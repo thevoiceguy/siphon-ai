@@ -102,6 +102,7 @@ sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "
 sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
 forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
 forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
 forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }

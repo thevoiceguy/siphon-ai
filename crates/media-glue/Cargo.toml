@@ -16,6 +16,7 @@ thiserror.workspace   = true
 tracing.workspace     = true
 
 # Upstream media stack
+forge-core.workspace   = true
 forge-rtp.workspace    = true
 forge-engine.workspace = true
 forge-codecs.workspace = true

@@ -2936,6 +2936,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "forge-codecs",
+ "forge-core",
  "forge-dtmf",
  "forge-engine",
  "forge-rtp",

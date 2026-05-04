@@ -73,7 +73,10 @@ async fn round_trip_one_frame() {
     assert_eq!(drained.samples, vec![10, 20, 30, 40, 50]);
 
     drop(handle);
-    assert!(!manager.has_bridge(&call_id), "handle drop must auto-detach");
+    assert!(
+        !manager.has_bridge(&call_id),
+        "handle drop must auto-detach"
+    );
 }
 
 /// Push 1 second of synthetic 20 ms frames through the bridge in both
@@ -153,7 +156,10 @@ async fn one_second_of_50fps_round_trips() {
     let mut received = 0usize;
     while received < FRAMES_PER_SEC {
         let frame = handle.recv_frame().await.expect("recv_frame");
-        assert_eq!(frame.sequence_number as usize, received, "ordering preserved");
+        assert_eq!(
+            frame.sequence_number as usize, received,
+            "ordering preserved"
+        );
         assert_eq!(frame.samples.len(), SAMPLES_PER_FRAME);
 
         // Round-trip: respond with an OutboundMediaFrame for every inbound

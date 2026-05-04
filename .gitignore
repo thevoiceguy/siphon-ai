@@ -22,6 +22,12 @@ Thumbs.db
 # Claude Code local state
 .claude/settings.local.json
 
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
 # Test artifacts
 /test-harness/**/*.log
 /test-harness/**/*.pcap

@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use forge_core::{AudioCodec, CallId};
 use forge_engine::{
-    InboundMediaFrame, MediaBridgeManager, MediaTarget, OutboundMediaFrame, ParticipantLabel,
+    InboundMediaFrame, MediaBridgeManager, MediaTarget, OutboundMediaFrame, OutboundMediaRequest,
+    ParticipantLabel, PlayoutMode,
 };
 
 /// Frames per second at 20 ms ptime. Steady-state per-call cadence.
@@ -54,14 +55,20 @@ async fn round_trip_one_frame() {
             target: MediaTarget::A,
             sample_rate: 8000,
             samples: vec![10, 20, 30, 40, 50],
+            playback_id: None,
+            mode: PlayoutMode::Append,
         })
         .await
         .expect("send_audio");
 
-    let drained = manager
-        .try_recv_outbound_frame(&call_id)
+    let drained = match manager
+        .try_recv_outbound_request(&call_id)
         .await
-        .expect("try_recv_outbound_frame");
+        .expect("try_recv_outbound_request")
+    {
+        OutboundMediaRequest::Audio(frame) => frame,
+        other => panic!("expected Audio variant, got {other:?}"),
+    };
     assert_eq!(drained.target, MediaTarget::A);
     assert_eq!(drained.samples, vec![10, 20, 30, 40, 50]);
 
@@ -127,14 +134,15 @@ async fn one_second_of_50fps_round_trips() {
         let mut drained = 0usize;
         while drained < FRAMES_PER_SEC {
             match drainer_manager
-                .try_recv_outbound_frame(&drainer_call_id)
+                .try_recv_outbound_request(&drainer_call_id)
                 .await
             {
-                Some(frame) => {
+                Some(OutboundMediaRequest::Audio(frame)) => {
                     assert_eq!(frame.samples.len(), SAMPLES_PER_FRAME);
                     assert_eq!(frame.target, MediaTarget::A);
                     drained += 1;
                 }
+                Some(other) => panic!("unexpected outbound variant: {other:?}"),
                 None => tokio::time::sleep(Duration::from_millis(1)).await,
             }
         }
@@ -155,6 +163,8 @@ async fn one_second_of_50fps_round_trips() {
                 target: MediaTarget::A,
                 sample_rate: 8000,
                 samples: vec![received as i16; SAMPLES_PER_FRAME],
+                playback_id: None,
+                mode: PlayoutMode::Append,
             })
             .await
             .expect("send_audio");

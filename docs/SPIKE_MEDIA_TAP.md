@@ -133,24 +133,29 @@ path. Audit of the forge surface against that bar:
 | Default queue depth | 64 frames ≈ 1.28 s at 50 fps | **Override to 10** via `MediaBridgeManager::with_capacities(10, 10)` so we keep ≤200 ms of buffering as the dev plan calls for. |
 | `Mutex<Receiver>` on outbound | Held briefly inside `try_recv_outbound_frame`, lock-free in `send_audio` (sender is cloned). | Acceptable. The receiver-side lock is held only by forge's drain loop. |
 
-## Transitive AI dependency
+## Transitive AI dependency — resolved
 
-`forge-engine` directly imports `forge_ai_stream::OpenAIConnector` in its
-`ai_integration` module — this is **not** feature-gated. By depending on
-`forge-engine`, SiphonAI's Cargo graph transitively pulls in OpenAI,
-Anthropic, ElevenLabs, and Deepgram WebSocket clients.
+Originally, `forge-engine` imported `forge_ai_stream::OpenAIConnector` in
+its `ai_integration` module unconditionally, so SiphonAI's Cargo graph
+transitively pulled in OpenAI, Anthropic, ElevenLabs, and Deepgram
+WebSocket clients — code we never call but which violated CLAUDE.md §4.1's
+"zero dependencies on AI vendors" in spirit.
 
-We never *call* any of those — the binary statically excludes them via
-dead-code elimination — but it violates CLAUDE.md §4.1's "zero
-dependencies on AI vendors" in spirit (Cargo dep-tree, not just runtime).
+Upstream PR [thevoiceguy/forge-media#39][pr39] added an `ai` Cargo feature
+(default-on) that gates the `forge-ai-stream` dep, the `ai_integration` and
+`persistence` modules, the `MediaSession::ai_manager` field and accessors,
+and the AI-aware code paths in `ForwardingEngine`. Existing consumers see
+no change; opt-out is a single line:
 
-**Recommendation:** open a small upstream PR adding an `ai` Cargo feature
-on `forge-engine` that gates the `ai_integration` module and the
-`forge-ai-stream` dep. SiphonAI then consumes
-`forge-engine = { ..., default-features = false, features = ["g722"] }`.
+```toml
+forge-engine = { ..., default-features = false, features = ["g722"] }
+```
 
-This is a Week-1 follow-up but does not block the spike or any v0.1.0
-work.
+That's the configuration SiphonAI's workspace `Cargo.toml` now uses.
+After the PR landed, the lockfile shrank from 434 to 393 packages — the
+AI vendor SDK chains are no longer in the dep tree.
+
+[pr39]: https://github.com/thevoiceguy/forge-media/pull/39
 
 ## Verification
 

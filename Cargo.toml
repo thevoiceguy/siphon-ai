@@ -101,10 +101,16 @@ sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "
 sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
 sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
 
-# forge-media — RTP / codecs / SDP / DTMF / engine
+# forge-media — RTP / codecs / SDP / DTMF / engine.
+#
+# We disable forge-engine's default features and re-enable only `g722`, which
+# drops the `forge-ai-stream` transitive dep (and through it OpenAI / Anthropic
+# / Deepgram / ElevenLabs WebSocket clients). SiphonAI is provider-neutral —
+# AI logic belongs in the WS server, never here. See CLAUDE.md §4.1 and the
+# upstream gate at https://github.com/thevoiceguy/forge-media/pull/39.
 forge-core    = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
 forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", branch = "main", default-features = false, features = ["g722"] }
 forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
 forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
 forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }

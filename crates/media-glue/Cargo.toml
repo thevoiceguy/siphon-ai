@@ -15,6 +15,9 @@ async-trait.workspace = true
 thiserror.workspace   = true
 tracing.workspace     = true
 
+# Sibling SiphonAI crates
+siphon-ai-bridge.workspace = true
+
 # Upstream media stack
 forge-core.workspace   = true
 forge-rtp.workspace    = true

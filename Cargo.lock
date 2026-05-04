@@ -2549,6 +2549,7 @@ dependencies = [
  "forge-engine",
  "forge-rtp",
  "forge-sdp",
+ "siphon-ai-bridge",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

@@ -1,7 +1,12 @@
 //! Bidirectional audio tap on top of forge-engine.
 //!
-//! This is the Week-1 spike target (see `docs/DEV_PLAN.md` §3.4). The exact
-//! `MediaTap` shape depends on what forge-engine exposes once we look at how
-//! `forge-ai-stream` plugs in. CLAUDE.md §4.3 governs the audio hot path:
-//! no allocations in the steady-state frame loop, no `unwrap`/`panic`, no
-//! `std::sync::Mutex`, no blocking I/O.
+//! See `crates/media-glue/src/tap.rs` for the implementation and
+//! `docs/SPIKE_MEDIA_TAP.md` for the design notes that justify it.
+//!
+//! Per CLAUDE.md §4.3 the audio hot path is sacred: no allocations in
+//! the steady-state frame loop beyond what the codec/wire format
+//! mandate, no `unwrap`/`panic`, no `std::sync::Mutex`, no blocking I/O.
+
+pub mod tap;
+
+pub use tap::{MediaTap, MediaTapError, TapDisconnect};

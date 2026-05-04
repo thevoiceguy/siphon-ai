@@ -1,0 +1,16 @@
+[package]
+name        = "siphon-ai-config"
+description = "TOML configuration loading, validation, and reload for SiphonAI."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+serde.workspace      = true
+toml.workspace       = true
+thiserror.workspace  = true
+regex.workspace      = true
+tracing.workspace    = true

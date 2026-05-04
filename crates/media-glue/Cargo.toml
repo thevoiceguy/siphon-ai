@@ -1,0 +1,23 @@
+[package]
+name        = "siphon-ai-media-glue"
+description = "Adapter from forge-engine media sessions to the SiphonAI bridge (the audio tap)."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+tokio.workspace       = true
+bytes.workspace       = true
+async-trait.workspace = true
+thiserror.workspace   = true
+tracing.workspace     = true
+
+# Upstream media stack
+forge-rtp.workspace    = true
+forge-engine.workspace = true
+forge-codecs.workspace = true
+forge-sdp.workspace    = true
+forge-dtmf.workspace   = true

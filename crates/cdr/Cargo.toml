@@ -1,0 +1,19 @@
+[package]
+name        = "siphon-ai-cdr"
+description = "Call Detail Record schema, file sink, and webhook sink."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+tokio.workspace      = true
+serde.workspace      = true
+serde_json.workspace = true
+reqwest.workspace    = true
+chrono.workspace     = true
+uuid.workspace       = true
+thiserror.workspace  = true
+tracing.workspace    = true

@@ -1,0 +1,31 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config / secrets
+*.local.toml
+.env
+.env.*
+!.env.example
+
+# Claude Code local state
+.claude/settings.local.json
+
+# Test artifacts
+/test-harness/**/*.log
+/test-harness/**/*.pcap
+/test-harness/**/*.wav
+
+# Docker
+docker/.data/

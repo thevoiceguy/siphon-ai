@@ -1,0 +1,124 @@
+[workspace]
+resolver = "2"
+members = [
+    "bins/siphon-ai",
+    "crates/bridge",
+    "crates/cdr",
+    "crates/config",
+    "crates/core",
+    "crates/media-glue",
+    "crates/routes",
+    "crates/sip-glue",
+    "crates/telemetry",
+    "crates/webhooks",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["SiphonAI contributors"]
+repository = "https://github.com/thevoiceguy/siphon-ai"
+homepage = "https://github.com/thevoiceguy/siphon-ai"
+
+[workspace.dependencies]
+# Internal crates (used by bins/siphon-ai and cross-crate)
+siphon-ai-bridge      = { path = "crates/bridge" }
+siphon-ai-cdr         = { path = "crates/cdr" }
+siphon-ai-config      = { path = "crates/config" }
+siphon-ai-core        = { path = "crates/core" }
+siphon-ai-media-glue  = { path = "crates/media-glue" }
+siphon-ai-routes      = { path = "crates/routes" }
+siphon-ai-sip-glue    = { path = "crates/sip-glue" }
+siphon-ai-telemetry   = { path = "crates/telemetry" }
+siphon-ai-webhooks    = { path = "crates/webhooks" }
+
+# Async runtime
+tokio       = { version = "1", features = ["full"] }
+tokio-util  = { version = "0.7", features = ["codec"] }
+futures     = "0.3"
+async-trait = "0.1"
+
+# Errors
+anyhow    = "1"
+thiserror = "1"
+
+# Serde / formats
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml       = "0.8"
+
+# Bytes / encoding
+bytes  = "1"
+base64 = "0.22"
+
+# Crypto (HMAC for webhook signing)
+hmac = "0.12"
+sha2 = "0.10"
+
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+
+# HTTP client (CDR webhook sink, lifecycle webhooks)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Admin / health HTTP server
+hyper      = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# Tracing / metrics
+tracing                     = "0.1"
+tracing-subscriber          = { version = "0.3", features = ["env-filter", "json"] }
+metrics                     = "0.23"
+metrics-exporter-prometheus = "0.15"
+
+# Match / parse
+regex = "1"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Utilities
+parking_lot = "0.12"
+once_cell   = "1"
+uuid        = { version = "1", features = ["v4", "serde"] }
+chrono      = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# ─── Upstream voice stack (separate repos, owned by us) ──────────────────────
+# These are git deps for now; once published to crates.io we'll switch to versioned
+# releases. For reproducibility, pin to a specific rev before v0.1.0 ships
+# (see CLAUDE.md §7.5 "Bumping Upstream Dep").
+
+# siphon-rs — RFC 3261 SIP stack
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
+
+# forge-media — RTP / codecs / SDP / DTMF / engine
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
+
+# hep-rs — HEP3 codec, transport, HepSink trait. Repo not yet created (CLAUDE.md
+# §2 marks this as "new, owned by us"). Wire this entry in once the repo exists:
+# hep-rs = { git = "https://github.com/thevoiceguy/hep-rs", branch = "main" }
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+panic         = "abort"
+strip         = "symbols"
+
+[profile.dev]
+# Keep dev builds fast; the audio hot path is profiled in release.
+opt-level = 0
+debug     = true

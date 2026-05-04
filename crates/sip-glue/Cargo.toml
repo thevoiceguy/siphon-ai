@@ -1,0 +1,25 @@
+[package]
+name        = "siphon-ai-sip-glue"
+description = "Adapter from siphon-rs UAS/UAC dialog events to the SiphonAI core state machine."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+tokio.workspace       = true
+async-trait.workspace = true
+thiserror.workspace   = true
+tracing.workspace     = true
+
+# Upstream SIP stack
+sip-core.workspace        = true
+sip-parse.workspace       = true
+sip-transport.workspace   = true
+sip-transaction.workspace = true
+sip-dialog.workspace      = true
+sip-uas.workspace         = true
+sip-uac.workspace         = true
+sip-auth.workspace        = true

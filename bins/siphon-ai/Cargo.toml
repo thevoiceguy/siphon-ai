@@ -1,0 +1,23 @@
+[package]
+name        = "siphon-ai"
+description = "SIP-to-WebSocket media bridge daemon."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[[bin]]
+name = "siphon-ai"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace   = true
+anyhow.workspace  = true
+clap.workspace    = true
+tracing.workspace = true
+
+siphon-ai-config.workspace    = true
+siphon-ai-core.workspace      = true
+siphon-ai-telemetry.workspace = true

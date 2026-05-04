@@ -1,0 +1,25 @@
+[package]
+name        = "siphon-ai-telemetry"
+description = "Tracing, Prometheus metrics, HEP wiring, and admin/health endpoints."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+tokio.workspace                       = true
+tracing.workspace                     = true
+tracing-subscriber.workspace          = true
+metrics.workspace                     = true
+metrics-exporter-prometheus.workspace = true
+hyper.workspace                       = true
+hyper-util.workspace                  = true
+http-body-util.workspace              = true
+serde.workspace                       = true
+serde_json.workspace                  = true
+thiserror.workspace                   = true
+
+# hep-rs is wired in once the upstream repo exists (see workspace Cargo.toml).
+# hep-rs.workspace = true

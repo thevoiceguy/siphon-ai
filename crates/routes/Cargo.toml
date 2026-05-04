@@ -1,0 +1,15 @@
+[package]
+name        = "siphon-ai-routes"
+description = "Route matching engine: TOML dialplan -> bridge config selection."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+serde.workspace      = true
+regex.workspace      = true
+thiserror.workspace  = true
+tracing.workspace    = true

@@ -1,0 +1,27 @@
+[package]
+name        = "siphon-ai-core"
+description = "CallController, call state machine, and per-call orchestration."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+tokio.workspace      = true
+async-trait.workspace = true
+thiserror.workspace  = true
+tracing.workspace    = true
+uuid.workspace       = true
+chrono.workspace     = true
+
+# Internal crates
+siphon-ai-bridge.workspace     = true
+siphon-ai-cdr.workspace        = true
+siphon-ai-config.workspace     = true
+siphon-ai-media-glue.workspace = true
+siphon-ai-routes.workspace     = true
+siphon-ai-sip-glue.workspace   = true
+siphon-ai-telemetry.workspace  = true
+siphon-ai-webhooks.workspace   = true

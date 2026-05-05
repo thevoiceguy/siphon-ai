@@ -2468,12 +2468,27 @@ name = "siphon-ai"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "bytes",
  "clap",
+ "forge-core",
+ "forge-engine",
+ "forge-rtp",
+ "sip-core",
+ "sip-parse",
+ "sip-transaction",
+ "sip-transport",
+ "sip-uas",
+ "siphon-ai-bridge",
  "siphon-ai-config",
  "siphon-ai-core",
+ "siphon-ai-media-glue",
+ "siphon-ai-routes",
+ "siphon-ai-sip-glue",
  "siphon-ai-telemetry",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

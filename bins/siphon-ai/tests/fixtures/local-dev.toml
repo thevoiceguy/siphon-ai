@@ -1,0 +1,33 @@
+# Smoke-test fixture for the daemon startup test.
+#
+# The integration test substitutes ${TEST_SIP_LISTEN}, ${TEST_RTP_MIN},
+# and ${TEST_RTP_MAX} with values pinned to ephemeral ports so the
+# test can run in parallel with other suites without port collisions.
+#
+# Real-deployment knobs (HEP, CDR, webhooks, registrations) are
+# intentionally absent — the v1 minimal config cut accepts /
+# ignores those sections, but they're not required to start.
+
+[node]
+id = "siphon-ai-smoke-test"
+public_address = "127.0.0.1"
+
+[sip]
+listen = "${TEST_SIP_LISTEN}"
+transports = ["udp"]
+user_agent = "SiphonAI/0.1.0-test"
+
+[media]
+codecs = ["pcmu", "pcma"]
+dtmf = "rfc2833"
+rtp_port_range = [${TEST_RTP_MIN}, ${TEST_RTP_MAX}]
+
+[bridge]
+ws_url = "wss://example.test/sip-bridge"
+ws_connect_timeout_ms = 1000
+audio_sample_rate = 8000
+
+[[route]]
+name = "default"
+[route.match]
+any = true

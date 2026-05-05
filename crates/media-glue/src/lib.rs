@@ -8,9 +8,11 @@
 //! mandate, no `unwrap`/`panic`, no `std::sync::Mutex`, no blocking I/O.
 
 pub mod sdp;
+pub mod setup;
 pub mod tap;
 
 pub use sdp::{
     build_answer, negotiate_answer, parse_offer, AnswerOutcome, Codec, LocalCapabilities, SdpError,
 };
+pub use setup::{InboundAccepted, InboundCall, MediaSetup, SetupError};
 pub use tap::{MediaTap, MediaTapError, TapDisconnect};

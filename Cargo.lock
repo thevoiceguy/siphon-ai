@@ -2580,6 +2580,8 @@ dependencies = [
  "forge-rtp",
  "forge-sdp",
  "futures",
+ "metrics 0.23.1",
+ "metrics-exporter-prometheus",
  "parking_lot",
  "serde_json",
  "sip-core",
@@ -2655,6 +2657,7 @@ dependencies = [
 name = "siphon-ai-telemetry"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "http-body-util",
  "hyper",
  "hyper-util",

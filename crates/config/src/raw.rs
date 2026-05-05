@@ -38,6 +38,9 @@ pub struct RawConfig {
 
     #[serde(default)]
     pub cdr: RawCdr,
+
+    #[serde(default)]
+    pub observability: RawObservability,
 }
 
 /// `[node]` — identity for logs / metrics / SDP origin host.
@@ -139,6 +142,25 @@ pub struct RawCdrWebhook {
     pub retry_max: Option<u32>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+}
+
+/// `[observability]` — Prometheus metrics + `/health` + `/ready`
+/// HTTP endpoints. v1 supports a single `http_listen` address; the
+/// daemon refuses to start if both `[observability].enabled = true`
+/// and `http_listen` is missing.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawObservability {
+    /// `false` (default) means the observability HTTP server is not
+    /// spawned at all — the metrics facade still works (process-wide
+    /// recorder is installed regardless), but nothing scrapes it.
+    /// In production deployments you almost always want this true.
+    #[serde(default)]
+    pub enabled: bool,
+    /// `host:port` to bind the observability HTTP listener on.
+    /// Required when `enabled = true`.
+    #[serde(default)]
+    pub http_listen: Option<String>,
 }
 
 /// `[bridge]` — daemon-wide bridge defaults.

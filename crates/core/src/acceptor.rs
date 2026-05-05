@@ -70,6 +70,10 @@ use siphon_ai_media_glue::{
 };
 use siphon_ai_routes::CompiledRoute;
 use siphon_ai_sip_glue::{CallAcceptor, InviteFacts, MatchedCall};
+use siphon_ai_telemetry::{
+    CALLS_ACTIVE, CALLS_TOTAL, CALL_DURATION_SECONDS, INVITES_TOTAL, ROUTE_MATCH_TOTAL,
+    SDP_NEGOTIATE_SECONDS,
+};
 use thiserror::Error;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
@@ -540,6 +544,28 @@ impl CallTerminationView {
     }
 }
 
+/// Record `siphon_ai_sdp_negotiate_seconds` when prepare_call exits.
+/// "Prepare" is the umbrella for SDP negotiate + forge port alloc +
+/// tap attach — all happening inside `MediaSetup::accept_inbound`,
+/// which is what operators actually want to time.
+fn record_prepare_outcome(elapsed: std::time::Duration, ok: bool) {
+    let result = if ok { "ok" } else { "error" };
+    metrics::histogram!(SDP_NEGOTIATE_SECONDS, "result" => result).record(elapsed.as_secs_f64());
+}
+
+/// Map a CDR termination cause to a stable wire string for the
+/// `siphon_ai_calls_total` counter label. Mirrors
+/// [`CdrTerminationCause`]'s snake_case serialization so dashboards
+/// can correlate the two without re-mapping.
+fn termination_label(cause: CdrTerminationCause) -> &'static str {
+    match cause {
+        CdrTerminationCause::ServerHangup => "server_hangup",
+        CdrTerminationCause::LocalShutdown => "local_shutdown",
+        CdrTerminationCause::BridgeEnded => "bridge_ended",
+        CdrTerminationCause::TapEnded => "tap_ended",
+    }
+}
+
 fn map_cause(t: CallTermination) -> CdrTerminationCause {
     match t {
         CallTermination::ServerHangup => CdrTerminationCause::ServerHangup,
@@ -591,12 +617,14 @@ impl CallAcceptor for BridgingAcceptor {
                     .map_err(|e| anyhow::anyhow!("failed to build 200 OK: {e}"))?;
                 call.handle.send_final(response).await;
 
+                metrics::counter!(INVITES_TOTAL, "result" => "accepted").increment(1);
                 self.run_call(prepared, call.route.name.as_str());
                 Ok(())
             }
             Err(e) => {
                 let (code, reason) = e.sip_status();
                 warn!(error = %e, code, reason, "rejecting INVITE");
+                metrics::counter!(INVITES_TOTAL, "result" => "rejected").increment(1);
                 let response = UserAgentServer::create_response(call.request, code, reason);
                 call.handle.send_final(response).await;
                 // The acceptor's contract with the routing layer is
@@ -641,6 +669,11 @@ impl BridgingAcceptor {
         self.registry
             .insert(prepared.sip_call_id.clone(), prepared.handle);
 
+        // Per-route counter is owned-by-route — bounded cardinality
+        // by config (operators have tens of routes, not millions).
+        metrics::counter!(ROUTE_MATCH_TOTAL, "route" => route_name.to_string()).increment(1);
+        metrics::gauge!(CALLS_ACTIVE).increment(1.0);
+
         let bridge_call_id = prepared.bridge_call_id.clone();
         let forge_call_id = prepared.forge_call_id.clone();
         let sip_call_id = prepared.sip_call_id;
@@ -665,7 +698,19 @@ impl BridgingAcceptor {
                     "forge session teardown failed"
                 );
             }
-            let record = call_start.into_record(Utc::now(), &view);
+
+            let ended_at = Utc::now();
+            let duration =
+                (ended_at - call_start.started_at).num_milliseconds().max(0) as f64 / 1000.0;
+            metrics::gauge!(CALLS_ACTIVE).decrement(1.0);
+            metrics::counter!(
+                CALLS_TOTAL,
+                "cause" => termination_label(view.cause),
+            )
+            .increment(1);
+            metrics::histogram!(CALL_DURATION_SECONDS).record(duration);
+
+            let record = call_start.into_record(ended_at, &view);
             cdr_sink.emit(record).await;
         })
     }
@@ -714,6 +759,18 @@ impl BridgingAcceptor {
     /// in production, [`CallAcceptor::on_matched`] does it; in tests,
     /// callers can inspect the [`PreparedCall`] directly.
     pub async fn prepare_call(
+        &self,
+        request: &Request,
+        route: &CompiledRoute,
+        facts: &InviteFacts,
+    ) -> Result<PreparedCall, AcceptError> {
+        let prepare_started = std::time::Instant::now();
+        let result = self.prepare_call_inner(request, route, facts).await;
+        record_prepare_outcome(prepare_started.elapsed(), result.is_ok());
+        result
+    }
+
+    async fn prepare_call_inner(
         &self,
         request: &Request,
         route: &CompiledRoute,

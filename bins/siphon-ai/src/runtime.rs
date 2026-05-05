@@ -62,12 +62,13 @@ use sip_uas::integrated::{IntegratedUAS, UasRequestHandler};
 use sip_uas::UserAgentServer;
 use siphon_ai_cdr::{CdrSinkHandle, FileSink, MultiSink, NullSink, WebhookSink, WebhookSinkConfig};
 use siphon_ai_config::{
-    CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, MediaConfig, NodeConfig, SipConfig,
-    SipTransport,
+    CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, MediaConfig, NodeConfig,
+    ObservabilityConfig, SipConfig, SipTransport,
 };
 use siphon_ai_core::{BridgingAcceptor, CallRegistry};
 use siphon_ai_media_glue::MediaSetup;
 use siphon_ai_sip_glue::{DialogTerminatorHandle, RoutingHandler};
+use siphon_ai_telemetry::{install_recorder, ObservabilityServer, ReadinessFlag};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -86,6 +87,9 @@ pub struct Runtime {
     /// reader, in particular, has no graceful-stop hook upstream —
     /// we rely on aborting it.
     listeners: Vec<JoinHandle<()>>,
+    /// `Some` when `[observability].enabled = true`. Dropped on
+    /// shutdown to stop the HTTP listener.
+    observability: Option<ObservabilityServer>,
 }
 
 impl Runtime {
@@ -101,9 +105,14 @@ impl Runtime {
             bridge_defaults,
             routes,
             cdr,
+            observability,
         } = config;
 
         warn_on_unsupported_transports(&sip);
+
+        // ─── Telemetry: install Prometheus recorder + spawn HTTP ───
+        let readiness = ReadinessFlag::new();
+        let observability_server = build_observability(observability, readiness.clone()).await?;
 
         let cdr_sink = build_cdr_sink(cdr).await?;
 
@@ -182,12 +191,16 @@ impl Runtime {
             Arc::clone(&uas),
         );
 
+        // We're now serving SIP — let the readiness probe flip.
+        readiness.mark_ready();
+
         Ok(Self {
             sip_listen: sip.listen_addr,
             udp_socket,
             transaction_mgr,
             uas,
             listeners,
+            observability: observability_server,
         })
     }
 
@@ -223,6 +236,11 @@ impl Runtime {
             let _ = handle.await;
         }
 
+        // Stop accepting `/metrics` / `/health` requests.
+        if let Some(server) = self.observability {
+            server.shutdown().await;
+        }
+
         // Drop the UAS / TM Arcs so any per-call task that's still
         // holding a clone tears down cleanly. We don't wait for
         // active calls — they'll see their channels close and exit
@@ -236,6 +254,29 @@ impl Runtime {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
+
+/// Install the Prometheus recorder + spawn the `/health` /
+/// `/ready` / `/metrics` HTTP server. When the operator hasn't
+/// enabled `[observability]` we still install the recorder (so
+/// metric calls in the call layers don't crash) but skip the HTTP
+/// listener — the recorder is just unconsumed in that case.
+async fn build_observability(
+    cfg: ObservabilityConfig,
+    readiness: ReadinessFlag,
+) -> Result<Option<ObservabilityServer>> {
+    let handle = install_recorder().context("install Prometheus recorder")?;
+    if !cfg.enabled {
+        debug!("[observability].enabled = false; skipping HTTP listener");
+        return Ok(None);
+    }
+    let listen = cfg
+        .http_listen
+        .ok_or_else(|| anyhow!("[observability].http_listen unexpectedly empty"))?;
+    let server = ObservabilityServer::start(listen, handle, readiness)
+        .await
+        .with_context(|| format!("bind observability HTTP {listen}"))?;
+    Ok(Some(server))
+}
 
 async fn build_cdr_sink(cdr: CdrConfig) -> Result<CdrSinkHandle> {
     if !cdr.enabled {

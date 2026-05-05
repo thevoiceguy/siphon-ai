@@ -17,6 +17,7 @@ tracing.workspace     = true
 uuid.workspace        = true
 chrono.workspace      = true
 parking_lot.workspace = true
+metrics.workspace     = true
 
 # Internal crates
 siphon-ai-bridge.workspace     = true
@@ -38,9 +39,10 @@ forge-core.workspace   = true
 forge-engine.workspace = true
 
 [dev-dependencies]
-bytes.workspace             = true
-tokio-tungstenite.workspace = true
-futures.workspace           = true
-serde_json.workspace        = true
-forge-rtp.workspace         = true
-forge-sdp.workspace         = true
+bytes.workspace                       = true
+tokio-tungstenite.workspace           = true
+futures.workspace                     = true
+serde_json.workspace                  = true
+forge-rtp.workspace                   = true
+forge-sdp.workspace                   = true
+metrics-exporter-prometheus.workspace = true

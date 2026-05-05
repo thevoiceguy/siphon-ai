@@ -523,6 +523,99 @@ any = true
 }
 
 #[test]
+fn observability_disabled_by_default() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(!cfg.observability.enabled);
+    assert!(cfg.observability.http_listen.is_none());
+}
+
+#[test]
+fn observability_enabled_compiles_with_listen_addr() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[observability]
+enabled = true
+http_listen = "0.0.0.0:9090"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(cfg.observability.enabled);
+    assert_eq!(cfg.observability.http_listen.map(|a| a.port()), Some(9090));
+}
+
+#[test]
+fn observability_enabled_without_listen_errors() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[observability]
+enabled = true
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("http_listen is required"));
+}
+
+#[test]
+fn observability_bad_listen_addr_errors() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[observability]
+enabled = true
+http_listen = "not-a-socket"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not-a-socket") || msg.contains("invalid"),
+        "got: {msg}"
+    );
+}
+
+#[test]
 fn defaults_kick_in_when_optional_blocks_omitted() {
     // Smallest valid config: just sip + bridge. Everything else
     // gets a sensible default.

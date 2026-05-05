@@ -31,7 +31,7 @@ use siphon_ai_routes::{compile as compile_routes, RawRouteFile, RouteSet};
 use thiserror::Error;
 use tracing::warn;
 
-use crate::raw::{RawBridge, RawCdr, RawConfig, RawMedia, RawNode, RawSip};
+use crate::raw::{RawBridge, RawCdr, RawConfig, RawMedia, RawNode, RawObservability, RawSip};
 
 /// Compiled, ready-to-pass daemon config.
 ///
@@ -49,6 +49,16 @@ pub struct Config {
     pub bridge_defaults: BridgeDefaults,
     pub routes: RouteSet,
     pub cdr: CdrConfig,
+    pub observability: ObservabilityConfig,
+}
+
+/// Resolved observability plan. The daemon binary turns this into
+/// a real `siphon-ai-telemetry::ObservabilityServer` (or skips it
+/// when disabled).
+#[derive(Debug, Clone, Default)]
+pub struct ObservabilityConfig {
+    pub enabled: bool,
+    pub http_listen: Option<SocketAddr>,
 }
 
 /// Resolved CDR plan. The daemon translates this into actual
@@ -135,6 +145,12 @@ pub enum CompileError {
     #[error("[cdr.webhook].url is required when [cdr.webhook].enabled = true")]
     CdrWebhookUrlRequired,
 
+    #[error("[observability].http_listen {0:?} is not a valid socket address: {1}")]
+    BadObservabilityListen(String, std::net::AddrParseError),
+
+    #[error("[observability].http_listen is required when [observability].enabled = true")]
+    ObservabilityListenRequired,
+
     #[error(transparent)]
     Routes(#[from] siphon_ai_routes::RouteError),
 }
@@ -147,6 +163,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let bridge_defaults = compile_bridge(raw.bridge, &raw.media)?;
     let routes = compile_dialplan(raw.routes)?;
     let cdr = compile_cdr(raw.cdr)?;
+    let observability = compile_observability(raw.observability)?;
 
     if !routes.has_default() {
         warn!(
@@ -161,6 +178,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         bridge_defaults,
         routes,
         cdr,
+        observability,
     })
 }
 
@@ -275,6 +293,29 @@ fn strip_bearer_prefix(value: &str) -> String {
 fn compile_dialplan(routes: Vec<siphon_ai_routes::RawRoute>) -> Result<RouteSet, CompileError> {
     let raw_file = RawRouteFile { routes };
     Ok(compile_routes(raw_file)?)
+}
+
+fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, CompileError> {
+    if !raw.enabled {
+        // Disabled means "don't spawn the HTTP server" — sub-block
+        // misconfig is tolerated (same shape as [cdr] master switch
+        // — operators can flip enabled = false to silence a flaky
+        // listener without re-editing every field).
+        return Ok(ObservabilityConfig::default());
+    }
+    let listen_str = raw
+        .http_listen
+        .ok_or(CompileError::ObservabilityListenRequired)?;
+    if listen_str.is_empty() {
+        return Err(CompileError::ObservabilityListenRequired);
+    }
+    let http_listen = listen_str
+        .parse()
+        .map_err(|e| CompileError::BadObservabilityListen(listen_str.clone(), e))?;
+    Ok(ObservabilityConfig {
+        enabled: true,
+        http_listen: Some(http_listen),
+    })
 }
 
 fn compile_cdr(raw: RawCdr) -> Result<CdrConfig, CompileError> {

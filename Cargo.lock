@@ -2512,6 +2512,9 @@ version = "0.0.0"
 dependencies = [
  "regex",
  "serde",
+ "siphon-ai-core",
+ "siphon-ai-media-glue",
+ "siphon-ai-routes",
  "thiserror 1.0.69",
  "toml",
  "tracing",
@@ -2537,7 +2540,6 @@ dependencies = [
  "sip-uas",
  "siphon-ai-bridge",
  "siphon-ai-cdr",
- "siphon-ai-config",
  "siphon-ai-media-glue",
  "siphon-ai-routes",
  "siphon-ai-sip-glue",

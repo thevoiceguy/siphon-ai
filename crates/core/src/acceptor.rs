@@ -53,14 +53,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sip_core::Request;
 use sip_uas::UserAgentServer;
 use siphon_ai_bridge::{
-    AudioEncoding, AudioFormat, BridgeConfig, CallId as BridgeCallId, Direction, SipMeta, StartMsg,
-    PROTOCOL_VERSION,
+    AudioEncoding, AudioFormat, BridgeConfig, CallId as BridgeCallId, Direction, DisconnectReason,
+    SipMeta, StartMsg, PROTOCOL_VERSION,
+};
+use siphon_ai_cdr::{
+    AudioInfo as CdrAudioInfo, CdrRecord, CdrSinkHandle, Direction as CdrDirection, NullSink,
+    TerminationCause as CdrTerminationCause, TerminationInfo as CdrTerminationInfo, CDR_VERSION,
 };
 use siphon_ai_media_glue::{
-    AnswerOutcome, Codec, InboundAccepted, InboundCall, MediaSetup, SdpError, SetupError,
+    AnswerOutcome, Codec, InboundAccepted, InboundCall, MediaSetup, MediaTapError, SdpError,
+    SetupError, TapDisconnect,
 };
 use siphon_ai_routes::CompiledRoute;
 use siphon_ai_sip_glue::{CallAcceptor, InviteFacts, MatchedCall};
@@ -68,7 +74,7 @@ use thiserror::Error;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
-use crate::call::{CallController, CallControllerConfig};
+use crate::call::{CallController, CallControllerConfig, CallOutcome, CallTermination};
 use crate::registry::CallRegistry;
 
 /// Daemon-wide bridge & media defaults. Routes' `[route.bridge]`
@@ -422,6 +428,7 @@ pub struct BridgingAcceptor {
     defaults: BridgeDefaults,
     uas: Arc<UserAgentServer>,
     registry: CallRegistry,
+    cdr_sink: CdrSinkHandle,
     call_id_factory: CallIdFactory,
 }
 
@@ -437,6 +444,7 @@ impl BridgingAcceptor {
             defaults,
             uas,
             registry,
+            cdr_sink: Arc::new(NullSink),
             call_id_factory: default_call_id_factory(),
         }
     }
@@ -449,10 +457,116 @@ impl BridgingAcceptor {
         self
     }
 
+    /// Plug in a CDR sink. Defaults to a no-op when not set; the
+    /// daemon binary swaps in a file or webhook sink based on
+    /// `[cdr]` config.
+    pub fn with_cdr_sink(mut self, sink: CdrSinkHandle) -> Self {
+        self.cdr_sink = sink;
+        self
+    }
+
     /// The registry this acceptor populates. Cheap to clone — share
     /// it with the SIP-side BYE/CANCEL handler.
     pub fn registry(&self) -> &CallRegistry {
         &self.registry
+    }
+}
+
+/// Snapshot of "everything we know at call-start that we'll need at
+/// CDR-emission time". Built inside the spawned task so the
+/// controller's exit handler doesn't have to re-derive it.
+#[derive(Debug, Clone)]
+struct CallStart {
+    bridge_call_id: BridgeCallId,
+    sip_call_id: String,
+    started_at: DateTime<Utc>,
+    from: String,
+    to: String,
+    route: String,
+    ws_url: String,
+    audio: CdrAudioInfo,
+}
+
+impl CallStart {
+    fn into_record(self, ended_at: DateTime<Utc>, outcome: &CallTerminationView) -> CdrRecord {
+        let duration_ms = (ended_at - self.started_at).num_milliseconds().max(0) as u64;
+        CdrRecord {
+            version: CDR_VERSION,
+            call_id: self.bridge_call_id.as_str().to_string(),
+            sip_call_id: self.sip_call_id,
+            started_at: self.started_at,
+            ended_at,
+            duration_ms,
+            from: self.from,
+            to: self.to,
+            direction: CdrDirection::Inbound,
+            route: self.route,
+            ws_url: self.ws_url,
+            audio: self.audio,
+            termination: CdrTerminationInfo {
+                cause: outcome.cause,
+                bridge_disconnect: outcome.bridge_detail.clone(),
+                tap_disconnect: outcome.tap_detail.clone(),
+            },
+        }
+    }
+}
+
+/// Flat view of `Result<CallOutcome, CallError>` for the CDR layer:
+/// just the cause + the human strings from the sub-task results.
+struct CallTerminationView {
+    cause: CdrTerminationCause,
+    bridge_detail: String,
+    tap_detail: String,
+}
+
+impl CallTerminationView {
+    fn from_run_result(result: Result<CallOutcome, crate::call::CallError>) -> Self {
+        match result {
+            Ok(o) => Self {
+                cause: map_cause(o.termination),
+                bridge_detail: bridge_detail(o.bridge),
+                tap_detail: tap_detail(o.tap),
+            },
+            Err(e) => Self {
+                // Treat a panic / join error as "bridge ended" —
+                // the call did end, and the cause string surfaces
+                // the underlying error for diagnostics.
+                cause: CdrTerminationCause::BridgeEnded,
+                bridge_detail: format!("controller error: {e}"),
+                tap_detail: String::new(),
+            },
+        }
+    }
+}
+
+fn map_cause(t: CallTermination) -> CdrTerminationCause {
+    match t {
+        CallTermination::ServerHangup => CdrTerminationCause::ServerHangup,
+        CallTermination::LocalShutdown => CdrTerminationCause::LocalShutdown,
+        CallTermination::BridgeEnded => CdrTerminationCause::BridgeEnded,
+        CallTermination::TapEnded => CdrTerminationCause::TapEnded,
+    }
+}
+
+fn bridge_detail(res: Option<Result<DisconnectReason, siphon_ai_bridge::BridgeError>>) -> String {
+    match res {
+        None => String::new(),
+        Some(Ok(reason)) => match reason {
+            DisconnectReason::StopSent => "stop_sent".into(),
+            DisconnectReason::ServerClosed => "server_closed".into(),
+            DisconnectReason::ControllerHungUp => "controller_hung_up".into(),
+        },
+        Some(Err(e)) => format!("error: {e}"),
+    }
+}
+
+fn tap_detail(res: Option<Result<TapDisconnect, MediaTapError>>) -> String {
+    match res {
+        None => String::new(),
+        Some(Ok(TapDisconnect::CallEnded)) => "call_ended".into(),
+        Some(Ok(TapDisconnect::ControllerHungUp)) => "controller_hung_up".into(),
+        Some(Err(e)) => format!("error: {e}"),
     }
 }
 
@@ -477,41 +591,7 @@ impl CallAcceptor for BridgingAcceptor {
                     .map_err(|e| anyhow::anyhow!("failed to build 200 OK: {e}"))?;
                 call.handle.send_final(response).await;
 
-                // Register before spawning so a BYE arriving on the
-                // very next packet finds an entry to wake. The
-                // spawned task removes the entry on its way out so
-                // the registry doesn't leak.
-                self.registry
-                    .insert(prepared.sip_call_id.clone(), prepared.handle);
-
-                let bridge_call_id = prepared.bridge_call_id.clone();
-                let forge_call_id = prepared.forge_call_id.clone();
-                let sip_call_id = prepared.sip_call_id.clone();
-                let controller = prepared.controller;
-                let media = Arc::clone(&self.media);
-                let registry = self.registry.clone();
-                tokio::spawn(async move {
-                    match controller.run().await {
-                        Ok(o) => info!(
-                            call_id = %bridge_call_id,
-                            termination = ?o.termination,
-                            "call ended"
-                        ),
-                        Err(e) => warn!(
-                            call_id = %bridge_call_id,
-                            error = %e,
-                            "call controller exited with error"
-                        ),
-                    }
-                    registry.remove(&sip_call_id);
-                    if let Err(e) = media.session_manager().stop_session(&forge_call_id).await {
-                        warn!(
-                            call_id = %bridge_call_id,
-                            error = %e,
-                            "forge session teardown failed"
-                        );
-                    }
-                });
+                self.run_call(prepared, call.route.name.as_str());
                 Ok(())
             }
             Err(e) => {
@@ -525,6 +605,69 @@ impl CallAcceptor for BridgingAcceptor {
                 Ok(())
             }
         }
+    }
+}
+
+impl BridgingAcceptor {
+    /// Drive a [`PreparedCall`] to completion on a spawned task.
+    ///
+    /// Registers the handle in the [`CallRegistry`] so an inbound
+    /// BYE can wake it, runs the controller, deregisters on exit,
+    /// stops the forge session, and emits the CDR. Returns the
+    /// `JoinHandle` of the spawned task — production callers
+    /// (`on_matched`) drop it; tests `await` it.
+    pub fn run_call(
+        &self,
+        prepared: PreparedCall,
+        route_name: &str,
+    ) -> tokio::task::JoinHandle<()> {
+        let call_start = CallStart {
+            bridge_call_id: prepared.bridge_call_id.clone(),
+            sip_call_id: prepared.sip_call_id.clone(),
+            started_at: Utc::now(),
+            from: prepared.start.from.clone(),
+            to: prepared.start.to.clone(),
+            route: route_name.to_string(),
+            ws_url: prepared.bridge_config.ws_url.clone(),
+            audio: CdrAudioInfo {
+                codec: prepared.answer.negotiated_codec.encoding_name().to_string(),
+                payload_type: prepared.answer.negotiated_payload_type,
+                sample_rate: prepared.answer.negotiated_audio_sample_rate,
+            },
+        };
+
+        // Register before spawning so a BYE arriving on the very
+        // next packet finds an entry to wake.
+        self.registry
+            .insert(prepared.sip_call_id.clone(), prepared.handle);
+
+        let bridge_call_id = prepared.bridge_call_id.clone();
+        let forge_call_id = prepared.forge_call_id.clone();
+        let sip_call_id = prepared.sip_call_id;
+        let controller = prepared.controller;
+        let media = Arc::clone(&self.media);
+        let registry = self.registry.clone();
+        let cdr_sink = Arc::clone(&self.cdr_sink);
+
+        tokio::spawn(async move {
+            let run_result = controller.run().await;
+            let view = CallTerminationView::from_run_result(run_result);
+            info!(
+                call_id = %bridge_call_id,
+                cause = ?view.cause,
+                "call ended"
+            );
+            registry.remove(&sip_call_id);
+            if let Err(e) = media.session_manager().stop_session(&forge_call_id).await {
+                warn!(
+                    call_id = %bridge_call_id,
+                    error = %e,
+                    "forge session teardown failed"
+                );
+            }
+            let record = call_start.into_record(Utc::now(), &view);
+            cdr_sink.emit(record).await;
+        })
     }
 }
 

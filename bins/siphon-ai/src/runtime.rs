@@ -60,7 +60,11 @@ use sip_transaction::{
 use sip_transport::{run_udp, send_udp, InboundPacket, TransportKind as TpTransportKind};
 use sip_uas::integrated::{IntegratedUAS, UasRequestHandler};
 use sip_uas::UserAgentServer;
-use siphon_ai_config::{Config, MediaConfig, NodeConfig, SipConfig, SipTransport};
+use siphon_ai_cdr::{CdrSinkHandle, FileSink, MultiSink, NullSink, WebhookSink, WebhookSinkConfig};
+use siphon_ai_config::{
+    CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, MediaConfig, NodeConfig, SipConfig,
+    SipTransport,
+};
 use siphon_ai_core::{BridgingAcceptor, CallRegistry};
 use siphon_ai_media_glue::MediaSetup;
 use siphon_ai_sip_glue::{DialogTerminatorHandle, RoutingHandler};
@@ -96,9 +100,12 @@ impl Runtime {
             media,
             bridge_defaults,
             routes,
+            cdr,
         } = config;
 
         warn_on_unsupported_transports(&sip);
+
+        let cdr_sink = build_cdr_sink(cdr).await?;
 
         // ─── Forge media stack ──────────────────────────────────────
         let session_mgr_config = SessionManagerConfig {
@@ -121,12 +128,15 @@ impl Runtime {
         // ─── Bridging acceptor + dialog registry ───────────────────
         let registry = CallRegistry::new();
         let uas_helper = build_uas_helper(&node, &sip)?;
-        let acceptor = Arc::new(BridgingAcceptor::new(
-            media_setup,
-            bridge_defaults,
-            Arc::clone(&uas_helper),
-            registry.clone(),
-        ));
+        let acceptor = Arc::new(
+            BridgingAcceptor::new(
+                media_setup,
+                bridge_defaults,
+                Arc::clone(&uas_helper),
+                registry.clone(),
+            )
+            .with_cdr_sink(cdr_sink),
+        );
 
         // ─── SIP routing handler ───────────────────────────────────
         let dialog_terminator: DialogTerminatorHandle = Arc::new(registry);
@@ -226,6 +236,51 @@ impl Runtime {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
+
+async fn build_cdr_sink(cdr: CdrConfig) -> Result<CdrSinkHandle> {
+    if !cdr.enabled {
+        return Ok(Arc::new(NullSink));
+    }
+    let mut sinks: Vec<CdrSinkHandle> = Vec::new();
+    if let Some(file_cfg) = cdr.file {
+        sinks.push(build_file_sink(&file_cfg).await?);
+    }
+    if let Some(webhook_cfg) = cdr.webhook {
+        sinks.push(build_webhook_sink(&webhook_cfg)?);
+    }
+    Ok(match sinks.len() {
+        // [cdr].enabled = true with no sub-sinks turned on is a
+        // configuration tic; emit a warning rather than failing so
+        // operators flipping switches mid-investigation aren't
+        // blocked.
+        0 => {
+            warn!("[cdr].enabled = true but no sub-sinks (file / webhook) are enabled; CDRs will be dropped");
+            Arc::new(NullSink) as CdrSinkHandle
+        }
+        1 => sinks.pop().unwrap(),
+        _ => Arc::new(MultiSink::new(sinks)) as CdrSinkHandle,
+    })
+}
+
+async fn build_file_sink(cfg: &CdrFileConfig) -> Result<CdrSinkHandle> {
+    let sink = FileSink::open(&cfg.path)
+        .await
+        .with_context(|| format!("open CDR file {}", cfg.path.display()))?;
+    info!(path = %cfg.path.display(), "CDR file sink active");
+    Ok(Arc::new(sink) as CdrSinkHandle)
+}
+
+fn build_webhook_sink(cfg: &CdrWebhookConfig) -> Result<CdrSinkHandle> {
+    let sink = WebhookSink::new(WebhookSinkConfig {
+        url: cfg.url.clone(),
+        auth_header: cfg.auth_header.clone(),
+        retry_max: cfg.retry_max,
+        timeout_ms: cfg.timeout.as_millis() as u64,
+    })
+    .map_err(|e| anyhow!("CDR webhook client build failed: {e}"))?;
+    info!(url = %cfg.url, "CDR webhook sink active");
+    Ok(Arc::new(sink) as CdrSinkHandle)
+}
 
 fn warn_on_unsupported_transports(sip: &SipConfig) {
     for t in &sip.transports {

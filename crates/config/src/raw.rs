@@ -35,6 +35,9 @@ pub struct RawConfig {
 
     #[serde(default, rename = "route")]
     pub routes: Vec<RawRoute>,
+
+    #[serde(default)]
+    pub cdr: RawCdr,
 }
 
 /// `[node]` — identity for logs / metrics / SDP origin host.
@@ -91,6 +94,51 @@ pub struct RawMedia {
     /// unset, forge's default range is used.
     #[serde(default)]
     pub rtp_port_range: Option<(u16, u16)>,
+}
+
+/// `[cdr]` — call detail record sinks. v1 supports a JSONL file
+/// sink and an HTTP webhook sink; both off by default.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawCdr {
+    /// Master switch. When `false` the daemon installs a no-op
+    /// sink regardless of the file/webhook sub-blocks.
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub file: RawCdrFile,
+
+    #[serde(default)]
+    pub webhook: RawCdrWebhook,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawCdrFile {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Required when `enabled = true`. Parent directory must exist
+    /// at startup; the daemon does NOT mkdir.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawCdrWebhook {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Required when `enabled = true`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Optional `Authorization` header value, sent verbatim.
+    #[serde(default)]
+    pub auth_header: Option<String>,
+    #[serde(default)]
+    pub retry_max: Option<u32>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 /// `[bridge]` — daemon-wide bridge defaults.

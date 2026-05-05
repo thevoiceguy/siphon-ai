@@ -364,6 +364,165 @@ any = true
 }
 
 #[test]
+fn cdr_disabled_by_default() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(!cfg.cdr.enabled);
+    assert!(cfg.cdr.file.is_none());
+    assert!(cfg.cdr.webhook.is_none());
+}
+
+#[test]
+fn cdr_file_sink_compiles_with_path() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[cdr]
+enabled = true
+[cdr.file]
+enabled = true
+path = "/var/log/siphon-ai/cdr.jsonl"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(cfg.cdr.enabled);
+    let file = cfg.cdr.file.expect("file sink configured");
+    assert_eq!(file.path.to_str(), Some("/var/log/siphon-ai/cdr.jsonl"));
+    assert!(cfg.cdr.webhook.is_none());
+}
+
+#[test]
+fn cdr_webhook_sink_compiles_with_url_and_auth() {
+    let env = MapEnv::new([("CDR_TOKEN", "tok-123")]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[cdr]
+enabled = true
+[cdr.webhook]
+enabled = true
+url = "https://billing.example.com/cdr"
+auth_header = "Bearer ${CDR_TOKEN}"
+retry_max = 5
+timeout_ms = 7500
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    let w = cfg.cdr.webhook.expect("webhook configured");
+    assert_eq!(w.url, "https://billing.example.com/cdr");
+    assert_eq!(w.auth_header.as_deref(), Some("Bearer tok-123"));
+    assert_eq!(w.retry_max, 5);
+    assert_eq!(w.timeout, std::time::Duration::from_millis(7500));
+}
+
+#[test]
+fn cdr_file_enabled_without_path_errors() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[cdr]
+enabled = true
+[cdr.file]
+enabled = true
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("path is required"));
+}
+
+#[test]
+fn cdr_webhook_enabled_without_url_errors() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[cdr]
+enabled = true
+[cdr.webhook]
+enabled = true
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("url is required"));
+}
+
+#[test]
+fn cdr_disabled_overrides_sub_block_misconfig() {
+    // Master switch off → sub-block misconfig is tolerated. This
+    // is intentional so operators can flip [cdr].enabled = false to
+    // silence a flaky CDR pipeline mid-investigation without
+    // editing all the sub-blocks.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[cdr]
+enabled = false
+[cdr.file]
+enabled = true
+# path missing — would error if [cdr].enabled = true
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(!cfg.cdr.enabled);
+    assert!(cfg.cdr.file.is_none());
+}
+
+#[test]
 fn defaults_kick_in_when_optional_blocks_omitted() {
     // Smallest valid config: just sip + bridge. Everything else
     // gets a sensible default.

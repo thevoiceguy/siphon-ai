@@ -22,6 +22,7 @@
 //! than fail loud.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use siphon_ai_core::BridgeDefaults;
@@ -30,14 +31,16 @@ use siphon_ai_routes::{compile as compile_routes, RawRouteFile, RouteSet};
 use thiserror::Error;
 use tracing::warn;
 
-use crate::raw::{RawBridge, RawConfig, RawMedia, RawNode, RawSip};
+use crate::raw::{RawBridge, RawCdr, RawConfig, RawMedia, RawNode, RawSip};
 
 /// Compiled, ready-to-pass daemon config.
 ///
 /// `bridge_defaults` is what `BridgingAcceptor::new` wants. `routes`
 /// goes straight into `RoutingHandler::new`. `sip.listen_addr` is
 /// what the SIP transport binds on. `local_ip` is what `MediaSetup`
-/// stamps into answer SDP `c=` / `o=` lines.
+/// stamps into answer SDP `c=` / `o=` lines. `cdr` is the resolved
+/// CDR sinks plan (file + webhook); the daemon binary builds the
+/// concrete sinks from it.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub node: NodeConfig,
@@ -45,6 +48,32 @@ pub struct Config {
     pub media: MediaConfig,
     pub bridge_defaults: BridgeDefaults,
     pub routes: RouteSet,
+    pub cdr: CdrConfig,
+}
+
+/// Resolved CDR plan. The daemon translates this into actual
+/// `siphon-ai-cdr` sinks at runtime (config doesn't depend on the
+/// CDR crate to keep the dep graph minimal).
+#[derive(Debug, Clone, Default)]
+pub struct CdrConfig {
+    /// `[cdr].enabled`. Even when true, file and webhook are
+    /// individually off until their `enabled = true` is set.
+    pub enabled: bool,
+    pub file: Option<CdrFileConfig>,
+    pub webhook: Option<CdrWebhookConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CdrFileConfig {
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct CdrWebhookConfig {
+    pub url: String,
+    pub auth_header: Option<String>,
+    pub retry_max: u32,
+    pub timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +129,12 @@ pub enum CompileError {
     #[error("[bridge].audio_sample_rate {0} not supported (8000 or 16000)")]
     BadSampleRate(u32),
 
+    #[error("[cdr.file].path is required when [cdr.file].enabled = true")]
+    CdrFilePathRequired,
+
+    #[error("[cdr.webhook].url is required when [cdr.webhook].enabled = true")]
+    CdrWebhookUrlRequired,
+
     #[error(transparent)]
     Routes(#[from] siphon_ai_routes::RouteError),
 }
@@ -111,6 +146,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let media = compile_media(&raw.media)?;
     let bridge_defaults = compile_bridge(raw.bridge, &raw.media)?;
     let routes = compile_dialplan(raw.routes)?;
+    let cdr = compile_cdr(raw.cdr)?;
 
     if !routes.has_default() {
         warn!(
@@ -124,6 +160,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         media,
         bridge_defaults,
         routes,
+        cdr,
     })
 }
 
@@ -238,4 +275,44 @@ fn strip_bearer_prefix(value: &str) -> String {
 fn compile_dialplan(routes: Vec<siphon_ai_routes::RawRoute>) -> Result<RouteSet, CompileError> {
     let raw_file = RawRouteFile { routes };
     Ok(compile_routes(raw_file)?)
+}
+
+fn compile_cdr(raw: RawCdr) -> Result<CdrConfig, CompileError> {
+    if !raw.enabled {
+        // Whole CDR pipeline off; sub-block config is parsed but
+        // ignored. Validating disabled sub-blocks would surprise
+        // operators who flip `enabled = false` to silence a
+        // misconfig while they investigate.
+        return Ok(CdrConfig::default());
+    }
+    let file = if raw.file.enabled {
+        let path = raw.file.path.ok_or(CompileError::CdrFilePathRequired)?;
+        if path.is_empty() {
+            return Err(CompileError::CdrFilePathRequired);
+        }
+        Some(CdrFileConfig {
+            path: PathBuf::from(path),
+        })
+    } else {
+        None
+    };
+    let webhook = if raw.webhook.enabled {
+        let url = raw.webhook.url.ok_or(CompileError::CdrWebhookUrlRequired)?;
+        if url.is_empty() {
+            return Err(CompileError::CdrWebhookUrlRequired);
+        }
+        Some(CdrWebhookConfig {
+            url,
+            auth_header: raw.webhook.auth_header.filter(|s| !s.is_empty()),
+            retry_max: raw.webhook.retry_max.unwrap_or(3),
+            timeout: Duration::from_millis(raw.webhook.timeout_ms.unwrap_or(5000)),
+        })
+    } else {
+        None
+    };
+    Ok(CdrConfig {
+        enabled: true,
+        file,
+        webhook,
+    })
 }

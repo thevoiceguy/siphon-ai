@@ -2523,6 +2523,10 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "forge-core",
+ "forge-engine",
+ "futures",
+ "serde_json",
  "siphon-ai-bridge",
  "siphon-ai-cdr",
  "siphon-ai-config",
@@ -2533,6 +2537,7 @@ dependencies = [
  "siphon-ai-webhooks",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "uuid",
 ]

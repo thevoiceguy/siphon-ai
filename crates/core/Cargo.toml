@@ -25,3 +25,10 @@ siphon-ai-routes.workspace     = true
 siphon-ai-sip-glue.workspace   = true
 siphon-ai-telemetry.workspace  = true
 siphon-ai-webhooks.workspace   = true
+
+[dev-dependencies]
+tokio-tungstenite.workspace = true
+futures.workspace           = true
+serde_json.workspace        = true
+forge-core.workspace        = true
+forge-engine.workspace      = true

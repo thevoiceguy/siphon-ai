@@ -7,6 +7,10 @@
 //! the steady-state frame loop beyond what the codec/wire format
 //! mandate, no `unwrap`/`panic`, no `std::sync::Mutex`, no blocking I/O.
 
+pub mod sdp;
 pub mod tap;
 
+pub use sdp::{
+    build_answer, negotiate_answer, parse_offer, AnswerOutcome, Codec, LocalCapabilities, SdpError,
+};
 pub use tap::{MediaTap, MediaTapError, TapDisconnect};

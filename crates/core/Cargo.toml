@@ -9,12 +9,13 @@ authors.workspace      = true
 repository.workspace   = true
 
 [dependencies]
-tokio.workspace      = true
+anyhow.workspace      = true
+tokio.workspace       = true
 async-trait.workspace = true
-thiserror.workspace  = true
-tracing.workspace    = true
-uuid.workspace       = true
-chrono.workspace     = true
+thiserror.workspace   = true
+tracing.workspace     = true
+uuid.workspace        = true
+chrono.workspace      = true
 
 # Internal crates
 siphon-ai-bridge.workspace     = true
@@ -26,9 +27,20 @@ siphon-ai-sip-glue.workspace   = true
 siphon-ai-telemetry.workspace  = true
 siphon-ai-webhooks.workspace   = true
 
+# Upstream — siphon-rs (Request, Response) for the CallAcceptor impl.
+sip-core.workspace        = true
+sip-uas.workspace         = true
+sip-transaction.workspace = true
+
+# Upstream — forge for constructing CallId/ParticipantId in the acceptor;
+# media-glue owns the session/bridge logic so we only need the type stubs.
+forge-core.workspace   = true
+forge-engine.workspace = true
+
 [dev-dependencies]
+bytes.workspace             = true
 tokio-tungstenite.workspace = true
 futures.workspace           = true
 serde_json.workspace        = true
-forge-core.workspace        = true
-forge-engine.workspace      = true
+forge-rtp.workspace         = true
+forge-sdp.workspace         = true

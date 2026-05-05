@@ -1,0 +1,1138 @@
+//! `BridgingAcceptor` — turn a routed INVITE into a running call.
+//!
+//! Sits at the seam between sip-glue's [`CallAcceptor`] trait and the
+//! per-call machinery in this crate. Given a [`MatchedCall`] from the
+//! routing layer, it:
+//!
+//! 1. Pulls the offer SDP out of the INVITE body.
+//! 2. Resolves daemon-wide media defaults against the matched route's
+//!    `[route.media]` and `[route.bridge]` overrides.
+//! 3. Asks [`MediaSetup`] to allocate the forge session, negotiate
+//!    the answer, and attach a [`MediaTap`].
+//! 4. Sends the 200 OK with the negotiated answer.
+//! 5. Builds the bridge [`StartMsg`] from the inbound facts and
+//!    spawns a [`CallController`] task.
+//!
+//! ## Design
+//!
+//! The deterministic pieces — building [`BridgeConfig`], building
+//! [`StartMsg`], extracting the offer body, resolving codec lists —
+//! are pure functions in this module so they can be unit-tested
+//! without `ServerTransactionHandle` (which has no public test
+//! constructor; see `sip-glue/tests/handler_dispatch.rs`). The async
+//! [`CallAcceptor`] impl is a thin shim over them.
+//!
+//! ## Failure → SIP response
+//!
+//! | Cause                                       | Response                  |
+//! |---------------------------------------------|---------------------------|
+//! | INVITE has no body or wrong Content-Type    | 415 Unsupported Media Type|
+//! | Offer parse / no common codec               | 488 Not Acceptable Here   |
+//! | Forge port pool exhausted, internal error   | 500 Server Internal Error |
+//! | Route's `ws_url` unset and no global default| 503 Service Unavailable   |
+//!
+//! Per CLAUDE.md §4.6 the last case should fail at config-load time;
+//! we still surface a runtime 503 because the validation step isn't
+//! wired yet — defensive and removable once the config crate lands.
+//!
+//! ## What's deferred
+//!
+//! - **BYE / CANCEL plumbing.** The spawned controller has a
+//!   [`CallHandle`] but nothing calls `handle.shutdown()` on a SIP
+//!   BYE yet. Tracked as the next layer; until then, the call ends
+//!   when the WS server hangs up or the tap sees forge tear down.
+//! - **CDR / lifecycle webhooks.** The controller's `CallOutcome`
+//!   carries everything needed to emit them; the wiring belongs
+//!   alongside BYE plumbing so a single "call ended" event drives
+//!   both.
+//! - **Forwarded headers.** `forward_headers` is honored if the
+//!   caller passes a list, but the daemon doesn't read it from
+//!   config yet.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use sip_core::Request;
+use sip_uas::UserAgentServer;
+use siphon_ai_bridge::{
+    AudioEncoding, AudioFormat, BridgeConfig, CallId as BridgeCallId, Direction, SipMeta, StartMsg,
+    PROTOCOL_VERSION,
+};
+use siphon_ai_media_glue::{
+    AnswerOutcome, Codec, InboundAccepted, InboundCall, MediaSetup, SdpError, SetupError,
+};
+use siphon_ai_routes::CompiledRoute;
+use siphon_ai_sip_glue::{CallAcceptor, InviteFacts, MatchedCall};
+use thiserror::Error;
+use tracing::{debug, info, instrument, warn};
+use uuid::Uuid;
+
+use crate::call::{CallController, CallControllerConfig};
+
+/// Daemon-wide bridge & media defaults. Routes' `[route.bridge]`
+/// and `[route.media]` blocks override individual fields.
+///
+/// Owned by the acceptor; the daemon constructs one from parsed
+/// TOML config and hands it in at startup.
+#[derive(Debug, Clone)]
+pub struct BridgeDefaults {
+    /// Default WebSocket URL. May be empty — in that case every
+    /// matched route MUST set its own `ws_url` or the call is
+    /// rejected with 503 (see module-level docs).
+    pub ws_url: Option<String>,
+    pub auth_bearer: Option<String>,
+    pub connect_timeout: Duration,
+    /// Codecs to advertise, in priority order.
+    pub codecs: Vec<Codec>,
+    /// RFC-2833 telephone-event payload type, or `None` to disable.
+    pub dtmf_payload_type: Option<u8>,
+    /// SIP header names to forward verbatim onto the bridge
+    /// `start.sip.headers` map. Names are matched case-insensitively
+    /// against the INVITE.
+    pub forward_headers: Vec<String>,
+}
+
+impl Default for BridgeDefaults {
+    fn default() -> Self {
+        Self {
+            ws_url: None,
+            auth_bearer: None,
+            connect_timeout: Duration::from_secs(5),
+            codecs: vec![Codec::Pcmu, Codec::Pcma],
+            dtmf_payload_type: Some(101),
+            forward_headers: Vec::new(),
+        }
+    }
+}
+
+/// What [`extract_offer_sdp`] / pre-flight checks return when the
+/// INVITE is unfit to negotiate against.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum OfferError {
+    /// `Content-Type` was missing or not `application/sdp`.
+    #[error("INVITE Content-Type is not application/sdp (got {0:?})")]
+    UnsupportedMediaType(Option<String>),
+
+    /// Body was empty (`Content-Length: 0`).
+    #[error("INVITE has no body")]
+    NoBody,
+
+    /// Body bytes weren't valid UTF-8 — SDP is text per RFC 4566.
+    #[error("INVITE body is not valid UTF-8")]
+    InvalidUtf8,
+}
+
+/// What can go wrong while building [`BridgeConfig`] from the daemon
+/// defaults plus a route's override.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum BridgeBuildError {
+    /// Neither the daemon default nor the matched route specifies a
+    /// `ws_url`. CLAUDE.md §4.6 says config-load should catch this;
+    /// we still error at runtime so a stale config can't 200 OK a
+    /// call we have nowhere to bridge to.
+    #[error("no ws_url configured (no global default and no route override)")]
+    NoWsUrl,
+}
+
+/// Errors the [`BridgingAcceptor`] surfaces internally before
+/// translating them to SIP responses. The async wrapper consumes
+/// these to choose a status code.
+#[derive(Debug, Error)]
+pub enum AcceptError {
+    #[error(transparent)]
+    Offer(#[from] OfferError),
+
+    #[error(transparent)]
+    Bridge(#[from] BridgeBuildError),
+
+    #[error(transparent)]
+    Setup(#[from] SetupError),
+
+    /// Forge created the session and we negotiated the answer, but
+    /// failed to spawn the controller (e.g., `tokio::spawn` from a
+    /// non-tokio context — exceedingly rare; mostly defensive).
+    #[error("controller setup failed: {0}")]
+    Controller(String),
+}
+
+impl AcceptError {
+    /// Status / reason pair to return in a SIP final response.
+    /// Centralised so the async wrapper has one source of truth and
+    /// tests can assert it without rebuilding the table.
+    pub fn sip_status(&self) -> (u16, &'static str) {
+        match self {
+            AcceptError::Offer(OfferError::UnsupportedMediaType(_)) => {
+                (415, "Unsupported Media Type")
+            }
+            AcceptError::Offer(OfferError::NoBody | OfferError::InvalidUtf8) => {
+                (400, "Bad Request")
+            }
+            AcceptError::Bridge(BridgeBuildError::NoWsUrl) => (503, "Service Unavailable"),
+            AcceptError::Setup(SetupError::Sdp(SdpError::Parse(_))) => (400, "Bad Request"),
+            AcceptError::Setup(SetupError::Sdp(SdpError::NoAudio))
+            | AcceptError::Setup(SetupError::Sdp(SdpError::NoCommonCodec))
+            | AcceptError::Setup(SetupError::Sdp(SdpError::AudioRejected)) => {
+                (488, "Not Acceptable Here")
+            }
+            AcceptError::Setup(SetupError::Sdp(SdpError::Negotiate(_))) => {
+                (488, "Not Acceptable Here")
+            }
+            AcceptError::Setup(SetupError::Session(_))
+            | AcceptError::Setup(SetupError::Tap(_))
+            | AcceptError::Controller(_) => (500, "Server Internal Error"),
+        }
+    }
+}
+
+// ─── Pure helpers (unit-tested below) ───────────────────────────────
+
+/// Pull the offer SDP body out of `request`. Verifies `Content-Type`
+/// is `application/sdp` (case-insensitive on the type/subtype, and we
+/// tolerate parameters like `; charset=utf-8`).
+pub fn extract_offer_sdp(request: &Request) -> Result<&str, OfferError> {
+    match request.headers().get_smol("Content-Type") {
+        Some(value) => {
+            let mime = value.split(';').next().unwrap_or("").trim();
+            if !mime.eq_ignore_ascii_case("application/sdp") {
+                return Err(OfferError::UnsupportedMediaType(Some(value.to_string())));
+            }
+        }
+        None => {
+            // Some gateways elide Content-Type when Content-Length is
+            // 0; that's still no-body, treat as such.
+            if !request.has_body() {
+                return Err(OfferError::NoBody);
+            }
+            return Err(OfferError::UnsupportedMediaType(None));
+        }
+    }
+    if !request.has_body() {
+        return Err(OfferError::NoBody);
+    }
+    std::str::from_utf8(request.body()).map_err(|_| OfferError::InvalidUtf8)
+}
+
+/// Pull the SIP `Call-ID` header off `request`. Returns `""` if
+/// absent — the matcher already routed, so we don't re-validate
+/// here; the empty string just means the bridge `start.sip.call_id`
+/// is empty for a malformed peer.
+pub fn extract_sip_call_id(request: &Request) -> String {
+    request
+        .headers()
+        .get_smol("Call-ID")
+        .map(|s| s.to_string())
+        .unwrap_or_default()
+}
+
+/// Build a [`BridgeConfig`] by merging the daemon's [`BridgeDefaults`]
+/// with the matched route's override block.
+///
+/// Rules per CLAUDE.md §4.6 ("Per-route overrides only override.
+/// Anything not specified inherits from globals"):
+/// - `ws_url`: route override > daemon default; one MUST be set.
+/// - `auth_bearer`: derived from `ws_auth_header` (route override
+///   only, since the daemon default is global) when it's a `Bearer`
+///   token; other auth schemes pass through to the WS handshake but
+///   we don't crack them open here.
+/// - `connect_timeout`: route override (`ws_connect_timeout_ms`) >
+///   daemon default.
+pub fn build_bridge_config(
+    defaults: &BridgeDefaults,
+    route: &CompiledRoute,
+) -> Result<BridgeConfig, BridgeBuildError> {
+    let ws_url = route
+        .bridge
+        .ws_url
+        .clone()
+        .or_else(|| defaults.ws_url.clone())
+        .ok_or(BridgeBuildError::NoWsUrl)?;
+    if ws_url.is_empty() {
+        return Err(BridgeBuildError::NoWsUrl);
+    }
+
+    let auth_bearer = match route.bridge.ws_auth_header.as_deref() {
+        Some("") | None => defaults.auth_bearer.clone(),
+        Some(header) => Some(strip_bearer_prefix(header)),
+    };
+
+    let connect_timeout = route
+        .bridge
+        .ws_connect_timeout_ms
+        .map(Duration::from_millis)
+        .unwrap_or(defaults.connect_timeout);
+
+    Ok(BridgeConfig {
+        ws_url,
+        auth_bearer,
+        connect_timeout,
+    })
+}
+
+/// `Authorization: Bearer xxx` → `xxx`. Other schemes pass through
+/// verbatim — the WS conn layer doesn't reformat headers we hand it.
+fn strip_bearer_prefix(header: &str) -> String {
+    const PREFIX: &str = "Bearer ";
+    if let Some(rest) = header.strip_prefix(PREFIX) {
+        rest.trim().to_string()
+    } else if header
+        .get(..PREFIX.len())
+        .map(|p| p.eq_ignore_ascii_case(PREFIX))
+        .unwrap_or(false)
+    {
+        header[PREFIX.len()..].trim().to_string()
+    } else {
+        header.to_string()
+    }
+}
+
+/// Resolve the codec list for a matched route. The route's
+/// `[route.media].codecs` (when set) replaces the daemon default;
+/// individual codecs are parsed via [`Codec::from_encoding_name`].
+/// Unrecognised names are dropped with a warning — the call still
+/// proceeds with whatever the matcher could parse.
+pub fn resolve_codecs(defaults: &BridgeDefaults, route: &CompiledRoute) -> Vec<Codec> {
+    match route.media.codecs.as_ref() {
+        None => defaults.codecs.clone(),
+        Some(names) => {
+            let mut out = Vec::with_capacity(names.len());
+            for name in names {
+                match Codec::from_encoding_name(name) {
+                    Some(c) => out.push(c),
+                    None => warn!(
+                        codec = %name,
+                        route = %route.name,
+                        "unknown codec in route override; dropped"
+                    ),
+                }
+            }
+            if out.is_empty() {
+                warn!(
+                    route = %route.name,
+                    "route media.codecs resolved to empty list; falling back to daemon defaults"
+                );
+                defaults.codecs.clone()
+            } else {
+                out
+            }
+        }
+    }
+}
+
+/// Pick the RFC-2833 PT for this call. v1 has no per-route override
+/// for it, but the seam is here so a future `[route.media].dtmf`
+/// (`"rfc2833" | "off" | "inband"`) merge can land without changing
+/// callers.
+pub fn resolve_dtmf_pt(defaults: &BridgeDefaults, route: &CompiledRoute) -> Option<u8> {
+    match route.media.dtmf.as_deref() {
+        Some(v) if v.eq_ignore_ascii_case("off") => None,
+        // "rfc2833" / "inband" / unset — keep the global PT. Inband
+        // doesn't need a PT but advertising one costs nothing and
+        // lets a peer that prefers RFC-2833 pick it.
+        _ => defaults.dtmf_payload_type,
+    }
+}
+
+/// Compose the bridge `start` message from the inbound INVITE facts,
+/// the negotiation outcome, and the daemon's forward-header list.
+///
+/// `bridge_call_id` is the SiphonAI-internal id (distinct from the
+/// SIP Call-ID per PROTOCOL.md §1) the caller has chosen. `seq` is
+/// always 0 here — the bridge connection task overwrites it with 0
+/// anyway, but we keep the field truthful.
+pub fn build_start_msg(
+    bridge_call_id: BridgeCallId,
+    facts: &InviteFacts,
+    sip_call_id: &str,
+    answer: &AnswerOutcome,
+    forward_headers: &[String],
+) -> StartMsg {
+    let mut headers = std::collections::HashMap::with_capacity(forward_headers.len());
+    for name in forward_headers {
+        if let Some(value) = facts.headers.get(&name.to_ascii_lowercase()) {
+            headers.insert(canonical_header_name(name), value.to_string());
+        }
+    }
+
+    StartMsg {
+        version: PROTOCOL_VERSION.to_string(),
+        call_id: bridge_call_id,
+        seq: 0,
+        from: facts.from_user.clone(),
+        to: facts.request_uri_user.clone(),
+        direction: Direction::Inbound,
+        audio: AudioFormat {
+            encoding: AudioEncoding::Pcm16le,
+            sample_rate: answer.negotiated_audio_sample_rate,
+            channels: 1,
+            frame_ms: 20,
+        },
+        sip: SipMeta {
+            call_id: sip_call_id.to_string(),
+            headers,
+        },
+    }
+}
+
+/// Title-case a hyphen-separated SIP header name (`x-foo-bar` →
+/// `X-Foo-Bar`). The bridge protocol doesn't care, but emitting
+/// canonical names keeps WS server logs readable.
+fn canonical_header_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut start_of_word = true;
+    for ch in name.chars() {
+        if start_of_word {
+            out.extend(ch.to_uppercase());
+        } else {
+            out.extend(ch.to_lowercase());
+        }
+        start_of_word = ch == '-';
+    }
+    out
+}
+
+// ─── Async acceptor ─────────────────────────────────────────────────
+
+/// Per-call ID generator hook — exposed so tests can pin it. Default
+/// uses a v4 UUID prefixed with `siphon-`.
+pub type CallIdFactory = Arc<dyn Fn() -> BridgeCallId + Send + Sync>;
+
+fn default_call_id_factory() -> CallIdFactory {
+    Arc::new(|| BridgeCallId::new(format!("siphon-{}", Uuid::new_v4().simple())))
+}
+
+/// `CallAcceptor` impl that drives every step from "matched route"
+/// to "running [`CallController`]". Constructed once at daemon
+/// startup; cheap to clone (everything inside is `Arc` or `Clone`).
+///
+/// `uas` is the upstream [`UserAgentServer`] the daemon already
+/// configures with its local URI / contact URI. We borrow its
+/// `create_ok` to stamp Contact + To-tag onto the 200 OK; sharing
+/// one instance per daemon (rather than rebuilding per call) keeps
+/// the deterministic-tag seed wiring upstream owns intact.
+pub struct BridgingAcceptor {
+    media: Arc<MediaSetup>,
+    defaults: BridgeDefaults,
+    uas: Arc<UserAgentServer>,
+    call_id_factory: CallIdFactory,
+}
+
+impl BridgingAcceptor {
+    pub fn new(
+        media: Arc<MediaSetup>,
+        defaults: BridgeDefaults,
+        uas: Arc<UserAgentServer>,
+    ) -> Self {
+        Self {
+            media,
+            defaults,
+            uas,
+            call_id_factory: default_call_id_factory(),
+        }
+    }
+
+    /// Override the bridge call-id factory. Useful in tests where
+    /// you want a deterministic id; production should keep the
+    /// default.
+    pub fn with_call_id_factory(mut self, factory: CallIdFactory) -> Self {
+        self.call_id_factory = factory;
+        self
+    }
+}
+
+#[async_trait]
+impl CallAcceptor for BridgingAcceptor {
+    #[instrument(skip(self, call), fields(
+        route = %call.route.name,
+        from = %call.facts.from_user,
+        to = %call.facts.request_uri_user,
+    ))]
+    async fn on_matched(&self, call: MatchedCall<'_>) -> anyhow::Result<()> {
+        match self
+            .prepare_call(call.request, call.route, &call.facts)
+            .await
+        {
+            Ok(prepared) => {
+                // 200 OK with the negotiated SDP. Use the upstream
+                // helper so we get Contact + To-tag for free.
+                let response = self
+                    .uas
+                    .create_ok(call.request, Some(&prepared.answer.answer_text))
+                    .map_err(|e| anyhow::anyhow!("failed to build 200 OK: {e}"))?;
+                call.handle.send_final(response).await;
+
+                // Spawn the controller. The Arc<MediaSetup> keeps
+                // the forge SessionManager / MediaBridgeManager
+                // alive for the duration of the call; on exit we
+                // explicitly stop the forge session so its RTP
+                // ports return to the pool. The next layer (BYE
+                // plumbing) will also wire `prepared.controller`'s
+                // `CallHandle::shutdown` into the SIP dialog tear-down.
+                let bridge_call_id = prepared.bridge_call_id.clone();
+                let forge_call_id = prepared.forge_call_id.clone();
+                let controller = prepared.controller;
+                let media = Arc::clone(&self.media);
+                tokio::spawn(async move {
+                    match controller.run().await {
+                        Ok(o) => info!(
+                            call_id = %bridge_call_id,
+                            termination = ?o.termination,
+                            "call ended"
+                        ),
+                        Err(e) => warn!(
+                            call_id = %bridge_call_id,
+                            error = %e,
+                            "call controller exited with error"
+                        ),
+                    }
+                    if let Err(e) = media.session_manager().stop_session(&forge_call_id).await {
+                        warn!(
+                            call_id = %bridge_call_id,
+                            error = %e,
+                            "forge session teardown failed"
+                        );
+                    }
+                });
+                Ok(())
+            }
+            Err(e) => {
+                let (code, reason) = e.sip_status();
+                warn!(error = %e, code, reason, "rejecting INVITE");
+                let response = UserAgentServer::create_response(call.request, code, reason);
+                call.handle.send_final(response).await;
+                // The acceptor's contract with the routing layer is
+                // "MUST send a final response" — we did, so this is
+                // not an error from the trait's perspective.
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Output of [`BridgingAcceptor::prepare_call`] — the deterministic
+/// preparation step before the SIP 200 OK and the controller spawn.
+///
+/// Exposed so integration tests can exercise the media + bridge wire-
+/// up without needing to fabricate a [`sip_transaction::ServerTransactionHandle`].
+pub struct PreparedCall {
+    pub bridge_call_id: BridgeCallId,
+    pub forge_call_id: forge_core::CallId,
+    pub answer: AnswerOutcome,
+    pub bridge_config: BridgeConfig,
+    pub start: StartMsg,
+    pub controller: CallController,
+}
+
+impl std::fmt::Debug for PreparedCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // CallController owns a `MediaTap` that wraps non-Debug forge
+        // types; redact it instead of cascading the constraint.
+        f.debug_struct("PreparedCall")
+            .field("bridge_call_id", &self.bridge_call_id)
+            .field("forge_call_id", &self.forge_call_id)
+            .field("answer", &self.answer)
+            .field("bridge_config", &self.bridge_config)
+            .field("start", &self.start)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BridgingAcceptor {
+    /// Run every step from "matched route" up to "ready-to-run
+    /// `CallController`," but stop short of sending the 200 OK or
+    /// spawning the controller. The caller composes those steps —
+    /// in production, [`CallAcceptor::on_matched`] does it; in tests,
+    /// callers can inspect the [`PreparedCall`] directly.
+    pub async fn prepare_call(
+        &self,
+        request: &Request,
+        route: &CompiledRoute,
+        facts: &InviteFacts,
+    ) -> Result<PreparedCall, AcceptError> {
+        let offer_sdp = extract_offer_sdp(request)?;
+        let sip_call_id = extract_sip_call_id(request);
+        let bridge_config = build_bridge_config(&self.defaults, route)?;
+        let codecs = resolve_codecs(&self.defaults, route);
+        let dtmf_pt = resolve_dtmf_pt(&self.defaults, route);
+
+        let bridge_call_id = (self.call_id_factory)();
+        let forge_call_id = forge_core::CallId::new(bridge_call_id.as_str());
+
+        debug!(
+            ws_url = %bridge_config.ws_url,
+            codec_count = codecs.len(),
+            "media setup starting"
+        );
+
+        let InboundAccepted {
+            answer,
+            session: _session,
+            tap,
+        } = self
+            .media
+            .accept_inbound(InboundCall {
+                call_id: forge_call_id.clone(),
+                offer_sdp,
+                codecs,
+                dtmf_payload_type: dtmf_pt,
+                participant_a: forge_core::ParticipantId::new(format!("sip-{}", forge_call_id.0)),
+                participant_b: forge_core::ParticipantId::new(format!("ws-{}", forge_call_id.0)),
+                from_tag: None,
+                to_tag: None,
+            })
+            .await?;
+
+        let start = build_start_msg(
+            bridge_call_id.clone(),
+            facts,
+            &sip_call_id,
+            &answer,
+            &self.defaults.forward_headers,
+        );
+
+        let cfg = CallControllerConfig {
+            call_id: bridge_call_id.clone(),
+            bridge: bridge_config.clone(),
+            start: start.clone(),
+            media_tap: tap,
+        };
+        let (controller, _handle) = CallController::new(cfg);
+
+        // `_handle` is dropped here for now. Once BYE plumbing lands
+        // it'll be stored in a per-dialog registry so the SIP layer
+        // can call shutdown() on tear-down.
+
+        Ok(PreparedCall {
+            bridge_call_id,
+            forge_call_id,
+            answer,
+            bridge_config,
+            start,
+            controller,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use sip_core::{Headers as SipHeaders, Method, Request, RequestLine, SipUri};
+    use siphon_ai_media_glue::{AnswerOutcome, Codec};
+    use siphon_ai_routes::load_from_toml;
+
+    fn invite_with(content_type: Option<&str>, body: &str) -> Request {
+        let uri = SipUri::parse("sip:5000@siphon.example.com").expect("uri");
+        let line = RequestLine::new(Method::Invite, uri);
+        let mut headers = SipHeaders::new();
+        headers
+            .push("Via", "SIP/2.0/UDP 10.0.0.1:5060;branch=z")
+            .unwrap();
+        headers
+            .push("From", "<sip:caller@example.net>;tag=abc")
+            .unwrap();
+        headers.push("To", "<sip:5000@siphon.example.com>").unwrap();
+        headers.push("Call-ID", "abc-123@pbx").unwrap();
+        headers.push("CSeq", "1 INVITE").unwrap();
+        if let Some(ct) = content_type {
+            headers.push("Content-Type", ct).unwrap();
+        }
+        headers
+            .push("Content-Length", body.len().to_string())
+            .unwrap();
+        Request::new(line, headers, Bytes::from(body.as_bytes().to_vec())).unwrap()
+    }
+
+    fn fake_answer() -> AnswerOutcome {
+        // We don't go through the real negotiator here; we just need
+        // an AnswerOutcome shape with the audio sample rate filled
+        // in. Build it via a real round-trip so any field rename
+        // upstream breaks this test loudly rather than silently.
+        let offer = "v=0\r\n\
+o=alice 1 1 IN IP4 10.0.0.5\r\n\
+s=t\r\n\
+c=IN IP4 10.0.0.5\r\n\
+t=0 0\r\n\
+m=audio 7000 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=sendrecv\r\n";
+        let caps = siphon_ai_media_glue::LocalCapabilities {
+            local_ip: "192.168.1.10".into(),
+            local_port: 20100,
+            codecs: vec![Codec::Pcmu],
+            dtmf_payload_type: None,
+        };
+        siphon_ai_media_glue::build_answer(offer, &caps).expect("answer")
+    }
+
+    fn first_route(toml: &str) -> siphon_ai_routes::RouteSet {
+        load_from_toml(toml).expect("compile routes")
+    }
+
+    // ─── extract_offer_sdp ─────────────────────────────────────────
+
+    #[test]
+    fn extract_offer_accepts_application_sdp() {
+        let req = invite_with(Some("application/sdp"), "v=0\r\n");
+        assert_eq!(extract_offer_sdp(&req).unwrap(), "v=0\r\n");
+    }
+
+    #[test]
+    fn extract_offer_accepts_application_sdp_with_charset() {
+        let req = invite_with(Some("application/sdp; charset=utf-8"), "v=0\r\n");
+        assert_eq!(extract_offer_sdp(&req).unwrap(), "v=0\r\n");
+    }
+
+    #[test]
+    fn extract_offer_is_case_insensitive_on_mime() {
+        let req = invite_with(Some("Application/SDP"), "v=0\r\n");
+        assert!(extract_offer_sdp(&req).is_ok());
+    }
+
+    #[test]
+    fn extract_offer_rejects_other_content_types() {
+        let req = invite_with(Some("text/plain"), "hello");
+        assert!(matches!(
+            extract_offer_sdp(&req),
+            Err(OfferError::UnsupportedMediaType(_))
+        ));
+    }
+
+    #[test]
+    fn extract_offer_rejects_empty_body() {
+        let req = invite_with(Some("application/sdp"), "");
+        assert_eq!(extract_offer_sdp(&req), Err(OfferError::NoBody));
+    }
+
+    #[test]
+    fn extract_offer_rejects_missing_content_type_when_body_present() {
+        // Some peers still send a body without Content-Type; we
+        // refuse to guess.
+        let req = invite_with(None, "v=0\r\n");
+        assert!(matches!(
+            extract_offer_sdp(&req),
+            Err(OfferError::UnsupportedMediaType(None))
+        ));
+    }
+
+    #[test]
+    fn extract_offer_rejects_missing_content_type_no_body() {
+        let req = invite_with(None, "");
+        assert_eq!(extract_offer_sdp(&req), Err(OfferError::NoBody));
+    }
+
+    #[test]
+    fn extract_sip_call_id_returns_header_value() {
+        let req = invite_with(Some("application/sdp"), "v=0\r\n");
+        assert_eq!(extract_sip_call_id(&req), "abc-123@pbx");
+    }
+
+    // ─── build_bridge_config ───────────────────────────────────────
+
+    #[test]
+    fn route_ws_url_overrides_default() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://route.example/ws"
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            ws_url: Some("wss://default.example/ws".into()),
+            ..BridgeDefaults::default()
+        };
+        let cfg = build_bridge_config(&defaults, route).unwrap();
+        assert_eq!(cfg.ws_url, "wss://route.example/ws");
+    }
+
+    #[test]
+    fn defaults_ws_url_used_when_route_omits_it() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            ws_url: Some("wss://default.example/ws".into()),
+            ..BridgeDefaults::default()
+        };
+        let cfg = build_bridge_config(&defaults, route).unwrap();
+        assert_eq!(cfg.ws_url, "wss://default.example/ws");
+    }
+
+    #[test]
+    fn missing_ws_url_anywhere_errors() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults::default();
+        assert_eq!(
+            build_bridge_config(&defaults, route).unwrap_err(),
+            BridgeBuildError::NoWsUrl
+        );
+    }
+
+    #[test]
+    fn route_connect_timeout_overrides_default() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            ws_connect_timeout_ms = 12345
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let cfg = build_bridge_config(&BridgeDefaults::default(), route).unwrap();
+        assert_eq!(cfg.connect_timeout, Duration::from_millis(12345));
+    }
+
+    #[test]
+    fn route_bearer_auth_strips_scheme_prefix() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            ws_auth_header = "Bearer abc123"
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let cfg = build_bridge_config(&BridgeDefaults::default(), route).unwrap();
+        assert_eq!(cfg.auth_bearer.as_deref(), Some("abc123"));
+    }
+
+    // ─── resolve_codecs ────────────────────────────────────────────
+
+    #[test]
+    fn defaults_used_when_route_omits_codecs() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            codecs: vec![Codec::Pcma, Codec::G722],
+            ..BridgeDefaults::default()
+        };
+        assert_eq!(
+            resolve_codecs(&defaults, route),
+            vec![Codec::Pcma, Codec::G722]
+        );
+    }
+
+    #[test]
+    fn route_codecs_replace_defaults_in_order() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            [route.media]
+            codecs = ["opus", "pcmu"]
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        assert_eq!(
+            resolve_codecs(&BridgeDefaults::default(), route),
+            vec![Codec::Opus, Codec::Pcmu]
+        );
+    }
+
+    #[test]
+    fn unknown_codecs_drop_with_warning_and_keep_known() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            [route.media]
+            codecs = ["amr", "pcmu"]
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        assert_eq!(
+            resolve_codecs(&BridgeDefaults::default(), route),
+            vec![Codec::Pcmu]
+        );
+    }
+
+    #[test]
+    fn empty_resolved_codecs_falls_back_to_defaults() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            [route.media]
+            codecs = ["g729", "amr"]
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            codecs: vec![Codec::Pcmu],
+            ..BridgeDefaults::default()
+        };
+        assert_eq!(resolve_codecs(&defaults, route), vec![Codec::Pcmu]);
+    }
+
+    // ─── resolve_dtmf_pt ──────────────────────────────────────────
+
+    #[test]
+    fn dtmf_off_disables_telephone_event_pt() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            [route.media]
+            dtmf = "off"
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            dtmf_payload_type: Some(101),
+            ..BridgeDefaults::default()
+        };
+        assert_eq!(resolve_dtmf_pt(&defaults, route), None);
+    }
+
+    #[test]
+    fn dtmf_unset_keeps_default_pt() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            dtmf_payload_type: Some(101),
+            ..BridgeDefaults::default()
+        };
+        assert_eq!(resolve_dtmf_pt(&defaults, route), Some(101));
+    }
+
+    // ─── build_start_msg ──────────────────────────────────────────
+
+    #[test]
+    fn start_msg_pulls_facts_and_answer_into_protocol_shape() {
+        let req = invite_with(Some("application/sdp"), "v=0\r\n");
+        let facts = InviteFacts::extract(&req);
+        let answer = fake_answer();
+        let start = build_start_msg(
+            BridgeCallId::new("siphon-1"),
+            &facts,
+            "abc-123@pbx",
+            &answer,
+            &[],
+        );
+        assert_eq!(start.version, PROTOCOL_VERSION);
+        assert_eq!(start.call_id.as_str(), "siphon-1");
+        assert_eq!(start.seq, 0);
+        assert_eq!(start.from, facts.from_user);
+        assert_eq!(start.to, facts.request_uri_user);
+        assert_eq!(start.direction, Direction::Inbound);
+        assert_eq!(start.audio.encoding, AudioEncoding::Pcm16le);
+        assert_eq!(start.audio.sample_rate, 8000);
+        assert_eq!(start.audio.channels, 1);
+        assert_eq!(start.audio.frame_ms, 20);
+        assert_eq!(start.sip.call_id, "abc-123@pbx");
+        assert!(start.sip.headers.is_empty());
+    }
+
+    #[test]
+    fn start_msg_forwards_configured_headers_only() {
+        let uri = SipUri::parse("sip:5000@siphon.example.com").expect("uri");
+        let line = RequestLine::new(Method::Invite, uri);
+        let mut headers = SipHeaders::new();
+        headers.push("Via", "SIP/2.0/UDP h:5060;branch=z").unwrap();
+        headers
+            .push("From", "<sip:caller@example.net>;tag=t")
+            .unwrap();
+        headers.push("To", "<sip:5000@siphon.example.com>").unwrap();
+        headers.push("Call-ID", "x@y").unwrap();
+        headers.push("CSeq", "1 INVITE").unwrap();
+        headers.push("User-Agent", "Cisco-CP8841").unwrap();
+        headers.push("X-Tenant-Id", "acme").unwrap();
+        headers.push("X-Secret", "hush").unwrap();
+        headers.push("Content-Length", "0").unwrap();
+        let req = Request::new(line, headers, Bytes::new()).unwrap();
+        let facts = InviteFacts::extract(&req);
+        let answer = fake_answer();
+
+        let start = build_start_msg(
+            BridgeCallId::new("c"),
+            &facts,
+            "x@y",
+            &answer,
+            &["User-Agent".into(), "X-Tenant-Id".into()],
+        );
+
+        // Forwarded headers come back canonical-cased.
+        assert_eq!(
+            start.sip.headers.get("User-Agent").map(String::as_str),
+            Some("Cisco-CP8841")
+        );
+        assert_eq!(
+            start.sip.headers.get("X-Tenant-Id").map(String::as_str),
+            Some("acme")
+        );
+        // Anything not in the allowlist stays out.
+        assert!(!start.sip.headers.contains_key("X-Secret"));
+    }
+
+    #[test]
+    fn forward_header_lookup_is_case_insensitive() {
+        let uri = SipUri::parse("sip:5000@siphon.example.com").expect("uri");
+        let line = RequestLine::new(Method::Invite, uri);
+        let mut headers = SipHeaders::new();
+        headers.push("Via", "SIP/2.0/UDP h;branch=z").unwrap();
+        headers.push("From", "<sip:c@x>;tag=t").unwrap();
+        headers.push("To", "<sip:5000@y>").unwrap();
+        headers.push("Call-ID", "x@y").unwrap();
+        headers.push("CSeq", "1 INVITE").unwrap();
+        headers.push("user-agent", "Linphone").unwrap();
+        headers.push("Content-Length", "0").unwrap();
+        let req = Request::new(line, headers, Bytes::new()).unwrap();
+        let facts = InviteFacts::extract(&req);
+        let answer = fake_answer();
+
+        let start = build_start_msg(
+            BridgeCallId::new("c"),
+            &facts,
+            "x@y",
+            &answer,
+            &["USER-AGENT".into()],
+        );
+        assert_eq!(
+            start.sip.headers.get("User-Agent").map(String::as_str),
+            Some("Linphone"),
+            "headers map: {:?}",
+            start.sip.headers
+        );
+    }
+
+    // ─── AcceptError → SIP status mapping ─────────────────────────
+
+    #[test]
+    fn accept_error_status_table() {
+        let cases: &[(AcceptError, (u16, &'static str))] = &[
+            (
+                AcceptError::Offer(OfferError::UnsupportedMediaType(Some("text/plain".into()))),
+                (415, "Unsupported Media Type"),
+            ),
+            (AcceptError::Offer(OfferError::NoBody), (400, "Bad Request")),
+            (
+                AcceptError::Offer(OfferError::InvalidUtf8),
+                (400, "Bad Request"),
+            ),
+            (
+                AcceptError::Bridge(BridgeBuildError::NoWsUrl),
+                (503, "Service Unavailable"),
+            ),
+            (
+                AcceptError::Setup(SetupError::Sdp(SdpError::Parse("bad".into()))),
+                (400, "Bad Request"),
+            ),
+            (
+                AcceptError::Setup(SetupError::Sdp(SdpError::NoCommonCodec)),
+                (488, "Not Acceptable Here"),
+            ),
+            (
+                AcceptError::Setup(SetupError::Sdp(SdpError::NoAudio)),
+                (488, "Not Acceptable Here"),
+            ),
+            (
+                AcceptError::Setup(SetupError::Sdp(SdpError::AudioRejected)),
+                (488, "Not Acceptable Here"),
+            ),
+            (
+                AcceptError::Setup(SetupError::Sdp(SdpError::Negotiate("oops".into()))),
+                (488, "Not Acceptable Here"),
+            ),
+            (
+                AcceptError::Setup(SetupError::Session("port pool empty".into())),
+                (500, "Server Internal Error"),
+            ),
+            (
+                AcceptError::Controller("spawn refused".into()),
+                (500, "Server Internal Error"),
+            ),
+        ];
+        for (err, (code, reason)) in cases {
+            assert_eq!(err.sip_status(), (*code, *reason), "for {err:?}");
+        }
+    }
+
+    /// Compile-time check: `BridgingAcceptor` actually satisfies the
+    /// `CallAcceptor` trait the routing layer expects. Mirror of
+    /// `RoutingHandler` / `UasRequestHandler` in handler.rs.
+    #[allow(dead_code)]
+    fn _bridging_acceptor_is_a_call_acceptor(b: BridgingAcceptor) {
+        let _: Arc<dyn CallAcceptor> = Arc::new(b);
+    }
+
+    fn dummy_call_info<'a>() -> siphon_ai_routes::CallInfo<'a> {
+        siphon_ai_routes::CallInfo {
+            request_uri_user: "5000",
+            request_uri_host: "siphon.example.com",
+            to_user: "5000",
+            to_host: "siphon.example.com",
+            from_user: "caller",
+            from_host: "example.net",
+            register_source: "trunk",
+            headers: leak_empty_headers(),
+        }
+    }
+
+    fn leak_empty_headers() -> &'static siphon_ai_routes::Headers {
+        // CallInfo borrows headers; the test tolerates the leak.
+        use std::sync::OnceLock;
+        static EMPTY: OnceLock<siphon_ai_routes::Headers> = OnceLock::new();
+        EMPTY.get_or_init(siphon_ai_routes::Headers::new)
+    }
+}

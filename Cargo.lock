@@ -2521,12 +2521,19 @@ dependencies = [
 name = "siphon-ai-core"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "bytes",
  "chrono",
  "forge-core",
  "forge-engine",
+ "forge-rtp",
+ "forge-sdp",
  "futures",
  "serde_json",
+ "sip-core",
+ "sip-transaction",
+ "sip-uas",
  "siphon-ai-bridge",
  "siphon-ai-cdr",
  "siphon-ai-config",

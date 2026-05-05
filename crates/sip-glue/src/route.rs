@@ -35,11 +35,18 @@ pub enum RouteDecision<'a> {
 ///
 /// `register_source` is the name of the `[[register]]` block the
 /// call arrived on, or `"trunk"` for unregistered inbound.
-pub fn route_invite<'a>(
+///
+/// The returned `&CompiledRoute` lifetime is tied to `routes`
+/// alone, *not* `register_source`. The matcher needs both at
+/// call-evaluation time but the result only references the route
+/// table — callers can pass a short-lived register_source string
+/// (e.g., synthesized per-request) and still hand the matched
+/// route off to a longer-lived consumer.
+pub fn route_invite<'r>(
     request: &Request,
-    register_source: &'a str,
-    routes: &'a RouteSet,
-) -> RouteDecision<'a> {
+    register_source: &str,
+    routes: &'r RouteSet,
+) -> RouteDecision<'r> {
     let facts = InviteFacts::extract(request);
     let info = facts.as_call_info(register_source);
     match routes.find_match(&info) {

@@ -2570,6 +2570,7 @@ dependencies = [
 name = "siphon-ai-sip-glue"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "bytes",
  "sip-auth",

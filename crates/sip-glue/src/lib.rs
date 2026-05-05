@@ -11,14 +11,21 @@
 //!   ([`InviteFacts`]).
 //! - [`route`] — combine facts + a [`siphon_ai_routes::RouteSet`]
 //!   into a [`RouteDecision`].
+//! - [`handler`] — `UasRequestHandler` impl that plugs into
+//!   siphon-rs's `IntegratedUAS` and dispatches matched INVITEs to
+//!   a [`CallAcceptor`].
 //!
 //! Future modules (one per concern, per CLAUDE.md §6.2):
 //! - dialog: BYE / re-INVITE / CANCEL handling
 //! - refer: REFER (transfer) → controller event
 //! - register: UAC REGISTER lifecycle (Week 4)
 
+pub mod handler;
 pub mod invite;
 pub mod route;
 
+pub use handler::{
+    dispatch_invite, CallAcceptor, MatchedCall, RegisterSourceResolver, RouteAction, RoutingHandler,
+};
 pub use invite::InviteFacts;
 pub use route::{route_invite, RouteDecision};

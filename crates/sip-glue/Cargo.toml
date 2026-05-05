@@ -14,6 +14,9 @@ async-trait.workspace = true
 thiserror.workspace   = true
 tracing.workspace     = true
 
+# Internal
+siphon-ai-routes.workspace = true
+
 # Upstream SIP stack
 sip-core.workspace        = true
 sip-parse.workspace       = true
@@ -23,3 +26,6 @@ sip-dialog.workspace      = true
 sip-uas.workspace         = true
 sip-uac.workspace         = true
 sip-auth.workspace        = true
+
+[dev-dependencies]
+bytes = { workspace = true }

@@ -2571,6 +2571,7 @@ name = "siphon-ai-sip-glue"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "sip-auth",
  "sip-core",
  "sip-dialog",
@@ -2579,6 +2580,7 @@ dependencies = [
  "sip-transport",
  "sip-uac",
  "sip-uas",
+ "siphon-ai-routes",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

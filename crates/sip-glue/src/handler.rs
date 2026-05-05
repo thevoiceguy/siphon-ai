@@ -45,6 +45,10 @@ use sip_uas::UserAgentServer;
 use siphon_ai_routes::{CompiledRoute, RouteSet};
 use tracing::{debug, info, instrument, warn};
 
+use crate::dialog::{
+    dispatch_bye, dispatch_cancel, DialogAction, DialogTerminatorHandle, NullDialogTerminator,
+};
+
 use crate::invite::InviteFacts;
 use crate::route::{route_invite, RouteDecision};
 
@@ -131,24 +135,30 @@ pub trait CallAcceptor: Send + Sync {
     async fn on_matched(&self, call: MatchedCall<'_>) -> anyhow::Result<()>;
 }
 
-/// `UasRequestHandler` that does INVITE routing only. Other methods
-/// fall through to the trait's default 405/501 responses; the daemon
-/// will compose this with separate handlers for BYE/CANCEL/REFER as
-/// those land.
+/// `UasRequestHandler` that does INVITE routing and mid-dialog
+/// teardown (BYE / CANCEL). Other methods fall through to the
+/// trait's default 405/501 responses; REFER (transfer) lands in a
+/// follow-up.
 pub struct RoutingHandler<A> {
     routes: Arc<RouteSet>,
     acceptor: Arc<A>,
     resolver: RegisterSourceResolver,
+    terminator: DialogTerminatorHandle,
 }
 
 impl<A> RoutingHandler<A> {
     /// Build a handler with the default register-source resolver
-    /// (always returns `"trunk"` — fine for UAS-only deployments).
+    /// (always returns `"trunk"` — fine for UAS-only deployments)
+    /// and a no-op dialog terminator. Wire a real terminator with
+    /// [`Self::with_dialog_terminator`] before deploying — without
+    /// it, BYEs are 200 OK'd but the per-call controller doesn't
+    /// learn the SIP leg ended.
     pub fn new(routes: Arc<RouteSet>, acceptor: Arc<A>) -> Self {
         Self {
             routes,
             acceptor,
             resolver: default_resolver(),
+            terminator: Arc::new(NullDialogTerminator),
         }
     }
 
@@ -157,6 +167,14 @@ impl<A> RoutingHandler<A> {
     /// to a `[[register]]` block name.
     pub fn with_register_source_resolver(mut self, resolver: RegisterSourceResolver) -> Self {
         self.resolver = resolver;
+        self
+    }
+
+    /// Plug in the dialog terminator (typically
+    /// `siphon-ai-core::CallRegistry`). Must match the registry the
+    /// `CallAcceptor` registers handles into.
+    pub fn with_dialog_terminator(mut self, terminator: DialogTerminatorHandle) -> Self {
+        self.terminator = terminator;
         self
     }
 
@@ -210,6 +228,35 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                         route,
                     })
                     .await
+            }
+        }
+    }
+
+    #[instrument(skip_all, fields(method = "BYE"))]
+    async fn on_bye(
+        &self,
+        request: &Request,
+        handle: ServerTransactionHandle,
+        _dialog: &Dialog,
+    ) -> anyhow::Result<()> {
+        match dispatch_bye(self.terminator.as_ref(), request) {
+            DialogAction::SendFinal(response) => {
+                handle.send_final(response).await;
+                Ok(())
+            }
+        }
+    }
+
+    #[instrument(skip_all, fields(method = "CANCEL"))]
+    async fn on_cancel(
+        &self,
+        request: &Request,
+        handle: ServerTransactionHandle,
+    ) -> anyhow::Result<()> {
+        match dispatch_cancel(self.terminator.as_ref(), request) {
+            DialogAction::SendFinal(response) => {
+                handle.send_final(response).await;
+                Ok(())
             }
         }
     }

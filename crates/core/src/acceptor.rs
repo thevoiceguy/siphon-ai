@@ -69,6 +69,7 @@ use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::call::{CallController, CallControllerConfig};
+use crate::registry::CallRegistry;
 
 /// Daemon-wide bridge & media defaults. Routes' `[route.bridge]`
 /// and `[route.media]` blocks override individual fields.
@@ -410,10 +411,17 @@ fn default_call_id_factory() -> CallIdFactory {
 /// `create_ok` to stamp Contact + To-tag onto the 200 OK; sharing
 /// one instance per daemon (rather than rebuilding per call) keeps
 /// the deterministic-tag seed wiring upstream owns intact.
+///
+/// `registry` is the shared [`CallRegistry`] the SIP-side BYE /
+/// CANCEL handlers consult. The acceptor inserts a [`CallHandle`]
+/// keyed by the inbound INVITE's `Call-ID` on the happy path and
+/// removes the entry from the spawned task when the controller
+/// exits, so a follow-up BYE/CANCEL has someone to wake.
 pub struct BridgingAcceptor {
     media: Arc<MediaSetup>,
     defaults: BridgeDefaults,
     uas: Arc<UserAgentServer>,
+    registry: CallRegistry,
     call_id_factory: CallIdFactory,
 }
 
@@ -422,11 +430,13 @@ impl BridgingAcceptor {
         media: Arc<MediaSetup>,
         defaults: BridgeDefaults,
         uas: Arc<UserAgentServer>,
+        registry: CallRegistry,
     ) -> Self {
         Self {
             media,
             defaults,
             uas,
+            registry,
             call_id_factory: default_call_id_factory(),
         }
     }
@@ -437,6 +447,12 @@ impl BridgingAcceptor {
     pub fn with_call_id_factory(mut self, factory: CallIdFactory) -> Self {
         self.call_id_factory = factory;
         self
+    }
+
+    /// The registry this acceptor populates. Cheap to clone — share
+    /// it with the SIP-side BYE/CANCEL handler.
+    pub fn registry(&self) -> &CallRegistry {
+        &self.registry
     }
 }
 
@@ -461,17 +477,19 @@ impl CallAcceptor for BridgingAcceptor {
                     .map_err(|e| anyhow::anyhow!("failed to build 200 OK: {e}"))?;
                 call.handle.send_final(response).await;
 
-                // Spawn the controller. The Arc<MediaSetup> keeps
-                // the forge SessionManager / MediaBridgeManager
-                // alive for the duration of the call; on exit we
-                // explicitly stop the forge session so its RTP
-                // ports return to the pool. The next layer (BYE
-                // plumbing) will also wire `prepared.controller`'s
-                // `CallHandle::shutdown` into the SIP dialog tear-down.
+                // Register before spawning so a BYE arriving on the
+                // very next packet finds an entry to wake. The
+                // spawned task removes the entry on its way out so
+                // the registry doesn't leak.
+                self.registry
+                    .insert(prepared.sip_call_id.clone(), prepared.handle);
+
                 let bridge_call_id = prepared.bridge_call_id.clone();
                 let forge_call_id = prepared.forge_call_id.clone();
+                let sip_call_id = prepared.sip_call_id.clone();
                 let controller = prepared.controller;
                 let media = Arc::clone(&self.media);
+                let registry = self.registry.clone();
                 tokio::spawn(async move {
                     match controller.run().await {
                         Ok(o) => info!(
@@ -485,6 +503,7 @@ impl CallAcceptor for BridgingAcceptor {
                             "call controller exited with error"
                         ),
                     }
+                    registry.remove(&sip_call_id);
                     if let Err(e) = media.session_manager().stop_session(&forge_call_id).await {
                         warn!(
                             call_id = %bridge_call_id,
@@ -514,13 +533,20 @@ impl CallAcceptor for BridgingAcceptor {
 ///
 /// Exposed so integration tests can exercise the media + bridge wire-
 /// up without needing to fabricate a [`sip_transaction::ServerTransactionHandle`].
+///
+/// `handle` is the controller's shutdown hook — the same one
+/// `on_matched` registers in the [`CallRegistry`] before spawning
+/// the task. Tests that drive `prepare_call` directly use it to
+/// observe registry behaviour.
 pub struct PreparedCall {
     pub bridge_call_id: BridgeCallId,
     pub forge_call_id: forge_core::CallId,
+    pub sip_call_id: String,
     pub answer: AnswerOutcome,
     pub bridge_config: BridgeConfig,
     pub start: StartMsg,
     pub controller: CallController,
+    pub handle: crate::call::CallHandle,
 }
 
 impl std::fmt::Debug for PreparedCall {
@@ -530,6 +556,7 @@ impl std::fmt::Debug for PreparedCall {
         f.debug_struct("PreparedCall")
             .field("bridge_call_id", &self.bridge_call_id)
             .field("forge_call_id", &self.forge_call_id)
+            .field("sip_call_id", &self.sip_call_id)
             .field("answer", &self.answer)
             .field("bridge_config", &self.bridge_config)
             .field("start", &self.start)
@@ -596,19 +623,17 @@ impl BridgingAcceptor {
             start: start.clone(),
             media_tap: tap,
         };
-        let (controller, _handle) = CallController::new(cfg);
-
-        // `_handle` is dropped here for now. Once BYE plumbing lands
-        // it'll be stored in a per-dialog registry so the SIP layer
-        // can call shutdown() on tear-down.
+        let (controller, handle) = CallController::new(cfg);
 
         Ok(PreparedCall {
             bridge_call_id,
             forge_call_id,
+            sip_call_id,
             answer,
             bridge_config,
             start,
             controller,
+            handle,
         })
     }
 }

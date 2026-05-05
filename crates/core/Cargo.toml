@@ -16,6 +16,7 @@ thiserror.workspace   = true
 tracing.workspace     = true
 uuid.workspace        = true
 chrono.workspace      = true
+parking_lot.workspace = true
 
 # Internal crates
 siphon-ai-bridge.workspace     = true

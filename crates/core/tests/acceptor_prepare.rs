@@ -16,7 +16,7 @@ use forge_sdp::{MediaType, SessionDescription, SessionDescriptionExt};
 use sip_core::{Headers as SipHeaders, Method, Request, RequestLine, SipUri};
 use sip_uas::UserAgentServer;
 use siphon_ai_bridge::{AudioEncoding, CallId as BridgeCallId, Direction, PROTOCOL_VERSION};
-use siphon_ai_core::{AcceptError, BridgeDefaults, BridgingAcceptor};
+use siphon_ai_core::{AcceptError, BridgeDefaults, BridgingAcceptor, CallRegistry};
 use siphon_ai_media_glue::MediaSetup;
 use siphon_ai_routes::{load_from_toml, RouteSet};
 use siphon_ai_sip_glue::InviteFacts;
@@ -82,6 +82,7 @@ fn build_acceptor(
     BridgingAcceptor,
     Arc<MediaBridgeManager>,
     Arc<SessionManager>,
+    CallRegistry,
 ) {
     let session_mgr = SessionManager::new(
         SessionManagerConfig {
@@ -103,17 +104,19 @@ fn build_acceptor(
     let local = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
     let contact = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
     let uas = Arc::new(UserAgentServer::new(local, contact));
+    let registry = CallRegistry::new();
     (
-        BridgingAcceptor::new(media, defaults, uas)
+        BridgingAcceptor::new(media, defaults, uas, registry.clone())
             .with_call_id_factory(Arc::new(|| BridgeCallId::new("siphon-test-fixed"))),
         bridge_mgr,
         session_mgr,
+        registry,
     )
 }
 
 #[tokio::test]
 async fn prepare_happy_path_produces_runnable_call() {
-    let (acceptor, bridge_mgr, session_mgr) = build_acceptor(50100, 50200);
+    let (acceptor, bridge_mgr, session_mgr, _registry) = build_acceptor(50100, 50200);
     let routes = one_route_routes();
     let req = invite(
         Some("application/sdp"),
@@ -173,7 +176,7 @@ async fn prepare_happy_path_produces_runnable_call() {
 
 #[tokio::test]
 async fn unsupported_media_type_maps_to_415() {
-    let (acceptor, _, _) = build_acceptor(50300, 50400);
+    let (acceptor, _, _, _) = build_acceptor(50300, 50400);
     let routes = one_route_routes();
     let route = routes.iter().next().unwrap();
     let req = invite(Some("text/plain"), "hi", "sip:5000@siphon.example.com");
@@ -188,7 +191,7 @@ async fn unsupported_media_type_maps_to_415() {
 
 #[tokio::test]
 async fn no_common_codec_maps_to_488() {
-    let (acceptor, bridge_mgr, session_mgr) = build_acceptor(50500, 50600);
+    let (acceptor, bridge_mgr, session_mgr, _registry) = build_acceptor(50500, 50600);
     let routes = one_route_routes();
     let route = routes.iter().next().unwrap();
     let req = invite(
@@ -235,7 +238,8 @@ async fn route_without_ws_url_when_no_default_yields_503() {
     let local = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
     let contact = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
     let uas = Arc::new(UserAgentServer::new(local, contact));
-    let acceptor = BridgingAcceptor::new(media, BridgeDefaults::default(), uas);
+    let acceptor =
+        BridgingAcceptor::new(media, BridgeDefaults::default(), uas, CallRegistry::new());
 
     let routes = load_from_toml(
         r#"
@@ -265,6 +269,36 @@ async fn route_without_ws_url_when_no_default_yields_503() {
 }
 
 #[tokio::test]
+async fn prepare_exposes_handle_and_sip_call_id_for_registry_use() {
+    // The whole point of surfacing `handle` and `sip_call_id` from
+    // PreparedCall is so on_matched (and any tests that mirror it)
+    // can register the handle keyed by Call-ID.
+    let (acceptor, _, _, registry) = build_acceptor(51100, 51200);
+    let routes = one_route_routes();
+    let req = invite(
+        Some("application/sdp"),
+        LINPHONE_PCMU_OFFER,
+        "sip:5000@siphon.example.com",
+    );
+    let facts = InviteFacts::extract(&req);
+    let route = routes.iter().next().unwrap();
+
+    let prepared = acceptor.prepare_call(&req, route, &facts).await.unwrap();
+    assert_eq!(prepared.sip_call_id, "abc-123@pbx.example.com");
+    assert_eq!(prepared.handle.call_id().as_str(), "siphon-test-fixed");
+
+    // Mirror the on_matched register step.
+    registry.insert(prepared.sip_call_id.clone(), prepared.handle);
+    let looked_up = registry.lookup("abc-123@pbx.example.com").expect("present");
+    assert_eq!(looked_up.call_id().as_str(), "siphon-test-fixed");
+    assert_eq!(registry.len(), 1);
+
+    // Mirror the spawned-task remove step.
+    registry.remove("abc-123@pbx.example.com");
+    assert!(registry.is_empty());
+}
+
+#[tokio::test]
 async fn second_call_gets_a_fresh_forge_session() {
     // Default factory generates unique ids. Call prepare twice with
     // the default factory, confirm both sessions live concurrently.
@@ -284,7 +318,8 @@ async fn second_call_gets_a_fresh_forge_session() {
     let local = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
     let contact = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
     let uas = Arc::new(UserAgentServer::new(local, contact));
-    let acceptor = BridgingAcceptor::new(media, BridgeDefaults::default(), uas);
+    let acceptor =
+        BridgingAcceptor::new(media, BridgeDefaults::default(), uas, CallRegistry::new());
 
     // We need a default ws_url so prepare_call accepts the offer.
     let routes = load_from_toml(

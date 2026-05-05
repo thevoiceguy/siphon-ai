@@ -7,6 +7,7 @@
 
 pub mod acceptor;
 pub mod call;
+pub mod registry;
 
 pub use acceptor::{
     build_bridge_config, build_start_msg, extract_offer_sdp, extract_sip_call_id, resolve_codecs,
@@ -17,3 +18,4 @@ pub use call::{
     CallController, CallControllerConfig, CallError, CallHandle, CallOutcome, CallState,
     CallTermination,
 };
+pub use registry::CallRegistry;

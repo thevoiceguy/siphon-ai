@@ -30,3 +30,4 @@ sip-auth.workspace        = true
 
 [dev-dependencies]
 bytes = { workspace = true }
+parking_lot = { workspace = true }

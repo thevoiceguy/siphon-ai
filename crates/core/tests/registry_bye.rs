@@ -1,0 +1,169 @@
+//! End-to-end: BYE → registry lookup → CallHandle::shutdown wakes
+//! a running CallController.
+//!
+//! Pulls together the wires the BYE plumbing layer adds:
+//! - `CallRegistry` impls `DialogTerminator`
+//! - `dispatch_bye` calls `terminate(call_id)`
+//! - `terminate` looks up the handle and calls `shutdown()`
+//! - `shutdown()` wakes the controller's main `select!`
+//! - the controller exits with [`CallTermination::LocalShutdown`]
+//!
+//! Without this test, each piece works in isolation but nothing
+//! verifies the chain.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::Bytes;
+use forge_core::CallId as ForgeCallId;
+use forge_engine::MediaBridgeManager;
+use futures::{SinkExt, StreamExt};
+use serde_json::Value;
+use sip_core::{Headers, Method, Request, RequestLine, SipUri};
+use siphon_ai_bridge::{
+    AudioEncoding, AudioFormat, BridgeConfig, CallId as BridgeCallId, Direction, SipMeta, StartMsg,
+};
+use siphon_ai_core::{CallController, CallControllerConfig, CallRegistry, CallTermination};
+use siphon_ai_media_glue::MediaTap;
+use siphon_ai_sip_glue::{dispatch_bye, DialogAction};
+use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::handshake::server::{
+    ErrorResponse as HsErrorResponse, Request as HsRequest, Response as HsResponse,
+};
+use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::Message;
+
+/// Handshake callback that echoes the siphon-ai.v1 subprotocol so
+/// tungstenite's stricter-than-spec client accepts the upgrade.
+#[allow(clippy::result_large_err)]
+fn echo_subprotocol(req: &HsRequest, mut resp: HsResponse) -> Result<HsResponse, HsErrorResponse> {
+    if let Some(offered) = req.headers().get("Sec-WebSocket-Protocol") {
+        resp.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            HeaderValue::from_bytes(offered.as_bytes()).unwrap(),
+        );
+    }
+    Ok(resp)
+}
+
+async fn server_acks_start_then_idles(port_tx: tokio::sync::oneshot::Sender<u16>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let _ = port_tx.send(port);
+    let (stream, _) = listener.accept().await.expect("accept");
+    let mut ws = tokio_tungstenite::accept_hdr_async(stream, echo_subprotocol)
+        .await
+        .expect("ws accept");
+
+    // Drain the start message and wait quietly for the controller's
+    // stop on shutdown.
+    while let Some(msg) = ws.next().await {
+        match msg {
+            Ok(Message::Text(t)) => {
+                let v: Value = serde_json::from_str(&t).unwrap();
+                if v["type"] == "stop" {
+                    let _ = ws.send(Message::Close(None)).await;
+                    break;
+                }
+            }
+            Ok(Message::Close(_)) | Err(_) => break,
+            _ => {}
+        }
+    }
+}
+
+fn bye_request(call_id: &str) -> Request {
+    let uri = SipUri::parse("sip:5000@siphon.example.com").unwrap();
+    let mut h = Headers::new();
+    h.push("Via", "SIP/2.0/UDP h:5060;branch=z9hG4bK-bye")
+        .unwrap();
+    h.push("From", "<sip:caller@example.net>;tag=t").unwrap();
+    h.push("To", "<sip:5000@siphon.example.com>;tag=u").unwrap();
+    h.push("Call-ID", call_id).unwrap();
+    h.push("CSeq", "2 BYE").unwrap();
+    h.push("Content-Length", "0").unwrap();
+    Request::new(RequestLine::new(Method::Bye, uri), h, Bytes::new()).unwrap()
+}
+
+#[tokio::test]
+async fn dispatch_bye_wakes_running_controller_via_registry() {
+    // 1. WS server that ACKs the start and waits for stop.
+    let (port_tx, port_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(server_acks_start_then_idles(port_tx));
+    let port = port_rx.await.expect("server announces port");
+
+    // 2. Build a controller around a real MediaTap + WS bridge.
+    let manager = Arc::new(MediaBridgeManager::new());
+    let forge_call_id = ForgeCallId::new("siphon-bye-test");
+    let tap = MediaTap::attach(&manager, forge_call_id, 8000).expect("attach");
+    let cfg = CallControllerConfig {
+        call_id: BridgeCallId::new("siphon-bye-test"),
+        bridge: BridgeConfig {
+            ws_url: format!("ws://127.0.0.1:{port}/"),
+            connect_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+        start: StartMsg {
+            version: "1".into(),
+            call_id: BridgeCallId::new("siphon-bye-test"),
+            seq: 0,
+            from: "+13125551234".into(),
+            to: "5000".into(),
+            direction: Direction::Inbound,
+            audio: AudioFormat {
+                encoding: AudioEncoding::Pcm16le,
+                sample_rate: 8000,
+                channels: 1,
+                frame_ms: 20,
+            },
+            sip: SipMeta {
+                call_id: "abc-123@pbx.example.com".into(),
+                headers: HashMap::new(),
+            },
+        },
+        media_tap: tap,
+    };
+    let (controller, handle) = CallController::new(cfg);
+
+    // 3. Register and start the controller.
+    let registry = CallRegistry::new();
+    registry.insert("abc-123@pbx.example.com", handle);
+
+    let run = tokio::spawn(async move { controller.run().await });
+
+    // Give the WS bridge a moment to handshake and send `start`.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // 4. Synthesize a BYE and dispatch it through the same path
+    //    `RoutingHandler::on_bye` would: registry-as-DialogTerminator.
+    let bye = bye_request("abc-123@pbx.example.com");
+    let action = dispatch_bye(&registry, &bye);
+    match action {
+        DialogAction::SendFinal(resp) => {
+            assert_eq!(resp.code(), 200);
+            assert_eq!(resp.reason(), "OK");
+        }
+    }
+
+    // 5. The controller must wake and end with LocalShutdown.
+    let outcome = tokio::time::timeout(Duration::from_secs(3), run)
+        .await
+        .expect("controller exits after BYE")
+        .expect("task didn't panic")
+        .expect("controller returns Ok");
+    assert_eq!(outcome.termination, CallTermination::LocalShutdown);
+}
+
+#[tokio::test]
+async fn dispatch_bye_for_unknown_call_id_does_not_panic() {
+    // The registry has no entry; dispatch_bye still produces a 200
+    // OK and returns false from the terminator. (The 200 OK is
+    // mandatory per RFC 3261 §15.1.2.)
+    let registry = CallRegistry::new();
+    let bye = bye_request("ghost@pbx");
+    match dispatch_bye(&registry, &bye) {
+        DialogAction::SendFinal(resp) => assert_eq!(resp.code(), 200),
+    }
+    assert!(registry.is_empty());
+}

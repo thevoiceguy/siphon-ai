@@ -82,6 +82,81 @@ async fn runtime_starts_and_shuts_down_cleanly() {
         .expect("task does not panic");
 }
 
+const TCP_FIXTURE: &str = r#"
+[node]
+id = "siphon-ai-tcp-test"
+public_address = "127.0.0.1"
+
+[sip]
+listen = "${TEST_SIP_LISTEN}"
+transports = ["udp", "tcp"]
+
+[media]
+codecs = ["pcmu", "pcma"]
+rtp_port_range = [${TEST_RTP_MIN}, ${TEST_RTP_MAX}]
+
+[bridge]
+ws_url = "wss://example.test/sip-bridge"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+
+#[tokio::test]
+async fn runtime_with_udp_and_tcp_transports_binds_both() {
+    // The TCP listener uses the same host:port pair as UDP — but
+    // UDP and TCP are different namespaces in the kernel, so the
+    // "busy" check only enforces uniqueness within a transport.
+    // We let the runtime pick a UDP port via :0, then assert TCP
+    // is also reachable on that port.
+    let env = MapEnv::new([
+        ("TEST_SIP_LISTEN", "127.0.0.1:0"),
+        ("TEST_RTP_MIN", "40400"),
+        ("TEST_RTP_MAX", "40500"),
+    ]);
+    let cfg = load_from_str_with_env(TCP_FIXTURE, &env).expect("config compiles");
+
+    let runtime = Runtime::build(cfg).await.expect("runtime builds");
+    let bound = runtime.local_addr().expect("local_addr");
+    assert!(bound.port() > 0);
+
+    // The TCP listener spawns asynchronously inside Runtime::build
+    // — it's bound by the time the spawned task gets polled, but
+    // that may be a tick or two after build returns. Probe with a
+    // short retry loop instead of pinning a single sleep.
+    let connected = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            match tokio::net::TcpStream::connect(bound).await {
+                Ok(_) => break true,
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await;
+    assert!(
+        matches!(connected, Ok(true)),
+        "TCP listener at {bound} should accept connections"
+    );
+
+    // Drive shutdown.
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let run_handle = tokio::spawn(async move {
+        let _ = runtime
+            .run(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    shutdown_tx.send(()).expect("shutdown signal");
+    tokio::time::timeout(Duration::from_secs(2), run_handle)
+        .await
+        .expect("runtime exits within 2s")
+        .expect("task does not panic");
+}
+
 #[tokio::test]
 async fn build_fails_when_listen_port_is_busy() {
     // Bind a placeholder UDP socket on an ephemeral port, then ask

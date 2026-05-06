@@ -2436,9 +2436,12 @@ dependencies = [
  "bytes",
  "dashmap",
  "memchr",
+ "rustls",
+ "rustls-pki-types",
  "sip-observe",
  "socket2 0.5.10",
  "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 
@@ -2514,6 +2517,7 @@ dependencies = [
  "siphon-ai-telemetry",
  "siphon-ai-webhooks",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
 ]

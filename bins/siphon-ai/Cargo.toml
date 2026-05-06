@@ -43,6 +43,10 @@ sip-transaction.workspace = true
 sip-transport.workspace   = true
 sip-uas.workspace         = true
 
+# tokio-rustls: name the ServerConfig type returned by
+# sip_transport::load_rustls_server_config.
+tokio-rustls.workspace = true
+
 # Upstream — forge-media (session manager, media bridge).
 forge-core.workspace   = true
 forge-engine.workspace = true

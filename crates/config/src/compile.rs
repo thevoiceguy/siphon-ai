@@ -32,7 +32,8 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::raw::{
-    RawBridge, RawCdr, RawConfig, RawMedia, RawNode, RawObservability, RawSip, RawWebhooks,
+    RawBridge, RawCdr, RawConfig, RawMedia, RawNode, RawObservability, RawSip, RawSipTls,
+    RawWebhooks,
 };
 
 /// Compiled, ready-to-pass daemon config.
@@ -117,6 +118,17 @@ pub struct SipConfig {
     pub transports: Vec<SipTransport>,
     pub user_agent: Option<String>,
     pub contact: Option<String>,
+    /// `Some` when `[sip.tls]` is supplied AND `tls` is in the
+    /// transports list. `None` when TLS isn't enabled. Daemon
+    /// loads cert/key from these paths at startup.
+    pub tls: Option<SipTlsConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SipTlsConfig {
+    pub listen_addr: SocketAddr,
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +155,18 @@ pub enum CompileError {
 
     #[error("[sip].transports has unknown entry {0:?}; expected udp / tcp / tls")]
     UnknownTransport(String),
+
+    #[error("[sip.tls].cert is required when transports includes \"tls\"")]
+    SipTlsCertRequired,
+
+    #[error("[sip.tls].key is required when transports includes \"tls\"")]
+    SipTlsKeyRequired,
+
+    #[error("[sip.tls].listen {0:?} is not a valid socket address: {1}")]
+    BadSipTlsListen(String, std::net::AddrParseError),
+
+    #[error("[sip.tls] is configured but transports does not include \"tls\"")]
+    SipTlsConfiguredButNotEnabled,
 
     #[error("[media].codecs has unknown codec {0:?}")]
     UnknownCodec(String),
@@ -224,12 +248,58 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
             transports.push(t);
         }
     }
+
+    let tls_enabled = transports.contains(&SipTransport::Tls);
+    let tls = compile_sip_tls(raw.tls, tls_enabled, &listen_addr)?;
+
     Ok(SipConfig {
         listen_addr,
         transports,
         user_agent: raw.user_agent,
         contact: raw.contact,
+        tls,
     })
+}
+
+fn compile_sip_tls(
+    raw: RawSipTls,
+    tls_enabled: bool,
+    sip_listen: &SocketAddr,
+) -> Result<Option<SipTlsConfig>, CompileError> {
+    let has_any_tls_field = raw.cert.is_some() || raw.key.is_some() || raw.listen.is_some();
+
+    if !tls_enabled {
+        if has_any_tls_field {
+            // Operator set `[sip.tls]` but didn't enable `tls` in
+            // the transports list — that's almost always a typo
+            // (their "tls" listen will silently never receive
+            // traffic). Fail loud instead of silently ignoring.
+            return Err(CompileError::SipTlsConfiguredButNotEnabled);
+        }
+        return Ok(None);
+    }
+
+    let cert_path = raw.cert.ok_or(CompileError::SipTlsCertRequired)?;
+    if cert_path.is_empty() {
+        return Err(CompileError::SipTlsCertRequired);
+    }
+    let key_path = raw.key.ok_or(CompileError::SipTlsKeyRequired)?;
+    if key_path.is_empty() {
+        return Err(CompileError::SipTlsKeyRequired);
+    }
+
+    // Default TLS listen: same host as the UDP/TCP listen, port
+    // 5061 (SIPS standard per RFC 3261 §26.2.1).
+    let listen_addr = match raw.listen {
+        Some(s) => s.parse().map_err(|e| CompileError::BadSipTlsListen(s, e))?,
+        None => SocketAddr::new(sip_listen.ip(), 5061),
+    };
+
+    Ok(Some(SipTlsConfig {
+        listen_addr,
+        cert_path: PathBuf::from(cert_path),
+        key_path: PathBuf::from(key_path),
+    }))
 }
 
 fn compile_node(raw: RawNode, sip: &SipConfig) -> NodeConfig {

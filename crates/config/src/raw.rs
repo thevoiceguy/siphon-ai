@@ -65,9 +65,12 @@ pub struct RawNode {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawSip {
-    /// `host:port` to bind. Required.
+    /// `host:port` to bind UDP / TCP on. Required.
     pub listen: String,
-    /// Transports to enable on `listen`. Default: `["udp"]`.
+    /// Transports to enable on `listen`. Default: `["udp"]`. Valid
+    /// entries: `udp`, `tcp`, `tls`. `tls` requires `[sip.tls]` to
+    /// be configured (cert/key); compile-time validation enforces
+    /// that.
     #[serde(default = "default_transports")]
     pub transports: Vec<String>,
     /// Value of the `User-Agent` header on outbound responses. The
@@ -79,6 +82,32 @@ pub struct RawSip {
     /// and `listen`.
     #[serde(default)]
     pub contact: Option<String>,
+    /// TLS sub-block. Even when `transports = ["tls"]` is set,
+    /// `[sip.tls]` must supply cert/key paths. Defaults are all
+    /// "off" so an `[sip]` block without `[sip.tls]` keeps working
+    /// for UDP-only deployments.
+    #[serde(default)]
+    pub tls: RawSipTls,
+}
+
+/// `[sip.tls]` — TLS server configuration. Required when
+/// `[sip].transports` includes `"tls"`. v1 only does inbound
+/// (server-side) TLS; outbound TLS for UAC mode is a follow-up.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawSipTls {
+    /// `host:port` to bind the TLS listener on. If unset, the
+    /// listener defaults to the same host as `[sip].listen` on
+    /// port 5061 (the SIPS standard). Set explicitly for
+    /// non-standard ports.
+    #[serde(default)]
+    pub listen: Option<String>,
+    /// PEM-encoded certificate chain (path on disk). Required.
+    #[serde(default)]
+    pub cert: Option<String>,
+    /// PEM-encoded private key (path on disk). Required.
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 fn default_transports() -> Vec<String> {

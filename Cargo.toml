@@ -60,6 +60,12 @@ sha2 = "0.10"
 # WebSocket
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 
+# tokio-rustls: only used to name the `ServerConfig` type returned
+# by `sip_transport::load_rustls_server_config` so the daemon can
+# pass it around. Already pulled transitively by sip-transport's
+# `tls` feature; declaring it here just gives us a name.
+tokio-rustls = "0.26"
+
 # HTTP client (CDR webhook sink, lifecycle webhooks)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
@@ -94,7 +100,7 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # siphon-rs — RFC 3261 SIP stack
 sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
 sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main", features = ["tls"] }
 sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
 sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
 sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }

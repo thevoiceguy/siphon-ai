@@ -523,6 +523,182 @@ any = true
 }
 
 #[test]
+fn sip_tls_disabled_by_default() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(cfg.sip.tls.is_none());
+}
+
+#[test]
+fn sip_tls_compiles_with_cert_key_and_default_listen() {
+    // `transports = ["udp", "tls"]` + `[sip.tls]` → tls config
+    // with default :5061 (SIPS standard) bound to the same host.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "10.0.0.5:5060"
+transports = ["udp", "tls"]
+
+[sip.tls]
+cert = "/etc/siphon-ai/tls/cert.pem"
+key  = "/etc/siphon-ai/tls/key.pem"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    let tls = cfg.sip.tls.as_ref().expect("tls configured");
+    assert_eq!(tls.listen_addr.ip().to_string(), "10.0.0.5");
+    assert_eq!(tls.listen_addr.port(), 5061);
+    assert_eq!(tls.cert_path.to_str(), Some("/etc/siphon-ai/tls/cert.pem"));
+    assert_eq!(tls.key_path.to_str(), Some("/etc/siphon-ai/tls/key.pem"));
+}
+
+#[test]
+fn sip_tls_explicit_listen_overrides_default() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+transports = ["tls"]
+
+[sip.tls]
+listen = "0.0.0.0:5443"
+cert   = "/c"
+key    = "/k"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    let tls = cfg.sip.tls.as_ref().expect("tls configured");
+    assert_eq!(tls.listen_addr.port(), 5443);
+}
+
+#[test]
+fn sip_tls_missing_cert_errors() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+transports = ["tls"]
+
+[sip.tls]
+key = "/k"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("cert is required"));
+}
+
+#[test]
+fn sip_tls_missing_key_errors() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+transports = ["tls"]
+
+[sip.tls]
+cert = "/c"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("key is required"));
+}
+
+#[test]
+fn sip_tls_block_without_tls_transport_errors() {
+    // Loud failure on the "I configured cert/key but forgot to put
+    // tls in transports" footgun.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+transports = ["udp"]
+
+[sip.tls]
+cert = "/c"
+key = "/k"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("transports does not include"));
+}
+
+#[test]
+fn sip_tls_bad_listen_addr_errors() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+transports = ["tls"]
+
+[sip.tls]
+listen = "not-a-socket"
+cert   = "/c"
+key    = "/k"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not-a-socket") || msg.contains("invalid"),
+        "got: {msg}"
+    );
+}
+
+#[test]
 fn webhooks_disabled_by_default() {
     let env = MapEnv::new([]);
     let toml = r#"

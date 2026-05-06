@@ -28,20 +28,23 @@
 //!                       (siphon-ai-core ─ tap + WS bridge)
 //! ```
 //!
-//! ## What's in scope (v1 minimal cut)
+//! ## What's in scope (v1)
 //!
-//! - UDP transport on `[sip].listen` (other transports deferred).
+//! - **SIP transports**: UDP, TCP, and TLS (SIPS). UDP and TCP
+//!   share the same `[sip].listen` address per RFC 3261 §18; TLS
+//!   binds on `[sip.tls].listen` (default 5061).
 //! - Inbound INVITE → routed → MediaSetup → 200 OK → CallController.
 //! - BYE / CANCEL via the CallRegistry.
+//! - CDR (file + webhook), lifecycle webhooks (call_start, call_end),
+//!   Prometheus metrics + `/health` + `/ready`.
 //!
 //! ## What's deferred
 //!
-//! - TCP / TLS / WS transports — wiring is straightforward (siphon-rs
-//!   `run_tcp` / `run_tls` / `run_ws` mirror `run_udp`); land them once
-//!   we have a need.
-//! - Outbound REGISTER (UAC mode); requires `[[register]]` config.
-//! - Admin / metrics / health HTTP servers.
-//! - HEP, CDR, lifecycle webhooks.
+//! - WebSocket SIP transport (`run_ws` / `run_wss`) — same shape as
+//!   TCP/TLS, deferred until we have a deployment that needs it.
+//! - Outbound REGISTER (UAC mode) — requires `[[register]]` config.
+//! - HEP / Homer (depends on the upstream `hep-rs` crate).
+//! - Admin endpoints (dynamic log level, force-hangup).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -57,13 +60,16 @@ use sip_parse::parse_request;
 use sip_transaction::{
     TransactionManager, TransportContext, TransportDispatcher, TransportKind as TxTransportKind,
 };
-use sip_transport::{run_udp, send_udp, InboundPacket, TransportKind as TpTransportKind};
+use sip_transport::{
+    load_rustls_server_config, run_tcp, run_tls, run_udp, send_stream, send_udp, InboundPacket,
+    TransportKind as TpTransportKind,
+};
 use sip_uas::integrated::{IntegratedUAS, UasRequestHandler};
 use sip_uas::UserAgentServer;
 use siphon_ai_cdr::{CdrSinkHandle, FileSink, MultiSink, NullSink, WebhookSink, WebhookSinkConfig};
 use siphon_ai_config::{
     CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, MediaConfig, NodeConfig,
-    ObservabilityConfig, SipConfig, SipTransport, WebhooksConfig,
+    ObservabilityConfig, SipConfig, SipTlsConfig, SipTransport, WebhooksConfig,
 };
 use siphon_ai_core::{BridgingAcceptor, CallRegistry};
 use siphon_ai_media_glue::MediaSetup;
@@ -113,8 +119,6 @@ impl Runtime {
             webhooks,
         } = config;
 
-        warn_on_unsupported_transports(&sip);
-
         // ─── Telemetry: install Prometheus recorder + spawn HTTP ───
         let readiness = ReadinessFlag::new();
         let observability_server = build_observability(observability, readiness.clone()).await?;
@@ -161,15 +165,30 @@ impl Runtime {
                 .with_dialog_terminator(dialog_terminator),
         );
 
-        // ─── UDP transport + transaction manager ───────────────────
+        // ─── SIP transports + transaction manager ──────────────────
+        // Bind UDP eagerly so a port-busy error surfaces here, not
+        // after we log "ready". TCP / TLS listeners spawn inside
+        // spawn_listeners; their accept loops own the bind.
         let udp_socket = Arc::new(
             UdpSocket::bind(sip.listen_addr)
                 .await
                 .with_context(|| format!("bind UDP {}", sip.listen_addr))?,
         );
         let dispatcher: Arc<dyn TransportDispatcher> =
-            Arc::new(UdpDispatcher::new(Arc::clone(&udp_socket)));
+            Arc::new(MultiTransportDispatcher::new(Arc::clone(&udp_socket)));
         let transaction_mgr = Arc::new(TransactionManager::new(Arc::clone(&dispatcher)));
+
+        // Load the TLS server config if `tls` is enabled. Loading
+        // here (instead of inside spawn_listeners) makes a bad
+        // cert/key path fail at startup with a clear error rather
+        // than after the listener tries to accept.
+        let tls_server_config = match (
+            sip.transports.contains(&SipTransport::Tls),
+            sip.tls.as_ref(),
+        ) {
+            (true, Some(tls)) => Some(load_sip_tls_server_config(tls)?),
+            _ => None,
+        };
 
         // ─── Integrated UAS ────────────────────────────────────────
         let local_uri = sip_local_uri(&node, &sip);
@@ -191,11 +210,17 @@ impl Runtime {
         }
         let uas = Arc::new(uas_builder.build()?);
 
-        // ─── Spawn the inbound UDP reader + dispatch loop ──────────
+        // ─── Spawn the inbound UDP/TCP/TLS readers + pump ─────────
+        let udp_bound_addr = udp_socket
+            .local_addr()
+            .with_context(|| "read UDP local_addr after bind")?;
         let listeners = spawn_listeners(
+            &sip,
             Arc::clone(&udp_socket),
+            udp_bound_addr,
             Arc::clone(&transaction_mgr),
             Arc::clone(&uas),
+            tls_server_config,
         );
 
         // We're now serving SIP — let the readiness probe flip.
@@ -285,6 +310,37 @@ async fn build_observability(
     Ok(Some(server))
 }
 
+/// Load the TLS server config (cert + key) from disk paths in
+/// `[sip.tls]`. Failure here is fatal — operators who set
+/// `transports = ["tls"]` expect SIPS to actually work, not to
+/// silently degrade to cleartext.
+fn load_sip_tls_server_config(
+    tls: &SipTlsConfig,
+) -> Result<Arc<tokio_rustls::rustls::ServerConfig>> {
+    let cert = tls
+        .cert_path
+        .to_str()
+        .ok_or_else(|| anyhow!("[sip.tls].cert path is not valid UTF-8"))?;
+    let key = tls
+        .key_path
+        .to_str()
+        .ok_or_else(|| anyhow!("[sip.tls].key path is not valid UTF-8"))?;
+    let cfg = load_rustls_server_config(cert, key).with_context(|| {
+        format!(
+            "load TLS cert={} key={}",
+            tls.cert_path.display(),
+            tls.key_path.display()
+        )
+    })?;
+    info!(
+        cert = %tls.cert_path.display(),
+        key = %tls.key_path.display(),
+        listen = %tls.listen_addr,
+        "TLS server config loaded"
+    );
+    Ok(cfg)
+}
+
 /// Build the lifecycle webhook sink from `[webhooks]` config.
 /// Returns `NullSink` when disabled. When enabled, wraps the
 /// `HttpSink` in a `FilteredSink` if an `events` allowlist is set.
@@ -359,17 +415,6 @@ fn build_cdr_webhook_sink(cfg: &CdrWebhookConfig) -> Result<CdrSinkHandle> {
     Ok(Arc::new(sink) as CdrSinkHandle)
 }
 
-fn warn_on_unsupported_transports(sip: &SipConfig) {
-    for t in &sip.transports {
-        if !matches!(t, SipTransport::Udp) {
-            warn!(
-                transport = ?t,
-                "non-UDP SIP transport configured but not yet wired in v1; ignoring"
-            );
-        }
-    }
-}
-
 fn rtp_port_pool(media: &MediaConfig) -> Result<PortPoolConfig> {
     match media.rtp_port_range {
         Some((min, max)) => PortPoolConfig::new(min, max)
@@ -427,20 +472,74 @@ fn sip_public_addr(node: &NodeConfig, sip: &SipConfig) -> Option<SocketAddr> {
 }
 
 fn spawn_listeners(
+    sip: &SipConfig,
     udp_socket: Arc<UdpSocket>,
+    udp_bound_addr: SocketAddr,
     transaction_mgr: Arc<TransactionManager>,
     uas: Arc<IntegratedUAS>,
+    tls_server_config: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
     let (packet_tx, packet_rx) = mpsc::channel::<InboundPacket>(1024);
 
+    let want_udp = sip.transports.contains(&SipTransport::Udp);
+    let want_tcp = sip.transports.contains(&SipTransport::Tcp);
+    let want_tls = sip.transports.contains(&SipTransport::Tls);
+
     // UDP reader: feeds inbound bytes into the packet channel.
-    let udp_reader_socket = Arc::clone(&udp_socket);
-    handles.push(tokio::spawn(async move {
-        if let Err(e) = run_udp(udp_reader_socket, packet_tx).await {
-            error!(error = %e, "UDP listener exited");
+    if want_udp {
+        let udp_reader_socket = Arc::clone(&udp_socket);
+        let tx = packet_tx.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = run_udp(udp_reader_socket, tx).await {
+                error!(error = %e, "UDP listener exited");
+            }
+        }));
+    }
+
+    // TCP listener — same host:port as UDP per RFC 3261 §18 (the
+    // SIP convention is to listen on the same port for udp/tcp).
+    // Use `udp_bound_addr` rather than the config's `listen_addr`
+    // so port-0 ("kernel picks") works — UDP picks first, TCP
+    // binds to the same kernel-chosen port.
+    if want_tcp {
+        let bind = udp_bound_addr.to_string();
+        let tx = packet_tx.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = run_tcp(&bind, tx).await {
+                error!(error = %e, "TCP listener exited");
+            }
+        }));
+    }
+
+    // TLS listener — separate bind (default port 5061 = SIPS).
+    if want_tls {
+        match (tls_server_config, sip.tls.as_ref()) {
+            (Some(cfg), Some(tls)) => {
+                let bind = tls.listen_addr.to_string();
+                let tx = packet_tx.clone();
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = run_tls(&bind, cfg, tx).await {
+                        error!(error = %e, "TLS listener exited");
+                    }
+                }));
+            }
+            _ => {
+                // Compile-time validation guarantees both are
+                // Some when the transport is enabled, but be loud
+                // if that contract ever breaks.
+                error!(
+                    "TLS transport enabled but no [sip.tls] config / server config available; \
+                     SIPS connections will be refused"
+                );
+            }
         }
-    }));
+    }
+
+    // Drop our local clone so the channel closes when every
+    // listener task does. The packet pump exits cleanly when its
+    // recv() returns None.
+    drop(packet_tx);
 
     // Packet pump: parse → tm.receive_request → uas.dispatch.
     handles.push(tokio::spawn(async move {
@@ -518,32 +617,56 @@ fn map_transport_kind(kind: TpTransportKind) -> TxTransportKind {
     }
 }
 
-// ─── UDP-only transport dispatcher ───────────────────────────────────
+// ─── Multi-transport dispatcher (UDP + TCP + TLS) ─────────────────
 //
-// Production siphond carries TCP / TLS / WS pools too; the v1 cut
-// here just speaks UDP. Sending a non-UDP response yields a clear
-// error rather than a silent fallback so a misconfiguration is
-// loud.
+// We're inbound-only (UAS) in v1: every response goes back over the
+// same transport the request arrived on. For UDP we own the socket
+// and `send_udp` writes to the peer. For stream transports
+// (TCP/TLS), `run_tcp` / `run_tls` set `ctx.stream()` to the per-
+// connection writer channel; `send_stream` pushes the payload
+// through that channel back to the peer.
+//
+// Outbound TCP/TLS connect (without a `stream` already set in
+// ctx) is what UAC mode would need — for v1 we error out cleanly
+// rather than silently falling back to UDP.
 
-struct UdpDispatcher {
-    socket: Arc<UdpSocket>,
+struct MultiTransportDispatcher {
+    udp_socket: Arc<UdpSocket>,
 }
 
-impl UdpDispatcher {
-    fn new(socket: Arc<UdpSocket>) -> Self {
-        Self { socket }
+impl MultiTransportDispatcher {
+    fn new(udp_socket: Arc<UdpSocket>) -> Self {
+        Self { udp_socket }
     }
 }
 
 #[async_trait]
-impl TransportDispatcher for UdpDispatcher {
+impl TransportDispatcher for MultiTransportDispatcher {
     async fn dispatch(&self, ctx: &TransportContext, payload: Bytes) -> Result<()> {
         match ctx.transport() {
-            TxTransportKind::Udp => send_udp(self.socket.as_ref(), &ctx.peer(), &payload)
+            TxTransportKind::Udp => send_udp(self.udp_socket.as_ref(), &ctx.peer(), &payload)
                 .await
                 .with_context(|| format!("send_udp to {}", ctx.peer())),
+            TxTransportKind::Tcp | TxTransportKind::Tls => match ctx.stream() {
+                Some(writer) => {
+                    let target = match ctx.transport() {
+                        TxTransportKind::Tcp => sip_transport::TransportKind::Tcp,
+                        TxTransportKind::Tls => sip_transport::TransportKind::Tls,
+                        _ => unreachable!(),
+                    };
+                    send_stream(target, writer, payload)
+                        .await
+                        .with_context(|| format!("send_stream to {}", ctx.peer()))
+                }
+                None => Err(anyhow!(
+                    "outbound {:?} without an existing stream is not supported in v1 \
+                     (peer={}); inbound-only UAS",
+                    ctx.transport(),
+                    ctx.peer()
+                )),
+            },
             other => Err(anyhow!(
-                "siphon-ai v1 only speaks UDP outbound; got {other:?} (peer={})",
+                "transport {other:?} is not enabled in this build (peer={})",
                 ctx.peer()
             )),
         }

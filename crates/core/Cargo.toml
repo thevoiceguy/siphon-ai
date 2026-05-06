@@ -46,3 +46,4 @@ serde_json.workspace                  = true
 forge-rtp.workspace                   = true
 forge-sdp.workspace                   = true
 metrics-exporter-prometheus.workspace = true
+async-trait.workspace                 = true

@@ -41,6 +41,9 @@ pub struct RawConfig {
 
     #[serde(default)]
     pub observability: RawObservability,
+
+    #[serde(default)]
+    pub webhooks: RawWebhooks,
 }
 
 /// `[node]` — identity for logs / metrics / SDP origin host.
@@ -138,6 +141,30 @@ pub struct RawCdrWebhook {
     /// Optional `Authorization` header value, sent verbatim.
     #[serde(default)]
     pub auth_header: Option<String>,
+    #[serde(default)]
+    pub retry_max: Option<u32>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// `[webhooks]` — out-of-band lifecycle events (call_start /
+/// call_end). Off by default. When enabled, requires `url`; the
+/// optional `events` allowlist filters which event types are sent.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawWebhooks {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Required when `enabled = true`.
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub auth_header: Option<String>,
+    /// Allowlist of event types to deliver. Empty / unset = all.
+    /// Valid values today: `"call_start"`, `"call_end"`. Unknown
+    /// names are accepted but never match (no events from them).
+    #[serde(default)]
+    pub events: Option<Vec<String>>,
     #[serde(default)]
     pub retry_max: Option<u32>,
     #[serde(default)]

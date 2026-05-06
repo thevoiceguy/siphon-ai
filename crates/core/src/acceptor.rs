@@ -74,6 +74,10 @@ use siphon_ai_telemetry::{
     CALLS_ACTIVE, CALLS_TOTAL, CALL_DURATION_SECONDS, INVITES_TOTAL, ROUTE_MATCH_TOTAL,
     SDP_NEGOTIATE_SECONDS,
 };
+use siphon_ai_webhooks::{
+    CallEndEvent, CallStartEvent, NullSink as WebhookNullSink, WebhookEvent, WebhookSinkHandle,
+    WEBHOOK_VERSION,
+};
 use thiserror::Error;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
@@ -433,6 +437,7 @@ pub struct BridgingAcceptor {
     uas: Arc<UserAgentServer>,
     registry: CallRegistry,
     cdr_sink: CdrSinkHandle,
+    webhook_sink: WebhookSinkHandle,
     call_id_factory: CallIdFactory,
 }
 
@@ -449,6 +454,7 @@ impl BridgingAcceptor {
             uas,
             registry,
             cdr_sink: Arc::new(NullSink),
+            webhook_sink: Arc::new(WebhookNullSink),
             call_id_factory: default_call_id_factory(),
         }
     }
@@ -466,6 +472,14 @@ impl BridgingAcceptor {
     /// `[cdr]` config.
     pub fn with_cdr_sink(mut self, sink: CdrSinkHandle) -> Self {
         self.cdr_sink = sink;
+        self
+    }
+
+    /// Plug in a lifecycle webhook sink (call_start / call_end
+    /// events). Defaults to a no-op; the daemon binary swaps in
+    /// an HTTP sink based on `[webhooks]` config.
+    pub fn with_webhook_sink(mut self, sink: WebhookSinkHandle) -> Self {
+        self.webhook_sink = sink;
         self
     }
 
@@ -674,6 +688,24 @@ impl BridgingAcceptor {
         metrics::counter!(ROUTE_MATCH_TOTAL, "route" => route_name.to_string()).increment(1);
         metrics::gauge!(CALLS_ACTIVE).increment(1.0);
 
+        // Fire call_start before the controller spawn so an immediate
+        // call_end (e.g. WS bridge connect failure) follows the
+        // expected start→end ordering on the receiving end.
+        let start_event = WebhookEvent::CallStart(CallStartEvent {
+            version: WEBHOOK_VERSION,
+            call_id: call_start.bridge_call_id.as_str().to_string(),
+            sip_call_id: call_start.sip_call_id.clone(),
+            timestamp: call_start.started_at,
+            from: call_start.from.clone(),
+            to: call_start.to.clone(),
+            route: call_start.route.clone(),
+            ws_url: call_start.ws_url.clone(),
+        });
+        let webhook_for_start = Arc::clone(&self.webhook_sink);
+        tokio::spawn(async move {
+            webhook_for_start.emit(start_event).await;
+        });
+
         let bridge_call_id = prepared.bridge_call_id.clone();
         let forge_call_id = prepared.forge_call_id.clone();
         let sip_call_id = prepared.sip_call_id;
@@ -681,6 +713,7 @@ impl BridgingAcceptor {
         let media = Arc::clone(&self.media);
         let registry = self.registry.clone();
         let cdr_sink = Arc::clone(&self.cdr_sink);
+        let webhook_sink = Arc::clone(&self.webhook_sink);
 
         tokio::spawn(async move {
             let run_result = controller.run().await;
@@ -700,18 +733,32 @@ impl BridgingAcceptor {
             }
 
             let ended_at = Utc::now();
-            let duration =
-                (ended_at - call_start.started_at).num_milliseconds().max(0) as f64 / 1000.0;
+            let duration_ms = (ended_at - call_start.started_at).num_milliseconds().max(0) as u64;
+            let duration_secs = duration_ms as f64 / 1000.0;
             metrics::gauge!(CALLS_ACTIVE).decrement(1.0);
             metrics::counter!(
                 CALLS_TOTAL,
                 "cause" => termination_label(view.cause),
             )
             .increment(1);
-            metrics::histogram!(CALL_DURATION_SECONDS).record(duration);
+            metrics::histogram!(CALL_DURATION_SECONDS).record(duration_secs);
+
+            let end_event = WebhookEvent::CallEnd(CallEndEvent {
+                version: WEBHOOK_VERSION,
+                call_id: call_start.bridge_call_id.as_str().to_string(),
+                sip_call_id: call_start.sip_call_id.clone(),
+                timestamp: ended_at,
+                from: call_start.from.clone(),
+                to: call_start.to.clone(),
+                route: call_start.route.clone(),
+                ws_url: call_start.ws_url.clone(),
+                duration_ms,
+                termination_cause: termination_label(view.cause).to_string(),
+            });
 
             let record = call_start.into_record(ended_at, &view);
             cdr_sink.emit(record).await;
+            webhook_sink.emit(end_event).await;
         })
     }
 }

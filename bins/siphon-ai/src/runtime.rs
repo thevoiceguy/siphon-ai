@@ -63,12 +63,16 @@ use sip_uas::UserAgentServer;
 use siphon_ai_cdr::{CdrSinkHandle, FileSink, MultiSink, NullSink, WebhookSink, WebhookSinkConfig};
 use siphon_ai_config::{
     CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, MediaConfig, NodeConfig,
-    ObservabilityConfig, SipConfig, SipTransport,
+    ObservabilityConfig, SipConfig, SipTransport, WebhooksConfig,
 };
 use siphon_ai_core::{BridgingAcceptor, CallRegistry};
 use siphon_ai_media_glue::MediaSetup;
 use siphon_ai_sip_glue::{DialogTerminatorHandle, RoutingHandler};
 use siphon_ai_telemetry::{install_recorder, ObservabilityServer, ReadinessFlag};
+use siphon_ai_webhooks::{
+    FilteredSink as WebhookFilteredSink, HttpSink as WebhookHttpSink,
+    HttpSinkConfig as WebhookHttpSinkConfig, NullSink as WebhookNullSink, WebhookSinkHandle,
+};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -106,6 +110,7 @@ impl Runtime {
             routes,
             cdr,
             observability,
+            webhooks,
         } = config;
 
         warn_on_unsupported_transports(&sip);
@@ -115,6 +120,7 @@ impl Runtime {
         let observability_server = build_observability(observability, readiness.clone()).await?;
 
         let cdr_sink = build_cdr_sink(cdr).await?;
+        let webhook_sink = build_webhook_sink(webhooks)?;
 
         // ─── Forge media stack ──────────────────────────────────────
         let session_mgr_config = SessionManagerConfig {
@@ -144,7 +150,8 @@ impl Runtime {
                 Arc::clone(&uas_helper),
                 registry.clone(),
             )
-            .with_cdr_sink(cdr_sink),
+            .with_cdr_sink(cdr_sink)
+            .with_webhook_sink(webhook_sink),
         );
 
         // ─── SIP routing handler ───────────────────────────────────
@@ -278,6 +285,35 @@ async fn build_observability(
     Ok(Some(server))
 }
 
+/// Build the lifecycle webhook sink from `[webhooks]` config.
+/// Returns `NullSink` when disabled. When enabled, wraps the
+/// `HttpSink` in a `FilteredSink` if an `events` allowlist is set.
+fn build_webhook_sink(cfg: WebhooksConfig) -> Result<WebhookSinkHandle> {
+    if !cfg.enabled {
+        return Ok(Arc::new(WebhookNullSink));
+    }
+    let url = cfg
+        .url
+        .ok_or_else(|| anyhow!("[webhooks].url unexpectedly empty"))?;
+    let http = WebhookHttpSink::new(WebhookHttpSinkConfig {
+        url: url.clone(),
+        auth_header: cfg.auth_header,
+        retry_max: cfg.retry_max,
+        timeout_ms: cfg.timeout.as_millis() as u64,
+    })
+    .map_err(|e| anyhow!("lifecycle webhook client build failed: {e}"))?;
+    info!(url = %url, allowlist = cfg.events.len(), "lifecycle webhook sink active");
+    let sink: WebhookSinkHandle = if cfg.events.is_empty() {
+        Arc::new(http)
+    } else {
+        Arc::new(WebhookFilteredSink::new(
+            Arc::new(http) as WebhookSinkHandle,
+            cfg.events,
+        ))
+    };
+    Ok(sink)
+}
+
 async fn build_cdr_sink(cdr: CdrConfig) -> Result<CdrSinkHandle> {
     if !cdr.enabled {
         return Ok(Arc::new(NullSink));
@@ -287,7 +323,7 @@ async fn build_cdr_sink(cdr: CdrConfig) -> Result<CdrSinkHandle> {
         sinks.push(build_file_sink(&file_cfg).await?);
     }
     if let Some(webhook_cfg) = cdr.webhook {
-        sinks.push(build_webhook_sink(&webhook_cfg)?);
+        sinks.push(build_cdr_webhook_sink(&webhook_cfg)?);
     }
     Ok(match sinks.len() {
         // [cdr].enabled = true with no sub-sinks turned on is a
@@ -311,7 +347,7 @@ async fn build_file_sink(cfg: &CdrFileConfig) -> Result<CdrSinkHandle> {
     Ok(Arc::new(sink) as CdrSinkHandle)
 }
 
-fn build_webhook_sink(cfg: &CdrWebhookConfig) -> Result<CdrSinkHandle> {
+fn build_cdr_webhook_sink(cfg: &CdrWebhookConfig) -> Result<CdrSinkHandle> {
     let sink = WebhookSink::new(WebhookSinkConfig {
         url: cfg.url.clone(),
         auth_header: cfg.auth_header.clone(),

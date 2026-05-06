@@ -9,13 +9,21 @@ authors.workspace      = true
 repository.workspace   = true
 
 [dependencies]
-tokio.workspace      = true
-serde.workspace      = true
-serde_json.workspace = true
-reqwest.workspace    = true
-hmac.workspace       = true
-sha2.workspace       = true
-base64.workspace     = true
-chrono.workspace     = true
-thiserror.workspace  = true
-tracing.workspace    = true
+tokio.workspace       = true
+async-trait.workspace = true
+serde.workspace       = true
+serde_json.workspace  = true
+reqwest.workspace     = true
+chrono.workspace      = true
+thiserror.workspace   = true
+tracing.workspace     = true
+
+# v1 doesn't ship HMAC signing — left as a follow-up per docs/DEV_PLAN.md
+# §11.6 ("Lifecycle Webhooks"). Re-enable hmac/sha2/base64 when that lands.
+
+[dev-dependencies]
+hyper.workspace          = true
+hyper-util.workspace     = true
+http-body-util.workspace = true
+bytes.workspace          = true
+parking_lot.workspace    = true

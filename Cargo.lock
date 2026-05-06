@@ -2512,6 +2512,7 @@ dependencies = [
  "siphon-ai-routes",
  "siphon-ai-sip-glue",
  "siphon-ai-telemetry",
+ "siphon-ai-webhooks",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2675,13 +2676,16 @@ dependencies = [
 name = "siphon-ai-webhooks"
 version = "0.0.0"
 dependencies = [
- "base64",
+ "async-trait",
+ "bytes",
  "chrono",
- "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

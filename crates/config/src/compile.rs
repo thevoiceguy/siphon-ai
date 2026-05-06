@@ -31,7 +31,9 @@ use siphon_ai_routes::{compile as compile_routes, RawRouteFile, RouteSet};
 use thiserror::Error;
 use tracing::warn;
 
-use crate::raw::{RawBridge, RawCdr, RawConfig, RawMedia, RawNode, RawObservability, RawSip};
+use crate::raw::{
+    RawBridge, RawCdr, RawConfig, RawMedia, RawNode, RawObservability, RawSip, RawWebhooks,
+};
 
 /// Compiled, ready-to-pass daemon config.
 ///
@@ -50,6 +52,21 @@ pub struct Config {
     pub routes: RouteSet,
     pub cdr: CdrConfig,
     pub observability: ObservabilityConfig,
+    pub webhooks: WebhooksConfig,
+}
+
+/// Resolved lifecycle-webhook plan. The daemon binary turns this
+/// into a real `siphon-ai-webhooks::HttpSink` (optionally wrapped
+/// in `FilteredSink`) at runtime.
+#[derive(Debug, Clone, Default)]
+pub struct WebhooksConfig {
+    pub enabled: bool,
+    pub url: Option<String>,
+    pub auth_header: Option<String>,
+    /// Empty = deliver everything; non-empty = allowlist filter.
+    pub events: Vec<String>,
+    pub retry_max: u32,
+    pub timeout: Duration,
 }
 
 /// Resolved observability plan. The daemon binary turns this into
@@ -151,6 +168,9 @@ pub enum CompileError {
     #[error("[observability].http_listen is required when [observability].enabled = true")]
     ObservabilityListenRequired,
 
+    #[error("[webhooks].url is required when [webhooks].enabled = true")]
+    WebhooksUrlRequired,
+
     #[error(transparent)]
     Routes(#[from] siphon_ai_routes::RouteError),
 }
@@ -164,6 +184,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let routes = compile_dialplan(raw.routes)?;
     let cdr = compile_cdr(raw.cdr)?;
     let observability = compile_observability(raw.observability)?;
+    let webhooks = compile_webhooks(raw.webhooks)?;
 
     if !routes.has_default() {
         warn!(
@@ -179,6 +200,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         routes,
         cdr,
         observability,
+        webhooks,
     })
 }
 
@@ -293,6 +315,26 @@ fn strip_bearer_prefix(value: &str) -> String {
 fn compile_dialplan(routes: Vec<siphon_ai_routes::RawRoute>) -> Result<RouteSet, CompileError> {
     let raw_file = RawRouteFile { routes };
     Ok(compile_routes(raw_file)?)
+}
+
+fn compile_webhooks(raw: RawWebhooks) -> Result<WebhooksConfig, CompileError> {
+    if !raw.enabled {
+        // Master switch off — sub-block misconfig tolerated, same
+        // pattern as [cdr] / [observability].
+        return Ok(WebhooksConfig::default());
+    }
+    let url = raw.url.ok_or(CompileError::WebhooksUrlRequired)?;
+    if url.is_empty() {
+        return Err(CompileError::WebhooksUrlRequired);
+    }
+    Ok(WebhooksConfig {
+        enabled: true,
+        url: Some(url),
+        auth_header: raw.auth_header.filter(|s| !s.is_empty()),
+        events: raw.events.unwrap_or_default(),
+        retry_max: raw.retry_max.unwrap_or(3),
+        timeout: Duration::from_millis(raw.timeout_ms.unwrap_or(5000)),
+    })
 }
 
 fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, CompileError> {

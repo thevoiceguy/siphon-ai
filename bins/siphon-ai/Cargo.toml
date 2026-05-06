@@ -34,6 +34,7 @@ siphon-ai-media-glue.workspace = true
 siphon-ai-routes.workspace     = true
 siphon-ai-sip-glue.workspace   = true
 siphon-ai-telemetry.workspace  = true
+siphon-ai-webhooks.workspace   = true
 
 # Upstream — siphon-rs (transport, transaction, UAS, parse).
 sip-core.workspace        = true

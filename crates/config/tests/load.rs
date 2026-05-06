@@ -523,6 +523,110 @@ any = true
 }
 
 #[test]
+fn webhooks_disabled_by_default() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(!cfg.webhooks.enabled);
+    assert!(cfg.webhooks.url.is_none());
+    assert!(cfg.webhooks.events.is_empty());
+}
+
+#[test]
+fn webhooks_enabled_compiles_with_url_auth_and_allowlist() {
+    let env = MapEnv::new([("WEBHOOK_TOKEN", "wh-xyz")]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[webhooks]
+enabled = true
+url = "https://ops.example.com/siphon-events"
+auth_header = "Bearer ${WEBHOOK_TOKEN}"
+events = ["call_start", "call_end"]
+retry_max = 5
+timeout_ms = 4000
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(cfg.webhooks.enabled);
+    assert_eq!(
+        cfg.webhooks.url.as_deref(),
+        Some("https://ops.example.com/siphon-events")
+    );
+    assert_eq!(cfg.webhooks.auth_header.as_deref(), Some("Bearer wh-xyz"));
+    assert_eq!(
+        cfg.webhooks.events,
+        vec!["call_start".to_string(), "call_end".to_string()]
+    );
+    assert_eq!(cfg.webhooks.retry_max, 5);
+    assert_eq!(cfg.webhooks.timeout, std::time::Duration::from_millis(4000));
+}
+
+#[test]
+fn webhooks_enabled_without_url_errors() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[webhooks]
+enabled = true
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("url is required"));
+}
+
+#[test]
+fn webhooks_disabled_tolerates_missing_url() {
+    // Master-switch-off pattern.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[webhooks]
+enabled = false
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(!cfg.webhooks.enabled);
+}
+
+#[test]
 fn observability_disabled_by_default() {
     let env = MapEnv::new([]);
     let toml = r#"

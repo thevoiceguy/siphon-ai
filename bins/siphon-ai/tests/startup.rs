@@ -157,6 +157,89 @@ async fn runtime_with_udp_and_tcp_transports_binds_both() {
         .expect("task does not panic");
 }
 
+const REGISTER_FIXTURE: &str = r#"
+[node]
+public_address = "127.0.0.1"
+
+[sip]
+listen = "${TEST_SIP_LISTEN}"
+transports = ["udp"]
+
+[media]
+codecs = ["pcmu"]
+rtp_port_range = [${TEST_RTP_MIN}, ${TEST_RTP_MAX}]
+
+[bridge]
+ws_url = "wss://example.test/sip-bridge"
+
+[[register]]
+name = "pending-trunk"
+server = "10.99.0.1"
+username = "alice"
+password = "secret"
+
+[[register]]
+name = "disabled-trunk"
+server = "10.99.0.2"
+username = "bob"
+password = "secret"
+register_on_startup = false
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+
+#[tokio::test]
+async fn registrations_seed_into_manager_on_startup() {
+    let env = MapEnv::new([
+        ("TEST_SIP_LISTEN", "127.0.0.1:0"),
+        ("TEST_RTP_MIN", "40600"),
+        ("TEST_RTP_MAX", "40700"),
+    ]);
+    let cfg = load_from_str_with_env(REGISTER_FIXTURE, &env).expect("config compiles");
+
+    let runtime = Runtime::build(cfg).await.expect("runtime builds");
+    let snapshot = runtime.registration_snapshot();
+    assert_eq!(snapshot.len(), 2);
+
+    let pending = snapshot
+        .iter()
+        .find(|s| s.name == "pending-trunk")
+        .expect("pending trunk snapshot");
+    assert_eq!(
+        pending.status,
+        siphon_ai_sip_glue::RegistrationStatus::Pending,
+    );
+    assert_eq!(pending.server_addr.ip().to_string(), "10.99.0.1");
+
+    let disabled = snapshot
+        .iter()
+        .find(|s| s.name == "disabled-trunk")
+        .expect("disabled trunk snapshot");
+    assert_eq!(
+        disabled.status,
+        siphon_ai_sip_glue::RegistrationStatus::Disabled,
+    );
+
+    // Drive shutdown.
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let run_handle = tokio::spawn(async move {
+        let _ = runtime
+            .run(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    shutdown_tx.send(()).expect("shutdown signal");
+    tokio::time::timeout(Duration::from_secs(2), run_handle)
+        .await
+        .expect("runtime exits within 2s")
+        .expect("task does not panic");
+}
+
 #[tokio::test]
 async fn build_fails_when_listen_port_is_busy() {
     // Bind a placeholder UDP socket on an ephemeral port, then ask

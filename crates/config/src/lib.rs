@@ -35,12 +35,13 @@ use thiserror::Error;
 
 pub use compile::{
     compile, CdrConfig, CdrFileConfig, CdrWebhookConfig, CompileError, Config, MediaConfig,
-    NodeConfig, ObservabilityConfig, SipConfig, SipTlsConfig, SipTransport, WebhooksConfig,
+    NodeConfig, ObservabilityConfig, RegisterConfig, SipConfig, SipTlsConfig, SipTransport,
+    WebhooksConfig,
 };
 pub use env::{expand, expand_cow, EnvError, EnvSource, ProcessEnv};
 pub use raw::{
     RawBridge, RawCdr, RawCdrFile, RawCdrWebhook, RawConfig, RawMedia, RawNode, RawObservability,
-    RawSip, RawSipTls, RawWebhooks,
+    RawRegister, RawSip, RawSipTls, RawWebhooks,
 };
 
 /// Top-level error type. Loaders surface this; consumers match on

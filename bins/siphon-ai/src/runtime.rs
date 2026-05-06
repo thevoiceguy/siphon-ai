@@ -69,11 +69,14 @@ use sip_uas::UserAgentServer;
 use siphon_ai_cdr::{CdrSinkHandle, FileSink, MultiSink, NullSink, WebhookSink, WebhookSinkConfig};
 use siphon_ai_config::{
     CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, MediaConfig, NodeConfig,
-    ObservabilityConfig, SipConfig, SipTlsConfig, SipTransport, WebhooksConfig,
+    ObservabilityConfig, RegisterConfig, SipConfig, SipTlsConfig, SipTransport, WebhooksConfig,
 };
 use siphon_ai_core::{BridgingAcceptor, CallRegistry};
 use siphon_ai_media_glue::MediaSetup;
-use siphon_ai_sip_glue::{DialogTerminatorHandle, RoutingHandler};
+use siphon_ai_sip_glue::{
+    spawn_disabled_task, DialogTerminatorHandle, RegisterSourceResolver, RegistrationEntry,
+    RegistrationManager, RoutingHandler,
+};
 use siphon_ai_telemetry::{install_recorder, ObservabilityServer, ReadinessFlag};
 use siphon_ai_webhooks::{
     FilteredSink as WebhookFilteredSink, HttpSink as WebhookHttpSink,
@@ -100,6 +103,11 @@ pub struct Runtime {
     /// `Some` when `[observability].enabled = true`. Dropped on
     /// shutdown to stop the HTTP listener.
     observability: Option<ObservabilityServer>,
+    /// Per-`[[register]]` background tasks. v1's tasks are no-ops
+    /// (UAC drive lands in a follow-up); we still own the handles
+    /// so shutdown awaits them cleanly.
+    registration_mgr: RegistrationManager,
+    registration_listeners: Vec<JoinHandle<()>>,
 }
 
 impl Runtime {
@@ -114,6 +122,7 @@ impl Runtime {
             media,
             bridge_defaults,
             routes,
+            registrations,
             cdr,
             observability,
             webhooks,
@@ -158,11 +167,34 @@ impl Runtime {
             .with_webhook_sink(webhook_sink),
         );
 
+        // ─── Registration manager ──────────────────────────────────
+        // Seed the manager with one row per [[register]] block so a
+        // /metrics scrape during cold-start already shows
+        // pending/disabled rows. Active UAC drive (sending REGISTER,
+        // refresh on success, retry on failure) is the next layer
+        // and lives outside this PR — entries with
+        // `register_on_startup = true` currently log a warning and
+        // stay `Pending`. `[[register]]` with `register_on_startup =
+        // false` gets a no-op task so shutdown-signal awaiting is
+        // uniform.
+        let registration_mgr = RegistrationManager::new();
+        let register_entries: Vec<RegistrationEntry> = registrations
+            .iter()
+            .map(|cfg| RegistrationEntry {
+                name: cfg.name.clone(),
+                server_addr: cfg.server_addr,
+                register_on_startup: cfg.register_on_startup,
+            })
+            .collect();
+        registration_mgr.seed(&register_entries);
+        let registration_listeners = spawn_registration_tasks(&registration_mgr, &registrations);
+
         // ─── SIP routing handler ───────────────────────────────────
         let dialog_terminator: DialogTerminatorHandle = Arc::new(registry);
         let routing_handler = Arc::new(
             RoutingHandler::new(Arc::new(routes), acceptor)
-                .with_dialog_terminator(dialog_terminator),
+                .with_dialog_terminator(dialog_terminator)
+                .with_register_source_resolver(register_source_resolver(&registration_mgr)),
         );
 
         // ─── SIP transports + transaction manager ──────────────────
@@ -233,7 +265,16 @@ impl Runtime {
             uas,
             listeners,
             observability: observability_server,
+            registration_mgr,
+            registration_listeners,
         })
+    }
+
+    /// Snapshot of registration state (one entry per
+    /// `[[register]]` block). Useful for tests and admin
+    /// introspection.
+    pub fn registration_snapshot(&self) -> Vec<siphon_ai_sip_glue::RegistrationState> {
+        self.registration_mgr.snapshot()
     }
 
     /// Bound UDP listen address. The post-bind value, so callers
@@ -266,6 +307,18 @@ impl Runtime {
             // Best-effort wait for the abort to land; ignore
             // JoinError (the abort yields Cancelled).
             let _ = handle.await;
+        }
+
+        // Tell registration tasks to exit. They observe the
+        // shutdown notify on their next loop iter.
+        self.registration_mgr.shutdown();
+        for handle in self.registration_listeners {
+            // Bound the wait so a flaky task doesn't block
+            // shutdown; abort if still alive after a beat.
+            match tokio::time::timeout(Duration::from_millis(250), handle).await {
+                Ok(_) => {}
+                Err(_) => debug!("registration task did not exit within 250ms"),
+            }
         }
 
         // Stop accepting `/metrics` / `/health` requests.
@@ -308,6 +361,48 @@ async fn build_observability(
         .await
         .with_context(|| format!("bind observability HTTP {listen}"))?;
     Ok(Some(server))
+}
+
+/// Build the `RegisterSourceResolver` closure that the routing
+/// handler installs. Looks the inbound peer up in the registration
+/// manager; falls back to `"trunk"` for unregistered inbound (the
+/// historical default).
+fn register_source_resolver(mgr: &RegistrationManager) -> RegisterSourceResolver {
+    let mgr = mgr.clone();
+    Arc::new(move |_req, ctx| match mgr.resolve_source(ctx.peer()) {
+        Some(name) => name,
+        None => "trunk".to_string(),
+    })
+}
+
+/// Spawn one task per `[[register]]` block. v1 only spawns the
+/// `register_on_startup = false` no-op tasks; entries with
+/// `register_on_startup = true` log a warning and stay in `Pending`
+/// until the UAC-drive layer lands.
+fn spawn_registration_tasks(
+    mgr: &RegistrationManager,
+    configs: &[RegisterConfig],
+) -> Vec<JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(configs.len());
+    for cfg in configs {
+        if cfg.register_on_startup {
+            // Log per-registration so operators see what's
+            // configured even before the UAC drive is wired.
+            warn!(
+                name = %cfg.name,
+                server = %cfg.server_addr,
+                "[[register]] is configured with register_on_startup = true but the v1 UAC \
+                 drive isn't wired yet; status will stay `pending` until the next layer lands"
+            );
+        } else {
+            info!(
+                name = %cfg.name,
+                "[[register]] disabled by config (register_on_startup = false)"
+            );
+            handles.push(spawn_disabled_task(mgr.clone(), cfg.name.clone()));
+        }
+    }
+    handles
 }
 
 /// Load the TLS server config (cert + key) from disk paths in

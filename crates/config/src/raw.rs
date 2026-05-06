@@ -36,6 +36,9 @@ pub struct RawConfig {
     #[serde(default, rename = "route")]
     pub routes: Vec<RawRoute>,
 
+    #[serde(default, rename = "register")]
+    pub registrations: Vec<RawRegister>,
+
     #[serde(default)]
     pub cdr: RawCdr,
 
@@ -174,6 +177,49 @@ pub struct RawCdrWebhook {
     pub retry_max: Option<u32>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+}
+
+/// `[[register]]` — a single outbound REGISTER endpoint. Zero or
+/// more allowed; each becomes a `register_source` route key.
+///
+/// `name` is the dialplan handle (`[route.match].register_source =
+/// "cucm-main"` matches a `[[register]]` block named `"cucm-main"`).
+/// `server` is the registrar's host or `host:port`; if `port` is
+/// supplied separately it overrides any port in `server`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawRegister {
+    pub name: String,
+    pub server: String,
+    /// Defaults to 5060 for udp/tcp, 5061 for tls.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// `udp` (default) | `tcp` | `tls`. v1 implements all three;
+    /// when set to `tls`, the daemon uses its own client TLS roots
+    /// (no per-registration TLS config in v1).
+    #[serde(default)]
+    pub transport: Option<String>,
+    /// SIP `From` username and the AOR (`sip:<username>@<server>`).
+    pub username: String,
+    /// Username used in the digest challenge response. Defaults to
+    /// `username` when unset.
+    #[serde(default)]
+    pub auth_username: Option<String>,
+    /// Password for digest auth. `${VAR}` env-expanded by the
+    /// upstream loader.
+    pub password: String,
+    /// Optional realm — most registrars supply it on the challenge
+    /// so this is mostly a hint for tooling.
+    #[serde(default)]
+    pub realm: Option<String>,
+    /// Registration lifetime in seconds. Default 3600. We refresh
+    /// at `expires - 60s` so the daemon doesn't race the registrar.
+    #[serde(default)]
+    pub expires_secs: Option<u32>,
+    /// `false` to leave the block configured-but-inactive (useful
+    /// during outages). Default `true`.
+    #[serde(default)]
+    pub register_on_startup: Option<bool>,
 }
 
 /// `[webhooks]` — out-of-band lifecycle events (call_start /

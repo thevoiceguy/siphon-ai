@@ -23,6 +23,7 @@
 pub mod dialog;
 pub mod handler;
 pub mod invite;
+pub mod register;
 pub mod route;
 
 pub use dialog::{
@@ -33,4 +34,8 @@ pub use handler::{
     dispatch_invite, CallAcceptor, MatchedCall, RegisterSourceResolver, RouteAction, RoutingHandler,
 };
 pub use invite::InviteFacts;
+pub use register::{
+    refresh_delay, spawn_disabled_task, RegistrationEntry, RegistrationManager, RegistrationState,
+    RegistrationStatus, ShutdownSignal,
+};
 pub use route::{route_invite, RouteDecision};

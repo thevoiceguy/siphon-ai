@@ -32,8 +32,8 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::raw::{
-    RawBridge, RawCdr, RawConfig, RawMedia, RawNode, RawObservability, RawSip, RawSipTls,
-    RawWebhooks,
+    RawBridge, RawCdr, RawConfig, RawMedia, RawNode, RawObservability, RawRegister, RawSip,
+    RawSipTls, RawWebhooks,
 };
 
 /// Compiled, ready-to-pass daemon config.
@@ -51,9 +51,34 @@ pub struct Config {
     pub media: MediaConfig,
     pub bridge_defaults: BridgeDefaults,
     pub routes: RouteSet,
+    pub registrations: Vec<RegisterConfig>,
     pub cdr: CdrConfig,
     pub observability: ObservabilityConfig,
     pub webhooks: WebhooksConfig,
+}
+
+/// One compiled `[[register]]` block. The daemon's
+/// `RegistrationManager` consumes these; the registration `name`
+/// also surfaces as a `register_source` route key for matched
+/// inbound calls.
+#[derive(Debug, Clone)]
+pub struct RegisterConfig {
+    pub name: String,
+    /// Resolved registrar address. The daemon may still re-resolve
+    /// at runtime via the SIP DNS resolver, but a literal
+    /// `host:port` is the fast path and the only one v1 supports.
+    pub server_addr: SocketAddr,
+    /// Original `host` from config — used as the `From` URI host
+    /// in REGISTER requests.
+    pub server_host: String,
+    pub transport: SipTransport,
+    pub username: String,
+    /// Defaults to `username` when not set.
+    pub auth_username: String,
+    pub password: String,
+    pub realm: Option<String>,
+    pub expires: Duration,
+    pub register_on_startup: bool,
 }
 
 /// Resolved lifecycle-webhook plan. The daemon binary turns this
@@ -195,6 +220,26 @@ pub enum CompileError {
     #[error("[webhooks].url is required when [webhooks].enabled = true")]
     WebhooksUrlRequired,
 
+    #[error("[[register]] block at index {index} has empty name")]
+    RegisterEmptyName { index: usize },
+
+    #[error("two [[register]] blocks share name {name:?} (#{first} and #{second})")]
+    RegisterDuplicateName {
+        name: String,
+        first: usize,
+        second: usize,
+    },
+
+    #[error("[[register]] {name:?} server {server:?} is not a valid host or host:port: {err}")]
+    RegisterBadServer {
+        name: String,
+        server: String,
+        err: String,
+    },
+
+    #[error("[[register]] {name:?} unknown transport {transport:?}; expected udp / tcp / tls")]
+    RegisterUnknownTransport { name: String, transport: String },
+
     #[error(transparent)]
     Routes(#[from] siphon_ai_routes::RouteError),
 }
@@ -206,6 +251,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let media = compile_media(&raw.media)?;
     let bridge_defaults = compile_bridge(raw.bridge, &raw.media)?;
     let routes = compile_dialplan(raw.routes)?;
+    let registrations = compile_registrations(raw.registrations)?;
     let cdr = compile_cdr(raw.cdr)?;
     let observability = compile_observability(raw.observability)?;
     let webhooks = compile_webhooks(raw.webhooks)?;
@@ -222,6 +268,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         media,
         bridge_defaults,
         routes,
+        registrations,
         cdr,
         observability,
         webhooks,
@@ -405,6 +452,109 @@ fn compile_webhooks(raw: RawWebhooks) -> Result<WebhooksConfig, CompileError> {
         retry_max: raw.retry_max.unwrap_or(3),
         timeout: Duration::from_millis(raw.timeout_ms.unwrap_or(5000)),
     })
+}
+
+fn compile_registrations(raw: Vec<RawRegister>) -> Result<Vec<RegisterConfig>, CompileError> {
+    let mut compiled = Vec::with_capacity(raw.len());
+    for (i, r) in raw.into_iter().enumerate() {
+        if r.name.trim().is_empty() {
+            return Err(CompileError::RegisterEmptyName { index: i });
+        }
+        for (j, prior) in compiled.iter().enumerate() {
+            let prior: &RegisterConfig = prior;
+            if prior.name == r.name {
+                return Err(CompileError::RegisterDuplicateName {
+                    name: r.name.clone(),
+                    first: j,
+                    second: i,
+                });
+            }
+        }
+
+        let transport = match r
+            .transport
+            .as_deref()
+            .unwrap_or("udp")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "udp" => SipTransport::Udp,
+            "tcp" => SipTransport::Tcp,
+            "tls" => SipTransport::Tls,
+            other => {
+                return Err(CompileError::RegisterUnknownTransport {
+                    name: r.name.clone(),
+                    transport: other.to_string(),
+                })
+            }
+        };
+
+        let default_port = match transport {
+            SipTransport::Tls => 5061,
+            _ => 5060,
+        };
+        let (server_host, server_port) = parse_register_server(&r.server, r.port, default_port)
+            .map_err(|err| CompileError::RegisterBadServer {
+                name: r.name.clone(),
+                server: r.server.clone(),
+                err,
+            })?;
+        // We resolve a literal IP; DNS lookups happen at runtime.
+        // For configs that supply a hostname, the daemon's UAC
+        // resolver kicks in — but to keep `server_addr` typed, we
+        // accept literal IPs here and surface a clear error for
+        // hostnames the user can fix later. (DNS-resolved
+        // registrars are a v1.1 feature.)
+        let ip = server_host.parse().map_err(|e: std::net::AddrParseError| {
+            CompileError::RegisterBadServer {
+                name: r.name.clone(),
+                server: r.server.clone(),
+                err: format!(
+                    "{e} (v1 only accepts literal IP addresses for [[register]].server; \
+                     hostname resolution lands in v1.1)"
+                ),
+            }
+        })?;
+        let server_addr = SocketAddr::new(ip, server_port);
+
+        compiled.push(RegisterConfig {
+            name: r.name,
+            server_addr,
+            server_host,
+            transport,
+            auth_username: r.auth_username.unwrap_or_else(|| r.username.clone()),
+            username: r.username,
+            password: r.password,
+            realm: r.realm,
+            expires: Duration::from_secs(r.expires_secs.unwrap_or(3600) as u64),
+            register_on_startup: r.register_on_startup.unwrap_or(true),
+        });
+    }
+    Ok(compiled)
+}
+
+/// Split the configured `server` ("host" or "host:port") + optional
+/// explicit `port` into `(host_str, port)`. Explicit `port` wins
+/// when both are present.
+fn parse_register_server(
+    server: &str,
+    explicit_port: Option<u16>,
+    default_port: u16,
+) -> Result<(String, u16), String> {
+    if server.trim().is_empty() {
+        return Err("server must not be empty".into());
+    }
+    let (host, port_in_str) = match server.rsplit_once(':') {
+        Some((h, p)) => {
+            let parsed: u16 = p
+                .parse()
+                .map_err(|e: std::num::ParseIntError| e.to_string())?;
+            (h.to_string(), Some(parsed))
+        }
+        None => (server.to_string(), None),
+    };
+    let port = explicit_port.or(port_in_str).unwrap_or(default_port);
+    Ok((host, port))
 }
 
 fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, CompileError> {

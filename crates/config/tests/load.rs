@@ -523,6 +523,220 @@ any = true
 }
 
 #[test]
+fn register_blocks_default_to_empty() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(cfg.registrations.is_empty());
+}
+
+#[test]
+fn register_block_compiles_with_required_fields() {
+    let env = MapEnv::new([("CUCM_PASS", "hunter2")]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[register]]
+name = "cucm-main"
+server = "10.20.30.40"
+username = "ai-receptionist"
+password = "${CUCM_PASS}"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert_eq!(cfg.registrations.len(), 1);
+    let r = &cfg.registrations[0];
+    assert_eq!(r.name, "cucm-main");
+    assert_eq!(r.server_addr.ip().to_string(), "10.20.30.40");
+    assert_eq!(r.server_addr.port(), 5060);
+    assert_eq!(r.username, "ai-receptionist");
+    assert_eq!(r.auth_username, "ai-receptionist");
+    assert_eq!(r.password, "hunter2");
+    assert_eq!(r.expires.as_secs(), 3600);
+    assert!(r.register_on_startup);
+}
+
+#[test]
+fn register_block_picks_default_port_per_transport() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[register]]
+name = "tls-trunk"
+server = "10.0.0.5"
+transport = "tls"
+username = "u"
+password = "p"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert_eq!(cfg.registrations[0].server_addr.port(), 5061);
+}
+
+#[test]
+fn register_explicit_port_overrides_default() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[register]]
+name = "trunk"
+server = "10.0.0.5"
+port = 5072
+username = "u"
+password = "p"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert_eq!(cfg.registrations[0].server_addr.port(), 5072);
+}
+
+#[test]
+fn register_duplicate_name_errors() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[register]]
+name = "trunk"
+server = "10.0.0.5"
+username = "u"
+password = "p"
+
+[[register]]
+name = "trunk"
+server = "10.0.0.6"
+username = "u2"
+password = "p2"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("share name"));
+}
+
+#[test]
+fn register_hostname_server_errors_in_v1() {
+    // v1 only accepts literal IPs — DNS-resolved registrars are
+    // a v1.1 feature.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[register]]
+name = "trunk"
+server = "cucm.example.com"
+username = "u"
+password = "p"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("literal IP"));
+}
+
+#[test]
+fn register_unknown_transport_errors() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[register]]
+name = "trunk"
+server = "10.0.0.5"
+transport = "smoke"
+username = "u"
+password = "p"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("smoke"));
+}
+
+#[test]
+fn register_auth_username_defaults_to_username() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[register]]
+name = "trunk"
+server = "10.0.0.5"
+username = "alice"
+password = "p"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert_eq!(cfg.registrations[0].auth_username, "alice");
+}
+
+#[test]
 fn sip_tls_disabled_by_default() {
     let env = MapEnv::new([]);
     let toml = r#"

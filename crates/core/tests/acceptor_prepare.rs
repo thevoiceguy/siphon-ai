@@ -14,7 +14,6 @@ use forge_engine::{MediaBridgeManager, SessionManager, SessionManagerConfig};
 use forge_rtp::PortPoolConfig;
 use forge_sdp::{MediaType, SessionDescription, SessionDescriptionExt};
 use sip_core::{Headers as SipHeaders, Method, Request, RequestLine, SipUri};
-use sip_uas::UserAgentServer;
 use siphon_ai_bridge::{AudioEncoding, CallId as BridgeCallId, Direction, PROTOCOL_VERSION};
 use siphon_ai_core::{AcceptError, BridgeDefaults, BridgingAcceptor, CallRegistry};
 use siphon_ai_media_glue::MediaSetup;
@@ -101,12 +100,9 @@ fn build_acceptor(
         forward_headers: vec!["User-Agent".into()],
         ..BridgeDefaults::default()
     };
-    let local = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
-    let contact = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
-    let uas = Arc::new(UserAgentServer::new(local, contact));
     let registry = CallRegistry::new();
     (
-        BridgingAcceptor::new(media, defaults, uas, registry.clone())
+        BridgingAcceptor::new(media, defaults, registry.clone())
             .with_call_id_factory(Arc::new(|| BridgeCallId::new("siphon-test-fixed"))),
         bridge_mgr,
         session_mgr,
@@ -235,11 +231,8 @@ async fn route_without_ws_url_when_no_default_yields_503() {
         Arc::clone(&bridge_mgr),
         "192.168.1.10",
     ));
-    let local = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
-    let contact = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
-    let uas = Arc::new(UserAgentServer::new(local, contact));
     let acceptor =
-        BridgingAcceptor::new(media, BridgeDefaults::default(), uas, CallRegistry::new());
+        BridgingAcceptor::new(media, BridgeDefaults::default(), CallRegistry::new());
 
     let routes = load_from_toml(
         r#"
@@ -315,11 +308,8 @@ async fn second_call_gets_a_fresh_forge_session() {
         Arc::clone(&bridge_mgr),
         "192.168.1.10",
     ));
-    let local = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
-    let contact = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
-    let uas = Arc::new(UserAgentServer::new(local, contact));
     let acceptor =
-        BridgingAcceptor::new(media, BridgeDefaults::default(), uas, CallRegistry::new());
+        BridgingAcceptor::new(media, BridgeDefaults::default(), CallRegistry::new());
 
     // We need a default ws_url so prepare_call accepts the offer.
     let routes = load_from_toml(

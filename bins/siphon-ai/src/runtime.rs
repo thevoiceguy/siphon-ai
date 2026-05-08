@@ -55,7 +55,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use forge_engine::{MediaBridgeManager, SessionManager, SessionManagerConfig};
 use forge_rtp::PortPoolConfig;
-use sip_core::SipUri;
 use sip_parse::parse_request;
 use sip_transaction::{
     TransactionManager, TransportContext, TransportDispatcher, TransportKind as TxTransportKind,
@@ -65,7 +64,6 @@ use sip_transport::{
     TransportKind as TpTransportKind,
 };
 use sip_uas::integrated::{IntegratedUAS, UasRequestHandler};
-use sip_uas::UserAgentServer;
 use siphon_ai_cdr::{CdrSinkHandle, FileSink, MultiSink, NullSink, WebhookSink, WebhookSinkConfig};
 use siphon_ai_config::{
     CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, MediaConfig, NodeConfig,
@@ -154,17 +152,15 @@ impl Runtime {
         ));
 
         // ─── Bridging acceptor + dialog registry ───────────────────
+        // Built without the IntegratedUAS here because the routing
+        // handler (which the UAS needs as its request handler) holds
+        // an Arc to this acceptor. We close the cycle below via
+        // `acceptor.install_uas(...)` once the UAS exists.
         let registry = CallRegistry::new();
-        let uas_helper = build_uas_helper(&node, &sip)?;
         let acceptor = Arc::new(
-            BridgingAcceptor::new(
-                media_setup,
-                bridge_defaults,
-                Arc::clone(&uas_helper),
-                registry.clone(),
-            )
-            .with_cdr_sink(cdr_sink)
-            .with_webhook_sink(webhook_sink),
+            BridgingAcceptor::new(media_setup, bridge_defaults, registry.clone())
+                .with_cdr_sink(cdr_sink)
+                .with_webhook_sink(webhook_sink),
         );
 
         // ─── Registration manager ──────────────────────────────────
@@ -192,7 +188,7 @@ impl Runtime {
         // ─── SIP routing handler ───────────────────────────────────
         let dialog_terminator: DialogTerminatorHandle = Arc::new(registry);
         let routing_handler = Arc::new(
-            RoutingHandler::new(Arc::new(routes), acceptor)
+            RoutingHandler::new(Arc::new(routes), Arc::clone(&acceptor))
                 .with_dialog_terminator(dialog_terminator)
                 .with_register_source_resolver(register_source_resolver(&registration_mgr)),
         );
@@ -241,6 +237,14 @@ impl Runtime {
                 .map_err(|e| anyhow!("public_addr: {e}"))?;
         }
         let uas = Arc::new(uas_builder.build()?);
+
+        // Close the BridgingAcceptor ↔ IntegratedUAS cycle now that
+        // both exist. The acceptor uses this handle in `on_matched`
+        // to send the 200 OK via `IntegratedUAS::accept_invite`,
+        // which registers the confirmed dialog with the SAME
+        // dialog_manager that `IntegratedUAS::dispatch` consults on
+        // the follow-up BYE.
+        acceptor.install_uas(Arc::clone(&uas));
 
         // ─── Spawn the inbound UDP/TCP/TLS readers + pump ─────────
         let udp_bound_addr = udp_socket
@@ -516,18 +520,6 @@ fn rtp_port_pool(media: &MediaConfig) -> Result<PortPoolConfig> {
             .map_err(|e| anyhow!("[media].rtp_port_range invalid: {e}")),
         None => Ok(PortPoolConfig::default()),
     }
-}
-
-fn build_uas_helper(node: &NodeConfig, sip: &SipConfig) -> Result<Arc<UserAgentServer>> {
-    let local_uri = SipUri::parse(&sip_local_uri(node, sip))
-        .map_err(|e| anyhow!("synthesised SIP local URI is invalid: {e}"))?;
-    let contact_str = sip
-        .contact
-        .clone()
-        .unwrap_or_else(|| sip_local_uri(node, sip));
-    let contact_uri = SipUri::parse(&contact_str)
-        .map_err(|e| anyhow!("[sip].contact {contact_str:?} is not a valid SIP URI: {e}"))?;
-    Ok(Arc::new(UserAgentServer::new(local_uri, contact_uri)))
 }
 
 /// `sip:siphon@<host>` derived from `[sip].listen` (or

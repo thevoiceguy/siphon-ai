@@ -49,12 +49,13 @@
 //!   caller passes a list, but the daemon doesn't read it from
 //!   config yet.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sip_core::Request;
+use sip_uas::integrated::IntegratedUAS;
 use sip_uas::UserAgentServer;
 use siphon_ai_bridge::{
     AudioEncoding, AudioFormat, BridgeConfig, CallId as BridgeCallId, Direction, DisconnectReason,
@@ -420,11 +421,14 @@ fn default_call_id_factory() -> CallIdFactory {
 /// to "running [`CallController`]". Constructed once at daemon
 /// startup; cheap to clone (everything inside is `Arc` or `Clone`).
 ///
-/// `uas` is the upstream [`UserAgentServer`] the daemon already
-/// configures with its local URI / contact URI. We borrow its
-/// `create_ok` to stamp Contact + To-tag onto the 200 OK; sharing
-/// one instance per daemon (rather than rebuilding per call) keeps
-/// the deterministic-tag seed wiring upstream owns intact.
+/// `uas` is the [`IntegratedUAS`] the daemon already builds for the
+/// dispatcher. The acceptor uses [`IntegratedUAS::accept_invite`] to
+/// send the 200 OK so the confirmed dialog lands in the SAME dialog
+/// manager that dispatch consults on the follow-up BYE/REFER/INFO.
+/// Holding a parallel `UserAgentServer` here would silently produce
+/// an independent `dialog_manager`, making BYE come back as
+/// "Received BYE for unknown dialog" — see siphon-rs PR #35 for the
+/// upstream fix that exposes the canonical `accept_invite` helper.
 ///
 /// `registry` is the shared [`CallRegistry`] the SIP-side BYE /
 /// CANCEL handlers consult. The acceptor inserts a [`CallHandle`]
@@ -434,7 +438,12 @@ fn default_call_id_factory() -> CallIdFactory {
 pub struct BridgingAcceptor {
     media: Arc<MediaSetup>,
     defaults: BridgeDefaults,
-    uas: Arc<UserAgentServer>,
+    /// Late-bound: the daemon builds `BridgingAcceptor` first (so the
+    /// routing handler can hold an `Arc` to it), then builds the
+    /// `IntegratedUAS` that owns the routing handler, then calls
+    /// [`Self::install_uas`] to close the cycle. Tests that don't
+    /// drive `on_matched` (the only consumer) can leave it unset.
+    uas: OnceLock<Arc<IntegratedUAS>>,
     registry: CallRegistry,
     cdr_sink: CdrSinkHandle,
     webhook_sink: WebhookSinkHandle,
@@ -445,18 +454,28 @@ impl BridgingAcceptor {
     pub fn new(
         media: Arc<MediaSetup>,
         defaults: BridgeDefaults,
-        uas: Arc<UserAgentServer>,
         registry: CallRegistry,
     ) -> Self {
         Self {
             media,
             defaults,
-            uas,
+            uas: OnceLock::new(),
             registry,
             cdr_sink: Arc::new(NullSink),
             webhook_sink: Arc::new(WebhookNullSink),
             call_id_factory: default_call_id_factory(),
         }
+    }
+
+    /// Install the [`IntegratedUAS`] handle the acceptor uses to send
+    /// the 2xx via [`IntegratedUAS::accept_invite`]. Must be called
+    /// once after both this acceptor and its enclosing `IntegratedUAS`
+    /// are built; calling twice panics.
+    pub fn install_uas(&self, uas: Arc<IntegratedUAS>) {
+        self.uas
+            .set(uas)
+            .map_err(|_| ())
+            .expect("install_uas called twice on BridgingAcceptor");
     }
 
     /// Override the bridge call-id factory. Useful in tests where
@@ -623,13 +642,27 @@ impl CallAcceptor for BridgingAcceptor {
             .await
         {
             Ok(prepared) => {
-                // 200 OK with the negotiated SDP. Use the upstream
-                // helper so we get Contact + To-tag for free.
-                let response = self
+                // 200 OK with the negotiated SDP via the canonical
+                // upstream helper (siphon-rs PR #35). This builds the
+                // response, auto-fills Via/Contact/User-Agent, sends
+                // it through the transaction handle, AND registers
+                // the confirmed dialog with the dialog manager that
+                // `dispatch` consults — so the follow-up BYE finds
+                // it instead of falling through to "unknown dialog".
+                let uas = self
                     .uas
-                    .create_ok(call.request, Some(&prepared.answer.answer_text))
-                    .map_err(|e| anyhow::anyhow!("failed to build 200 OK: {e}"))?;
-                call.handle.send_final(response).await;
+                    .get()
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "BridgingAcceptor::install_uas was not called; on_matched cannot accept INVITE without the IntegratedUAS handle"
+                    ))?;
+                uas.accept_invite(
+                    call.request,
+                    &call.handle,
+                    call.transport,
+                    Some(&prepared.answer.answer_text),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to accept INVITE: {e}"))?;
 
                 metrics::counter!(INVITES_TOTAL, "result" => "accepted").increment(1);
                 self.run_call(prepared, call.route.name.as_str());

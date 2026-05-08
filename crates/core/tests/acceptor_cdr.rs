@@ -15,7 +15,6 @@ use futures::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde_json::Value;
 use sip_core::{Headers as SipHeaders, Method, Request, RequestLine, SipUri};
-use sip_uas::UserAgentServer;
 use siphon_ai_bridge::CallId as BridgeCallId;
 use siphon_ai_cdr::{CdrRecord, CdrSink, Direction as CdrDirection, TerminationCause};
 use siphon_ai_core::{BridgeDefaults, BridgingAcceptor, CallRegistry};
@@ -144,13 +143,10 @@ async fn run_call_emits_cdr_when_controller_exits() {
         bridge_mgr,
         "192.168.1.10",
     ));
-    let local = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
-    let contact = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
-    let uas = Arc::new(UserAgentServer::new(local, contact));
     let registry = CallRegistry::new();
     let recorder = Arc::new(Recorder::default());
 
-    let acceptor = BridgingAcceptor::new(media, BridgeDefaults::default(), uas, registry.clone())
+    let acceptor = BridgingAcceptor::new(media, BridgeDefaults::default(), registry.clone())
         .with_call_id_factory(Arc::new(|| BridgeCallId::new("siphon-cdr-test")))
         .with_cdr_sink(Arc::clone(&recorder) as Arc<dyn CdrSink>);
 
@@ -231,11 +227,8 @@ async fn null_sink_is_the_default_when_no_sink_configured() {
         bridge_mgr,
         "192.168.1.10",
     ));
-    let local = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
-    let contact = SipUri::parse("sip:siphon@192.168.1.10").unwrap();
-    let uas = Arc::new(UserAgentServer::new(local, contact));
     let registry = CallRegistry::new();
-    let acceptor = BridgingAcceptor::new(media, BridgeDefaults::default(), uas, registry.clone())
+    let acceptor = BridgingAcceptor::new(media, BridgeDefaults::default(), registry.clone())
         .with_call_id_factory(Arc::new(|| BridgeCallId::new("siphon-null-cdr")));
 
     let routes = one_route(ws_url);

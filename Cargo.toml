@@ -97,15 +97,21 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # releases. For reproducibility, pin to a specific rev before v0.1.0 ships
 # (see CLAUDE.md §7.5 "Bumping Upstream Dep").
 
-# siphon-rs — RFC 3261 SIP stack
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
+# siphon-rs — RFC 3261 SIP stack.
+#
+# Temporary pin to the fix branch for siphon-rs PR #35
+# (https://github.com/thevoiceguy/siphon-rs/pull/35), which adds
+# `IntegratedUAS::accept_invite` and unblocks the unknown-dialog 481
+# response paths from a tokio::Mutex re-entrancy deadlock. When that
+# PR lands on main, flip these back to `branch = "main"`.
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "fix/integrated-uas-accept-invite-tracks-dialog" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "fix/integrated-uas-accept-invite-tracks-dialog" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "fix/integrated-uas-accept-invite-tracks-dialog", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "fix/integrated-uas-accept-invite-tracks-dialog" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "fix/integrated-uas-accept-invite-tracks-dialog" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "fix/integrated-uas-accept-invite-tracks-dialog" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "fix/integrated-uas-accept-invite-tracks-dialog" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "fix/integrated-uas-accept-invite-tracks-dialog" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #

@@ -54,11 +54,28 @@ pub const CALLS_TOTAL: &str = "siphon_ai_calls_total";
 /// `[[route]].name`). Useful for "which route is hot" dashboards.
 pub const ROUTE_MATCH_TOTAL: &str = "siphon_ai_route_match_total";
 
+/// REGISTER attempts the daemon has driven. Labeled by `name`
+/// (the `[[register]].name`) and `outcome`:
+/// `registered` / `auth_failed` / `transport_error` / `timeout` /
+/// `rejected` (any other 4xx/5xx/6xx final response).
+/// Counts the FINAL outcome of each REGISTER transaction — the
+/// upstream IntegratedUAC handles 401/407 retry internally, so
+/// challenges aren't counted here.
+pub const REGISTER_ATTEMPTS_TOTAL: &str = "siphon_ai_register_attempts_total";
+
 // ─── Gauges ─────────────────────────────────────────────────────────
 
 /// Currently-active calls. Incremented when the controller spawns,
 /// decremented when it exits.
 pub const CALLS_ACTIVE: &str = "siphon_ai_calls_active";
+
+/// Per-`[[register]]` registration status. Labeled by `name` and
+/// `state` (`pending`/`registered`/`failed`/`disabled`); the gauge
+/// is `1` for the row matching the current state and `0` for the
+/// other rows of the same `name`. Lets dashboards page on
+/// `siphon_ai_register_state{state="failed"} == 1` without
+/// stringly-typed comparisons.
+pub const REGISTER_STATE: &str = "siphon_ai_register_state";
 
 // ─── Histograms ─────────────────────────────────────────────────────
 
@@ -147,10 +164,19 @@ pub fn register_descriptions() {
         "Completed calls by termination cause (server_hangup, local_shutdown, bridge_ended, tap_ended)."
     );
     describe_counter!(ROUTE_MATCH_TOTAL, "Calls accepted by matched route name.");
+    describe_counter!(
+        REGISTER_ATTEMPTS_TOTAL,
+        "REGISTER attempts by [[register]].name and outcome."
+    );
     describe_gauge!(
         CALLS_ACTIVE,
         Unit::Count,
         "Currently-running per-call controllers."
+    );
+    describe_gauge!(
+        REGISTER_STATE,
+        Unit::Count,
+        "Per-[[register]] status. 1 = current state for that name; 0 = other states."
     );
     describe_histogram!(
         WS_CONNECT_SECONDS,

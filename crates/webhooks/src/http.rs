@@ -99,7 +99,7 @@ async fn post_with_retry(client: &Client, config: &HttpSinkConfig, event: Webhoo
                 if status.is_success() {
                     debug!(
                         url = %config.url,
-                        call_id = %event.call_id(),
+                        call_id = event.call_id().unwrap_or("-"),
                         event_type = event.type_str(),
                         status = %status,
                         "lifecycle webhook delivered"
@@ -109,7 +109,7 @@ async fn post_with_retry(client: &Client, config: &HttpSinkConfig, event: Webhoo
                 if !is_transient(status) {
                     warn!(
                         url = %config.url,
-                        call_id = %event.call_id(),
+                        call_id = event.call_id().unwrap_or("-"),
                         event_type = event.type_str(),
                         status = %status,
                         "lifecycle webhook rejected (4xx); not retrying"
@@ -118,7 +118,7 @@ async fn post_with_retry(client: &Client, config: &HttpSinkConfig, event: Webhoo
                 }
                 warn!(
                     url = %config.url,
-                    call_id = %event.call_id(),
+                    call_id = event.call_id().unwrap_or("-"),
                     event_type = event.type_str(),
                     status = %status,
                     attempt = attempt + 1,
@@ -128,7 +128,7 @@ async fn post_with_retry(client: &Client, config: &HttpSinkConfig, event: Webhoo
             Err(e) => {
                 warn!(
                     url = %config.url,
-                    call_id = %event.call_id(),
+                    call_id = event.call_id().unwrap_or("-"),
                     event_type = event.type_str(),
                     error = %e,
                     attempt = attempt + 1,
@@ -139,7 +139,7 @@ async fn post_with_retry(client: &Client, config: &HttpSinkConfig, event: Webhoo
         if attempt >= config.retry_max {
             warn!(
                 url = %config.url,
-                call_id = %event.call_id(),
+                call_id = event.call_id().unwrap_or("-"),
                 event_type = event.type_str(),
                 attempts = attempt + 1,
                 "lifecycle webhook giving up; event dropped"

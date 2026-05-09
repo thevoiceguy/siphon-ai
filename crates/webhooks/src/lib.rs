@@ -23,6 +23,8 @@ pub mod event;
 pub mod http;
 pub mod sink;
 
-pub use event::{CallEndEvent, CallStartEvent, WebhookEvent, WEBHOOK_VERSION};
+pub use event::{
+    CallEndEvent, CallStartEvent, RegistrationStateChangedEvent, WebhookEvent, WEBHOOK_VERSION,
+};
 pub use http::{HttpSink, HttpSinkConfig};
 pub use sink::{FilteredSink, NullSink, WebhookSink, WebhookSinkHandle};

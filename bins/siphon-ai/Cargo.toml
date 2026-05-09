@@ -24,6 +24,8 @@ bytes.workspace            = true
 clap.workspace             = true
 tracing.workspace          = true
 tracing-subscriber.workspace = true
+chrono.workspace           = true
+metrics.workspace          = true
 
 # Internal — the daemon composes every layer.
 siphon-ai-bridge.workspace     = true
@@ -42,6 +44,8 @@ sip-parse.workspace       = true
 sip-transaction.workspace = true
 sip-transport.workspace   = true
 sip-uas.workspace         = true
+sip-uac.workspace         = true
+sip-dns.workspace         = true
 
 # tokio-rustls: name the ServerConfig type returned by
 # sip_transport::load_rustls_server_config.

@@ -18,7 +18,6 @@
 //!
 //! - `ws_failure` — needs richer hooks into the bridge connection
 //!   lifecycle than `BridgingAcceptor` currently exposes.
-//! - `registration_state_changed` — needs REGISTER mode (deferred).
 //! - HMAC `X-SiphonAI-Signature` header — sketched in CLAUDE.md
 //!   §11.6, deferred to a follow-up.
 
@@ -45,6 +44,12 @@ pub enum WebhookEvent {
     /// emitted. The same `call_id` always pairs `CallStart` and
     /// `CallEnd` exactly once each.
     CallEnd(CallEndEvent),
+
+    /// Fired on every `[[register]]` block status transition —
+    /// e.g. `pending → registered`, `registered → failed`,
+    /// `failed → registered`. Ops integrations subscribe to this
+    /// to alert when an upstream PBX deregisters us.
+    RegistrationStateChanged(RegistrationStateChangedEvent),
 }
 
 impl WebhookEvent {
@@ -55,15 +60,18 @@ impl WebhookEvent {
         match self {
             WebhookEvent::CallStart(_) => "call_start",
             WebhookEvent::CallEnd(_) => "call_end",
+            WebhookEvent::RegistrationStateChanged(_) => "registration_state_changed",
         }
     }
 
-    /// Bridge call id, present on every event variant. Lets the
-    /// sink correlate retries / dedupe.
-    pub fn call_id(&self) -> &str {
+    /// Bridge call id when the event is call-scoped; `None` for
+    /// non-call events (e.g. `RegistrationStateChanged`). Lets the
+    /// sink correlate retries / dedupe by call when relevant.
+    pub fn call_id(&self) -> Option<&str> {
         match self {
-            WebhookEvent::CallStart(e) => &e.call_id,
-            WebhookEvent::CallEnd(e) => &e.call_id,
+            WebhookEvent::CallStart(e) => Some(&e.call_id),
+            WebhookEvent::CallEnd(e) => Some(&e.call_id),
+            WebhookEvent::RegistrationStateChanged(_) => None,
         }
     }
 }
@@ -107,6 +115,33 @@ pub struct CallEndEvent {
     /// `siphon_ai_cdr::TerminationCause` so dashboards can
     /// correlate the two without a re-mapping table.
     pub termination_cause: String,
+}
+
+/// State transition for one `[[register]]` block.
+///
+/// Status strings mirror `siphon_ai_sip_glue::RegistrationStatus::as_str`
+/// so dashboards correlate the webhook with the
+/// `siphon_ai_register_state{name,state}` metric without a re-mapping
+/// table. `previous_status` is `None` only on the very first emit
+/// after process start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistrationStateChangedEvent {
+    pub version: u32,
+    /// `[[register]].name`.
+    pub name: String,
+    /// When the transition was observed (UTC).
+    pub timestamp: DateTime<Utc>,
+    /// New status (`pending`/`registered`/`failed`/`disabled`).
+    pub status: String,
+    /// Status before this transition. `None` on the first emit.
+    pub previous_status: Option<String>,
+    /// Free-form failure description when transitioning to
+    /// `failed` (`"401 Unauthorized"`, `"timeout"`, …). `None` for
+    /// success transitions.
+    pub last_error: Option<String>,
+    /// When the registration expires per the registrar's grant.
+    /// Present only when `status = registered`.
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]

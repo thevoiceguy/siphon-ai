@@ -55,7 +55,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use forge_engine::{MediaBridgeManager, SessionManager, SessionManagerConfig};
 use forge_rtp::PortPoolConfig;
-use sip_parse::parse_request;
+use sip_parse::{parse_request, parse_response};
 use sip_transaction::{
     TransactionManager, TransportContext, TransportDispatcher, TransportKind as TxTransportKind,
 };
@@ -67,13 +67,13 @@ use sip_uas::integrated::{IntegratedUAS, UasRequestHandler};
 use siphon_ai_cdr::{CdrSinkHandle, FileSink, MultiSink, NullSink, WebhookSink, WebhookSinkConfig};
 use siphon_ai_config::{
     CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, MediaConfig, NodeConfig,
-    ObservabilityConfig, RegisterConfig, SipConfig, SipTlsConfig, SipTransport, WebhooksConfig,
+    ObservabilityConfig, SipConfig, SipTlsConfig, SipTransport, WebhooksConfig,
 };
 use siphon_ai_core::{BridgingAcceptor, CallRegistry};
 use siphon_ai_media_glue::MediaSetup;
 use siphon_ai_sip_glue::{
-    spawn_disabled_task, DialogTerminatorHandle, RegisterSourceResolver, RegistrationEntry,
-    RegistrationManager, RoutingHandler,
+    DialogTerminatorHandle, RegisterSourceResolver, RegistrationEntry, RegistrationManager,
+    RoutingHandler,
 };
 use siphon_ai_telemetry::{install_recorder, ObservabilityServer, ReadinessFlag};
 use siphon_ai_webhooks::{
@@ -131,7 +131,11 @@ impl Runtime {
         let observability_server = build_observability(observability, readiness.clone()).await?;
 
         let cdr_sink = build_cdr_sink(cdr).await?;
+        // The same sink fans out call lifecycle events from the
+        // acceptor AND registration_state_changed events from the
+        // per-[[register]] tasks. Cheap to share — Arc<dyn …>.
         let webhook_sink = build_webhook_sink(webhooks)?;
+        let webhook_sink_for_registrations = Arc::clone(&webhook_sink);
 
         // ─── Forge media stack ──────────────────────────────────────
         let session_mgr_config = SessionManagerConfig {
@@ -164,15 +168,10 @@ impl Runtime {
         );
 
         // ─── Registration manager ──────────────────────────────────
-        // Seed the manager with one row per [[register]] block so a
-        // /metrics scrape during cold-start already shows
-        // pending/disabled rows. Active UAC drive (sending REGISTER,
-        // refresh on success, retry on failure) is the next layer
-        // and lives outside this PR — entries with
-        // `register_on_startup = true` currently log a warning and
-        // stay `Pending`. `[[register]]` with `register_on_startup =
-        // false` gets a no-op task so shutdown-signal awaiting is
-        // uniform.
+        // Seed the manager up-front so a /metrics scrape during the
+        // cold-start window already shows pending/disabled rows. The
+        // actual UAC drive tasks need the TransactionManager +
+        // dispatcher, so they're spawned further down once those exist.
         let registration_mgr = RegistrationManager::new();
         let register_entries: Vec<RegistrationEntry> = registrations
             .iter()
@@ -183,7 +182,6 @@ impl Runtime {
             })
             .collect();
         registration_mgr.seed(&register_entries);
-        let registration_listeners = spawn_registration_tasks(&registration_mgr, &registrations);
 
         // ─── SIP routing handler ───────────────────────────────────
         let dialog_terminator: DialogTerminatorHandle = Arc::new(registry);
@@ -205,6 +203,16 @@ impl Runtime {
         let dispatcher: Arc<dyn TransportDispatcher> =
             Arc::new(MultiTransportDispatcher::new(Arc::clone(&udp_socket)));
         let transaction_mgr = Arc::new(TransactionManager::new(Arc::clone(&dispatcher)));
+
+        // System DNS resolver, shared by every per-[[register]] UAC
+        // task. Cheap to clone (Arc inside). Full SRV/NAPTR-driven
+        // failover lives in the resolver itself; v1 only relies on
+        // the literal-IP fast path because the config crate rejects
+        // hostnames with a clear v1.1 message.
+        let sip_resolver = Arc::new(
+            sip_dns::SipResolver::from_system()
+                .with_context(|| "construct SipResolver from system DNS config")?,
+        );
 
         // Load the TLS server config if `tls` is enabled. Loading
         // here (instead of inside spawn_listeners) makes a bad
@@ -245,6 +253,22 @@ impl Runtime {
         // dialog_manager that `IntegratedUAS::dispatch` consults on
         // the follow-up BYE.
         acceptor.install_uas(Arc::clone(&uas));
+
+        // ─── Per-registration UAC drive tasks ──────────────────────
+        // Now that the dispatcher and transaction manager exist, spawn
+        // one async task per [[register]] block to drive the REGISTER
+        // → refresh / retry loop. Tasks share the manager's shutdown
+        // signal so the runtime's teardown path wakes them all at
+        // once. See `crate::registration` for the loop semantics.
+        let registration_listeners = crate::registration::spawn_registration_tasks(
+            &registration_mgr,
+            &registrations,
+            Arc::clone(&transaction_mgr),
+            Arc::clone(&dispatcher),
+            Arc::clone(&sip_resolver),
+            &sip,
+            Arc::clone(&webhook_sink_for_registrations),
+        );
 
         // ─── Spawn the inbound UDP/TCP/TLS readers + pump ─────────
         let udp_bound_addr = udp_socket
@@ -377,36 +401,6 @@ fn register_source_resolver(mgr: &RegistrationManager) -> RegisterSourceResolver
         Some(name) => name,
         None => "trunk".to_string(),
     })
-}
-
-/// Spawn one task per `[[register]]` block. v1 only spawns the
-/// `register_on_startup = false` no-op tasks; entries with
-/// `register_on_startup = true` log a warning and stay in `Pending`
-/// until the UAC-drive layer lands.
-fn spawn_registration_tasks(
-    mgr: &RegistrationManager,
-    configs: &[RegisterConfig],
-) -> Vec<JoinHandle<()>> {
-    let mut handles = Vec::with_capacity(configs.len());
-    for cfg in configs {
-        if cfg.register_on_startup {
-            // Log per-registration so operators see what's
-            // configured even before the UAC drive is wired.
-            warn!(
-                name = %cfg.name,
-                server = %cfg.server_addr,
-                "[[register]] is configured with register_on_startup = true but the v1 UAC \
-                 drive isn't wired yet; status will stay `pending` until the next layer lands"
-            );
-        } else {
-            info!(
-                name = %cfg.name,
-                "[[register]] disabled by config (register_on_startup = false)"
-            );
-            handles.push(spawn_disabled_task(mgr.clone(), cfg.name.clone()));
-        }
-    }
-    handles
 }
 
 /// Load the TLS server config (cert + key) from disk paths in
@@ -658,10 +652,17 @@ async fn handle_packet(
     let payload = packet.into_payload();
 
     let Some(request) = parse_request(&payload) else {
-        // Could be a response (we're UAS-only in v1, so unsolicited
-        // responses are dropped) or junk. parse_response would
-        // catch the former; we don't care for now.
-        debug!(peer = %peer, "inbound bytes did not parse as a SIP request");
+        // Not a request. Try parsing as a response — the daemon's
+        // UAC drives outbound REGISTERs (CLAUDE.md §7.2 registered
+        // mode), and the registrar's 200 OK / 401 / 4xx responses
+        // arrive on this same socket. The transaction manager
+        // matches them to in-flight client transactions by Via
+        // branch.
+        if let Some(response) = parse_response(&payload) {
+            transaction_mgr.receive_response(response).await;
+            return;
+        }
+        debug!(peer = %peer, "inbound bytes did not parse as a SIP request or response");
         return;
     };
 

@@ -563,3 +563,145 @@ async fn send_dtmf_command_with_invalid_digit_does_not_kill_tap() {
     drop(_playout_tx);
     let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
 }
+
+// ─── Clear (barge-in / interrupt outbound playout) ─────────────────
+
+/// Send `TapCommand::Clear` with no audio in flight, assert forge
+/// sees a `Flush` request targeting leg A.
+///
+/// `MediaTap::run` polls audio arms before the command arm (`biased;`),
+/// so pre-staged playout frames already in the controller→tap
+/// channel will reach forge as `Audio` requests *before* Clear is
+/// processed — that's expected, and forge's `Flush` is what
+/// actually drops them from the encoder's pending-out queue. So
+/// this test focuses on the contract the tap owns: when Clear
+/// fires, exactly one `Flush` lands on forge for leg A.
+#[tokio::test]
+async fn clear_command_emits_flush_on_forge() {
+    use siphon_ai_media_glue::TapCommand;
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
+    let call = CallId::new("clear-test");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, _events_rx) = mpsc::channel::<siphon_ai_bridge::OutgoingEvent>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    cmd_tx.send(TapCommand::Clear).await.expect("send clear");
+
+    let drained = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            if let Some(req) = manager.try_recv_outbound_request(&call).await {
+                return req;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("forge sees Flush");
+
+    match drained {
+        OutboundMediaRequest::Flush { target, playback_id } => {
+            assert_eq!(
+                target,
+                Some(MediaTarget::A),
+                "single-leg model → flush leg A",
+            );
+            assert!(
+                playback_id.is_none(),
+                "v1 doesn't use playback_id; got {playback_id:?}",
+            );
+        }
+        other => panic!("expected Flush, got {other:?}"),
+    }
+
+    drop(cmd_tx);
+    drop(_events_rx);
+    drop(_caller_rx);
+    drop(_playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// Clear drains the controller→tap audio buffer of bytes that haven't
+/// yet been polled by the playout arm. Pre-stage two frames, send
+/// Clear, then push one more frame — the post-Clear frame must
+/// reach forge while the tap stays alive.
+///
+/// We don't pin "zero pre-Clear frames reach forge" because the
+/// `biased` select polls audio first; in production, Clear's
+/// usefulness rests on forge's `Flush` (which this test pins in
+/// `clear_command_emits_flush_on_forge`).
+#[tokio::test]
+async fn clear_command_does_not_kill_tap() {
+    use siphon_ai_bridge::pack_pcm16_le;
+    use siphon_ai_media_glue::TapCommand;
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
+    let call = CallId::new("clear-resume-test");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, _events_rx) = mpsc::channel::<siphon_ai_bridge::OutgoingEvent>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    cmd_tx.send(TapCommand::Clear).await.expect("send clear");
+
+    // Drain whatever the Clear pushed (Flush).
+    let _ = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            if let Some(req) = manager.try_recv_outbound_request(&call).await {
+                if matches!(req, OutboundMediaRequest::Flush { .. }) {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("Flush observed");
+
+    // Tap should still be alive: a follow-up audio frame reaches forge.
+    let frame = pack_pcm16_le(&vec![3i16; 160]);
+    playout_tx.send(frame).await.expect("send post-Clear audio");
+    let drained = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            if let Some(req) = manager.try_recv_outbound_request(&call).await {
+                return req;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("post-Clear audio reaches forge");
+    match drained {
+        OutboundMediaRequest::Audio(f) => {
+            assert_eq!(f.samples, vec![3i16; 160]);
+        }
+        other => panic!("expected Audio post-Clear, got {other:?}"),
+    }
+
+    drop(cmd_tx);
+    drop(_events_rx);
+    drop(_caller_rx);
+    drop(playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}

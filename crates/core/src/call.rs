@@ -344,10 +344,23 @@ impl CallController {
                                 warn!(error = %e, "tap command channel full or closed; dropping Clear");
                             }
                         }
+                        Some(BridgeIn::Mark { call_id: cid, name }) => {
+                            debug!(ws_call_id = %cid, %name, "forwarding Mark to tap");
+                            // Mark is a notification request — the
+                            // WS server is asking us to fire `mark`
+                            // back when audio up to this point has
+                            // played. Drop on full as elsewhere; the
+                            // server can re-issue if it really
+                            // needs the signal.
+                            if let Err(e) =
+                                tap_cmd_tx.try_send(TapCommand::Mark { name: name.clone() })
+                            {
+                                warn!(error = %e, %name, "tap command channel full or closed; dropping Mark");
+                            }
+                        }
                         Some(other) => {
-                            // Mark / Transfer: log for now; full
-                            // handling lands with their respective
-                            // glue layers.
+                            // Transfer: log for now; full handling
+                            // lands with the SIP REFER glue.
                             debug!(?other, "control message not yet handled");
                         }
                         None => {

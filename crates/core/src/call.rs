@@ -333,10 +333,21 @@ impl CallController {
                                 warn!(error = %e, "tap command channel full or closed; dropping SendDtmf");
                             }
                         }
+                        Some(BridgeIn::Clear { call_id: cid }) => {
+                            debug!(ws_call_id = %cid, "forwarding Clear to tap");
+                            // Same drop-rather-than-block policy as
+                            // SendDtmf — Clear is barge-in-driven and
+                            // the WS server typically follows up
+                            // with a fresh playback, so a missed
+                            // command is recoverable.
+                            if let Err(e) = tap_cmd_tx.try_send(TapCommand::Clear) {
+                                warn!(error = %e, "tap command channel full or closed; dropping Clear");
+                            }
+                        }
                         Some(other) => {
-                            // Clear / Mark / Transfer: log for now;
-                            // full handling lands with their
-                            // respective glue layers.
+                            // Mark / Transfer: log for now; full
+                            // handling lands with their respective
+                            // glue layers.
                             debug!(?other, "control message not yet handled");
                         }
                         None => {

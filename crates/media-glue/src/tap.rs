@@ -115,6 +115,15 @@ pub enum TapCommand {
     /// dropped with a warning rather than tearing the call down — a
     /// misbehaving WS server shouldn't kill a call.
     SendDtmf { digit: char, duration_ms: u32 },
+
+    /// Drop every byte of pending outbound playout — both the bytes
+    /// queued in the controller→tap audio channel that haven't yet
+    /// reached forge, and forge's own encoder queue. Drives the WS
+    /// protocol's `Clear` message: the server's typical use is
+    /// "stop talking immediately" in response to caller barge-in,
+    /// so any tail audio left in the pipe must not reach the
+    /// caller.
+    Clear,
 }
 
 /// Why the tap pump exited cleanly.
@@ -337,40 +346,74 @@ impl MediaTap {
                         commands_rx = replacement;
                         continue;
                     };
-                    handle_tap_command(&self.call_id, &self.handle, cmd).await;
+                    match cmd {
+                        TapCommand::Clear => {
+                            // Drain any bytes queued in the
+                            // controller→tap audio channel before
+                            // they can reach forge. The mpsc bound
+                            // is small (10 frames = 200 ms) but
+                            // letting that tail slip through a
+                            // barge-in event would be perceptible.
+                            let mut drained = 0usize;
+                            while let Ok(_bytes) = playout_audio_rx.try_recv() {
+                                drained += 1;
+                            }
+                            if let Err(e) = self
+                                .handle
+                                .flush(Some(MediaTarget::A), None)
+                                .await
+                            {
+                                warn!(
+                                    call_id = %self.call_id,
+                                    error = %e,
+                                    "forge flush failed during Clear",
+                                );
+                            } else {
+                                debug!(
+                                    call_id = %self.call_id,
+                                    drained,
+                                    "cleared pending outbound playout",
+                                );
+                            }
+                        }
+                        TapCommand::SendDtmf { digit, duration_ms } => {
+                            handle_send_dtmf(&self.call_id, &self.handle, digit, duration_ms).await;
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-async fn handle_tap_command(call_id: &CallId, handle: &MediaBridgeHandle, cmd: TapCommand) {
-    match cmd {
-        TapCommand::SendDtmf { digit, duration_ms } => {
-            let parsed = match DtmfDigit::from_char(digit) {
-                Ok(d) => d,
-                Err(e) => {
-                    warn!(
-                        call_id = %call_id,
-                        digit = %digit, error = %e,
-                        "ignoring SendDtmf with unsupported digit char",
-                    );
-                    return;
-                }
-            };
-            let req = OutboundDtmfRequest {
-                target: MediaTarget::A,
-                digit: parsed,
-                duration_ms,
-                playback_id: None,
-                mode: PlayoutMode::Append,
-            };
-            if let Err(e) = handle.send_dtmf(req).await {
-                warn!(call_id = %call_id, error = %e, "forge send_dtmf failed");
-            } else {
-                debug!(call_id = %call_id, digit = %digit, duration_ms, "queued outbound DTMF");
-            }
+async fn handle_send_dtmf(
+    call_id: &CallId,
+    handle: &MediaBridgeHandle,
+    digit: char,
+    duration_ms: u32,
+) {
+    let parsed = match DtmfDigit::from_char(digit) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(
+                call_id = %call_id,
+                digit = %digit, error = %e,
+                "ignoring SendDtmf with unsupported digit char",
+            );
+            return;
         }
+    };
+    let req = OutboundDtmfRequest {
+        target: MediaTarget::A,
+        digit: parsed,
+        duration_ms,
+        playback_id: None,
+        mode: PlayoutMode::Append,
+    };
+    if let Err(e) = handle.send_dtmf(req).await {
+        warn!(call_id = %call_id, error = %e, "forge send_dtmf failed");
+    } else {
+        debug!(call_id = %call_id, digit = %digit, duration_ms, "queued outbound DTMF");
     }
 }
 

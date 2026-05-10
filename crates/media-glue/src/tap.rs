@@ -41,21 +41,32 @@
 //!   committed to in `start.audio.sample_rate`. A mid-call codec
 //!   switch that changes the rate yields a fatal `SampleRateMismatch`.
 //!
+//! ## DTMF events
+//!
+//! The tap subscribes to the daemon-wide [`EventBus`] forge publishes
+//! to. When a [`ForgeEvent::DtmfDigitDetected`] for *this* call's
+//! `call_id` arrives — and only on the `End` of the press, so each
+//! press maps to one WS event with a final `duration_ms` — we forward
+//! it through the supplied [`OutgoingEvent`] sender as
+//! `OutgoingEvent::Dtmf`. The bridge crate stamps `call_id` and `seq`
+//! and writes the JSON `dtmf` text frame on the WS.
+//!
 //! ## Not yet wired
 //!
-//! - DTMF / VAD events (forge `ForgeEvent` broadcast bus → channel to
-//!   the controller). Tracked as a follow-up; the audio path here is
-//!   independent.
+//! - VAD `speech_started` / `speech_stopped`. Forge has the detector
+//!   surface; we just don't have a `ForgeEvent` variant for it yet.
 
 use std::sync::Arc;
 
-use forge_core::{CallId, ForgeError};
+use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, EventBus, ForgeError, ForgeEvent};
 use forge_engine::{
     MediaBridgeHandle, MediaBridgeManager, MediaTarget, OutboundMediaFrame, PlayoutMode,
 };
-use siphon_ai_bridge::{pack_pcm16_le, unpack_pcm16_le, AudioError, Reframer};
+use siphon_ai_bridge::{
+    pack_pcm16_le, unpack_pcm16_le, AudioError, DtmfMethod, OutgoingEvent, Reframer,
+};
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, instrument, warn};
 
 #[derive(Debug, Error)]
@@ -99,6 +110,13 @@ pub struct MediaTap {
     handle: MediaBridgeHandle,
     sample_rate: u32,
     call_id: CallId,
+    /// Subscription to the daemon-wide forge [`EventBus`]. The tap
+    /// filters for events matching its own `call_id`. Subscribing at
+    /// `attach` time (rather than inside `run`) means events emitted
+    /// between attach and run are still buffered for us — the
+    /// broadcast channel's per-receiver queue holds up to the bus's
+    /// configured capacity.
+    events_rx: broadcast::Receiver<ForgeEvent>,
 }
 
 impl std::fmt::Debug for MediaTap {
@@ -113,7 +131,8 @@ impl std::fmt::Debug for MediaTap {
 
 impl MediaTap {
     /// Attach a new tap for `call_id` against the process-wide
-    /// `MediaBridgeManager`.
+    /// `MediaBridgeManager` and subscribe to the supplied `EventBus`
+    /// (the same bus forge's session manager publishes on).
     ///
     /// Fails with [`MediaTapError::AttachFailed`] if a tap is already
     /// attached for the same call (forge enforces 1 handle per call).
@@ -121,6 +140,7 @@ impl MediaTap {
     /// audio module's rules (8 kHz or 16 kHz only in v1).
     pub fn attach(
         manager: &Arc<MediaBridgeManager>,
+        event_bus: &Arc<EventBus>,
         call_id: CallId,
         sample_rate: u32,
     ) -> Result<Self, MediaTapError> {
@@ -130,10 +150,12 @@ impl MediaTap {
         let handle = manager
             .attach_call(call_id.clone())
             .map_err(forge_attach_err)?;
+        let events_rx = event_bus.subscribe();
         Ok(Self {
             handle,
             sample_rate,
             call_id,
+            events_rx,
         })
     }
 
@@ -155,11 +177,16 @@ impl MediaTap {
     /// - `playout_audio_rx`: bytes the bridge crate received from the
     ///   WS server arrive here; the tap unpacks and hands them to
     ///   forge for playout into the SIP leg.
+    /// - `events_tx`: out-of-band [`OutgoingEvent`]s the tap derives
+    ///   from forge's event bus (currently only DTMF). The bridge
+    ///   crate stamps `call_id` + `seq` and writes the JSON text
+    ///   frame on the WS.
     #[instrument(skip_all, fields(call_id = %self.call_id, sample_rate = self.sample_rate))]
     pub async fn run(
         mut self,
         caller_audio_tx: mpsc::Sender<Vec<u8>>,
         mut playout_audio_rx: mpsc::Receiver<Vec<u8>>,
+        events_tx: mpsc::Sender<OutgoingEvent>,
     ) -> Result<TapDisconnect, MediaTapError> {
         let mut reframer = Reframer::new(self.sample_rate)?;
 
@@ -221,8 +248,81 @@ impl MediaTap {
                         }
                     }
                 }
+
+                // Forge events (currently only DTMF). Filter to this
+                // call_id; map End-of-press to a single OutgoingEvent.
+                event = self.events_rx.recv() => {
+                    match event {
+                        Ok(ev) => {
+                            if let Some(out) = derive_outgoing_event(&self.call_id, ev) {
+                                if events_tx.send(out).await.is_err() {
+                                    debug!("events_tx closed; ending tap");
+                                    return Ok(TapDisconnect::ControllerHungUp);
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            // The broadcast queue overflowed for this
+                            // subscriber. Per CLAUDE.md §4.5 we never
+                            // panic on the audio path; just log and
+                            // resume — events from the lag window are
+                            // best-effort by definition.
+                            warn!(skipped = n, "tap event subscriber lagged");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            debug!("forge event bus closed; tap continues without events");
+                            // Falling through to the next iteration
+                            // would spin on an immediately-ready Closed
+                            // arm. Replace the receiver with one that
+                            // blocks forever instead.
+                            let (_dummy_tx, dummy_rx) = broadcast::channel(1);
+                            self.events_rx = dummy_rx;
+                        }
+                    }
+                }
             }
         }
+    }
+}
+
+/// Map a forge `ForgeEvent` to an `OutgoingEvent` the bridge can ship.
+///
+/// Returns `None` for events that aren't this call's, that aren't part
+/// of the v1 WS protocol surface, or that don't carry the final
+/// duration we need (DTMF `Start`/`Continue`).
+fn derive_outgoing_event(call_id: &CallId, event: ForgeEvent) -> Option<OutgoingEvent> {
+    match event {
+        ForgeEvent::DtmfDigitDetected {
+            call_id: ev_call,
+            digit,
+            duration_ms,
+            method,
+            event_type: DtmfEventKind::End,
+            ..
+        } if &ev_call == call_id => Some(OutgoingEvent::Dtmf {
+            digit,
+            // RFC 2833 detection always reports duration, but the
+            // ForgeEvent type is Option to model SIP INFO. Fall back
+            // to 0 — the bridge protocol's `duration_ms` is u32 and
+            // a missing duration on End is forge giving up; we still
+            // emit the press so the WS server isn't left guessing.
+            duration_ms: duration_ms.unwrap_or(0),
+            method: map_dtmf_method(method),
+        }),
+        _ => None,
+    }
+}
+
+fn map_dtmf_method(method: DtmfDetectionMethod) -> DtmfMethod {
+    match method {
+        DtmfDetectionMethod::Rfc2833 => DtmfMethod::Rfc2833,
+        DtmfDetectionMethod::Inband => DtmfMethod::Inband,
+        // SIP INFO DTMF rides on the SIP layer (not RTP), so the
+        // bridge's RTP-derived `method` enum has no slot for it. v1's
+        // SIP layer doesn't surface INFO DTMF anyway; map it to
+        // Inband so a future change here doesn't break wire shape if
+        // forge ever publishes one.
+        DtmfDetectionMethod::SipInfo => DtmfMethod::Inband,
     }
 }
 
@@ -239,7 +339,7 @@ mod tests {
         // We don't need a manager for the failure path: validation
         // happens before attach_call is invoked.
         let manager = Arc::new(MediaBridgeManager::new());
-        let err = MediaTap::attach(&manager, CallId::new("c"), 48000).unwrap_err();
+        let err = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), CallId::new("c"), 48000).unwrap_err();
         assert!(matches!(err, MediaTapError::Audio(_)));
     }
 
@@ -248,7 +348,7 @@ mod tests {
         let manager = Arc::new(MediaBridgeManager::new());
         let call = CallId::new("c");
         {
-            let tap = MediaTap::attach(&manager, call.clone(), 8000).expect("attach");
+            let tap = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), call.clone(), 8000).expect("attach");
             assert_eq!(tap.sample_rate(), 8000);
             assert_eq!(tap.call_id(), &call);
             assert!(manager.has_bridge(&call));
@@ -261,8 +361,8 @@ mod tests {
     fn attach_twice_for_same_call_fails() {
         let manager = Arc::new(MediaBridgeManager::new());
         let call = CallId::new("c");
-        let _t1 = MediaTap::attach(&manager, call.clone(), 8000).expect("first attach");
-        let err = MediaTap::attach(&manager, call, 8000).unwrap_err();
+        let _t1 = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), call.clone(), 8000).expect("first attach");
+        let err = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), call, 8000).unwrap_err();
         assert!(matches!(err, MediaTapError::AttachFailed(_)));
     }
 }

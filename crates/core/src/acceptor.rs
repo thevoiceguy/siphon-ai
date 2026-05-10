@@ -664,6 +664,28 @@ impl CallAcceptor for BridgingAcceptor {
                 .await
                 .map_err(|e| anyhow::anyhow!("failed to accept INVITE: {e}"))?;
 
+                // Start forge's RTP forwarding loop — this is what
+                // decodes inbound audio, runs the RFC-2833 detector,
+                // and publishes ForgeEvent::DtmfDigitDetected to the
+                // EventBus our taps subscribe to. Skipping it would
+                // leave the call silent and DTMF unheard, even though
+                // the SDP/200-OK round-trip looks healthy. forge's
+                // internal state requires Initializing → Active here;
+                // calling twice errors loudly, so do it exactly once
+                // per accepted INVITE.
+                if let Err(e) = self
+                    .media
+                    .session_manager()
+                    .start_session(&prepared.forge_call_id)
+                    .await
+                {
+                    warn!(
+                        call_id = %prepared.bridge_call_id,
+                        error = %e,
+                        "forge start_session failed; call will be silent",
+                    );
+                }
+
                 metrics::counter!(INVITES_TOTAL, "result" => "accepted").increment(1);
                 self.run_call(prepared, call.route.name.as_str());
                 Ok(())

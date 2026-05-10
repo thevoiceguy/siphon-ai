@@ -250,8 +250,14 @@ impl CallController {
 
         let mut bridge_task: JoinHandle<Result<DisconnectReason, BridgeError>> =
             tokio::spawn(connect_and_run(bridge, start, channels));
-        let mut tap_task: JoinHandle<Result<TapDisconnect, MediaTapError>> =
-            tokio::spawn(media_tap.run(caller_audio_tx, playout_audio_rx));
+        // The tap forwards out-of-band events (currently DTMF) onto
+        // the same control stream the bridge reads. Cloning the
+        // sender means tap and controller are independent producers
+        // — bridge teardown closes the receiver, both producers see
+        // the same EOF.
+        let mut tap_task: JoinHandle<Result<TapDisconnect, MediaTapError>> = tokio::spawn(
+            media_tap.run(caller_audio_tx, playout_audio_rx, control_out_tx.clone()),
+        );
 
         // We don't wait for the bridge handshake to declare
         // Active; the moment both tasks are spawned, audio plumbing

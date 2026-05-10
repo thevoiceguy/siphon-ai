@@ -141,6 +141,7 @@ async fn run_call_emits_cdr_when_controller_exits() {
     let media = Arc::new(MediaSetup::new(
         Arc::clone(&session_mgr),
         bridge_mgr,
+            Arc::new(forge_core::EventBus::new()),
         "192.168.1.10",
     ));
     let registry = CallRegistry::new();
@@ -225,6 +226,7 @@ async fn null_sink_is_the_default_when_no_sink_configured() {
     let media = Arc::new(MediaSetup::new(
         Arc::clone(&session_mgr),
         bridge_mgr,
+            Arc::new(forge_core::EventBus::new()),
         "192.168.1.10",
     ));
     let registry = CallRegistry::new();

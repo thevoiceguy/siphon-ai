@@ -53,6 +53,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
+use forge_core::EventBus as ForgeEventBus;
 use forge_engine::{MediaBridgeManager, SessionManager, SessionManagerConfig};
 use forge_rtp::PortPoolConfig;
 use sip_parse::{parse_request, parse_response};
@@ -138,11 +139,18 @@ impl Runtime {
         let webhook_sink_for_registrations = Arc::clone(&webhook_sink);
 
         // ─── Forge media stack ──────────────────────────────────────
+        // One process-wide EventBus. Forge's session manager publishes
+        // ForgeEvents (DTMF detect, session-state, quality reports) on
+        // it; per-call MediaTaps subscribe and forward the ones the
+        // bridge protocol covers (currently DTMF) over the WS as
+        // BridgeOut events.
+        let event_bus = Arc::new(ForgeEventBus::new());
+
         let session_mgr_config = SessionManagerConfig {
             port_pool_config: rtp_port_pool(&media)?,
             ..Default::default()
         };
-        let session_mgr = SessionManager::new(session_mgr_config, None);
+        let session_mgr = SessionManager::new(session_mgr_config, Some(Arc::clone(&event_bus)));
         // Background task that reaps idle sessions per
         // SessionManagerConfig::cleanup_interval. Must run for forge
         // to enforce its session_timeout.
@@ -152,6 +160,7 @@ impl Runtime {
         let media_setup = Arc::new(MediaSetup::new(
             Arc::clone(&session_mgr),
             Arc::clone(&bridge_mgr),
+            Arc::clone(&event_bus),
             node.public_address.clone(),
         ));
 

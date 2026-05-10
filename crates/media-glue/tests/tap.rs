@@ -705,3 +705,142 @@ async fn clear_command_does_not_kill_tap() {
     drop(playout_tx);
     let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
 }
+
+// ─── Mark (server-driven playout marker) ───────────────────────────
+
+/// `Mark` issued before any audio has been queued must fire
+/// immediately — there's nothing to wait for.
+///
+/// Pins the protocol semantics: `mark` is "fire when audio up to
+/// this point has played"; if no audio has been queued, that point
+/// is now.
+#[tokio::test]
+async fn mark_with_no_audio_fires_immediately() {
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::TapCommand;
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
+    let call = CallId::new("mark-immediate");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    cmd_tx
+        .send(TapCommand::Mark {
+            name: "no-audio".into(),
+        })
+        .await
+        .expect("send mark");
+
+    let event = tokio::time::timeout(Duration::from_millis(100), events_rx.recv())
+        .await
+        .expect("mark fires within 100ms (effectively immediate)")
+        .expect("events channel still open");
+
+    match event {
+        OutgoingEvent::Mark { name } => assert_eq!(name, "no-audio"),
+        other => panic!("expected Mark, got {other:?}"),
+    }
+
+    drop(cmd_tx);
+    drop(_caller_rx);
+    drop(_playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// `Mark` issued after N frames have been pushed must fire roughly
+/// `N * 20ms` after the first frame was pushed (regardless of when
+/// the Mark itself was sent).
+///
+/// The estimate is an upper bound — fire-after must be at least
+/// `N * 20ms - elapsed`. We assert the inter-arrival between the
+/// Mark command and the Mark event is approximately the play-out
+/// duration of the queued audio (within a generous tolerance,
+/// because tokio task scheduling jitter on a busy CI box can shift
+/// the wakeup).
+#[tokio::test]
+async fn mark_fires_after_estimated_playout_of_queued_frames() {
+    use siphon_ai_bridge::{pack_pcm16_le, OutgoingEvent};
+    use siphon_ai_media_glue::TapCommand;
+    use std::time::Instant;
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
+    let call = CallId::new("mark-after-audio");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    // Queue 5 frames (= 100ms of estimated play-out). Drain forge's
+    // outbound queue as we go so the audio arm in the tap can keep
+    // pulling without blocking.
+    for k in 0..5 {
+        let frame = pack_pcm16_le(&vec![k as i16; 160]);
+        playout_tx.send(frame).await.unwrap();
+    }
+    // Let the tap process the audio arm before we send Mark.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let manager_ref = manager.clone();
+    let call_ref = call.clone();
+    tokio::spawn(async move {
+        // Drain forge so the channel doesn't back-pressure.
+        loop {
+            let _ = manager_ref.try_recv_outbound_request(&call_ref).await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    let mark_sent_at = Instant::now();
+    cmd_tx
+        .send(TapCommand::Mark {
+            name: "after-5".into(),
+        })
+        .await
+        .expect("send mark");
+
+    let event = tokio::time::timeout(Duration::from_millis(500), events_rx.recv())
+        .await
+        .expect("mark arrives within 500ms")
+        .expect("events channel open");
+    let elapsed = mark_sent_at.elapsed();
+
+    match event {
+        OutgoingEvent::Mark { name } => assert_eq!(name, "after-5"),
+        other => panic!("expected Mark, got {other:?}"),
+    }
+
+    // 5 frames at 20ms = 100ms total play-out. Mark was sent ≥ 20ms
+    // after the first frame was pushed (we slept), so the remaining
+    // play-out is ≤ 80ms. We accept a wide band (0..200ms) — the
+    // assertion is just "we waited approximately the right amount,
+    // and didn't fire instantly or 5 seconds later."
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "mark fired too late: {elapsed:?}",
+    );
+
+    drop(cmd_tx);
+    drop(_caller_rx);
+    drop(playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}

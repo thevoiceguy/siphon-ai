@@ -57,6 +57,7 @@
 //!   surface; we just don't have a `ForgeEvent` variant for it yet.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, EventBus, ForgeError, ForgeEvent};
 use forge_dtmf::DtmfDigit;
@@ -70,6 +71,14 @@ use siphon_ai_bridge::{
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, instrument, warn};
+
+/// Per-frame WS playout duration. The bridge protocol fixes outbound
+/// audio at 20 ms regardless of sample rate (CLAUDE.md §4.2 / docs/
+/// PROTOCOL.md §3) — the inbound tap reframes whatever forge gives us
+/// down to 20 ms before sending it on the WS, and the outbound side
+/// receives 20 ms frames from the WS server. Estimated play-out time
+/// of frame K is therefore `first_audio_pushed_at + K * 20ms`.
+const PLAYOUT_FRAME_MS: u64 = 20;
 
 #[derive(Debug, Error)]
 pub enum MediaTapError {
@@ -124,6 +133,26 @@ pub enum TapCommand {
     /// so any tail audio left in the pipe must not reach the
     /// caller.
     Clear,
+
+    /// Insert a named marker into the playout stream. The tap
+    /// estimates when the audio queued so far will have played out
+    /// (frames pushed to forge × 20 ms, anchored at the wallclock
+    /// of the first push) and fires a single
+    /// [`OutgoingEvent::Mark`] back to the WS server at that
+    /// moment. If no audio is queued, the mark fires immediately.
+    ///
+    /// Servers use marks to know when their TTS prompt has finished
+    /// playing — e.g., "after the 'Please wait' clip is done, start
+    /// listening for an answer." See `docs/PROTOCOL.md` §3 for the
+    /// wire-side contract.
+    ///
+    /// v1 caveat: the estimate doesn't account for forge's internal
+    /// playout jitter buffer (≈ 60 ms per the dev plan), so the
+    /// fired mark precedes the real audio reaching the caller's ear
+    /// by that buffer's depth. Acceptable for prompt-completion
+    /// signalling; tighter sync needs a forge upstream PR exposing a
+    /// per-frame playout-completion hook.
+    Mark { name: String },
 }
 
 /// Why the tap pump exited cleanly.
@@ -238,6 +267,10 @@ impl MediaTap {
         mut commands_rx: mpsc::Receiver<TapCommand>,
     ) -> Result<TapDisconnect, MediaTapError> {
         let mut reframer = Reframer::new(self.sample_rate)?;
+        // Play-out estimation state for `TapCommand::Mark`.
+        // Updated in the playout arm; read in the command arm.
+        let mut frames_sent_to_forge: u64 = 0;
+        let mut first_audio_pushed_at: Option<Instant> = None;
 
         loop {
             tokio::select! {
@@ -269,6 +302,14 @@ impl MediaTap {
                         .send_audio(frame)
                         .await
                         .map_err(|e| MediaTapError::PlayoutFailed(e.to_string()))?;
+                    // Bookkeeping for `TapCommand::Mark`: count
+                    // frames pushed to forge and stamp the wallclock
+                    // of the first push so we can estimate when the
+                    // Nth queued frame finishes playing.
+                    if frames_sent_to_forge == 0 {
+                        first_audio_pushed_at = Some(Instant::now());
+                    }
+                    frames_sent_to_forge += 1;
                 }
 
                 // Caller → server: PCM16 samples from forge, reframed and packed.
@@ -379,11 +420,66 @@ impl MediaTap {
                         TapCommand::SendDtmf { digit, duration_ms } => {
                             handle_send_dtmf(&self.call_id, &self.handle, digit, duration_ms).await;
                         }
+                        TapCommand::Mark { name } => {
+                            schedule_mark(
+                                &self.call_id,
+                                &events_tx,
+                                name,
+                                frames_sent_to_forge,
+                                first_audio_pushed_at,
+                            );
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/// Schedule an `OutgoingEvent::Mark` to fire when the audio queued so
+/// far is estimated to have played out.
+///
+/// "Estimated" because forge's streaming `send_audio` path doesn't
+/// expose a per-frame playout-completion event — instead we anchor to
+/// the wallclock when the first frame went into forge and assume one
+/// frame per 20 ms. If `frames_sent` is 0 (no audio queued yet) the
+/// mark fires immediately.
+///
+/// The fire happens on a detached tokio task so the tap's main
+/// `select!` loop keeps draining the audio path during the wait. The
+/// task holds a clone of the events sender; when the tap tears down
+/// and drops the inner receiver, the cloned sender's send returns
+/// `Err` and the task quietly exits.
+fn schedule_mark(
+    call_id: &CallId,
+    events_tx: &mpsc::Sender<OutgoingEvent>,
+    name: String,
+    frames_sent: u64,
+    first_pushed_at: Option<Instant>,
+) {
+    let target = match first_pushed_at {
+        Some(start) if frames_sent > 0 => {
+            start + Duration::from_millis(frames_sent.saturating_mul(PLAYOUT_FRAME_MS))
+        }
+        // Mark requested before any audio queued — fire now.
+        _ => Instant::now(),
+    };
+    let events_tx = events_tx.clone();
+    let call_id = call_id.clone();
+    tokio::spawn(async move {
+        // `sleep_until` accepts `tokio::time::Instant`. Convert.
+        let target = tokio::time::Instant::from_std(target);
+        tokio::time::sleep_until(target).await;
+        if events_tx
+            .send(OutgoingEvent::Mark { name: name.clone() })
+            .await
+            .is_err()
+        {
+            debug!(call_id = %call_id, name = %name, "events_tx closed; mark dropped");
+        } else {
+            debug!(call_id = %call_id, name = %name, "fired mark after estimated playout");
+        }
+    });
 }
 
 async fn handle_send_dtmf(

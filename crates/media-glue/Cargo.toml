@@ -26,3 +26,8 @@ forge-engine.workspace = true
 forge-codecs.workspace = true
 forge-sdp.workspace    = true
 forge-dtmf.workspace   = true
+
+[dev-dependencies]
+# `chrono` is in our forge_core::ForgeEvent::DtmfDigitDetected
+# `timestamp` field, used in tests that publish synthesised events.
+chrono.workspace = true

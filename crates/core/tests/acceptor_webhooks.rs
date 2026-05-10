@@ -131,6 +131,7 @@ async fn run_call_emits_call_start_then_call_end() {
     let media = Arc::new(MediaSetup::new(
         Arc::clone(&session_mgr),
         bridge_mgr,
+            Arc::new(forge_core::EventBus::new()),
         "192.168.1.10",
     ));
     let registry = CallRegistry::new();
@@ -215,6 +216,7 @@ async fn null_webhook_sink_is_the_default() {
     let media = Arc::new(MediaSetup::new(
         Arc::clone(&session_mgr),
         bridge_mgr,
+            Arc::new(forge_core::EventBus::new()),
         "192.168.1.10",
     ));
     let registry = CallRegistry::new();

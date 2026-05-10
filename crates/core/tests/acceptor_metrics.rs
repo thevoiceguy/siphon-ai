@@ -128,6 +128,7 @@ fn build_acceptor() -> (BridgingAcceptor, Arc<MediaBridgeManager>, CallRegistry)
     let media = Arc::new(MediaSetup::new(
         Arc::clone(&session_mgr),
         Arc::clone(&bridge_mgr),
+            Arc::new(forge_core::EventBus::new()),
         "192.168.1.10",
     ));
     let registry = CallRegistry::new();

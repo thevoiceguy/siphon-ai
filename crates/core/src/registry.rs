@@ -145,7 +145,7 @@ mod tests {
     fn fresh_handle(bridge_call_id: &str) -> CallHandle {
         let manager = Arc::new(MediaBridgeManager::new());
         let tap =
-            MediaTap::attach(&manager, ForgeCallId::new(bridge_call_id), 8000).expect("attach tap");
+            MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), ForgeCallId::new(bridge_call_id), 8000).expect("attach tap");
         let cfg = CallControllerConfig {
             call_id: BridgeCallId::new(bridge_call_id),
             bridge: BridgeConfig {

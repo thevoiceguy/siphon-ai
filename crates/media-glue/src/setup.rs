@@ -41,7 +41,7 @@
 
 use std::sync::Arc;
 
-use forge_core::{CallId, ForgeError, ParticipantId};
+use forge_core::{CallId, EventBus, ForgeError, ParticipantId};
 use forge_engine::{
     MediaBridgeManager, MediaSession, ParticipantCodecConfig, ParticipantLabel,
     ParticipantMediaUpdate, SessionManager,
@@ -55,10 +55,15 @@ use crate::sdp::{
 use crate::tap::{MediaTap, MediaTapError};
 
 /// Daemon-wide handles `MediaSetup` needs once at startup. Cheap to
-/// clone — both managers are already `Arc`-ed.
+/// clone — every field is already `Arc`-ed.
 pub struct MediaSetup {
     session_manager: Arc<SessionManager>,
     bridge_manager: Arc<MediaBridgeManager>,
+    /// Same `EventBus` the [`SessionManager`] publishes to. Each tap
+    /// `subscribe()`s here so per-call DTMF / VAD / quality events
+    /// reach the bridge layer without going through forge's
+    /// session-internal channels.
+    event_bus: Arc<EventBus>,
     /// IP that goes into the answer's `c=` and `o=` lines. Same
     /// address forge's RTP socket is bound to (or the public-facing
     /// address when behind 1:1 NAT — left to deployment config).
@@ -140,11 +145,13 @@ impl MediaSetup {
     pub fn new(
         session_manager: Arc<SessionManager>,
         bridge_manager: Arc<MediaBridgeManager>,
+        event_bus: Arc<EventBus>,
         local_ip: impl Into<String>,
     ) -> Self {
         Self {
             session_manager,
             bridge_manager,
+            event_bus,
             local_ip: local_ip.into(),
         }
     }
@@ -155,6 +162,10 @@ impl MediaSetup {
 
     pub fn bridge_manager(&self) -> &Arc<MediaBridgeManager> {
         &self.bridge_manager
+    }
+
+    pub fn event_bus(&self) -> &Arc<EventBus> {
+        &self.event_bus
     }
 
     pub fn local_ip(&self) -> &str {
@@ -233,6 +244,7 @@ impl MediaSetup {
 
         let tap = MediaTap::attach(
             &self.bridge_manager,
+            &self.event_bus,
             call.call_id.clone(),
             answer.negotiated_audio_sample_rate,
         )?;
@@ -340,6 +352,7 @@ mod tests {
         let setup = MediaSetup::new(
             Arc::clone(&session_mgr),
             Arc::clone(&bridge_mgr),
+            Arc::new(forge_core::EventBus::new()),
             "127.0.0.1",
         );
 

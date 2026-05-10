@@ -91,7 +91,7 @@ fn echo_subprotocol(
 
 fn make_controller(port: u16, call_id: &str) -> (CallController, siphon_ai_core::CallHandle) {
     let manager = Arc::new(MediaBridgeManager::new());
-    let tap = MediaTap::attach(&manager, ForgeCallId::new(call_id), 8000).expect("attach tap");
+    let tap = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), ForgeCallId::new(call_id), 8000).expect("attach tap");
     // Keep the manager alive for the duration of the call by
     // leaking it intentionally — in production the daemon owns the
     // manager. Tests deliberately don't tear it down between calls.

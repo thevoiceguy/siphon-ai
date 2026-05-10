@@ -96,7 +96,7 @@ async fn dispatch_bye_wakes_running_controller_via_registry() {
     // 2. Build a controller around a real MediaTap + WS bridge.
     let manager = Arc::new(MediaBridgeManager::new());
     let forge_call_id = ForgeCallId::new("siphon-bye-test");
-    let tap = MediaTap::attach(&manager, forge_call_id, 8000).expect("attach");
+    let tap = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), forge_call_id, 8000).expect("attach");
     let cfg = CallControllerConfig {
         call_id: BridgeCallId::new("siphon-bye-test"),
         bridge: BridgeConfig {

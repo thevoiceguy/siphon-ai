@@ -61,7 +61,7 @@ use siphon_ai_bridge::{
     connect_and_run, BridgeChannels, BridgeConfig, BridgeError, BridgeIn, CallId, DisconnectReason,
     OutgoingEvent, StartMsg, StopReason,
 };
-use siphon_ai_media_glue::{MediaTap, MediaTapError, TapDisconnect};
+use siphon_ai_media_glue::{MediaTap, MediaTapError, TapCommand, TapDisconnect};
 use thiserror::Error;
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
@@ -237,6 +237,9 @@ impl CallController {
         // bridge → controller: BridgeIn from server
         let (control_in_tx, mut control_in_rx) =
             mpsc::channel::<BridgeIn>(CONTROL_CHANNEL_CAPACITY);
+        // controller → tap: out-of-band commands the controller routes
+        // from BridgeIn (currently SendDtmf; future Clear / Mark).
+        let (tap_cmd_tx, tap_cmd_rx) = mpsc::channel::<TapCommand>(CONTROL_CHANNEL_CAPACITY);
 
         let channels = BridgeChannels {
             audio_out_rx: caller_audio_rx,
@@ -255,9 +258,13 @@ impl CallController {
         // sender means tap and controller are independent producers
         // — bridge teardown closes the receiver, both producers see
         // the same EOF.
-        let mut tap_task: JoinHandle<Result<TapDisconnect, MediaTapError>> = tokio::spawn(
-            media_tap.run(caller_audio_tx, playout_audio_rx, control_out_tx.clone()),
-        );
+        let mut tap_task: JoinHandle<Result<TapDisconnect, MediaTapError>> =
+            tokio::spawn(media_tap.run(
+                caller_audio_tx,
+                playout_audio_rx,
+                control_out_tx.clone(),
+                tap_cmd_rx,
+            ));
 
         // We don't wait for the bridge handshake to declare
         // Active; the moment both tasks are spawned, audio plumbing
@@ -305,10 +312,31 @@ impl CallController {
                                 .await;
                             break;
                         }
+                        Some(BridgeIn::SendDtmf {
+                            call_id: cid,
+                            digit,
+                            duration_ms,
+                        }) => {
+                            debug!(
+                                ws_call_id = %cid,
+                                digit = %digit,
+                                duration_ms,
+                                "forwarding SendDtmf to tap",
+                            );
+                            // tap_cmd_tx capacity is small (8); a
+                            // backed-up tap means forge or the WS
+                            // side is misbehaving. Drop with a warn
+                            // rather than blocking the control loop.
+                            if let Err(e) = tap_cmd_tx
+                                .try_send(TapCommand::SendDtmf { digit, duration_ms })
+                            {
+                                warn!(error = %e, "tap command channel full or closed; dropping SendDtmf");
+                            }
+                        }
                         Some(other) => {
-                            // Clear / Mark / Transfer / SendDtmf:
-                            // log for now; full handling lands with
-                            // their respective glue layers.
+                            // Clear / Mark / Transfer: log for now;
+                            // full handling lands with their
+                            // respective glue layers.
                             debug!(?other, "control message not yet handled");
                         }
                         None => {

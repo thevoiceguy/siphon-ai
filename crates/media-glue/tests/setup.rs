@@ -153,7 +153,7 @@ async fn pre_attached_tap_pumps_real_audio() {
 
     let (caller_tx, mut caller_rx) = mpsc::channel::<Vec<u8>>(10);
     let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
-    let pump = tokio::spawn(accepted.tap.run(caller_tx, playout_rx, ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0));
+    let pump = tokio::spawn(accepted.tap.run(caller_tx, playout_rx, ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0, ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1));
 
     // Push 20 ms of inbound at 8 kHz (160 samples).
     let pattern: Vec<i16> = (0..160).map(|i| (i as i16) * 3).collect();

@@ -59,8 +59,10 @@
 use std::sync::Arc;
 
 use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, EventBus, ForgeError, ForgeEvent};
+use forge_dtmf::DtmfDigit;
 use forge_engine::{
-    MediaBridgeHandle, MediaBridgeManager, MediaTarget, OutboundMediaFrame, PlayoutMode,
+    MediaBridgeHandle, MediaBridgeManager, MediaTarget, OutboundDtmfRequest, OutboundMediaFrame,
+    PlayoutMode,
 };
 use siphon_ai_bridge::{
     pack_pcm16_le, unpack_pcm16_le, AudioError, DtmfMethod, OutgoingEvent, Reframer,
@@ -91,6 +93,30 @@ pub enum MediaTapError {
     Audio(#[from] AudioError),
 }
 
+/// Out-of-band commands the controller can drive the tap with —
+/// distinct from the audio path because they're rare control-plane
+/// events, not per-frame data.
+///
+/// Each variant maps to a forge `MediaBridgeHandle` action. The tap
+/// translates the WS server's intent (`BridgeIn::SendDtmf`, future
+/// `Clear`, future `Mark`) into the right forge call.
+///
+/// New variants are additive — older controllers / tests building
+/// only `SendDtmf` keep working without any match-arm churn here.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum TapCommand {
+    /// Server-driven outbound DTMF press. The tap turns it into an
+    /// [`OutboundDtmfRequest`] targeting [`MediaTarget::A`] (the SIP
+    /// caller); forge's encoder writes the RFC 2833 packets onto the
+    /// session's RTP socket.
+    ///
+    /// Invalid `digit` chars (anything outside `0-9 * # A-D`) are
+    /// dropped with a warning rather than tearing the call down — a
+    /// misbehaving WS server shouldn't kill a call.
+    SendDtmf { digit: char, duration_ms: u32 },
+}
+
 /// Why the tap pump exited cleanly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TapDisconnect {
@@ -117,6 +143,15 @@ pub struct MediaTap {
     /// broadcast channel's per-receiver queue holds up to the bus's
     /// configured capacity.
     events_rx: broadcast::Receiver<ForgeEvent>,
+    /// Held alive across calls to [`Self::run`] so that, if the
+    /// daemon-wide bus's `Sender` is dropped (test fixtures that don't
+    /// keep the `Arc<EventBus>` alive, or a future shutdown sequence),
+    /// the swapped-in fallback receiver doesn't immediately re-close.
+    /// Without this anchor the `events_rx` `select!` arm would fire
+    /// `Closed` every poll under `biased;`, starving the other arms.
+    /// `None` while the original bus is still feeding us; `Some`
+    /// after we've swapped in a fallback channel.
+    events_keepalive: Option<broadcast::Sender<ForgeEvent>>,
 }
 
 impl std::fmt::Debug for MediaTap {
@@ -156,6 +191,7 @@ impl MediaTap {
             sample_rate,
             call_id,
             events_rx,
+            events_keepalive: None,
         })
     }
 
@@ -181,12 +217,16 @@ impl MediaTap {
     ///   from forge's event bus (currently only DTMF). The bridge
     ///   crate stamps `call_id` + `seq` and writes the JSON text
     ///   frame on the WS.
+    /// - `commands_rx`: control-plane requests from the controller
+    ///   (currently [`TapCommand::SendDtmf`]). The tap translates
+    ///   each into the right forge `MediaBridgeHandle` call.
     #[instrument(skip_all, fields(call_id = %self.call_id, sample_rate = self.sample_rate))]
     pub async fn run(
         mut self,
         caller_audio_tx: mpsc::Sender<Vec<u8>>,
         mut playout_audio_rx: mpsc::Receiver<Vec<u8>>,
         events_tx: mpsc::Sender<OutgoingEvent>,
+        mut commands_rx: mpsc::Receiver<TapCommand>,
     ) -> Result<TapDisconnect, MediaTapError> {
         let mut reframer = Reframer::new(self.sample_rate)?;
 
@@ -271,15 +311,64 @@ impl MediaTap {
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             debug!("forge event bus closed; tap continues without events");
-                            // Falling through to the next iteration
-                            // would spin on an immediately-ready Closed
-                            // arm. Replace the receiver with one that
-                            // blocks forever instead.
-                            let (_dummy_tx, dummy_rx) = broadcast::channel(1);
+                            // Without holding a keepalive sender, the
+                            // fresh receiver would also be Closed, the
+                            // arm would fire on every poll, and under
+                            // `biased;` the cmd / audio arms would be
+                            // starved. Stash the sender on `self` so
+                            // it lives as long as the tap.
+                            let (dummy_tx, dummy_rx) = broadcast::channel(1);
+                            self.events_keepalive = Some(dummy_tx);
                             self.events_rx = dummy_rx;
                         }
                     }
                 }
+
+                // Controller-driven commands (currently only SendDtmf).
+                cmd = commands_rx.recv() => {
+                    let Some(cmd) = cmd else {
+                        // Controller dropped its sender. The audio
+                        // arms still drive the call; treat command
+                        // closure as a non-fatal "no more commands"
+                        // and stop polling this arm by recreating the
+                        // receiver against a dropped sender.
+                        debug!("commands_rx closed; tap continues without commands");
+                        let (_drop_tx, replacement) = mpsc::channel::<TapCommand>(1);
+                        commands_rx = replacement;
+                        continue;
+                    };
+                    handle_tap_command(&self.call_id, &self.handle, cmd).await;
+                }
+            }
+        }
+    }
+}
+
+async fn handle_tap_command(call_id: &CallId, handle: &MediaBridgeHandle, cmd: TapCommand) {
+    match cmd {
+        TapCommand::SendDtmf { digit, duration_ms } => {
+            let parsed = match DtmfDigit::from_char(digit) {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!(
+                        call_id = %call_id,
+                        digit = %digit, error = %e,
+                        "ignoring SendDtmf with unsupported digit char",
+                    );
+                    return;
+                }
+            };
+            let req = OutboundDtmfRequest {
+                target: MediaTarget::A,
+                digit: parsed,
+                duration_ms,
+                playback_id: None,
+                mode: PlayoutMode::Append,
+            };
+            if let Err(e) = handle.send_dtmf(req).await {
+                warn!(call_id = %call_id, error = %e, "forge send_dtmf failed");
+            } else {
+                debug!(call_id = %call_id, digit = %digit, duration_ms, "queued outbound DTMF");
             }
         }
     }

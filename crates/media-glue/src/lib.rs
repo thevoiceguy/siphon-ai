@@ -15,4 +15,4 @@ pub use sdp::{
     build_answer, negotiate_answer, parse_offer, AnswerOutcome, Codec, LocalCapabilities, SdpError,
 };
 pub use setup::{InboundAccepted, InboundCall, MediaSetup, SetupError};
-pub use tap::{MediaTap, MediaTapError, TapDisconnect};
+pub use tap::{MediaTap, MediaTapError, TapCommand, TapDisconnect};

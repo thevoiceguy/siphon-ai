@@ -57,15 +57,18 @@
 
 use std::time::Duration;
 
+use sip_core::SipUri;
 use siphon_ai_bridge::{
     connect_and_run, BridgeChannels, BridgeConfig, BridgeError, BridgeIn, CallId, DisconnectReason,
-    OutgoingEvent, StartMsg, StopReason,
+    ErrorCode, OutgoingEvent, StartMsg, StopReason,
 };
 use siphon_ai_media_glue::{MediaTap, MediaTapError, TapCommand, TapDisconnect};
 use thiserror::Error;
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
+
+use crate::transfer::{TransferContext, TransferOutcome};
 
 /// Bounded channel capacity for audio frames. 10 × 20 ms = 200 ms
 /// of audio; per CLAUDE.md §6.2 audio channels are bounded for
@@ -93,6 +96,12 @@ pub struct CallControllerConfig {
 
     /// Pre-attached forge tap. The controller drives it.
     pub media_tap: MediaTap,
+
+    /// Optional REFER handle. `None` in unit tests that don't
+    /// exercise transfer; the daemon's [`BridgingAcceptor`] populates
+    /// it for every accepted call when the daemon-wide
+    /// `IntegratedUAC` is installed.
+    pub transfer: Option<TransferContext>,
 }
 
 /// Where in its life a call is. State transitions are logged at
@@ -222,6 +231,7 @@ impl CallController {
             bridge,
             start,
             media_tap,
+            transfer,
         } = cfg;
 
         log_state(&call_id, CallState::Initializing);
@@ -240,6 +250,11 @@ impl CallController {
         // controller → tap: out-of-band commands the controller routes
         // from BridgeIn (currently SendDtmf; future Clear / Mark).
         let (tap_cmd_tx, tap_cmd_rx) = mpsc::channel::<TapCommand>(CONTROL_CHANNEL_CAPACITY);
+        // transfer task → controller: REFER outcome. Single-shot per
+        // call (`Transfer` ends the call on success); cap = 1 keeps
+        // back-pressure simple if a second BridgeIn::Transfer arrives
+        // while the first is still in flight.
+        let (transfer_result_tx, mut transfer_result_rx) = mpsc::channel::<TransferOutcome>(1);
 
         let channels = BridgeChannels {
             audio_out_rx: caller_audio_rx,
@@ -358,16 +373,95 @@ impl CallController {
                                 warn!(error = %e, %name, "tap command channel full or closed; dropping Mark");
                             }
                         }
-                        Some(other) => {
-                            // Transfer: log for now; full handling
-                            // lands with the SIP REFER glue.
-                            debug!(?other, "control message not yet handled");
+                        Some(BridgeIn::Transfer { call_id: cid, target }) => {
+                            // RFC 3515 blind transfer. Spawn a task so
+                            // the multi-RTT REFER never blocks the
+                            // control loop (CLAUDE.md §4.3: nothing
+                            // adjacent to audio may block). The task
+                            // reports back via `transfer_result_rx`,
+                            // which has its own select arm below.
+                            match &transfer {
+                                Some(ctx) => {
+                                    let ctx = ctx.clone();
+                                    let tx = transfer_result_tx.clone();
+                                    let target_owned = target.clone();
+                                    debug!(
+                                        ws_call_id = %cid,
+                                        target = %target_owned,
+                                        "spawning REFER task"
+                                    );
+                                    tokio::spawn(async move {
+                                        let outcome = run_transfer(&ctx, &target_owned).await;
+                                        // Receiver is bounded(1); the
+                                        // call ends on first Accepted
+                                        // so try_send is safe — a
+                                        // queue-full only happens if
+                                        // a second Transfer landed
+                                        // back-to-back, in which case
+                                        // dropping the result is fine.
+                                        let _ = tx.try_send(outcome);
+                                    });
+                                }
+                                None => {
+                                    warn!(
+                                        ws_call_id = %cid,
+                                        "BridgeIn::Transfer received but no IntegratedUAC \
+                                         is installed; rejecting"
+                                    );
+                                    let _ = control_out_tx
+                                        .send(OutgoingEvent::Error {
+                                            code: ErrorCode::TransferFailed,
+                                            message: "transfer not configured on daemon"
+                                                .to_string(),
+                                        })
+                                        .await;
+                                }
+                            }
                         }
                         None => {
                             // Bridge dropped the sender — let the
                             // bridge_task arm fire next.
                             debug!("control_in_rx closed; awaiting bridge task to settle");
                             control_open = false;
+                        }
+                    }
+                }
+
+                // Outcome of an in-flight REFER. Open for the lifetime
+                // of the controller; cap = 1 so this fires at most
+                // once per Transfer round.
+                Some(outcome) = transfer_result_rx.recv() => {
+                    match outcome {
+                        TransferOutcome::Accepted => {
+                            info!(call_id = %call_id, "REFER accepted; tearing down call");
+                            termination = CallTermination::LocalShutdown;
+                            let _ = control_out_tx
+                                .send(OutgoingEvent::Stop { reason: StopReason::Transfer })
+                                .await;
+                            break;
+                        }
+                        TransferOutcome::LocalError(msg) => {
+                            warn!(call_id = %call_id, error = %msg, "REFER failed locally");
+                            let _ = control_out_tx
+                                .send(OutgoingEvent::Error {
+                                    code: ErrorCode::TransferFailed,
+                                    message: msg,
+                                })
+                                .await;
+                        }
+                        TransferOutcome::RemoteRejected { status, reason } => {
+                            warn!(
+                                call_id = %call_id,
+                                status,
+                                reason = %reason,
+                                "PBX rejected REFER"
+                            );
+                            let _ = control_out_tx
+                                .send(OutgoingEvent::Error {
+                                    code: ErrorCode::TransferFailed,
+                                    message: format!("{status} {reason}"),
+                                })
+                                .await;
                         }
                     }
                 }
@@ -461,4 +555,51 @@ impl CallController {
 
 fn log_state(call_id: &CallId, state: CallState) {
     info!(call_id = %call_id, ?state, "call state");
+}
+
+/// One-shot REFER round-trip. Lookup → URI parse → send_refer →
+/// classify the response. Errors are returned as [`TransferOutcome`]
+/// variants (never `Result::Err`) so the controller has a single
+/// match arm to handle every outcome.
+async fn run_transfer(ctx: &TransferContext, target: &str) -> TransferOutcome {
+    let refer_to = match SipUri::parse(target) {
+        Ok(uri) => uri,
+        Err(e) => {
+            return TransferOutcome::LocalError(format!("invalid transfer target {target:?}: {e}"));
+        }
+    };
+
+    // The UAS owns the canonical dialog; we operate on a clone so the
+    // local CSeq the REFER consumes doesn't race the next inbound
+    // request on the same dialog. CLAUDE.md §4.4: per-call state is
+    // not shared across tasks — this is the per-task copy.
+    let Some(mut dialog) = ctx.dialog_manager.find_by_call_id(&ctx.sip_call_id) else {
+        return TransferOutcome::LocalError(format!(
+            "no dialog for sip_call_id {:?}",
+            ctx.sip_call_id
+        ));
+    };
+
+    match ctx.uac.send_refer(&mut dialog, &refer_to, None).await {
+        Ok((response, _subscription)) => {
+            let status = response.code();
+            if (200..300).contains(&status) {
+                // RFC 5589 allows either pattern (BYE-after-202 vs.
+                // staying in-dialog to consume NOTIFYs); v1 ships the
+                // simpler "REFER + BYE" so the SIP dialog actually
+                // tears down on the wire. Without this the peer holds
+                // the dialog open until its session-expires kicks in.
+                if let Err(e) = ctx.uac.bye(&dialog).await {
+                    warn!(error = %e, "post-REFER BYE failed (dialog may linger)");
+                }
+                TransferOutcome::Accepted
+            } else {
+                TransferOutcome::RemoteRejected {
+                    status,
+                    reason: response.reason().to_string(),
+                }
+            }
+        }
+        Err(e) => TransferOutcome::LocalError(format!("send_refer: {e}")),
+    }
 }

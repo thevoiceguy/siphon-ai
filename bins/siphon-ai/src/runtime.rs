@@ -64,6 +64,7 @@ use sip_transport::{
     load_rustls_server_config, run_tcp, run_tls, run_udp, send_stream, send_udp, InboundPacket,
     TransportKind as TpTransportKind,
 };
+use sip_uac::integrated::IntegratedUAC;
 use sip_uas::integrated::{IntegratedUAS, UasRequestHandler};
 use siphon_ai_cdr::{CdrSinkHandle, FileSink, MultiSink, NullSink, WebhookSink, WebhookSinkConfig};
 use siphon_ai_config::{
@@ -262,6 +263,28 @@ impl Runtime {
         // dialog_manager that `IntegratedUAS::dispatch` consults on
         // the follow-up BYE.
         acceptor.install_uas(Arc::clone(&uas));
+
+        // ─── Daemon-wide REFER UAC ─────────────────────────────────
+        // One IntegratedUAC instance handles every accepted call's
+        // BridgeIn::Transfer. Distinct from the per-[[register]] UACs
+        // (those have AOR-specific credentials and identities); this
+        // one is anonymous and uses the daemon's own SIP identity.
+        // It MUST share the UAS's DialogManager so the per-call REFER
+        // can find the dialog the UAS established on the inbound
+        // 200 OK. CLAUDE.md §4.4: per-call state lives inside the
+        // controller; process-wide plumbing is what we share here.
+        let transfer_uac = build_transfer_uac(TransferUacBuild {
+            local_uri: &local_uri,
+            contact_uri: &contact_uri,
+            listen_addr: sip.listen_addr,
+            public_addr: sip_public_addr(&node, &sip),
+            transaction_mgr: Arc::clone(&transaction_mgr),
+            dispatcher: Arc::clone(&dispatcher),
+            sip_resolver: Arc::clone(&sip_resolver),
+        })?;
+        let transfer_uac = Arc::new(transfer_uac);
+        let dialog_manager = uas.dialog_manager();
+        acceptor.install_transfer(Arc::clone(&transfer_uac), dialog_manager);
 
         // ─── Per-registration UAC drive tasks ──────────────────────
         // Now that the dispatcher and transaction manager exist, spawn
@@ -515,6 +538,43 @@ fn build_cdr_webhook_sink(cfg: &CdrWebhookConfig) -> Result<CdrSinkHandle> {
     .map_err(|e| anyhow!("CDR webhook client build failed: {e}"))?;
     info!(url = %cfg.url, "CDR webhook sink active");
     Ok(Arc::new(sink) as CdrSinkHandle)
+}
+
+/// Inputs to [`build_transfer_uac`]. Bundled into a struct so the
+/// callsite stays readable and clippy is happy (the function would
+/// otherwise have eight positional arguments).
+struct TransferUacBuild<'a> {
+    local_uri: &'a str,
+    contact_uri: &'a str,
+    listen_addr: SocketAddr,
+    public_addr: Option<SocketAddr>,
+    transaction_mgr: Arc<TransactionManager>,
+    dispatcher: Arc<dyn TransportDispatcher>,
+    sip_resolver: Arc<sip_dns::SipResolver>,
+}
+
+/// Build the daemon-wide UAC used by `BridgeIn::Transfer` to send
+/// REFER inside an existing UAS-accepted dialog. No credentials —
+/// the dialog is already authenticated; REFER inherits the dialog's
+/// authentication state. Shares the system DNS resolver with the
+/// per-[[register]] UACs so SRV/NAPTR resolution happens once.
+fn build_transfer_uac(args: TransferUacBuild<'_>) -> Result<IntegratedUAC> {
+    let mut builder = IntegratedUAC::builder()
+        .local_uri(args.local_uri)
+        .contact_uri(args.contact_uri)
+        .transaction_manager(args.transaction_mgr)
+        .dispatcher(args.dispatcher)
+        .resolver(args.sip_resolver)
+        .local_addr(args.listen_addr.to_string())
+        .map_err(|e| anyhow!("transfer UAC local_addr: {e}"))?;
+    if let Some(public) = args.public_addr {
+        builder = builder
+            .public_addr(public.to_string())
+            .map_err(|e| anyhow!("transfer UAC public_addr: {e}"))?;
+    }
+    builder
+        .build()
+        .map_err(|e| anyhow!("transfer UAC build: {e}"))
 }
 
 fn rtp_port_pool(media: &MediaConfig) -> Result<PortPoolConfig> {

@@ -36,12 +36,23 @@ fn synth_inbound(seq: u16, sample_rate: u32, samples: Vec<i16>) -> InboundMediaF
 async fn inbound_audio_reframed_and_packed_to_caller_channel() {
     let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
     let call = CallId::new("c");
-    let tap = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), call.clone(), 8000).expect("attach");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
 
     let (caller_tx, mut caller_rx) = mpsc::channel::<Vec<u8>>(10);
     let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
 
-    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0, ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1));
+    let pump = tokio::spawn(tap.run(
+        caller_tx,
+        playout_rx,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1,
+    ));
 
     // Push a 20 ms frame of pattern data; the tap should emit one
     // packed wire frame.
@@ -74,11 +85,22 @@ async fn small_inbound_frames_are_buffered_until_a_full_20ms_is_available() {
     // collect two 10 ms frames into one 20 ms wire frame.
     let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
     let call = CallId::new("c");
-    let tap = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), call.clone(), 8000).expect("attach");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
 
     let (caller_tx, mut caller_rx) = mpsc::channel::<Vec<u8>>(10);
     let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
-    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0, ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1));
+    let pump = tokio::spawn(tap.run(
+        caller_tx,
+        playout_rx,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1,
+    ));
 
     // Two 10 ms half-frames at 8 kHz = 80 samples each.
     manager
@@ -105,11 +127,22 @@ async fn small_inbound_frames_are_buffered_until_a_full_20ms_is_available() {
 async fn outbound_audio_unpacked_and_handed_to_forge() {
     let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
     let call = CallId::new("c");
-    let tap = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), call.clone(), 8000).expect("attach");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
 
     let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
     let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
-    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0, ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1));
+    let pump = tokio::spawn(tap.run(
+        caller_tx,
+        playout_rx,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1,
+    ));
 
     // Send a 20 ms frame's worth of wire bytes.
     let samples: Vec<i16> = (10..170).collect();
@@ -146,11 +179,22 @@ async fn outbound_audio_unpacked_and_handed_to_forge() {
 async fn sample_rate_mismatch_yields_error() {
     let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
     let call = CallId::new("c");
-    let tap = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), call.clone(), 8000).expect("attach");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
 
     let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
     let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
-    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0, ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1));
+    let pump = tokio::spawn(tap.run(
+        caller_tx,
+        playout_rx,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1,
+    ));
 
     // Push a frame at the WRONG rate.
     manager
@@ -174,11 +218,22 @@ async fn sample_rate_mismatch_yields_error() {
 async fn malformed_outbound_bytes_yield_audio_error() {
     let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
     let call = CallId::new("c");
-    let tap = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), call.clone(), 8000).expect("attach");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
 
     let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
     let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
-    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0, ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1));
+    let pump = tokio::spawn(tap.run(
+        caller_tx,
+        playout_rx,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1,
+    ));
 
     // Odd-length payload — PCM16 needs an even byte count.
     playout_tx.send(vec![0u8; 5]).await.expect("send");
@@ -197,11 +252,22 @@ async fn malformed_outbound_bytes_yield_audio_error() {
 async fn forge_call_ended_returns_call_ended() {
     let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
     let call = CallId::new("c");
-    let tap = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), call.clone(), 8000).expect("attach");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
 
     let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
     let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
-    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0, ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1));
+    let pump = tokio::spawn(tap.run(
+        caller_tx,
+        playout_rx,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1,
+    ));
 
     // Emulate forge ending the inbound stream by detaching the
     // call-id slot from the manager.
@@ -226,11 +292,22 @@ async fn dropping_playout_sender_does_not_end_tap_alone() {
     // tolerated.)
     let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
     let call = CallId::new("c");
-    let tap = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), call.clone(), 8000).expect("attach");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
 
     let (caller_tx, caller_rx) = mpsc::channel::<Vec<u8>>(10);
     let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
-    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0, ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1));
+    let pump = tokio::spawn(tap.run(
+        caller_tx,
+        playout_rx,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1,
+    ));
 
     drop(playout_tx);
     // Pump observes playout_rx closed and exits with ControllerHungUp.
@@ -249,11 +326,22 @@ async fn round_trip_audio_via_tap_then_back_through_forge() {
     // back into playout_tx → forge outbound side → assert match.
     let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
     let call = CallId::new("c");
-    let tap = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), call.clone(), 8000).expect("attach");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
 
     let (caller_tx, mut caller_rx) = mpsc::channel::<Vec<u8>>(10);
     let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
-    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0, ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1));
+    let pump = tokio::spawn(tap.run(
+        caller_tx,
+        playout_rx,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(1).0,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1,
+    ));
 
     let pattern: Vec<i16> = (0..SAMPLES_PER_FRAME_8K).map(|i| (i as i16) * 7).collect();
     manager
@@ -301,9 +389,7 @@ async fn round_trip_audio_via_tap_then_back_through_forge() {
 #[tokio::test]
 async fn dtmf_end_event_emits_outgoing_event() {
     use chrono::Utc;
-    use forge_core::{
-        DtmfDetectionMethod, DtmfEventKind, EventBus as ForgeEventBus, ForgeEvent,
-    };
+    use forge_core::{DtmfDetectionMethod, DtmfEventKind, EventBus as ForgeEventBus, ForgeEvent};
     use siphon_ai_bridge::{DtmfMethod, OutgoingEvent};
 
     let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
@@ -313,10 +399,14 @@ async fn dtmf_end_event_emits_outgoing_event() {
 
     let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
     let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
-    let (events_tx, mut events_rx) =
-        mpsc::channel::<OutgoingEvent>(8);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(8);
 
-    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1));
+    let pump = tokio::spawn(tap.run(
+        caller_tx,
+        playout_rx,
+        events_tx,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1,
+    ));
 
     // Tap subscribes inside `attach`; `events_rx` (the broadcast
     // receiver inside the tap) is live by the time we publish below.
@@ -382,9 +472,7 @@ async fn dtmf_end_event_emits_outgoing_event() {
 #[tokio::test]
 async fn dtmf_event_for_other_call_is_ignored() {
     use chrono::Utc;
-    use forge_core::{
-        DtmfDetectionMethod, DtmfEventKind, EventBus as ForgeEventBus, ForgeEvent,
-    };
+    use forge_core::{DtmfDetectionMethod, DtmfEventKind, EventBus as ForgeEventBus, ForgeEvent};
     use siphon_ai_bridge::OutgoingEvent;
 
     let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
@@ -394,10 +482,14 @@ async fn dtmf_event_for_other_call_is_ignored() {
 
     let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
     let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
-    let (events_tx, mut events_rx) =
-        mpsc::channel::<OutgoingEvent>(8);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(8);
 
-    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1));
+    let pump = tokio::spawn(tap.run(
+        caller_tx,
+        playout_rx,
+        events_tx,
+        ::tokio::sync::mpsc::channel::<::siphon_ai_media_glue::TapCommand>(1).1,
+    ));
 
     // Publish for an unrelated call_id.
     bus.publish(ForgeEvent::DtmfDigitDetected {
@@ -611,7 +703,10 @@ async fn clear_command_emits_flush_on_forge() {
     .expect("forge sees Flush");
 
     match drained {
-        OutboundMediaRequest::Flush { target, playback_id } => {
+        OutboundMediaRequest::Flush {
+            target,
+            playback_id,
+        } => {
             assert_eq!(
                 target,
                 Some(MediaTarget::A),
@@ -929,10 +1024,7 @@ async fn forge_speech_stopped_emits_outgoing_with_duration() {
         .expect("events_tx open");
 
     match event {
-        OutgoingEvent::SpeechStopped {
-            ts_ms,
-            duration_ms,
-        } => {
+        OutgoingEvent::SpeechStopped { ts_ms, duration_ms } => {
             assert_eq!(ts_ms, ts.timestamp_millis().max(0) as u64);
             assert_eq!(duration_ms, 1234);
         }
@@ -1037,7 +1129,13 @@ async fn auto_clear_drops_playout_and_flushes_on_speech_started() {
     .await
     .expect("forge sees Flush");
     assert!(
-        matches!(drained, OutboundMediaRequest::Flush { target: Some(MediaTarget::A), .. }),
+        matches!(
+            drained,
+            OutboundMediaRequest::Flush {
+                target: Some(MediaTarget::A),
+                ..
+            }
+        ),
         "expected Flush for leg A, got {drained:?}",
     );
 
@@ -1068,14 +1166,9 @@ async fn notify_only_does_not_flush_on_speech_started() {
     let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
     let bus = Arc::new(ForgeEventBus::new());
     let call = CallId::new("notify-only");
-    let tap = MediaTap::attach_with_barge_in(
-        &manager,
-        &bus,
-        call.clone(),
-        8000,
-        BargeInAction::Notify,
-    )
-    .expect("attach");
+    let tap =
+        MediaTap::attach_with_barge_in(&manager, &bus, call.clone(), 8000, BargeInAction::Notify)
+            .expect("attach");
 
     let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
     let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);

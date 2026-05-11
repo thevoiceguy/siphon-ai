@@ -91,7 +91,13 @@ fn echo_subprotocol(
 
 fn make_controller(port: u16, call_id: &str) -> (CallController, siphon_ai_core::CallHandle) {
     let manager = Arc::new(MediaBridgeManager::new());
-    let tap = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), ForgeCallId::new(call_id), 8000).expect("attach tap");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        ForgeCallId::new(call_id),
+        8000,
+    )
+    .expect("attach tap");
     // Keep the manager alive for the duration of the call by
     // leaking it intentionally — in production the daemon owns the
     // manager. Tests deliberately don't tear it down between calls.
@@ -106,6 +112,7 @@ fn make_controller(port: u16, call_id: &str) -> (CallController, siphon_ai_core:
         },
         start: start_msg(call_id),
         media_tap: tap,
+        transfer: None,
     };
     CallController::new(cfg)
 }
@@ -205,4 +212,49 @@ async fn unreachable_server_yields_bridge_error() {
     let outcome = controller.run().await.expect("run");
     assert_eq!(outcome.termination, CallTermination::BridgeEnded);
     assert!(matches!(outcome.bridge, Some(Err(_))));
+}
+
+#[tokio::test]
+async fn transfer_without_uac_emits_error() {
+    // No IntegratedUAC installed (transfer = None on the config).
+    // BridgeIn::Transfer must surface as a BridgeOut::Error with
+    // code = transfer_failed instead of silently dropping.
+    let port = one_shot_server(|mut ws| async move {
+        // Drain start.
+        let _ = ws.next().await;
+        // Ask for a transfer.
+        let xfer = serde_json::json!({
+            "type": "transfer",
+            "call_id": "test-5",
+            "target": "sip:bob@example.com"
+        });
+        ws.send(Message::Text(xfer.to_string())).await.unwrap();
+
+        // We expect an `error` message back, then keep the
+        // connection open so the controller doesn't tear down.
+        let saw_error = loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    let v: Value = serde_json::from_str(&t).expect("json");
+                    if v["type"] == "error" {
+                        assert_eq!(v["code"], "transfer_failed");
+                        break true;
+                    }
+                }
+                Some(Ok(Message::Binary(_))) => {} // ignore audio
+                _ => break false,
+            }
+        };
+        assert!(saw_error, "did not observe transfer_failed error");
+
+        // Politely close so the controller exits.
+        ws.close(None).await.ok();
+    })
+    .await;
+
+    let (controller, _handle) = make_controller(port, "test-5");
+    let outcome = controller.run().await.expect("run");
+    // Server closed the WS after the error; controller's bridge
+    // task is the first to exit.
+    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
 }

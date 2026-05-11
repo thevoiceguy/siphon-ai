@@ -94,7 +94,7 @@ fn build_acceptor(
     let media = Arc::new(MediaSetup::new(
         Arc::clone(&session_mgr),
         Arc::clone(&bridge_mgr),
-            Arc::new(forge_core::EventBus::new()),
+        Arc::new(forge_core::EventBus::new()),
         "192.168.1.10",
     ));
     let defaults = BridgeDefaults {
@@ -230,11 +230,10 @@ async fn route_without_ws_url_when_no_default_yields_503() {
     let media = Arc::new(MediaSetup::new(
         Arc::clone(&session_mgr),
         Arc::clone(&bridge_mgr),
-            Arc::new(forge_core::EventBus::new()),
+        Arc::new(forge_core::EventBus::new()),
         "192.168.1.10",
     ));
-    let acceptor =
-        BridgingAcceptor::new(media, BridgeDefaults::default(), CallRegistry::new());
+    let acceptor = BridgingAcceptor::new(media, BridgeDefaults::default(), CallRegistry::new());
 
     let routes = load_from_toml(
         r#"
@@ -308,11 +307,10 @@ async fn second_call_gets_a_fresh_forge_session() {
     let media = Arc::new(MediaSetup::new(
         Arc::clone(&session_mgr),
         Arc::clone(&bridge_mgr),
-            Arc::new(forge_core::EventBus::new()),
+        Arc::new(forge_core::EventBus::new()),
         "192.168.1.10",
     ));
-    let acceptor =
-        BridgingAcceptor::new(media, BridgeDefaults::default(), CallRegistry::new());
+    let acceptor = BridgingAcceptor::new(media, BridgeDefaults::default(), CallRegistry::new());
 
     // We need a default ws_url so prepare_call accepts the offer.
     let routes = load_from_toml(

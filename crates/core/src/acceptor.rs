@@ -55,6 +55,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sip_core::Request;
+use sip_dialog::DialogManager;
+use sip_uac::integrated::IntegratedUAC;
 use sip_uas::integrated::IntegratedUAS;
 use sip_uas::UserAgentServer;
 use siphon_ai_bridge::{
@@ -85,6 +87,7 @@ use uuid::Uuid;
 
 use crate::call::{CallController, CallControllerConfig, CallOutcome, CallTermination};
 use crate::registry::CallRegistry;
+use crate::transfer::TransferContext;
 
 /// Daemon-wide bridge & media defaults. Routes' `[route.bridge]`
 /// and `[route.media]` blocks override individual fields.
@@ -528,22 +531,30 @@ pub struct BridgingAcceptor {
     /// [`Self::install_uas`] to close the cycle. Tests that don't
     /// drive `on_matched` (the only consumer) can leave it unset.
     uas: OnceLock<Arc<IntegratedUAS>>,
+    /// Late-bound too — same reason as `uas`. The daemon-wide
+    /// `IntegratedUAC` is built once after the UAS so it can share
+    /// the UAS's [`DialogManager`]. Without it, `BridgeIn::Transfer`
+    /// returns `TransferFailed` to the WS server.
+    transfer: OnceLock<InstalledTransfer>,
     registry: CallRegistry,
     cdr_sink: CdrSinkHandle,
     webhook_sink: WebhookSinkHandle,
     call_id_factory: CallIdFactory,
 }
 
+/// Daemon-wide REFER plumbing (shared across every accepted call).
+struct InstalledTransfer {
+    uac: Arc<IntegratedUAC>,
+    dialog_manager: Arc<DialogManager>,
+}
+
 impl BridgingAcceptor {
-    pub fn new(
-        media: Arc<MediaSetup>,
-        defaults: BridgeDefaults,
-        registry: CallRegistry,
-    ) -> Self {
+    pub fn new(media: Arc<MediaSetup>, defaults: BridgeDefaults, registry: CallRegistry) -> Self {
         Self {
             media,
             defaults,
             uas: OnceLock::new(),
+            transfer: OnceLock::new(),
             registry,
             cdr_sink: Arc::new(NullSink),
             webhook_sink: Arc::new(WebhookNullSink),
@@ -560,6 +571,25 @@ impl BridgingAcceptor {
             .set(uas)
             .map_err(|_| ())
             .expect("install_uas called twice on BridgingAcceptor");
+    }
+
+    /// Install the daemon-wide REFER plumbing. `uac` issues the
+    /// REFER; `dialog_manager` MUST be the same instance the UAS
+    /// dispatches against (`IntegratedUAS::dialog_manager()`), or
+    /// the controller's per-call dialog lookup will miss.
+    ///
+    /// Optional: callers that don't enable transfer never call this
+    /// and `BridgeIn::Transfer` is rejected at the controller with
+    /// `TransferFailed`. Calling twice panics — there is exactly one
+    /// transfer UAC per daemon.
+    pub fn install_transfer(&self, uac: Arc<IntegratedUAC>, dialog_manager: Arc<DialogManager>) {
+        self.transfer
+            .set(InstalledTransfer {
+                uac,
+                dialog_manager,
+            })
+            .map_err(|_| ())
+            .expect("install_transfer called twice on BridgingAcceptor");
     }
 
     /// Override the bridge call-id factory. Useful in tests where
@@ -992,10 +1022,7 @@ impl BridgingAcceptor {
                 participant_b: forge_core::ParticipantId::new(format!("ws-{}", forge_call_id.0)),
                 from_tag: None,
                 to_tag: None,
-                barge_in_action: barge_in_to_tap_action(&resolve_barge_in(
-                    &self.defaults,
-                    route,
-                )),
+                barge_in_action: barge_in_to_tap_action(&resolve_barge_in(&self.defaults, route)),
             })
             .await?;
 
@@ -1007,11 +1034,18 @@ impl BridgingAcceptor {
             &self.defaults.forward_headers,
         );
 
+        let transfer = self.transfer.get().map(|installed| TransferContext {
+            sip_call_id: sip_call_id.clone(),
+            uac: Arc::clone(&installed.uac),
+            dialog_manager: Arc::clone(&installed.dialog_manager),
+        });
+
         let cfg = CallControllerConfig {
             call_id: bridge_call_id.clone(),
             bridge: bridge_config.clone(),
             start: start.clone(),
             media_tap: tap,
+            transfer,
         };
         let (controller, handle) = CallController::new(cfg);
 

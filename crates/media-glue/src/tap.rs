@@ -238,7 +238,13 @@ impl MediaTap {
         call_id: CallId,
         sample_rate: u32,
     ) -> Result<Self, MediaTapError> {
-        Self::attach_with_barge_in(manager, event_bus, call_id, sample_rate, BargeInAction::Notify)
+        Self::attach_with_barge_in(
+            manager,
+            event_bus,
+            call_id,
+            sample_rate,
+            BargeInAction::Notify,
+        )
     }
 
     /// Same as [`Self::attach`] but with an explicit barge-in policy.
@@ -658,7 +664,13 @@ mod tests {
         // We don't need a manager for the failure path: validation
         // happens before attach_call is invoked.
         let manager = Arc::new(MediaBridgeManager::new());
-        let err = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), CallId::new("c"), 48000).unwrap_err();
+        let err = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            CallId::new("c"),
+            48000,
+        )
+        .unwrap_err();
         assert!(matches!(err, MediaTapError::Audio(_)));
     }
 
@@ -667,7 +679,13 @@ mod tests {
         let manager = Arc::new(MediaBridgeManager::new());
         let call = CallId::new("c");
         {
-            let tap = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), call.clone(), 8000).expect("attach");
+            let tap = MediaTap::attach(
+                &manager,
+                &::std::sync::Arc::new(forge_core::EventBus::new()),
+                call.clone(),
+                8000,
+            )
+            .expect("attach");
             assert_eq!(tap.sample_rate(), 8000);
             assert_eq!(tap.call_id(), &call);
             assert!(manager.has_bridge(&call));
@@ -680,8 +698,20 @@ mod tests {
     fn attach_twice_for_same_call_fails() {
         let manager = Arc::new(MediaBridgeManager::new());
         let call = CallId::new("c");
-        let _t1 = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), call.clone(), 8000).expect("first attach");
-        let err = MediaTap::attach(&manager, &::std::sync::Arc::new(forge_core::EventBus::new()), call, 8000).unwrap_err();
+        let _t1 = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            call.clone(),
+            8000,
+        )
+        .expect("first attach");
+        let err = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            call,
+            8000,
+        )
+        .unwrap_err();
         assert!(matches!(err, MediaTapError::AttachFailed(_)));
     }
 }

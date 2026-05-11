@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  caller_cancels_during_setup — caller sends CANCEL while the daemon
+  is still preparing the 200 OK.
+
+  v1 behaviour (see crates/sip-glue/src/dialog.rs §"CANCEL semantics"):
+  the daemon ALWAYS 200-OKs the CANCEL, then wakes any spawned
+  controller — there is no path that emits 487 Request Terminated to
+  the original INVITE in v1. So this scenario validates the two
+  invariants we DO ship today:
+
+    * CANCEL always returns 200 OK
+    * The daemon doesn't crash or wedge on a CANCEL/INVITE race
+
+  When CANCEL semantics tighten up (487 path lands), update the
+  trailing recv to require 487 instead of accepting 200/487 either way.
+-->
+<scenario name="caller_cancels_during_setup">
+  <send>
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <!-- The transaction layer sends 100 Trying immediately; consume
+       it so SIPp can ack it before the CANCEL goes out. -->
+  <recv response="100"/>
+
+  <send>
+<![CDATA[
+CANCEL sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 CANCEL
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- Two 200 OKs are expected: one for the CANCEL, one for the
+       (raced) original INVITE. The daemon always sends both in v1
+       because the 200 OK to INVITE went out before the CANCEL was
+       processed. -->
+  <recv response="200" rtd="true"/>
+  <recv response="200"/>
+
+  <!-- ACK for the 2xx-to-INVITE so the dialog isn't left orphaned
+       on the wire. Synthetic — SIPp's automatic ACK only fires for
+       known transactions. -->
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+</scenario>

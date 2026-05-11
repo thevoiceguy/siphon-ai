@@ -180,8 +180,8 @@ async fn drive(
 
         match outcome {
             RegisterOutcome::Registered { granted_expires } => {
-                let expires_at = Utc::now()
-                    + chrono::Duration::seconds(granted_expires.as_secs() as i64);
+                let expires_at =
+                    Utc::now() + chrono::Duration::seconds(granted_expires.as_secs() as i64);
                 metrics::counter!(
                     REGISTER_ATTEMPTS_TOTAL,
                     "name" => cfg.name.clone(),
@@ -267,8 +267,13 @@ async fn drive(
 }
 
 enum RegisterOutcome {
-    Registered { granted_expires: Duration },
-    Failed { outcome_label: &'static str, error_msg: String },
+    Registered {
+        granted_expires: Duration,
+    },
+    Failed {
+        outcome_label: &'static str,
+        error_msg: String,
+    },
 }
 
 async fn perform_register(
@@ -280,7 +285,8 @@ async fn perform_register(
         Ok(resp) => {
             let code = resp.code();
             if (200..300).contains(&code) {
-                let granted = response_expires(&resp).unwrap_or(Duration::from_secs(expires_secs as u64));
+                let granted =
+                    response_expires(&resp).unwrap_or(Duration::from_secs(expires_secs as u64));
                 RegisterOutcome::Registered {
                     granted_expires: granted,
                 }

@@ -8,6 +8,7 @@
 pub mod acceptor;
 pub mod call;
 pub mod registry;
+pub mod transfer;
 
 pub use acceptor::{
     build_bridge_config, build_start_msg, extract_offer_sdp, extract_sip_call_id, resolve_barge_in,
@@ -19,3 +20,4 @@ pub use call::{
     CallTermination,
 };
 pub use registry::CallRegistry;
+pub use transfer::{TransferContext, TransferOutcome};

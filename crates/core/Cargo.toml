@@ -30,6 +30,8 @@ siphon-ai-webhooks.workspace   = true
 
 # Upstream — siphon-rs (Request, Response) for the CallAcceptor impl.
 sip-core.workspace        = true
+sip-dialog.workspace      = true
+sip-uac.workspace         = true
 sip-uas.workspace         = true
 sip-transaction.workspace = true
 

@@ -261,10 +261,14 @@ After a successful hangup, SiphonAI sends `stop` with
 { "type": "transfer", "call_id": "...", "target": "sip:agent@example.com" }
 ```
 
-`target` MUST be a SIP or SIPS URI. SiphonAI sends a REFER with that
-target. On a 202-Accepted that proceeds to NOTIFY 200, SiphonAI sends
-`stop` with `reason: "transfer"` and closes. On rejection, SiphonAI
-sends `error { code: "transfer_failed" }` and the call continues.
+`target` MUST be a SIP or SIPS URI. SiphonAI sends a blind REFER with
+that target. On a 2xx final response, SiphonAI sends BYE on the same
+dialog (the "REFER + BYE" pattern from RFC 5589 §6.1), then emits
+`stop` with `reason: "transfer"` and closes the WebSocket. NOTIFYs
+that the PBX sends after the REFER are accepted but not surfaced over
+the WS in v1. On a non-2xx response (or a local failure — bad target
+URI, dialog gone), SiphonAI emits `error { code: "transfer_failed" }`
+and the call continues.
 
 ### 4.5 `send_dtmf` — emit DTMF toward the caller
 

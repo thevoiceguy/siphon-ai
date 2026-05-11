@@ -53,6 +53,12 @@ class Options:
     auth_token: str | None
     echo_marks: bool
     log_level: str
+    # Test-harness knob: after the `start` message, wait this long and
+    # then send a `transfer` message with `target=auto_transfer_target`.
+    # Disabled when either field is None — keeps the reference server
+    # silent on the control channel by default (see file docstring).
+    auto_transfer_target: str | None
+    auto_transfer_delay_ms: int
 
 
 # ─── HTTP-side concerns: auth + subprotocol ─────────────────────────────────
@@ -155,6 +161,21 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
                         })
                     )
 
+                if opts.auto_transfer_target and call_id:
+                    # Test-harness behaviour: drive a blind transfer
+                    # without a human in the loop. The delay lets the
+                    # SIP side reach ESTABLISHED before REFER lands.
+                    target = opts.auto_transfer_target
+                    delay_ms = opts.auto_transfer_delay_ms
+                    cid = call_id
+                    asyncio.create_task(
+                        _send_after(
+                            connection,
+                            delay_ms,
+                            {"type": "transfer", "call_id": cid, "target": target},
+                        )
+                    )
+
             elif mtype == "stop":
                 LOG.info("stop call_id=%s reason=%s", call_id, msg.get("reason"))
                 # SiphonAI closes the connection right after `stop`; we
@@ -184,6 +205,19 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
 def _redact(msg: dict[str, Any]) -> dict[str, Any]:
     """Strip noisy fields when logging known control messages."""
     return {k: v for k, v in msg.items() if k != "type"}
+
+
+async def _send_after(
+    connection: ServerConnection, delay_ms: int, payload: dict[str, Any]
+) -> None:
+    """Sleep, then send a JSON payload. Swallows close errors so a
+    race with WS teardown doesn't crash the task."""
+    await asyncio.sleep(delay_ms / 1000.0)
+    try:
+        await connection.send(json.dumps(payload))
+        LOG.info("test-harness sent: %s", _redact(payload))
+    except websockets.exceptions.ConnectionClosed:
+        LOG.debug("auto-send dropped: connection closed before delay elapsed")
 
 
 # ─── Entrypoint ──────────────────────────────────────────────────────────────
@@ -216,6 +250,22 @@ def parse_args(argv: list[str] | None = None) -> Options:
         help="send a `mark` event back after `start` (used by protocol smoke tests)",
     )
     p.add_argument(
+        "--auto-transfer-target",
+        default=None,
+        metavar="SIP_URI",
+        help=(
+            "test-harness only: after `start`, emit a `transfer` "
+            "message with this target SIP URI. See "
+            "test-harness/sipp-scenarios/blind_transfer.xml."
+        ),
+    )
+    p.add_argument(
+        "--auto-transfer-delay-ms",
+        type=int,
+        default=200,
+        help="ms to wait after `start` before emitting the transfer (default: 200)",
+    )
+    p.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -232,6 +282,8 @@ def parse_args(argv: list[str] | None = None) -> Options:
         auth_token=args.auth_token,
         echo_marks=args.echo_marks,
         log_level=args.log_level,
+        auto_transfer_target=args.auto_transfer_target,
+        auto_transfer_delay_ms=args.auto_transfer_delay_ms,
     )
 
 

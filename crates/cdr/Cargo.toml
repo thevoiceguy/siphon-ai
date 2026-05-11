@@ -18,6 +18,9 @@ chrono.workspace      = true
 uuid.workspace        = true
 thiserror.workspace   = true
 tracing.workspace     = true
+# HEP3 emission target for `HepCdrSink`. Optional dep so deployments
+# that don't want HEP shipping don't pull `hep-rs` + tokio sub-deps.
+hep-rs.workspace      = true
 
 [dev-dependencies]
 tempfile = "3"

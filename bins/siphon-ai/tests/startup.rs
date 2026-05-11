@@ -281,3 +281,74 @@ impl EnvSource for OwnedMapEnv {
         self.0.get(name).cloned()
     }
 }
+
+const HEP_FIXTURE: &str = r#"
+[node]
+id = "siphon-ai-hep-test"
+public_address = "127.0.0.1"
+
+[sip]
+listen = "${TEST_SIP_LISTEN}"
+transports = ["udp"]
+
+[media]
+codecs = ["pcmu", "pcma"]
+rtp_port_range = [${TEST_RTP_MIN}, ${TEST_RTP_MAX}]
+
+[bridge]
+ws_url = "wss://example.test/sip-bridge"
+
+[hep]
+enabled = true
+collector = "${TEST_HEP_COLLECTOR}"
+capture_id = 7777
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+
+#[tokio::test]
+async fn runtime_with_hep_enabled_binds_and_drains_worker_on_shutdown() {
+    // Bind a UDP socket to stand in for Homer; we don't actually
+    // need to receive anything for this smoke — the test asserts the
+    // daemon brings up the HEP plumbing without failing the build,
+    // and shuts down the worker cleanly.
+    let homer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake collector");
+    let homer_addr = homer.local_addr().unwrap();
+
+    let env = OwnedMapEnv::new(&[
+        ("TEST_SIP_LISTEN", "127.0.0.1:0".to_string()),
+        ("TEST_RTP_MIN", "40500".to_string()),
+        ("TEST_RTP_MAX", "40600".to_string()),
+        ("TEST_HEP_COLLECTOR", homer_addr.to_string()),
+    ]);
+    let cfg = load_from_str_with_env(HEP_FIXTURE, &env).expect("config compiles");
+
+    let runtime = Runtime::build(cfg).await.expect("runtime builds with HEP");
+    let bound = runtime.local_addr().expect("local_addr");
+    assert!(bound.port() > 0, "kernel must pick a port");
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let run_handle = tokio::spawn(async move {
+        let _ = runtime
+            .run(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    shutdown_tx.send(()).expect("shutdown signal");
+    tokio::time::timeout(Duration::from_secs(2), run_handle)
+        .await
+        .expect("runtime exits within 2s")
+        .expect("task does not panic");
+
+    // Keep `homer` alive until here so the daemon's UDP sink had a
+    // real socket to `connect()` to.
+    drop(homer);
+}

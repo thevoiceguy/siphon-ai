@@ -47,6 +47,9 @@ pub struct RawConfig {
 
     #[serde(default)]
     pub webhooks: RawWebhooks,
+
+    #[serde(default)]
+    pub hep: RawHep,
 }
 
 /// `[node]` — identity for logs / metrics / SDP origin host.
@@ -263,6 +266,40 @@ pub struct RawObservability {
     /// Required when `enabled = true`.
     #[serde(default)]
     pub http_listen: Option<String>,
+}
+
+/// `[hep]` — HEP3 (Homer) shipping. Off by default; when
+/// `enabled = true`, `collector` is required. The capture ID
+/// disambiguates multiple SiphonAI agents reporting into the same
+/// Homer; the password is the HEPlify-Server shared-secret chunk
+/// (`0x000E`). Both siphon-rs's SIP-message capture and forge-media's
+/// RTCP capture install their global emitters from this config, plus
+/// SiphonAI's own log / CDR chunks.
+///
+/// v1 ships UDP only — TCP/TLS are deferred to the `hep-rs` follow-up.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawHep {
+    /// Master switch. Defaults to `false` so a config without `[hep]`
+    /// keeps doing nothing observability-wise.
+    #[serde(default)]
+    pub enabled: bool,
+    /// `host:port` of the Homer / HEPlify-Server UDP collector.
+    /// Required when `enabled = true`.
+    #[serde(default)]
+    pub collector: Option<String>,
+    /// Homer agent ID — required when `enabled = true`. Operators
+    /// usually pick a small integer per node (e.g., 2001).
+    #[serde(default)]
+    pub capture_id: Option<u32>,
+    /// Optional HEPlify-Server shared password. `${VAR}` env-expanded
+    /// upstream like other secret fields.
+    #[serde(default)]
+    pub capture_password: Option<String>,
+    /// Sink queue capacity. Drops on full; tune up for high call
+    /// volumes. Default `256` (per `hep-rs::DEFAULT_QUEUE_CAPACITY`).
+    #[serde(default)]
+    pub queue_capacity: Option<usize>,
 }
 
 /// `[bridge]` — daemon-wide bridge defaults.

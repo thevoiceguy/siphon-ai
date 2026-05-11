@@ -22,8 +22,16 @@ serde.workspace                       = true
 serde_json.workspace                  = true
 thiserror.workspace                   = true
 
+# HEP3 / Homer shipping. Owned by us (github.com/thevoiceguy/hep-rs +
+# the sip-hep / forge-hep adapter crates). Telemetry assembles the
+# UdpHepSink at startup, installs the per-protocol emitters, and
+# exposes a small SIPHON-AI-owned API for log / CDR HEP chunks.
+# `siphon-ai-config` is intentionally NOT a dep here (it would close
+# a cycle through siphon-ai-core); `HepTelemetry::build` takes
+# primitives so the runtime can do the destructure.
+hep-rs       = { workspace = true }
+sip-hep      = { workspace = true }
+forge-hep    = { workspace = true }
+
 [dev-dependencies]
 hyper-util = { workspace = true, features = ["client", "client-legacy", "http1"] }
-
-# hep-rs is wired in once the upstream repo exists (see workspace Cargo.toml).
-# hep-rs.workspace = true

@@ -19,10 +19,12 @@
 //! - Dynamic log-level admin endpoint.
 //! - Per-call HEP correlation chunks.
 
+pub mod hep;
 pub mod http;
 pub mod metrics;
 pub mod readiness;
 
+pub use hep::{HepBuildError, HepTelemetry, HepTelemetryBuild};
 pub use http::ObservabilityServer;
 pub use metrics::{
     install_recorder, prometheus_builder, register_descriptions, InitError, CALLS_ACTIVE,

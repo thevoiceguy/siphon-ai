@@ -524,7 +524,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -612,7 +612,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 [[package]]
 name = "forge-codecs"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=feat%2Fforge-vad-events#d36df5223e9d054e7c3b855bb50b3225a416ae59"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
 dependencies = [
  "ezk-g722",
  "lazy_static",
@@ -623,7 +623,7 @@ dependencies = [
 [[package]]
 name = "forge-core"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=feat%2Fforge-vad-events#d36df5223e9d054e7c3b855bb50b3225a416ae59"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
 dependencies = [
  "chrono",
  "serde",
@@ -638,7 +638,7 @@ dependencies = [
 [[package]]
 name = "forge-dtmf"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=feat%2Fforge-vad-events#d36df5223e9d054e7c3b855bb50b3225a416ae59"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
 dependencies = [
  "chrono",
  "forge-core",
@@ -650,7 +650,7 @@ dependencies = [
 [[package]]
 name = "forge-engine"
 version = "0.4.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=feat%2Fforge-vad-events#d36df5223e9d054e7c3b855bb50b3225a416ae59"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -660,6 +660,7 @@ dependencies = [
  "forge-codecs",
  "forge-core",
  "forge-dtmf",
+ "forge-hep",
  "forge-injection",
  "forge-recorder",
  "forge-rtp",
@@ -677,9 +678,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-hep"
+version = "0.0.1"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
+dependencies = [
+ "bytes",
+ "hep-rs",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "forge-injection"
 version = "0.1.1"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=feat%2Fforge-vad-events#d36df5223e9d054e7c3b855bb50b3225a416ae59"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
 dependencies = [
  "forge-core",
  "rubato",
@@ -692,7 +706,7 @@ dependencies = [
 [[package]]
 name = "forge-recorder"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=feat%2Fforge-vad-events#d36df5223e9d054e7c3b855bb50b3225a416ae59"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
 dependencies = [
  "bytes",
  "forge-core",
@@ -706,7 +720,7 @@ dependencies = [
 [[package]]
 name = "forge-resampler"
 version = "0.1.1"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=feat%2Fforge-vad-events#d36df5223e9d054e7c3b855bb50b3225a416ae59"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
 dependencies = [
  "thiserror 2.0.18",
  "tracing",
@@ -715,7 +729,7 @@ dependencies = [
 [[package]]
 name = "forge-rtp"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=feat%2Fforge-vad-events#d36df5223e9d054e7c3b855bb50b3225a416ae59"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -737,11 +751,11 @@ dependencies = [
 [[package]]
 name = "forge-sdp"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=feat%2Fforge-vad-events#d36df5223e9d054e7c3b855bb50b3225a416ae59"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
 dependencies = [
  "chrono",
  "forge-core",
- "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/forge-media?branch=feat%2Fforge-vad-events)",
+ "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/forge-media?branch=main)",
  "smol_str",
  "thiserror 2.0.18",
 ]
@@ -749,7 +763,7 @@ dependencies = [
 [[package]]
 name = "forge-transcoder"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=feat%2Fforge-vad-events#d36df5223e9d054e7c3b855bb50b3225a416ae59"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
 dependencies = [
  "bytes",
  "forge-codecs",
@@ -762,7 +776,7 @@ dependencies = [
 [[package]]
 name = "forge-vad"
 version = "0.1.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=feat%2Fforge-vad-events#d36df5223e9d054e7c3b855bb50b3225a416ae59"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
 dependencies = [
  "thiserror 2.0.18",
 ]
@@ -980,6 +994,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hep-rs"
+version = "0.0.1"
+source = "git+https://github.com/thevoiceguy/hep-rs?branch=main#26ed2d31b42bd483d9cbf006045f02225246587d"
+dependencies = [
+ "bytes",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1154,7 +1179,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tokio",
  "tower-service",
  "tracing",
@@ -1774,7 +1799,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1811,7 +1836,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.52.0",
 ]
@@ -2077,7 +2102,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2300,7 +2325,7 @@ dependencies = [
 [[package]]
 name = "sip-auth"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#b3063067b593bab136bb21543ff753dec3315f0d"
+source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#09c33e2de9cbd9581f8309e42b09a81bfb921d3e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2323,7 +2348,7 @@ dependencies = [
 [[package]]
 name = "sip-core"
 version = "0.7.6"
-source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#b3063067b593bab136bb21543ff753dec3315f0d"
+source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#09c33e2de9cbd9581f8309e42b09a81bfb921d3e"
 dependencies = [
  "bytes",
  "httpdate",
@@ -2336,7 +2361,7 @@ dependencies = [
 [[package]]
 name = "sip-dialog"
 version = "0.3.3"
-source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#b3063067b593bab136bb21543ff753dec3315f0d"
+source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#09c33e2de9cbd9581f8309e42b09a81bfb921d3e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2354,7 +2379,7 @@ dependencies = [
 [[package]]
 name = "sip-dns"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#b3063067b593bab136bb21543ff753dec3315f0d"
+source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#09c33e2de9cbd9581f8309e42b09a81bfb921d3e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2366,9 +2391,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sip-hep"
+version = "0.0.1"
+source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#09c33e2de9cbd9581f8309e42b09a81bfb921d3e"
+dependencies = [
+ "bytes",
+ "hep-rs",
+ "once_cell",
+ "tracing",
+]
+
+[[package]]
 name = "sip-observe"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#b3063067b593bab136bb21543ff753dec3315f0d"
+source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#09c33e2de9cbd9581f8309e42b09a81bfb921d3e"
 dependencies = [
  "once_cell",
  "tracing",
@@ -2377,7 +2413,7 @@ dependencies = [
 [[package]]
 name = "sip-parse"
 version = "0.3.4"
-source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#b3063067b593bab136bb21543ff753dec3315f0d"
+source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#09c33e2de9cbd9581f8309e42b09a81bfb921d3e"
 dependencies = [
  "bytes",
  "httpdate",
@@ -2391,7 +2427,7 @@ dependencies = [
 [[package]]
 name = "sip-ratelimit"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#b3063067b593bab136bb21543ff753dec3315f0d"
+source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#09c33e2de9cbd9581f8309e42b09a81bfb921d3e"
 dependencies = [
  "dashmap",
  "parking_lot",
@@ -2402,7 +2438,7 @@ dependencies = [
 [[package]]
 name = "sip-sdp"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=feat%2Fforge-vad-events#d36df5223e9d054e7c3b855bb50b3225a416ae59"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
 dependencies = [
  "nom",
  "smol_str",
@@ -2411,7 +2447,7 @@ dependencies = [
 [[package]]
 name = "sip-sdp"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#b3063067b593bab136bb21543ff753dec3315f0d"
+source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#09c33e2de9cbd9581f8309e42b09a81bfb921d3e"
 dependencies = [
  "nom",
  "smol_str",
@@ -2420,7 +2456,7 @@ dependencies = [
 [[package]]
 name = "sip-transaction"
 version = "0.5.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#b3063067b593bab136bb21543ff753dec3315f0d"
+source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#09c33e2de9cbd9581f8309e42b09a81bfb921d3e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2439,7 +2475,7 @@ dependencies = [
 [[package]]
 name = "sip-transport"
 version = "0.3.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#b3063067b593bab136bb21543ff753dec3315f0d"
+source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#09c33e2de9cbd9581f8309e42b09a81bfb921d3e"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2447,6 +2483,7 @@ dependencies = [
  "memchr",
  "rustls",
  "rustls-pki-types",
+ "sip-hep",
  "sip-observe",
  "socket2 0.5.10",
  "tokio",
@@ -2457,7 +2494,7 @@ dependencies = [
 [[package]]
 name = "sip-uac"
 version = "0.4.2"
-source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#b3063067b593bab136bb21543ff753dec3315f0d"
+source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#09c33e2de9cbd9581f8309e42b09a81bfb921d3e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2482,7 +2519,7 @@ dependencies = [
 [[package]]
 name = "sip-uas"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#b3063067b593bab136bb21543ff753dec3315f0d"
+source = "git+https://github.com/thevoiceguy/siphon-rs?branch=main#09c33e2de9cbd9581f8309e42b09a81bfb921d3e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2558,6 +2595,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "hep-rs",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -2680,6 +2718,8 @@ name = "siphon-ai-telemetry"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "forge-hep",
+ "hep-rs",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -2687,6 +2727,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "serde",
  "serde_json",
+ "sip-hep",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -3035,7 +3076,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

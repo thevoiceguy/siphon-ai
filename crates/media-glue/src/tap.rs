@@ -154,6 +154,21 @@ pub enum TapCommand {
     Mark { name: String },
 }
 
+/// How the tap reacts to forge-vad `SpeechStarted` events. Mirrors
+/// `siphon-ai-core`'s public `BargeInMode` shape but lives in this
+/// crate so media-glue doesn't have to take a backwards dep on
+/// core. The acceptor translates `BargeInConfig` (`enabled` +
+/// `mode`) into one of these at call-setup time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BargeInAction {
+    /// Just forward the WS event. The server decides whether to
+    /// send `clear`.
+    Notify,
+    /// Drop pending outbound playout (drain the tap-side audio
+    /// channel + ask forge to flush leg A) AND forward the event.
+    AutoClear,
+}
+
 /// Why the tap pump exited cleanly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TapDisconnect {
@@ -189,6 +204,13 @@ pub struct MediaTap {
     /// `None` while the original bus is still feeding us; `Some`
     /// after we've swapped in a fallback channel.
     events_keepalive: Option<broadcast::Sender<ForgeEvent>>,
+    /// What this call does when forge-vad reports speech started.
+    /// Resolved from `[bridge].barge_in` + `[route.bridge].barge_in`
+    /// by the acceptor; passed in at `attach` time. Defaults to
+    /// `Notify` on the bare `attach()` entry point so test fixtures
+    /// that don't care about barge-in don't have to thread it
+    /// through.
+    barge_in_action: BargeInAction,
 }
 
 impl std::fmt::Debug for MediaTap {
@@ -216,6 +238,19 @@ impl MediaTap {
         call_id: CallId,
         sample_rate: u32,
     ) -> Result<Self, MediaTapError> {
+        Self::attach_with_barge_in(manager, event_bus, call_id, sample_rate, BargeInAction::Notify)
+    }
+
+    /// Same as [`Self::attach`] but with an explicit barge-in policy.
+    /// The 4-arg form is kept so test fixtures that don't care
+    /// about barge-in don't have to thread the policy through.
+    pub fn attach_with_barge_in(
+        manager: &Arc<MediaBridgeManager>,
+        event_bus: &Arc<EventBus>,
+        call_id: CallId,
+        sample_rate: u32,
+        barge_in_action: BargeInAction,
+    ) -> Result<Self, MediaTapError> {
         // Validate sample rate up front so we don't attach a handle
         // we'd immediately have to detach.
         let _ = siphon_ai_bridge::samples_per_frame(sample_rate)?;
@@ -229,6 +264,7 @@ impl MediaTap {
             call_id,
             events_rx,
             events_keepalive: None,
+            barge_in_action,
         })
     }
 
@@ -344,6 +380,43 @@ impl MediaTap {
                     match event {
                         Ok(ev) => {
                             if let Some(out) = derive_outgoing_event(&self.call_id, ev) {
+                                // Barge-in `auto_clear`: when forge-vad
+                                // reports speech-started AND this call's
+                                // policy is AutoClear, drop pending
+                                // outbound playout before forwarding the
+                                // WS event. The drain catches bytes in
+                                // the controller→tap audio channel that
+                                // haven't yet reached forge; the flush
+                                // dumps forge's encoder queue. Reset the
+                                // Mark bookkeeping so the next `Mark`
+                                // doesn't wait on now-dropped audio.
+                                if matches!(out, OutgoingEvent::SpeechStarted { .. })
+                                    && self.barge_in_action == BargeInAction::AutoClear
+                                {
+                                    let mut drained = 0usize;
+                                    while let Ok(_bytes) = playout_audio_rx.try_recv() {
+                                        drained += 1;
+                                    }
+                                    if let Err(e) = self
+                                        .handle
+                                        .flush(Some(MediaTarget::A), None)
+                                        .await
+                                    {
+                                        warn!(
+                                            call_id = %self.call_id,
+                                            error = %e,
+                                            "forge flush failed during auto_clear",
+                                        );
+                                    } else {
+                                        debug!(
+                                            call_id = %self.call_id,
+                                            drained,
+                                            "auto_clear: dropped pending playout on speech",
+                                        );
+                                    }
+                                    frames_sent_to_forge = 0;
+                                    first_audio_pushed_at = None;
+                                }
                                 if events_tx.send(out).await.is_err() {
                                     debug!("events_tx closed; ending tap");
                                     return Ok(TapDisconnect::ControllerHungUp);

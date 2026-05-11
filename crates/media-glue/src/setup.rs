@@ -52,7 +52,7 @@ use tracing::{debug, info, instrument, warn};
 use crate::sdp::{
     negotiate_answer, parse_offer, AnswerOutcome, Codec, LocalCapabilities, SdpError,
 };
-use crate::tap::{MediaTap, MediaTapError};
+use crate::tap::{BargeInAction, MediaTap, MediaTapError};
 
 /// Daemon-wide handles `MediaSetup` needs once at startup. Cheap to
 /// clone — every field is already `Arc`-ed.
@@ -91,6 +91,11 @@ pub struct InboundCall<'a> {
     pub participant_b: ParticipantId,
     pub from_tag: Option<String>,
     pub to_tag: Option<String>,
+    /// What the tap does when forge-vad reports speech-started.
+    /// `[BargeInAction::Notify]` (just forward the WS event) or
+    /// `[BargeInAction::AutoClear]` (drop pending outbound playout
+    /// before forwarding). Set from `[bridge].barge_in.mode`.
+    pub barge_in_action: BargeInAction,
 }
 
 /// What [`MediaSetup::accept_inbound`] hands back on success.
@@ -242,11 +247,12 @@ impl MediaSetup {
             .set_media_bridge_manager(Arc::clone(&self.bridge_manager))
             .await;
 
-        let tap = MediaTap::attach(
+        let tap = MediaTap::attach_with_barge_in(
             &self.bridge_manager,
             &self.event_bus,
             call.call_id.clone(),
             answer.negotiated_audio_sample_rate,
+            call.barge_in_action,
         )?;
 
         guard.disarm();
@@ -367,6 +373,7 @@ mod tests {
                 participant_b: ParticipantId::generate(),
                 from_tag: None,
                 to_tag: None,
+                barge_in_action: BargeInAction::Notify,
             })
             .await;
 

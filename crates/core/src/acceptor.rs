@@ -107,6 +107,46 @@ pub struct BridgeDefaults {
     /// `start.sip.headers` map. Names are matched case-insensitively
     /// against the INVITE.
     pub forward_headers: Vec<String>,
+    /// Barge-in policy. [`BargeInMode::AutoClear`] (the default)
+    /// drops pending outbound playout the moment forge-vad reports
+    /// the caller started speaking — caller interruption acks
+    /// without a server round-trip. [`BargeInMode::NotifyOnly`]
+    /// just forwards `speech_started` and leaves the decision to
+    /// the WS server.
+    pub barge_in: BargeInConfig,
+}
+
+/// What the daemon does when forge-vad reports speech-started.
+///
+/// Public so the acceptor / media-glue / config layers can refer to
+/// the type by symbol rather than threading a `String`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BargeInMode {
+    /// Just forward `speech_started` / `speech_stopped` to the WS.
+    /// The server decides whether to send `clear`.
+    NotifyOnly,
+    /// Forward the event AND drop pending outbound playout the
+    /// moment speech-started fires.
+    AutoClear,
+}
+
+/// Resolved barge-in plan after merging globals + route overrides.
+#[derive(Debug, Clone)]
+pub struct BargeInConfig {
+    /// Master enable. When `false`, VAD events still flow to the WS
+    /// (the tap subscribes regardless), but `mode` is treated as if
+    /// it were `NotifyOnly` and never drives a server-side flush.
+    pub enabled: bool,
+    pub mode: BargeInMode,
+}
+
+impl Default for BargeInConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: BargeInMode::AutoClear,
+        }
+    }
 }
 
 impl Default for BridgeDefaults {
@@ -118,6 +158,7 @@ impl Default for BridgeDefaults {
             codecs: vec![Codec::Pcmu, Codec::Pcma],
             dtmf_payload_type: Some(101),
             forward_headers: Vec::new(),
+            barge_in: BargeInConfig::default(),
         }
     }
 }
@@ -346,6 +387,49 @@ pub fn resolve_dtmf_pt(defaults: &BridgeDefaults, route: &CompiledRoute) -> Opti
         // doesn't need a PT but advertising one costs nothing and
         // lets a peer that prefers RFC-2833 pick it.
         _ => defaults.dtmf_payload_type,
+    }
+}
+
+/// Resolve the barge-in plan for one call by merging
+/// `[bridge.barge_in]` (global) with `[route.bridge.barge_in]`. Same
+/// shape as the other `resolve_*` helpers — unset route fields
+/// inherit the default. An unrecognised `mode` string on a route
+/// silently falls back to the global mode rather than failing the
+/// call, matching the config crate's existing tolerance for partial
+/// overrides.
+pub fn resolve_barge_in(defaults: &BridgeDefaults, route: &CompiledRoute) -> BargeInConfig {
+    let mut out = defaults.barge_in.clone();
+    if let Some(enabled) = route.bridge.barge_in.enabled {
+        out.enabled = enabled;
+    }
+    if let Some(mode) = route.bridge.barge_in.mode.as_deref() {
+        if let Some(parsed) = parse_barge_in_mode_route(mode) {
+            out.mode = parsed;
+        }
+    }
+    out
+}
+
+fn parse_barge_in_mode_route(s: &str) -> Option<BargeInMode> {
+    match s {
+        "auto_clear" => Some(BargeInMode::AutoClear),
+        "notify_only" => Some(BargeInMode::NotifyOnly),
+        _ => None,
+    }
+}
+
+/// Translate the public [`BargeInConfig`] into the media-glue tap's
+/// own enum. Kept as a single chokepoint so a future
+/// `BargeInConfig.enabled = false` flip — which today degrades
+/// `AutoClear` to `Notify` — can grow knobs without leaking into
+/// every call site.
+fn barge_in_to_tap_action(cfg: &BargeInConfig) -> siphon_ai_media_glue::BargeInAction {
+    if !cfg.enabled {
+        return siphon_ai_media_glue::BargeInAction::Notify;
+    }
+    match cfg.mode {
+        BargeInMode::AutoClear => siphon_ai_media_glue::BargeInAction::AutoClear,
+        BargeInMode::NotifyOnly => siphon_ai_media_glue::BargeInAction::Notify,
     }
 }
 
@@ -908,6 +992,10 @@ impl BridgingAcceptor {
                 participant_b: forge_core::ParticipantId::new(format!("ws-{}", forge_call_id.0)),
                 from_tag: None,
                 to_tag: None,
+                barge_in_action: barge_in_to_tap_action(&resolve_barge_in(
+                    &self.defaults,
+                    route,
+                )),
             })
             .await?;
 

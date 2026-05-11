@@ -199,6 +199,9 @@ pub enum CompileError {
     #[error("[media].dtmf is {0:?}; expected \"rfc2833\" or \"off\"")]
     UnknownDtmfMode(String),
 
+    #[error("[bridge.barge_in].mode is {0:?}; expected \"auto_clear\" or \"notify_only\"")]
+    UnknownBargeInMode(String),
+
     #[error("[media].rtp_port_range {min}-{max} is invalid (min must be < max and even)")]
     BadRtpPortRange { min: u16, max: u16 },
 
@@ -393,6 +396,8 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         .map(strip_bearer_prefix)
         .filter(|s| !s.is_empty());
 
+    let barge_in = compile_barge_in_default(&raw.barge_in)?;
+
     Ok(BridgeDefaults {
         ws_url: raw.ws_url.filter(|s| !s.is_empty()),
         auth_bearer,
@@ -400,7 +405,33 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         codecs,
         dtmf_payload_type,
         forward_headers: raw.forward_headers.unwrap_or_default(),
+        barge_in,
     })
+}
+
+/// Translate `[bridge.barge_in]` into a resolved
+/// [`siphon_ai_core::BargeInConfig`]. Defaults follow `BargeInConfig`'s
+/// own `Default` (`enabled = true`, `mode = AutoClear`); only fields
+/// the operator set in TOML override.
+fn compile_barge_in_default(
+    raw: &crate::raw::RawBargeIn,
+) -> Result<siphon_ai_core::BargeInConfig, CompileError> {
+    let mut cfg = siphon_ai_core::BargeInConfig::default();
+    if let Some(enabled) = raw.enabled {
+        cfg.enabled = enabled;
+    }
+    if let Some(mode) = raw.mode.as_deref() {
+        cfg.mode = parse_barge_in_mode(mode)?;
+    }
+    Ok(cfg)
+}
+
+fn parse_barge_in_mode(s: &str) -> Result<siphon_ai_core::BargeInMode, CompileError> {
+    match s {
+        "auto_clear" => Ok(siphon_ai_core::BargeInMode::AutoClear),
+        "notify_only" => Ok(siphon_ai_core::BargeInMode::NotifyOnly),
+        other => Err(CompileError::UnknownBargeInMode(other.to_string())),
+    }
 }
 
 fn parse_codecs(names: &[String]) -> Result<Vec<Codec>, CompileError> {

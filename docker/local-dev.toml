@@ -1,0 +1,53 @@
+# SiphonAI config for the docker-compose demo.
+#
+# Differences from `configs/local-dev.toml`:
+#
+#   * `[sip].listen = "0.0.0.0:5070"` so the container accepts
+#     traffic on every interface (compose's bridge network gives
+#     each service a private IP).
+#
+#   * `[node].public_address = "127.0.0.1"` — the SDP answer's
+#     `c=` line goes here. With host-port forwarding, callers
+#     running on the host send RTP to 127.0.0.1:<rtp-port>, which
+#     the kernel forwards into the container. Operators running
+#     this on a remote machine should set this to the machine's
+#     external IP.
+#
+#   * `[bridge].ws_url = "ws://echo-ws:8765/"` — compose service
+#     discovery resolves `echo-ws` to the sibling container's IP.
+#
+#   * `[observability].http_listen = "0.0.0.0:9091"` so the host
+#     port-mapping reaches it.
+#
+# The HEP block is left disabled in this file because the demo
+# compose doesn't include Homer. Stand up Homer separately (see
+# docs/HEP.md, follow-up) and flip `[hep].enabled = true` with the
+# right `collector` to wire it in.
+
+[node]
+id = "siphon-ai-compose"
+public_address = "127.0.0.1"
+
+[sip]
+listen = "0.0.0.0:5070"
+transports = ["udp"]
+user_agent = "SiphonAI/compose-demo"
+
+[media]
+codecs = ["pcmu", "pcma"]
+dtmf = "rfc2833"
+rtp_port_range = [40000, 40100]
+
+[bridge]
+ws_url = "ws://echo-ws:8765/"
+ws_connect_timeout_ms = 3000
+audio_sample_rate = 8000
+
+[observability]
+enabled = true
+http_listen = "0.0.0.0:9091"
+
+[[route]]
+name = "default"
+[route.match]
+any = true

@@ -1,0 +1,27 @@
+# Exclude artefacts that bloat the build context without
+# contributing to the image. Keeps `docker build` fast and avoids
+# accidentally shipping (e.g.) a local `.env`.
+
+# Rust build artefacts — the multi-stage Dockerfile builds inside
+# the container; the host's `target/` is irrelevant and can be
+# tens of GB on a workstation with multiple test runs.
+target/
+**/target/
+
+# Editor / OS scratch
+.git/
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+.claude/
+
+# Secrets — never want these baked into a layer
+.env
+.env.*
+*.pem
+*.key
+
+# Test detritus from the SIPp scenarios runner
+*_errors.log

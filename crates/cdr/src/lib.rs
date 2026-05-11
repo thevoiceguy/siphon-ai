@@ -24,11 +24,13 @@
 //! propagating panics.
 
 pub mod file;
+pub mod hep;
 pub mod schema;
 pub mod sink;
 pub mod webhook;
 
 pub use file::{FileSink, FileSinkError};
+pub use hep::HepCdrSink;
 pub use schema::{AudioInfo, CdrRecord, Direction, TerminationCause, TerminationInfo, CDR_VERSION};
 pub use sink::{CdrSink, CdrSinkHandle, MultiSink, NullSink};
 pub use webhook::{WebhookSink, WebhookSinkConfig};

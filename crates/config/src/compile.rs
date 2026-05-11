@@ -32,7 +32,7 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::raw::{
-    RawBridge, RawCdr, RawConfig, RawMedia, RawNode, RawObservability, RawRegister, RawSip,
+    RawBridge, RawCdr, RawConfig, RawHep, RawMedia, RawNode, RawObservability, RawRegister, RawSip,
     RawSipTls, RawWebhooks,
 };
 
@@ -55,6 +55,7 @@ pub struct Config {
     pub cdr: CdrConfig,
     pub observability: ObservabilityConfig,
     pub webhooks: WebhooksConfig,
+    pub hep: HepConfig,
 }
 
 /// One compiled `[[register]]` block. The daemon's
@@ -102,6 +103,27 @@ pub struct WebhooksConfig {
 pub struct ObservabilityConfig {
     pub enabled: bool,
     pub http_listen: Option<SocketAddr>,
+}
+
+/// Resolved HEP3 (Homer) plan. The daemon binary builds a real
+/// `hep_rs::UdpHepSink` from this, installs `sip_hep::SipHepEmitter`
+/// and `forge_hep::ForgeHepEmitter` against it, and uses the same
+/// sink for its own log/CDR HEP chunks.
+///
+/// Always present (default `enabled = false`). Other fields are
+/// `Option`s — set by `compile_hep` when `enabled = true`.
+#[derive(Debug, Clone, Default)]
+pub struct HepConfig {
+    pub enabled: bool,
+    /// `host:port` of the collector. Always `Some` when `enabled`.
+    pub collector: Option<SocketAddr>,
+    /// Homer agent ID. Always `Some` when `enabled`.
+    pub capture_id: Option<u32>,
+    /// HEPlify-Server shared password.
+    pub capture_password: Option<String>,
+    /// Bounded queue capacity between producer and worker. Default
+    /// `256` (matches `hep_rs::DEFAULT_QUEUE_CAPACITY`).
+    pub queue_capacity: usize,
 }
 
 /// Resolved CDR plan. The daemon translates this into actual
@@ -223,6 +245,15 @@ pub enum CompileError {
     #[error("[webhooks].url is required when [webhooks].enabled = true")]
     WebhooksUrlRequired,
 
+    #[error("[hep].collector is required when [hep].enabled = true")]
+    HepCollectorRequired,
+
+    #[error("[hep].collector {0:?} is not a valid host:port socket address: {1}")]
+    BadHepCollector(String, std::net::AddrParseError),
+
+    #[error("[hep].capture_id is required when [hep].enabled = true")]
+    HepCaptureIdRequired,
+
     #[error("[[register]] block at index {index} has empty name")]
     RegisterEmptyName { index: usize },
 
@@ -258,6 +289,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let cdr = compile_cdr(raw.cdr)?;
     let observability = compile_observability(raw.observability)?;
     let webhooks = compile_webhooks(raw.webhooks)?;
+    let hep = compile_hep(raw.hep)?;
 
     if !routes.has_default() {
         warn!(
@@ -275,6 +307,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         cdr,
         observability,
         webhooks,
+        hep,
     })
 }
 
@@ -608,6 +641,36 @@ fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, C
     Ok(ObservabilityConfig {
         enabled: true,
         http_listen: Some(http_listen),
+    })
+}
+
+fn compile_hep(raw: RawHep) -> Result<HepConfig, CompileError> {
+    // Same "disabled = stop here" semantics as observability. Lets
+    // operators flip the master switch off without re-validating the
+    // sub-fields they may have left stale.
+    if !raw.enabled {
+        return Ok(HepConfig::default());
+    }
+
+    let collector_str = raw.collector.ok_or(CompileError::HepCollectorRequired)?;
+    if collector_str.is_empty() {
+        return Err(CompileError::HepCollectorRequired);
+    }
+    let collector = collector_str
+        .parse()
+        .map_err(|e| CompileError::BadHepCollector(collector_str.clone(), e))?;
+
+    let capture_id = raw.capture_id.ok_or(CompileError::HepCaptureIdRequired)?;
+
+    Ok(HepConfig {
+        enabled: true,
+        collector: Some(collector),
+        capture_id: Some(capture_id),
+        capture_password: raw.capture_password,
+        // 256 matches hep_rs::DEFAULT_QUEUE_CAPACITY. We re-declare
+        // it here rather than depending on hep-rs from this crate
+        // (config has a deliberately minimal dep graph).
+        queue_capacity: raw.queue_capacity.unwrap_or(256),
     })
 }
 

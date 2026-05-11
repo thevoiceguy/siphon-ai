@@ -66,9 +66,11 @@ use sip_transport::{
 };
 use sip_uac::integrated::IntegratedUAC;
 use sip_uas::integrated::{IntegratedUAS, UasRequestHandler};
-use siphon_ai_cdr::{CdrSinkHandle, FileSink, MultiSink, NullSink, WebhookSink, WebhookSinkConfig};
+use siphon_ai_cdr::{
+    CdrSinkHandle, FileSink, HepCdrSink, MultiSink, NullSink, WebhookSink, WebhookSinkConfig,
+};
 use siphon_ai_config::{
-    CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, MediaConfig, NodeConfig,
+    CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, HepConfig, MediaConfig, NodeConfig,
     ObservabilityConfig, SipConfig, SipTlsConfig, SipTransport, WebhooksConfig,
 };
 use siphon_ai_core::{BridgingAcceptor, CallRegistry};
@@ -77,7 +79,9 @@ use siphon_ai_sip_glue::{
     DialogTerminatorHandle, RegisterSourceResolver, RegistrationEntry, RegistrationManager,
     RoutingHandler,
 };
-use siphon_ai_telemetry::{install_recorder, ObservabilityServer, ReadinessFlag};
+use siphon_ai_telemetry::{
+    install_recorder, HepTelemetry, HepTelemetryBuild, ObservabilityServer, ReadinessFlag,
+};
 use siphon_ai_webhooks::{
     FilteredSink as WebhookFilteredSink, HttpSink as WebhookHttpSink,
     HttpSinkConfig as WebhookHttpSinkConfig, NullSink as WebhookNullSink, WebhookSinkHandle,
@@ -103,6 +107,10 @@ pub struct Runtime {
     /// `Some` when `[observability].enabled = true`. Dropped on
     /// shutdown to stop the HTTP listener.
     observability: Option<ObservabilityServer>,
+    /// `Some` when `[hep].enabled = true`. Owned here so the UDP
+    /// worker stays alive for the daemon's lifetime; dropped on
+    /// shutdown so the worker exits.
+    hep_telemetry: Option<HepTelemetry>,
     /// Per-`[[register]]` background tasks. v1's tasks are no-ops
     /// (UAC drive lands in a follow-up); we still own the handles
     /// so shutdown awaits them cleanly.
@@ -126,13 +134,20 @@ impl Runtime {
             cdr,
             observability,
             webhooks,
+            hep,
         } = config;
 
         // ─── Telemetry: install Prometheus recorder + spawn HTTP ───
         let readiness = ReadinessFlag::new();
         let observability_server = build_observability(observability, readiness.clone()).await?;
 
-        let cdr_sink = build_cdr_sink(cdr).await?;
+        // ─── HEP3 / Homer wiring ──────────────────────────────────
+        // Built before any SIP / forge traffic so the global emitters
+        // are installed before the listeners can fire. When `[hep]
+        // .enabled = false` returns `None` with zero cost.
+        let hep_telemetry = build_hep_telemetry(&node, hep).await?;
+
+        let cdr_sink = build_cdr_sink(cdr, hep_telemetry.as_ref()).await?;
         // The same sink fans out call lifecycle events from the
         // acceptor AND registration_state_changed events from the
         // per-[[register]] tasks. Cheap to share — Arc<dyn …>.
@@ -325,6 +340,7 @@ impl Runtime {
             uas,
             listeners,
             observability: observability_server,
+            hep_telemetry,
             registration_mgr,
             registration_listeners,
         })
@@ -386,6 +402,14 @@ impl Runtime {
             server.shutdown().await;
         }
 
+        // Drain the HEP UDP worker — drops the sink reference, the
+        // worker sees its channel close, and exits. Bounded by the
+        // sink's queue depth (default 256 packets, ~milliseconds at
+        // typical call volumes).
+        if let Some(hep) = self.hep_telemetry {
+            hep.shutdown().await;
+        }
+
         // Drop the UAS / TM Arcs so any per-call task that's still
         // holding a clone tears down cleanly. We don't wait for
         // active calls — they'll see their channels close and exit
@@ -421,6 +445,44 @@ async fn build_observability(
         .await
         .with_context(|| format!("bind observability HTTP {listen}"))?;
     Ok(Some(server))
+}
+
+/// Build the daemon's HEP3 plumbing from compiled `[hep]` config.
+/// Returns `Ok(None)` when disabled, `Ok(Some(...))` when wired —
+/// installing both `sip-hep` and `forge-hep` global emitters as a
+/// side effect so siphon-rs and forge-media start shipping the
+/// moment the first packet flows.
+async fn build_hep_telemetry(node: &NodeConfig, cfg: HepConfig) -> Result<Option<HepTelemetry>> {
+    if !cfg.enabled {
+        debug!("[hep].enabled = false; HEP shipping disabled");
+        return Ok(None);
+    }
+    // Compile-time validation guarantees these are Some when enabled,
+    // but be defensive — surface a clear startup error rather than
+    // panicking inside the builder.
+    let collector = cfg
+        .collector
+        .ok_or_else(|| anyhow!("[hep].collector unexpectedly empty when enabled"))?;
+    let capture_id = cfg
+        .capture_id
+        .ok_or_else(|| anyhow!("[hep].capture_id unexpectedly empty when enabled"))?;
+
+    let telemetry = HepTelemetry::build(HepTelemetryBuild {
+        collector,
+        capture_id,
+        capture_password: cfg.capture_password,
+        queue_capacity: cfg.queue_capacity,
+        node_id: node.id.clone(),
+    })
+    .await
+    .with_context(|| format!("build HEP UDP sink for collector {collector}"))?;
+
+    info!(
+        collector = %collector,
+        capture_id,
+        "HEP3 shipping active (SIP + RTCP + RTP-QoS + log + CDR chunks)"
+    );
+    Ok(Some(telemetry))
 }
 
 /// Build the `RegisterSourceResolver` closure that the routing
@@ -495,24 +557,40 @@ fn build_webhook_sink(cfg: WebhooksConfig) -> Result<WebhookSinkHandle> {
     Ok(sink)
 }
 
-async fn build_cdr_sink(cdr: CdrConfig) -> Result<CdrSinkHandle> {
-    if !cdr.enabled {
-        return Ok(Arc::new(NullSink));
-    }
+async fn build_cdr_sink(cdr: CdrConfig, hep: Option<&HepTelemetry>) -> Result<CdrSinkHandle> {
     let mut sinks: Vec<CdrSinkHandle> = Vec::new();
-    if let Some(file_cfg) = cdr.file {
-        sinks.push(build_file_sink(&file_cfg).await?);
+
+    if cdr.enabled {
+        if let Some(file_cfg) = cdr.file {
+            sinks.push(build_file_sink(&file_cfg).await?);
+        }
+        if let Some(webhook_cfg) = cdr.webhook {
+            sinks.push(build_cdr_webhook_sink(&webhook_cfg)?);
+        }
     }
-    if let Some(webhook_cfg) = cdr.webhook {
-        sinks.push(build_cdr_webhook_sink(&webhook_cfg)?);
+
+    // HEP CDR shipping is independent of `[cdr].enabled` — operators
+    // can ship CDRs to Homer without also writing them to disk or a
+    // webhook. Wires up when HEP is installed.
+    if let Some(hep) = hep {
+        let mut sink = HepCdrSink::new(hep.sink(), hep.capture_id());
+        if let Some(pw) = hep.capture_password() {
+            sink = sink.with_password(pw);
+        }
+        sinks.push(Arc::new(sink) as CdrSinkHandle);
+        info!("CDR HEP sink active (chunk type 101)");
     }
+
     Ok(match sinks.len() {
-        // [cdr].enabled = true with no sub-sinks turned on is a
-        // configuration tic; emit a warning rather than failing so
-        // operators flipping switches mid-investigation aren't
-        // blocked.
+        // No CDR shipping anywhere — silently drop. We only warn
+        // when `[cdr].enabled = true` was set but no sub-sinks
+        // landed, since that's the misconfig the operator cares about.
         0 => {
-            warn!("[cdr].enabled = true but no sub-sinks (file / webhook) are enabled; CDRs will be dropped");
+            if cdr.enabled {
+                warn!(
+                    "[cdr].enabled = true but no sub-sinks (file / webhook / hep) are active; CDRs will be dropped"
+                );
+            }
             Arc::new(NullSink) as CdrSinkHandle
         }
         1 => sinks.pop().unwrap(),

@@ -844,3 +844,143 @@ async fn mark_fires_after_estimated_playout_of_queued_frames() {
     drop(playout_tx);
     let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
 }
+
+// ─── VAD (SpeechStarted / SpeechStopped from ForgeEvent) ───────────
+
+/// Publishing a `ForgeEvent::SpeechStarted` for this call's `call_id`
+/// must produce exactly one `OutgoingEvent::SpeechStarted` carrying
+/// the wallclock as `ts_ms` (Unix-epoch milliseconds).
+#[tokio::test]
+async fn forge_speech_started_emits_outgoing_speech_started() {
+    use chrono::Utc;
+    use forge_core::{EventBus as ForgeEventBus, ForgeEvent};
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::TapCommand;
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
+    let bus = Arc::new(ForgeEventBus::new());
+    let call = CallId::new("vad-started");
+    let tap = MediaTap::attach(&manager, &bus, call.clone(), 8000).expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (_cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    let ts = Utc::now();
+    bus.publish(ForgeEvent::SpeechStarted {
+        call_id: call.clone(),
+        timestamp: ts,
+    })
+    .expect("publish");
+
+    let event = tokio::time::timeout(Duration::from_millis(500), events_rx.recv())
+        .await
+        .expect("event arrives")
+        .expect("events_tx open");
+
+    match event {
+        OutgoingEvent::SpeechStarted { ts_ms } => {
+            assert_eq!(ts_ms, ts.timestamp_millis().max(0) as u64);
+        }
+        other => panic!("expected SpeechStarted, got {other:?}"),
+    }
+
+    drop(_cmd_tx);
+    drop(_caller_rx);
+    drop(_playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// `SpeechStopped` carries `duration_ms` end-to-end from forge through
+/// to the WS event. Pins the field mapping.
+#[tokio::test]
+async fn forge_speech_stopped_emits_outgoing_with_duration() {
+    use chrono::Utc;
+    use forge_core::{EventBus as ForgeEventBus, ForgeEvent};
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::TapCommand;
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
+    let bus = Arc::new(ForgeEventBus::new());
+    let call = CallId::new("vad-stopped");
+    let tap = MediaTap::attach(&manager, &bus, call.clone(), 8000).expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (_cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    let ts = Utc::now();
+    bus.publish(ForgeEvent::SpeechStopped {
+        call_id: call.clone(),
+        timestamp: ts,
+        duration_ms: 1234,
+    })
+    .expect("publish");
+
+    let event = tokio::time::timeout(Duration::from_millis(500), events_rx.recv())
+        .await
+        .expect("event arrives")
+        .expect("events_tx open");
+
+    match event {
+        OutgoingEvent::SpeechStopped {
+            ts_ms,
+            duration_ms,
+        } => {
+            assert_eq!(ts_ms, ts.timestamp_millis().max(0) as u64);
+            assert_eq!(duration_ms, 1234);
+        }
+        other => panic!("expected SpeechStopped, got {other:?}"),
+    }
+
+    drop(_cmd_tx);
+    drop(_caller_rx);
+    drop(_playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// VAD events for an unrelated `call_id` must not leak to this tap.
+/// Same property as the DTMF filter test — multi-call deployments
+/// would cross-talk without it.
+#[tokio::test]
+async fn forge_speech_event_for_other_call_is_ignored() {
+    use chrono::Utc;
+    use forge_core::{EventBus as ForgeEventBus, ForgeEvent};
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::TapCommand;
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
+    let bus = Arc::new(ForgeEventBus::new());
+    let call = CallId::new("vad-mine");
+    let tap = MediaTap::attach(&manager, &bus, call.clone(), 8000).expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (_cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    bus.publish(ForgeEvent::SpeechStarted {
+        call_id: CallId::new("someone-else"),
+        timestamp: Utc::now(),
+    })
+    .expect("publish foreign");
+
+    let nothing = tokio::time::timeout(Duration::from_millis(50), events_rx.recv()).await;
+    assert!(
+        nothing.is_err(),
+        "tap must filter by call_id; got an event meant for another call: {nothing:?}",
+    );
+
+    drop(_cmd_tx);
+    drop(_caller_rx);
+    drop(_playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}

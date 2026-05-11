@@ -115,12 +115,17 @@ sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "
 # / Deepgram / ElevenLabs WebSocket clients). SiphonAI is provider-neutral —
 # AI logic belongs in the WS server, never here. See CLAUDE.md §4.1 and the
 # upstream gate at https://github.com/thevoiceguy/forge-media/pull/39.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", branch = "main", default-features = false, features = ["g722"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
+#
+# Pinned to the VAD events branch until forge-media PR #41 merges:
+# https://github.com/thevoiceguy/forge-media/pull/41 — adds the
+# `forge-vad` crate and ForgeEvent::SpeechStarted/Stopped variants we
+# consume below in MediaTap.
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", branch = "feat/forge-vad-events" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", branch = "feat/forge-vad-events" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", branch = "feat/forge-vad-events", default-features = false, features = ["g722"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", branch = "feat/forge-vad-events" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", branch = "feat/forge-vad-events" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", branch = "feat/forge-vad-events" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Repo not yet created (CLAUDE.md
 # §2 marks this as "new, owned by us"). Wire this entry in once the repo exists:

@@ -41,20 +41,19 @@
 //!   committed to in `start.audio.sample_rate`. A mid-call codec
 //!   switch that changes the rate yields a fatal `SampleRateMismatch`.
 //!
-//! ## DTMF events
+//! ## Bus-derived events (DTMF, speech)
 //!
 //! The tap subscribes to the daemon-wide [`EventBus`] forge publishes
-//! to. When a [`ForgeEvent::DtmfDigitDetected`] for *this* call's
-//! `call_id` arrives — and only on the `End` of the press, so each
-//! press maps to one WS event with a final `duration_ms` — we forward
-//! it through the supplied [`OutgoingEvent`] sender as
-//! `OutgoingEvent::Dtmf`. The bridge crate stamps `call_id` and `seq`
-//! and writes the JSON `dtmf` text frame on the WS.
+//! to. Events for *this* call's `call_id` get mapped to
+//! [`OutgoingEvent`] variants and forwarded through the supplied
+//! sender; the bridge crate stamps `call_id` + `seq` and writes the
+//! JSON text frame on the WS. v1 maps:
 //!
-//! ## Not yet wired
-//!
-//! - VAD `speech_started` / `speech_stopped`. Forge has the detector
-//!   surface; we just don't have a `ForgeEvent` variant for it yet.
+//! - [`ForgeEvent::DtmfDigitDetected`] (only on `End`, so each press
+//!   maps to one event carrying the final `duration_ms`).
+//! - [`ForgeEvent::SpeechStarted`] / [`ForgeEvent::SpeechStopped`]
+//!   from forge-vad. Each transition publishes once — hysteresis
+//!   inside the detector filters per-frame jitter.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -536,6 +535,25 @@ fn derive_outgoing_event(call_id: &CallId, event: ForgeEvent) -> Option<Outgoing
             // emit the press so the WS server isn't left guessing.
             duration_ms: duration_ms.unwrap_or(0),
             method: map_dtmf_method(method),
+        }),
+        ForgeEvent::SpeechStarted {
+            call_id: ev_call,
+            timestamp,
+        } if &ev_call == call_id => Some(OutgoingEvent::SpeechStarted {
+            // `ts_ms` is the wallclock Unix-epoch milliseconds of
+            // the transition. forge's `timestamp_millis()` returns
+            // i64; we coerce to u64 (negative pre-epoch values would
+            // wrap, but that won't happen for live calls). The WS
+            // server decides how to display it.
+            ts_ms: timestamp.timestamp_millis().max(0) as u64,
+        }),
+        ForgeEvent::SpeechStopped {
+            call_id: ev_call,
+            timestamp,
+            duration_ms,
+        } if &ev_call == call_id => Some(OutgoingEvent::SpeechStopped {
+            ts_ms: timestamp.timestamp_millis().max(0) as u64,
+            duration_ms,
         }),
         _ => None,
     }

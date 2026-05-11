@@ -290,4 +290,28 @@ pub struct RawBridge {
     /// Names are case-insensitive at lookup time.
     #[serde(default)]
     pub forward_headers: Option<Vec<String>>,
+    /// `[bridge.barge_in]` block. Empty = inherit defaults
+    /// (`enabled = true`, `mode = "auto_clear"`).
+    #[serde(default)]
+    pub barge_in: RawBargeIn,
+}
+
+/// `[bridge.barge_in]` — global default barge-in policy.
+/// Mirrors the `[route.bridge.barge_in]` override grammar so the
+/// merge in the compile step is purely "if route field is `Some`,
+/// take it; else inherit the default."
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawBargeIn {
+    /// Master switch. Defaults to `true` on the global side.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// `"auto_clear"` (default) or `"notify_only"`.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Reserved for future use (event debouncing). Accepted today
+    /// so configs that set it don't fail validation; not yet read
+    /// by the runtime.
+    #[serde(default)]
+    pub debounce_ms: Option<u64>,
 }

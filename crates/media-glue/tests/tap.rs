@@ -984,3 +984,129 @@ async fn forge_speech_event_for_other_call_is_ignored() {
     drop(_playout_tx);
     let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
 }
+
+// ─── Barge-in auto_clear (SpeechStarted triggers forge.flush) ──────
+
+/// `BargeInAction::AutoClear` + `SpeechStarted` must:
+///   1. Drop any pending bytes in `playout_audio_rx`.
+///   2. Ask forge to flush leg A.
+///   3. Forward the WS event so the server sees `speech_started`.
+///
+/// Pins the `[bridge].barge_in.mode = "auto_clear"` semantics: a
+/// caller interruption is acked immediately with no server round-trip.
+#[tokio::test]
+async fn auto_clear_drops_playout_and_flushes_on_speech_started() {
+    use chrono::Utc;
+    use forge_core::{EventBus as ForgeEventBus, ForgeEvent};
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::{BargeInAction, TapCommand};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
+    let bus = Arc::new(ForgeEventBus::new());
+    let call = CallId::new("auto-clear");
+    let tap = MediaTap::attach_with_barge_in(
+        &manager,
+        &bus,
+        call.clone(),
+        8000,
+        BargeInAction::AutoClear,
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (_cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    bus.publish(ForgeEvent::SpeechStarted {
+        call_id: call.clone(),
+        timestamp: Utc::now(),
+    })
+    .expect("publish");
+
+    let drained = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            if let Some(req) = manager.try_recv_outbound_request(&call).await {
+                return req;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("forge sees Flush");
+    assert!(
+        matches!(drained, OutboundMediaRequest::Flush { target: Some(MediaTarget::A), .. }),
+        "expected Flush for leg A, got {drained:?}",
+    );
+
+    let event = tokio::time::timeout(Duration::from_millis(500), events_rx.recv())
+        .await
+        .expect("speech_started arrives")
+        .expect("events_tx open");
+    assert!(
+        matches!(event, OutgoingEvent::SpeechStarted { .. }),
+        "expected SpeechStarted, got {event:?}",
+    );
+
+    drop(_cmd_tx);
+    drop(_caller_rx);
+    drop(_playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// `BargeInAction::Notify` forwards the WS event but does NOT ask
+/// forge to flush. Pins the `mode = "notify_only"` branch.
+#[tokio::test]
+async fn notify_only_does_not_flush_on_speech_started() {
+    use chrono::Utc;
+    use forge_core::{EventBus as ForgeEventBus, ForgeEvent};
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::{BargeInAction, TapCommand};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(10, 10));
+    let bus = Arc::new(ForgeEventBus::new());
+    let call = CallId::new("notify-only");
+    let tap = MediaTap::attach_with_barge_in(
+        &manager,
+        &bus,
+        call.clone(),
+        8000,
+        BargeInAction::Notify,
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (_cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    bus.publish(ForgeEvent::SpeechStarted {
+        call_id: call.clone(),
+        timestamp: Utc::now(),
+    })
+    .expect("publish");
+
+    let event = tokio::time::timeout(Duration::from_millis(500), events_rx.recv())
+        .await
+        .expect("speech_started arrives")
+        .expect("events_tx open");
+    assert!(matches!(event, OutgoingEvent::SpeechStarted { .. }));
+
+    let nothing = tokio::time::timeout(Duration::from_millis(80), async {
+        manager.try_recv_outbound_request(&call).await
+    })
+    .await;
+    assert!(
+        matches!(nothing, Ok(None)) || nothing.is_err(),
+        "notify_only must NOT emit forge requests; got {nothing:?}",
+    );
+
+    drop(_cmd_tx);
+    drop(_caller_rx);
+    drop(_playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}

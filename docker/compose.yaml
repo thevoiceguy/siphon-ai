@@ -1,0 +1,87 @@
+# Local-demo docker-compose for SiphonAI.
+#
+# What you get with `docker compose up`:
+#
+#   * `echo-ws`     — the reference Python WebSocket server on
+#                     ws://echo-ws:8765 inside the compose network.
+#                     Echoes every audio frame back into the call;
+#                     logs control messages.
+#
+#   * `siphon-ai`   — the daemon, configured to dial the echo WS
+#                     above. Listens for SIP on host port 5070/udp.
+#
+# Drive a call from your host with SIPp:
+#
+#   sipp -sf test-harness/sipp-scenarios/basic_call_then_bye.xml \
+#        -m 1 -p 5080 -s 1000 127.0.0.1:5070
+#
+# (or a softphone; point it at 127.0.0.1:5070 with any user-part.)
+#
+# This file deliberately leaves Homer out — running Homer pulls in
+# Postgres + heplify-server + the homer-app UI, which is its own
+# stack. See examples/homer-stack/ for that integration (deferred to
+# the docs/HEP.md PR).
+
+services:
+  echo-ws:
+    build:
+      context: ../examples/echo-ws-server-python
+      dockerfile: Dockerfile
+    image: siphon-ai/echo-ws:dev
+    # The daemon connects to ws://echo-ws:8765 inside the bridge
+    # network; we don't expose the port to the host unless an
+    # operator explicitly forwards it (uncomment the `ports` line
+    # below for poking from a host browser/`websocat`).
+    # ports:
+    #   - "8765:8765"
+    command:
+      - --bind
+      - "0.0.0.0:8765"
+      - --log-level
+      - INFO
+    healthcheck:
+      # `/healthz` short-circuits the WebSocket upgrade in the
+      # echo server (see server.py::process_request), so the probe
+      # gets a clean 200 without "InvalidUpgrade" log noise every
+      # 5 seconds.
+      test:
+        - CMD-SHELL
+        - "python3 -c \"import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8765/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)\""
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+    restart: unless-stopped
+
+  siphon-ai:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: siphon-ai/siphon-ai:dev
+    depends_on:
+      echo-ws:
+        condition: service_healthy
+    # Mount the compose-tuned config in over the image's default
+    # path. Operators editing on the host see changes after a
+    # `docker compose restart siphon-ai`.
+    volumes:
+      - ./local-dev.toml:/app/config.toml:ro
+    ports:
+      # SIP UDP — SIPp / softphones / PBX trunks. Mapped to host
+      # 5070 to match the existing test-harness/sipp-scenarios
+      # commands and configs/local-dev.toml.
+      - "5070:5070/udp"
+      # SIP TCP — same port, different namespace.
+      - "5070:5070/tcp"
+      # Prometheus metrics + /health + /ready.
+      - "9091:9091/tcp"
+      # RTP port pool. forge's port allocator picks from this range
+      # for the answer SDP's `m=audio` line; without these forwarded
+      # the caller's media flows nowhere.
+      - "40000-40100:40000-40100/udp"
+    environment:
+      # Verbose enough to see call lifecycle without drowning in
+      # per-frame logs. Override with `--log` or RUST_LOG when
+      # debugging a specific layer.
+      RUST_LOG: "siphon_ai=info,siphon=info,forge=info"
+    restart: unless-stopped

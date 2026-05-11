@@ -9,7 +9,37 @@ call. **It does not contain any AI code** — that is the WebSocket server's job
 
 ## Status
 
-Pre-alpha; scaffold only. See `docs/DEV_PLAN.md` for the 7-week sprint plan.
+Pre-alpha. See `docs/DEV_PLAN.md` for the 7-week sprint plan.
+
+## Quickstart (Docker)
+
+The fastest way to see SiphonAI work end-to-end is the local demo
+stack — a containerized daemon talking to the reference Python echo
+WebSocket server.
+
+```sh
+# Build + run the daemon + echo-ws in the background.
+docker compose -f docker/compose.yaml up -d
+
+# Drive a call from your host. Any softphone pointed at
+# 127.0.0.1:5070 works; this one uses SIPp.
+sipp -sf test-harness/sipp-scenarios/basic_call_then_bye.xml \
+     -m 1 -p 5080 -s 1000 127.0.0.1:5070
+
+# Watch the call land:
+docker compose -f docker/compose.yaml logs -f siphon-ai echo-ws
+```
+
+The echo server replays every audio frame back into the call, so if
+you use a softphone you'll hear yourself.
+
+The compose file mounts `docker/local-dev.toml` over the image's
+default config. Edit it (or supply your own with `-v
+./my.toml:/app/config.toml:ro`) and `docker compose restart
+siphon-ai` to apply.
+
+Prometheus metrics live on `http://127.0.0.1:9091/metrics`;
+`/health` and `/ready` are next to them.
 
 ## Layout
 
@@ -51,7 +81,7 @@ the same author:
 
 - [`siphon-rs`](https://github.com/thevoiceguy/siphon-rs) — RFC 3261 SIP stack
 - [`forge-media`](https://github.com/thevoiceguy/forge-media) — RTP/codecs/SDP/jitter/VAD
-- `hep-rs` — HEP3 codec, transport, `HepSink` trait (in progress; not yet a public repo)
+- [`hep-rs`](https://github.com/thevoiceguy/hep-rs) — HEP3 codec, transport, `HepSink` trait
 
 ## License
 

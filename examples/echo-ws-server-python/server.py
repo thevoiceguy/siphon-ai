@@ -72,6 +72,13 @@ def make_request_handler(opts: Options):
     """
 
     def process_request(connection: ServerConnection, request: Request) -> Response | None:
+        # Cheap healthcheck endpoint. We short-circuit before the
+        # websockets handshake validation runs, so periodic
+        # `curl http://.../healthz` from a Docker / k8s probe
+        # doesn't show up as an `InvalidUpgrade` error in the log.
+        if request.path == "/healthz":
+            return connection.respond(200, "ok\n")
+
         if opts.auth_token is None:
             return None
         header = request.headers.get("Authorization", "")

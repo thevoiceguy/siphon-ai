@@ -1,0 +1,7 @@
+# Skip the local venv from `python -m venv .venv` and other
+# scratch state.
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store

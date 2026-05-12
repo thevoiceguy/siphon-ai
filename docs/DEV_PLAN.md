@@ -486,8 +486,7 @@ speech_pad_ms = 50
 # CLAUDE.md §4.2 and the v1 protocol's fixed PCM16/8k|16k contract.
 [bridge]
 audio_direction = "bidirectional"    # bidirectional | inbound_only
-on_ws_failure = "hangup"             # hangup | play_prompt
-on_ws_failure_prompt = "/etc/siphon-ai/prompts/trouble.wav"
+on_ws_failure = "hangup"             # v1: "hangup" only; "play_prompt" is post-v1
 ws_reconnect_enabled = false         # post-v1
 ws_connect_timeout_ms = 3000
 

@@ -227,6 +227,12 @@ pub enum CompileError {
     )]
     CodecRequiresResampling(String),
 
+    #[error(
+        "route {route:?} sets [route.bridge].on_ws_failure = {value:?}; expected \
+         \"hangup\" (play_prompt is post-v1)"
+    )]
+    UnknownOnWsFailure { route: String, value: String },
+
     #[error("[media].dtmf is {0:?}; expected \"rfc2833\" or \"off\"")]
     UnknownDtmfMode(String),
 
@@ -459,6 +465,15 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
 
     let barge_in = compile_barge_in_default(&raw.barge_in)?;
 
+    // `None` → 60 s default; `Some(0)` → watchdog off. The merge
+    // step in `resolve_inactivity_timeout` handles per-route 0 →
+    // disabled the same way.
+    let inactivity_timeout = match media.inactivity_timeout_secs {
+        None => Some(Duration::from_secs(60)),
+        Some(0) => None,
+        Some(n) => Some(Duration::from_secs(n)),
+    };
+
     Ok(BridgeDefaults {
         ws_url: raw.ws_url.filter(|s| !s.is_empty()),
         auth_bearer,
@@ -467,6 +482,7 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         dtmf_payload_type,
         forward_headers: raw.forward_headers.unwrap_or_default(),
         barge_in,
+        inactivity_timeout,
     })
 }
 
@@ -539,7 +555,22 @@ fn strip_bearer_prefix(value: &str) -> String {
 
 fn compile_dialplan(routes: Vec<siphon_ai_routes::RawRoute>) -> Result<RouteSet, CompileError> {
     let raw_file = RawRouteFile { routes };
-    Ok(compile_routes(raw_file)?)
+    let set = compile_routes(raw_file)?;
+    // Walk each route's `[route.bridge]` overrides for fields that
+    // need an enum check beyond what the routes crate already does.
+    // Today: `on_ws_failure` is "hangup" only — the play_prompt
+    // path needs a forge-driven prompt player that isn't built.
+    for route in set.iter() {
+        if let Some(mode) = route.bridge.on_ws_failure.as_deref() {
+            if !mode.eq_ignore_ascii_case("hangup") {
+                return Err(CompileError::UnknownOnWsFailure {
+                    route: route.name.clone(),
+                    value: mode.to_string(),
+                });
+            }
+        }
+    }
+    Ok(set)
 }
 
 fn compile_webhooks(raw: RawWebhooks) -> Result<WebhooksConfig, CompileError> {

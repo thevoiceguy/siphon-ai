@@ -213,6 +213,127 @@ ws_url = "wss://x/y"
 }
 
 #[test]
+fn on_ws_failure_only_accepts_hangup() {
+    // v1 supports "hangup" only — `play_prompt` would need a
+    // forge-driven prompt player that isn't built. Reject the
+    // unsupported mode at load time instead of silently ignoring it.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+[route.bridge]
+on_ws_failure = "play_prompt"
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("on_ws_failure") && msg.contains("play_prompt"),
+        "expected on_ws_failure rejection, got: {msg}"
+    );
+}
+
+#[test]
+fn on_ws_failure_hangup_compiles() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+[route.bridge]
+on_ws_failure = "hangup"
+"#;
+    let cfg = load_from_str_with_env(toml, &env).expect("hangup is the v1 supported mode");
+    assert!(cfg.routes.has_default());
+}
+
+#[test]
+fn inactivity_timeout_defaults_to_60s_when_absent() {
+    // The watchdog default in `BridgeDefaults::default()` is 60s so
+    // an operator who never wrote the field still gets a sensible
+    // safety net against zombie calls.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert_eq!(
+        cfg.bridge_defaults.inactivity_timeout,
+        Some(Duration::from_secs(60)),
+    );
+}
+
+#[test]
+fn inactivity_timeout_zero_disables_watchdog() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[media]
+inactivity_timeout_secs = 0
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert_eq!(cfg.bridge_defaults.inactivity_timeout, None);
+}
+
+#[test]
+fn inactivity_timeout_explicit_value_compiles() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[media]
+inactivity_timeout_secs = 45
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert_eq!(
+        cfg.bridge_defaults.inactivity_timeout,
+        Some(Duration::from_secs(45)),
+    );
+}
+
+#[test]
 fn opus_in_codec_list_is_rejected_at_load() {
     // The WS audio path is PCM16 at 8 kHz or 16 kHz (CLAUDE.md
     // §4.2). Opus samples at 48 kHz and would crash forge tap

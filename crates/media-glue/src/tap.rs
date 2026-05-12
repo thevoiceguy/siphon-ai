@@ -179,6 +179,12 @@ pub enum TapDisconnect {
     /// Equivalent to "the bridge is gone, so there's no point reading
     /// or writing audio anymore".
     ControllerHungUp,
+    /// No inbound RTP for the configured
+    /// `[media].inactivity_timeout_secs` window. RFC-3550 says
+    /// nothing about how long a stalled stream is "stalled enough,"
+    /// so this is operator policy: a peer that's gone away on the
+    /// network shouldn't keep a forge session alive forever.
+    InactivityTimeout,
 }
 
 /// Bidirectional audio tap attached to one call's `MediaBridgeHandle`.
@@ -211,6 +217,12 @@ pub struct MediaTap {
     /// that don't care about barge-in don't have to thread it
     /// through.
     barge_in_action: BargeInAction,
+    /// RTP watchdog window. `None` disables the watchdog entirely;
+    /// `Some(d)` means "if no inbound frame arrives within `d`,
+    /// return `TapDisconnect::InactivityTimeout`." Settable on the
+    /// fully-built tap via [`Self::with_inactivity_timeout`] so the
+    /// 4-arg `attach()` form in tests stays terse.
+    inactivity_timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for MediaTap {
@@ -271,7 +283,16 @@ impl MediaTap {
             events_rx,
             events_keepalive: None,
             barge_in_action,
+            inactivity_timeout: None,
         })
+    }
+
+    /// Override the inactivity watchdog window. The acceptor calls
+    /// this after `attach_with_barge_in` so the route's resolved
+    /// `inactivity_timeout_secs` lands on the tap before `run` starts.
+    pub fn with_inactivity_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.inactivity_timeout = timeout;
+        self
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -313,6 +334,15 @@ impl MediaTap {
         let mut frames_sent_to_forge: u64 = 0;
         let mut first_audio_pushed_at: Option<Instant> = None;
 
+        // RTP watchdog. Pinned so we can reset the deadline in place
+        // every time an inbound frame arrives. When the timeout is
+        // `None` we still pin a far-future sleep so the select arm
+        // is structurally identical — the arm just never fires.
+        let inactivity = self.inactivity_timeout;
+        let watchdog_initial = inactivity.unwrap_or(Duration::from_secs(86_400));
+        let watchdog = tokio::time::sleep(watchdog_initial);
+        tokio::pin!(watchdog);
+
         loop {
             tokio::select! {
                 biased;
@@ -323,6 +353,20 @@ impl MediaTap {
                 _ = caller_audio_tx.closed() => {
                     debug!("caller_audio_tx receiver dropped; ending tap");
                     return Ok(TapDisconnect::ControllerHungUp);
+                }
+
+                // RTP watchdog. `if inactivity.is_some()` makes the
+                // arm un-selectable when the operator turned the
+                // watchdog off — `tokio::select!` skips the arm
+                // entirely rather than registering its waker, so the
+                // far-future sleep never costs anything.
+                _ = &mut watchdog, if inactivity.is_some() => {
+                    warn!(
+                        call_id = %self.call_id,
+                        timeout_ms = inactivity.unwrap().as_millis() as u64,
+                        "no inbound RTP within inactivity window; tearing down",
+                    );
+                    return Ok(TapDisconnect::InactivityTimeout);
                 }
 
                 // Server → caller: bytes from the WS into forge's playout.
@@ -369,6 +413,11 @@ impl MediaTap {
                             expected: self.sample_rate,
                             got: frame.sample_rate,
                         });
+                    }
+                    // Reset the inactivity deadline on every received
+                    // frame. Cheap; `Sleep::reset` reuses the timer.
+                    if let Some(d) = inactivity {
+                        watchdog.as_mut().reset(tokio::time::Instant::now() + d);
                     }
                     reframer.push(&frame.samples);
                     while let Some(samples) = reframer.pop_frame() {
@@ -713,5 +762,79 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, MediaTapError::AttachFailed(_)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inactivity_watchdog_fires_when_no_inbound_frame() {
+        // `start_paused = true` lets us advance virtual time
+        // deterministically — no real wall-clock sleeps in the test.
+        // Attach a tap, hand it inactivity = 100 ms, and watch the
+        // watchdog arm fire when no frame arrives. forge never sends
+        // a frame in this fixture (no session driver), which is
+        // exactly the "RTP stopped" scenario.
+        let manager = Arc::new(MediaBridgeManager::new());
+        let call = CallId::new("c-watchdog");
+        let tap = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            call,
+            8000,
+        )
+        .expect("attach")
+        .with_inactivity_timeout(Some(Duration::from_millis(100)));
+
+        let (caller_tx, mut caller_rx) = mpsc::channel(4);
+        let (_playout_tx, playout_rx) = mpsc::channel(4);
+        let (events_tx, mut events_rx) = mpsc::channel(4);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+
+        let join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+        // Advance virtual time past the deadline. The watchdog arm
+        // fires and `run` returns `Ok(InactivityTimeout)`.
+        tokio::time::advance(Duration::from_millis(200)).await;
+
+        let outcome = join.await.expect("join").expect("ok");
+        assert_eq!(outcome, TapDisconnect::InactivityTimeout);
+
+        // No audio / events should have been emitted — we exited
+        // straight from the watchdog arm.
+        assert!(caller_rx.try_recv().is_err());
+        assert!(events_rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inactivity_watchdog_off_when_timeout_none() {
+        // With `inactivity_timeout = None` the watchdog arm is
+        // disabled — `tap.run` should NOT exit just because virtual
+        // time advanced past any deadline. We tear it down by
+        // dropping the caller_audio_tx receiver to confirm the loop
+        // is still alive and responsive.
+        let manager = Arc::new(MediaBridgeManager::new());
+        let tap = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            CallId::new("c-no-watchdog"),
+            8000,
+        )
+        .expect("attach")
+        .with_inactivity_timeout(None);
+
+        let (caller_tx, caller_rx) = mpsc::channel(4);
+        let (_playout_tx, playout_rx) = mpsc::channel(4);
+        let (events_tx, _events_rx) = mpsc::channel(4);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+
+        let join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+        // Way past any plausible default — still no exit.
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        // Drop the receiver to wake the `caller_audio_tx.closed()` arm.
+        drop(caller_rx);
+        // Allow the runtime to step.
+        tokio::task::yield_now().await;
+
+        let outcome = join.await.expect("join").expect("ok");
+        assert_eq!(outcome, TapDisconnect::ControllerHungUp);
     }
 }

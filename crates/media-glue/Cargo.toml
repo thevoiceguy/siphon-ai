@@ -31,3 +31,7 @@ forge-dtmf.workspace   = true
 # `chrono` is in our forge_core::ForgeEvent::DtmfDigitDetected
 # `timestamp` field, used in tests that publish synthesised events.
 chrono.workspace = true
+# `test-util` is required for `#[tokio::test(start_paused = true)]`
+# and `tokio::time::advance` — used in the inactivity-watchdog test.
+# `"full"` (the workspace default) deliberately omits this feature.
+tokio = { workspace = true, features = ["test-util"] }

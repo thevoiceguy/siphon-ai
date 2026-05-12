@@ -319,6 +319,11 @@ async fn run_loop(
             maybe_msg = stream.next() => {
                 match maybe_msg {
                     Some(Ok(Message::Binary(data))) => {
+                        // Audio frames at ~50/sec — trace-level so
+                        // operators can opt into the per-frame stream
+                        // when triaging WS payout issues without
+                        // drowning their dashboards at info.
+                        tracing::trace!(bytes = data.len(), "ws inbound audio");
                         if audio_in_tx.send(data).await.is_err() {
                             return Ok(DisconnectReason::ControllerHungUp);
                         }
@@ -333,6 +338,13 @@ async fn run_loop(
                                 got: got.to_string(),
                             });
                         }
+                        // Debug-level: every received control message
+                        // (Clear, Mark, Hangup, Transfer, SendDtmf).
+                        // §11.8 Q9 in DEV_PLAN.md — operators bump
+                        // `siphon_ai_bridge=debug` via /admin/log to
+                        // see exactly what the WS server sent. Audio
+                        // frames live one notch lower (trace).
+                        tracing::debug!(?parsed, "ws inbound control");
                         if control_in_tx.send(parsed).await.is_err() {
                             return Ok(DisconnectReason::ControllerHungUp);
                         }

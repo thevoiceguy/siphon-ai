@@ -41,7 +41,6 @@ rtp_port_range = [40000, 40100]
 [bridge]
 ws_url = "ws://echo-ws:8765/"
 ws_connect_timeout_ms = 3000
-audio_sample_rate = 8000
 
 [observability]
 enabled = true

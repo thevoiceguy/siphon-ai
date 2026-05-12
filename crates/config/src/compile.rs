@@ -7,7 +7,9 @@
 //! - At least one transport is enabled, and every name is one of
 //!   `udp` / `tcp` / `tls`.
 //! - Every codec name parses via [`Codec::from_encoding_name`].
-//! - `[bridge].audio_sample_rate`, when set, is `8000` or `16000`.
+//! - `[bridge].codecs` parse to known encodings via
+//!   `Codec::from_encoding_name`. Opus is rejected here — see
+//!   [`CompileError::CodecRequiresResampling`].
 //! - Every regex in the dialplan compiles (delegated to the routes
 //!   compiler).
 //! - A trailing default route (`any = true`) is recommended but not
@@ -218,6 +220,13 @@ pub enum CompileError {
     #[error("[media].codecs has unknown codec {0:?}")]
     UnknownCodec(String),
 
+    #[error(
+        "[media].codecs lists {0:?}, which is not supported on the WS audio path \
+         (samples at 48 kHz; the bridge ships PCM16 at 8 kHz or 16 kHz). Resampling \
+         is post-v1 work — drop the codec from the list for now."
+    )]
+    CodecRequiresResampling(String),
+
     #[error("[media].dtmf is {0:?}; expected \"rfc2833\" or \"off\"")]
     UnknownDtmfMode(String),
 
@@ -226,9 +235,6 @@ pub enum CompileError {
 
     #[error("[media].rtp_port_range {min}-{max} is invalid (min must be < max and even)")]
     BadRtpPortRange { min: u16, max: u16 },
-
-    #[error("[bridge].audio_sample_rate {0} not supported (8000 or 16000)")]
-    BadSampleRate(u32),
 
     #[error("[cdr.file].path is required when [cdr.file].enabled = true")]
     CdrFilePathRequired,
@@ -441,11 +447,6 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         Some("off") => None,
         Some(other) => return Err(CompileError::UnknownDtmfMode(other.to_string())),
     };
-    if let Some(rate) = raw.audio_sample_rate {
-        if rate != 8000 && rate != 16000 {
-            return Err(CompileError::BadSampleRate(rate));
-        }
-    }
     let connect_timeout = raw
         .ws_connect_timeout_ms
         .map(Duration::from_millis)
@@ -499,11 +500,27 @@ fn parse_codecs(names: &[String]) -> Result<Vec<Codec>, CompileError> {
     for name in names {
         let codec = Codec::from_encoding_name(name)
             .ok_or_else(|| CompileError::UnknownCodec(name.clone()))?;
+        // The bridge audio path only handles 8 kHz and 16 kHz PCM16
+        // (CLAUDE.md §4.2 pins the WS protocol's audio shape). Opus
+        // produces 48 kHz; without resampling in the media engine
+        // the call would 488 at SDP-negotiate time or — worse — 200
+        // OK then fail at tap attach. Refuse at load time so the
+        // operator sees the limitation before a single INVITE.
+        if !is_ws_compatible(codec) {
+            return Err(CompileError::CodecRequiresResampling(name.clone()));
+        }
         if !out.contains(&codec) {
             out.push(codec);
         }
     }
     Ok(out)
+}
+
+/// Codecs whose post-decode PCM rate the WS audio path supports.
+/// G.722 is 16 kHz audio despite its 8 kHz rtpmap quirk; the rest of
+/// our supported set is 8 kHz. Opus is the lone outlier today.
+fn is_ws_compatible(codec: Codec) -> bool {
+    matches!(codec.audio_sample_rate(), 8000 | 16000)
 }
 
 fn default_codecs() -> Vec<Codec> {

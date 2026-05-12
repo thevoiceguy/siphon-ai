@@ -25,7 +25,6 @@ rtp_port_range = [${TEST_RTP_MIN}, ${TEST_RTP_MAX}]
 [bridge]
 ws_url = "wss://example.test/sip-bridge"
 ws_connect_timeout_ms = 1000
-audio_sample_rate = 8000
 
 [[route]]
 name = "default"

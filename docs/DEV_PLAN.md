@@ -471,7 +471,7 @@ expires_secs = 1800
 # ─── Media defaults (per-route can override) ─────────────────────────────
 [media]
 rtp_port_range = [16384, 32768]
-codecs = ["pcmu", "pcma", "opus"]    # offered priority
+codecs = ["pcmu", "pcma"]            # offered priority. Opus is post-v1 (needs 48k→16k resampling in forge).
 dtmf = "rfc2833"                     # rfc2833 | info | both
 inactivity_timeout_secs = 60
 
@@ -481,8 +481,10 @@ aggressiveness = 2                   # 0-3
 speech_pad_ms = 50
 
 # ─── Bridge defaults (per-route can override) ────────────────────────────
+# Audio sample rate on the WS path is determined by the negotiated codec
+# (PCMU/PCMA = 8 kHz, G.722 = 16 kHz). It is NOT a configurable knob — see
+# CLAUDE.md §4.2 and the v1 protocol's fixed PCM16/8k|16k contract.
 [bridge]
-audio_sample_rate = 8000             # 8000 | 16000
 audio_direction = "bidirectional"    # bidirectional | inbound_only
 on_ws_failure = "hangup"             # hangup | play_prompt
 on_ws_failure_prompt = "/etc/siphon-ai/prompts/trouble.wav"
@@ -505,7 +507,6 @@ request_uri_user = "5000"            # exact match on user part of Request-URI
 [route.bridge]
 ws_url = "wss://reception.example.com/sip-bridge"
 ws_auth_header = "Bearer ${BRIDGE_TOKEN_RECEPTION}"
-audio_sample_rate = 16000
 
 [[route]]
 name = "sales_team"
@@ -738,7 +739,7 @@ For a typical call: caller speaks → server's AI responds → caller hears it.
 1. Implement `bridge` crate: `tokio-tungstenite` client, protocol types (`BridgeIn`/`BridgeOut`), connection lifecycle
 2. Implement `start` event with full call metadata (including `traceparent`)
 3. Wire `MediaTap`: inbound forge frames → WS binary; WS binary → forge-injection
-4. Resampling (8k ↔ 16k via forge-resampler) based on `bridge.audio_sample_rate`
+4. (Reserved.) WS audio rate is fixed by the negotiated codec in v1; resampling for codecs whose audio rate is not 8 kHz / 16 kHz (e.g., Opus 48 kHz) is post-v1 work in `forge-resampler`.
 5. Implement `routes` crate: TOML loading, match evaluation (string/regex/header/register_source), per-route override merging
 6. Wire route lookup into the call flow: INVITE → match → use route's bridge config (not global)
 7. Handle `clear` (drop pending playback buffer)
@@ -1252,7 +1253,7 @@ A reasonable user can:
 
 These don't block kickoff but should be answered before the relevant week:
 
-1. **Codec offer ordering:** Default to `[pcmu, pcma, opus]` — but should Opus be first if both sides support it? Pro: better quality. Con: forces transcoding to/from PCM16 at the WS edge if WS server prefers 8 kHz. **Recommendation:** PCMU first (matches PSTN), Opus available, configurable.
+1. **Codec offer ordering:** v1 default is `[pcmu, pcma]`. Opus is *not* offered in v1 — its 48 kHz audio rate doesn't fit the bridge's PCM16 / 8k|16k contract, and adding resampling lives in forge-media, not here. Reopen when forge-resampler ships.
 2. **WS reconnect mid-call:** Punted to post-v1. Worth gathering user feedback before designing.
 3. **Outbound originated calls (UAC INVITE for `make this call`):** Not in v1, but WS server `transfer` is close — should there be a `dial` control message in v1.x?
 4. **Recording:** Forge already has it. Easy add post-v1 — server requests recording via control message, file is stored locally or pushed to S3.

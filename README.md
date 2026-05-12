@@ -7,6 +7,39 @@ phone on a PBX), streams the call's audio over a WebSocket to a developer-
 supplied server, and plays audio received back over that WebSocket into the
 call. **It does not contain any AI code** — that is the WebSocket server's job.
 
+## How it fits together
+
+```mermaid
+flowchart LR
+    Caller([SIP caller<br/>softphone / trunk / PBX])
+    WS["Your WS server<br/>(STT • LLM • TTS)"]
+    Homer[("Homer / HEPIC<br/>HEP3 collector")]
+
+    subgraph SiphonAI ["SiphonAI daemon"]
+        direction LR
+        sip["siphon-rs<br/>SIP UAS / UAC"]
+        forge["forge-media<br/>RTP • codecs • SDP"]
+        bridge["bridge crate<br/>WS protocol v1"]
+        sip -- "INVITE / BYE / REFER" --> ctrl
+        forge -- "PCM16 20 ms frames" --> ctrl
+        ctrl["core::CallController<br/>per-call state machine"]
+        ctrl --> bridge
+    end
+
+    Caller -- "SIP + RTP" --> sip
+    forge <-- "RTP" --> Caller
+    bridge <== "WebSocket<br/>JSON ctrl + binary audio" ==> WS
+
+    sip -. "HEP3 SIP (0x01)" .-> Homer
+    forge -. "HEP3 RTCP (0x05) + QoS (0x20)" .-> Homer
+    ctrl -. "HEP3 CDR (0x65)" .-> Homer
+```
+
+The WebSocket server runs the AI — STT, LLM, TTS, whatever fits the
+use case. SiphonAI is the bridge: SIP signaling, RTP media, codec
+handling, jitter, barge-in, DTMF, hold, transfer. See
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the contract.
+
 ## Status
 
 Pre-alpha. See `docs/DEV_PLAN.md` for the 7-week sprint plan.

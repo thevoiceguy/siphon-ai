@@ -743,8 +743,149 @@ fn tap_detail(res: Option<Result<TapDisconnect, MediaTapError>>) -> String {
     }
 }
 
+/// Read the audio media's `a=` direction from a parsed offer.
+/// Returns `None` for offers without an audio media or with no
+/// explicit direction attribute (the caller maps that to the RFC
+/// 4566 §6 default of sendrecv).
+fn sdp_audio_direction(
+    session: &forge_sdp::SessionDescription,
+) -> Option<siphon_ai_media_glue::MediaDirection> {
+    use forge_sdp::MediaType;
+    let audio = session.find_media(MediaType::Audio)?;
+    audio
+        .direction()
+        .as_ref()
+        .map(|d| d.as_token())
+        .and_then(siphon_ai_media_glue::MediaDirection::from_attr)
+}
+
+/// RFC 3264 §6.1 direction mirror. Hold/resume re-INVITE answering
+/// depends on this — see `BridgingAcceptor::on_reinvite`.
+fn mirror_direction(
+    offer: siphon_ai_media_glue::MediaDirection,
+) -> siphon_ai_media_glue::MediaDirection {
+    use siphon_ai_media_glue::MediaDirection::*;
+    match offer {
+        SendRecv => SendRecv,
+        SendOnly => RecvOnly,
+        RecvOnly => SendOnly,
+        Inactive => Inactive,
+    }
+}
+
+/// Replace the `a=sendrecv|sendonly|recvonly|inactive` line in an
+/// SDP body with the requested direction. Linear scan over lines.
+/// The first match wins and no other lines are touched — re-using
+/// the original port / codec / rtpmap / fmtp values verbatim.
+///
+/// If no direction line exists in the input, one is appended after
+/// the audio media's `m=` line. This is rare in practice (the
+/// initial answer we cache always emits `a=sendrecv`) but keeps
+/// the helper total.
+fn rewrite_sdp_direction(sdp: &str, new_dir: siphon_ai_media_glue::MediaDirection) -> String {
+    let mut out = String::with_capacity(sdp.len());
+    let mut replaced = false;
+    for line in sdp.split_inclusive('\n') {
+        let trimmed = line.trim_end();
+        let is_direction = matches!(
+            trimmed,
+            "a=sendrecv" | "a=sendonly" | "a=recvonly" | "a=inactive"
+        );
+        if is_direction && !replaced {
+            // Preserve CRLF vs LF: take the trailing newline bytes
+            // off the original line and re-attach them.
+            let nl = &line[trimmed.len()..];
+            out.push_str("a=");
+            out.push_str(new_dir.as_attr());
+            out.push_str(nl);
+            replaced = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    if !replaced {
+        // Append. Caller's responsibility to ensure the audio
+        // media section is the last thing — true for our cached
+        // answers (built by `build_answer`).
+        out.push_str("a=");
+        out.push_str(new_dir.as_attr());
+        out.push_str("\r\n");
+    }
+    out
+}
+
 #[async_trait]
 impl CallAcceptor for BridgingAcceptor {
+    #[instrument(skip(self, call), fields(sip_call_id = %call.sip_call_id))]
+    async fn on_reinvite(&self, call: siphon_ai_sip_glue::ReinviteCall<'_>) -> anyhow::Result<()> {
+        // Look up the call's cached answer SDP. Without it we have
+        // no record of the original codec / port / direction and
+        // can't safely build a re-INVITE answer; surface that as
+        // 481 (the dialog effectively isn't ours).
+        let Some(entry) = self.registry.entry(&call.sip_call_id) else {
+            let response = UserAgentServer::create_response(
+                call.request,
+                481,
+                "Call/Transaction Does Not Exist",
+            );
+            call.handle.send_final(response).await;
+            return Ok(());
+        };
+        let Some(prev_answer) = entry.answer_text else {
+            // Legacy path: call was registered without an answer
+            // cache (currently only happens in tests). Refuse
+            // cleanly with 501.
+            let response = UserAgentServer::create_response(call.request, 501, "Not Implemented");
+            call.handle.send_final(response).await;
+            return Ok(());
+        };
+
+        // Determine the offer's new direction. Anything malformed
+        // or missing the audio media falls back to sendrecv per
+        // RFC 4566 §6.
+        let offer_direction = extract_offer_sdp(call.request)
+            .ok()
+            .and_then(|t| siphon_ai_media_glue::parse_offer(t).ok())
+            .as_ref()
+            .and_then(sdp_audio_direction)
+            .unwrap_or_default();
+
+        // RFC 3264 §6.1 mirror: offer sendonly → answer recvonly,
+        // offer recvonly → answer sendonly, offer inactive →
+        // answer inactive, offer sendrecv → answer sendrecv.
+        let answer_direction = mirror_direction(offer_direction);
+
+        // Take the cached answer SDP and flip its direction
+        // attribute. Re-using everything else (port, codecs,
+        // payload types) keeps forge's session intact — hold/
+        // resume by design only changes the `a=` line.
+        let new_answer = rewrite_sdp_direction(&prev_answer, answer_direction);
+
+        // Send 200 OK via the canonical helper so the dialog
+        // manager gets the updated CSeq / route-set.
+        let uas = self.uas.get().ok_or_else(|| {
+            anyhow::anyhow!(
+                "BridgingAcceptor::install_uas was not called; on_reinvite cannot accept INVITE"
+            )
+        })?;
+        uas.accept_invite(
+            call.request,
+            &call.handle,
+            call.transport,
+            Some(&new_answer),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to accept re-INVITE: {e}"))?;
+
+        debug!(
+            sip_call_id = %call.sip_call_id,
+            offer = ?offer_direction,
+            answer = ?answer_direction,
+            "re-INVITE answered"
+        );
+        Ok(())
+    }
+
     #[instrument(skip(self, call), fields(
         route = %call.route.name,
         from = %call.facts.from_user,
@@ -848,9 +989,16 @@ impl BridgingAcceptor {
         };
 
         // Register before spawning so a BYE arriving on the very
-        // next packet finds an entry to wake.
-        self.registry
-            .insert(prepared.sip_call_id.clone(), prepared.handle);
+        // next packet finds an entry to wake. Cache the answer SDP
+        // we sent so a future re-INVITE (hold/resume) can rebuild a
+        // matching answer with just the direction flipped.
+        self.registry.insert(
+            prepared.sip_call_id.clone(),
+            crate::registry::CallEntry {
+                handle: prepared.handle,
+                answer_text: Some(prepared.answer.answer_text.clone()),
+            },
+        );
 
         // Per-route counter is owned-by-route — bounded cardinality
         // by config (operators have tens of routes, not millions).
@@ -1583,5 +1731,71 @@ a=sendrecv\r\n";
         use std::sync::OnceLock;
         static EMPTY: OnceLock<siphon_ai_routes::Headers> = OnceLock::new();
         EMPTY.get_or_init(siphon_ai_routes::Headers::new)
+    }
+
+    // ─── Hold / resume helpers ──────────────────────────────────
+
+    use siphon_ai_media_glue::MediaDirection;
+
+    #[test]
+    fn mirror_direction_follows_rfc_3264_section_6_1() {
+        assert_eq!(
+            mirror_direction(MediaDirection::SendRecv),
+            MediaDirection::SendRecv
+        );
+        assert_eq!(
+            mirror_direction(MediaDirection::SendOnly),
+            MediaDirection::RecvOnly
+        );
+        assert_eq!(
+            mirror_direction(MediaDirection::RecvOnly),
+            MediaDirection::SendOnly
+        );
+        assert_eq!(
+            mirror_direction(MediaDirection::Inactive),
+            MediaDirection::Inactive
+        );
+    }
+
+    #[test]
+    fn rewrite_sdp_direction_swaps_sendrecv_to_recvonly() {
+        let sdp = "v=0\r\no=- 1 1 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\n\
+                   t=0 0\r\nm=audio 30000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+                   a=sendrecv\r\n";
+        let out = rewrite_sdp_direction(sdp, MediaDirection::RecvOnly);
+        assert!(out.contains("a=recvonly\r\n"));
+        assert!(!out.contains("a=sendrecv"));
+        // Everything else preserved verbatim — port, codec, rtpmap.
+        assert!(out.contains("m=audio 30000 RTP/AVP 0"));
+        assert!(out.contains("a=rtpmap:0 PCMU/8000"));
+    }
+
+    #[test]
+    fn rewrite_sdp_direction_swaps_recvonly_back_to_sendrecv() {
+        // The resume case: previous answer was recvonly (we were
+        // held); new offer is sendrecv; we mirror to sendrecv.
+        let sdp = "v=0\r\nm=audio 30000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
+        let out = rewrite_sdp_direction(sdp, MediaDirection::SendRecv);
+        assert!(out.contains("a=sendrecv\r\n"));
+        assert!(!out.contains("a=recvonly"));
+    }
+
+    #[test]
+    fn rewrite_sdp_direction_appends_when_missing() {
+        // RFC 4566 §6 lets the direction attribute be implicit. If
+        // it's absent we append the explicit attribute rather than
+        // silently leaving the direction unspecified.
+        let sdp = "v=0\r\nm=audio 30000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+        let out = rewrite_sdp_direction(sdp, MediaDirection::Inactive);
+        assert!(out.ends_with("a=inactive\r\n"));
+    }
+
+    #[test]
+    fn rewrite_sdp_direction_preserves_lf_only_endings() {
+        let sdp = "v=0\nm=audio 30000 RTP/AVP 0\na=sendrecv\n";
+        let out = rewrite_sdp_direction(sdp, MediaDirection::SendOnly);
+        assert!(out.contains("a=sendonly\n"));
+        // No spurious CR added.
+        assert!(!out.contains("\r"));
     }
 }

@@ -245,6 +245,65 @@ pub struct AnswerOutcome {
     /// `start.audio.sample_rate` once we map up: G.722 advertises
     /// 8000 but produces 16 kHz audio).
     pub negotiated_audio_sample_rate: u32,
+    /// Direction the answerer (us) committed to. RFC 3264 §6.1
+    /// mirroring: offer `sendonly` → answer `recvonly`, etc. Used
+    /// by the call layer to surface hold/resume to the WS server
+    /// and (eventually) pause forge's outbound RTP.
+    pub negotiated_direction: MediaDirection,
+}
+
+/// Media direction per RFC 4566 / RFC 3264. The values mirror
+/// `sip-sdp::Direction` but live here so consumers of media-glue
+/// don't need a second upstream dep just to name the enum.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MediaDirection {
+    /// Bidirectional audio. The normal "talking" state. Default —
+    /// matches RFC 4566 §6 ("the default value is sendrecv").
+    #[default]
+    SendRecv,
+    /// Answerer sends, doesn't expect to receive. From a hold
+    /// scenario: the held endpoint goes `sendonly` (often with
+    /// music-on-hold), so we answer `recvonly`. Net: we keep
+    /// receiving but pause our send.
+    SendOnly,
+    /// Answerer receives, doesn't expect to send. Mirror of the
+    /// above — counter-party held us.
+    RecvOnly,
+    /// Both directions paused. RFC 3264 §6.1 — used during
+    /// transient teardown or attended-transfer.
+    Inactive,
+}
+
+impl MediaDirection {
+    /// Parse from an SDP `a=` attribute name. `None` if the value
+    /// isn't one of the four direction attributes.
+    pub fn from_attr(s: &str) -> Option<Self> {
+        Some(match s {
+            "sendrecv" => Self::SendRecv,
+            "sendonly" => Self::SendOnly,
+            "recvonly" => Self::RecvOnly,
+            "inactive" => Self::Inactive,
+            _ => return None,
+        })
+    }
+
+    /// The attribute string for serialization (`a=<this>`).
+    pub fn as_attr(self) -> &'static str {
+        match self {
+            Self::SendRecv => "sendrecv",
+            Self::SendOnly => "sendonly",
+            Self::RecvOnly => "recvonly",
+            Self::Inactive => "inactive",
+        }
+    }
+
+    /// True iff this direction means "audio is paused in at least
+    /// one direction" — the hold-style state set by `sendonly` /
+    /// `recvonly` / `inactive`. Used by the call layer to decide
+    /// whether to emit `hold` / `resume` to the WS server.
+    pub fn is_held(self) -> bool {
+        !matches!(self, Self::SendRecv)
+    }
 }
 
 /// Parse an offer SDP string. Surfaces parse errors as
@@ -286,6 +345,23 @@ pub fn negotiate_answer(
     let primary = helpers::extract_primary_codec(audio).ok_or(SdpError::AudioRejected)?;
     let codec = Codec::from_encoding_name(&primary.encoding_name).ok_or(SdpError::NoCommonCodec)?;
 
+    // The upstream negotiator already mirrors direction per RFC
+    // 3264 §6.1; we just read it back via the typed accessor.
+    // `direction()` returns None when the attribute is absent,
+    // which RFC 4566 §6 maps to sendrecv.
+    // The upstream `MediaDescription::direction()` returns the
+    // typed enum from sip-sdp's `attrs` module, which isn't on our
+    // dep graph directly — go through its canonical-token string
+    // form so we don't have to pull sip-sdp in as a separate dep
+    // just to name the enum. Skipping the token also future-
+    // proofs against an upstream rename.
+    let negotiated_direction = audio
+        .direction()
+        .as_ref()
+        .map(|d| d.as_token())
+        .and_then(MediaDirection::from_attr)
+        .unwrap_or_default();
+
     let answer_text = answer.serialize();
     Ok(AnswerOutcome {
         answer,
@@ -294,6 +370,7 @@ pub fn negotiate_answer(
         negotiated_payload_type: primary.payload_type,
         negotiated_clock_rate: primary.clock_rate,
         negotiated_audio_sample_rate: codec.audio_sample_rate(),
+        negotiated_direction,
     })
 }
 

@@ -19,5 +19,5 @@ pub use call::{
     CallController, CallControllerConfig, CallError, CallHandle, CallOutcome, CallState,
     CallTermination,
 };
-pub use registry::CallRegistry;
+pub use registry::{CallEntry, CallRegistry};
 pub use transfer::{TransferContext, TransferOutcome};

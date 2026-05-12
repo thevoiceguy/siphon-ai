@@ -135,7 +135,13 @@ async fn dispatch_bye_wakes_running_controller_via_registry() {
 
     // 3. Register and start the controller.
     let registry = CallRegistry::new();
-    registry.insert("abc-123@pbx.example.com", handle);
+    registry.insert(
+        "abc-123@pbx.example.com",
+        siphon_ai_core::registry::CallEntry {
+            handle,
+            answer_text: None,
+        },
+    );
 
     let run = tokio::spawn(async move { controller.run().await });
 

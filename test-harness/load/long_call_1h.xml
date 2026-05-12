@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  long_call_1h — one inbound call to SiphonAI, sustained for 60 minutes
+  with PCMA audio streaming via `play_pcap_audio`, then a clean BYE.
+
+  Validates the Week-5 stability bar: memory growth, jitter/loss
+  health, clock drift, codec state stability. See
+  test-harness/load/README.md for what to watch and pass criteria.
+
+  Requires a PCMA-encoded RTP pcap at `test-harness/load/audio_pcma.pcap`.
+  See the README for how to generate one. Omit `-mi <local_ip>` and SIPp
+  will auto-bind, which is fine for loopback runs.
+
+  Tuning notes:
+    * The pcap is looped by SIPp under the hood — 1 minute of silence
+      is enough; the daemon doesn't notice the loop seam.
+    * <pause milliseconds="3600000"/> is exactly 60 minutes. The
+      `-timeout 4000s` SIPp flag at the call level (set by the
+      operator) gives a 6-minute margin for SIPp + daemon teardown.
+    * BYE flows from the UAC (SIPp) so the daemon's "remote_bye" path
+      from PR #19 is exercised. To exercise the WS-initiated hangup
+      path instead, configure the echo WS server to emit
+      `BridgeIn::Hangup` after N minutes.
+-->
+<scenario name="long_call_1h">
+  <send retrans="500">
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp-soak@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp-soak@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [auto_media_port] RTP/AVP 8 0
+a=rtpmap:8 PCMA/8000
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+  <recv response="200" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp-soak@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!--
+    Stream PCMA RTP for the duration of the call. The pcap is in the
+    same directory as the scenario; SIPp resolves relative paths
+    against its working directory, so the runner cd's there first
+    (see README's "Running" section).
+  -->
+  <nop>
+    <action>
+      <exec play_pcap_audio="audio_pcma.pcap"/>
+    </action>
+  </nop>
+
+  <!-- 3600 s = 60 minutes. -->
+  <pause milliseconds="3600000"/>
+
+  <send retrans="500">
+<![CDATA[
+BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-bye
+Max-Forwards: 70
+From: <sip:sipp-soak@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 BYE
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="200"/>
+
+  <ResponseTimeRepartition value="2000, 5000, 10000"/>
+</scenario>

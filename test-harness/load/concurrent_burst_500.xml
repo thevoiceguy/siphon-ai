@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  concurrent_burst_500 — bursty load test. Each instance opens a call,
+  pauses 10 minutes (steady-state), then BYEs. With `sipp -m 500 -r 50`
+  the daemon hits 500 concurrent calls at ~T+10s and sustains until
+  individual scenarios start tearing down at T+10m.
+
+  No RTP streaming here — `inactivity_timeout_secs` on the daemon side
+  must be 0 (disabled) for this scenario to sit at 10 minutes. The
+  acceptance criterion is signaling-stability + port-pool health, not
+  audio quality (that's the long_call_1h scenario's job). See
+  test-harness/load/README.md.
+
+  Why 10 minutes per call? Long enough that the burst is fully
+  settled before the first teardown starts; short enough that the
+  whole run completes inside a 15-minute on-call window. Bump or
+  shrink as you like.
+-->
+<scenario name="concurrent_burst_500">
+  <send retrans="500">
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp-burst@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp-burst@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [auto_media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+  <recv response="200" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp-burst@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- 600 s = 10 minutes. -->
+  <pause milliseconds="600000"/>
+
+  <send retrans="500">
+<![CDATA[
+BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-bye
+Max-Forwards: 70
+From: <sip:sipp-burst@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 BYE
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="200"/>
+
+  <ResponseTimeRepartition value="200, 500, 1000, 2000"/>
+</scenario>

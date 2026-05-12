@@ -55,6 +55,7 @@
 //!   yet — they're logged. Hangup terminates the call.
 //! - No CDR / webhook emission.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use sip_core::SipUri;
@@ -173,6 +174,12 @@ pub enum CallError {
 pub struct CallHandle {
     notify: std::sync::Arc<Notify>,
     call_id: CallId,
+    /// Set when the peer drove teardown by sending a BYE on the
+    /// confirmed dialog. The acceptor's post-controller cleanup
+    /// consults this to decide whether to send an outbound BYE —
+    /// without it, a WS-side `hangup` would leave the SIP leg up
+    /// because the controller only stops the WS/tap path.
+    remote_bye: std::sync::Arc<AtomicBool>,
 }
 
 impl CallHandle {
@@ -180,6 +187,7 @@ impl CallHandle {
         Self {
             notify: std::sync::Arc::new(Notify::new()),
             call_id,
+            remote_bye: std::sync::Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -188,6 +196,19 @@ impl CallHandle {
     /// return.
     pub fn shutdown(&self) {
         self.notify.notify_one();
+    }
+
+    /// Record that the SIP peer has sent (or implicitly already
+    /// completed) the BYE leg of teardown. Callers that initiate
+    /// teardown locally (e.g., WS server `hangup`, admin force-
+    /// hangup) leave this `false` so the acceptor knows it still
+    /// owes the peer an outbound BYE.
+    pub fn mark_remote_bye(&self) {
+        self.remote_bye.store(true, Ordering::Release);
+    }
+
+    pub fn remote_bye_received(&self) -> bool {
+        self.remote_bye.load(Ordering::Acquire)
     }
 
     pub fn call_id(&self) -> &CallId {

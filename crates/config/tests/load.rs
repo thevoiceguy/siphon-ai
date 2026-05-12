@@ -36,7 +36,7 @@ id = "siphon-ai-test"
 public_address = "203.0.113.10"
 
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 transports = ["udp", "tcp"]
 user_agent = "SiphonAI/0.1.0-test"
 
@@ -128,7 +128,7 @@ fn env_default_used_when_var_absent() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:${SIP_PORT:-5070}"
+listen = "127.0.0.1:${SIP_PORT:-5070}"
 
 [bridge]
 ws_url = "wss://${HOST:-fallback.example.com}/ws"
@@ -165,7 +165,7 @@ fn unknown_codec_is_a_compile_error() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [media]
 codecs = ["pcmu", "g729"]
@@ -206,7 +206,7 @@ fn unknown_transport_is_a_compile_error() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 transports = ["udp", "smoke"]
 
 [bridge]
@@ -221,7 +221,7 @@ fn audio_sample_rate_must_be_8k_or_16k() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -236,7 +236,7 @@ fn dtmf_off_disables_payload_type() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [media]
 dtmf = "off"
@@ -258,7 +258,7 @@ fn unknown_dtmf_mode_errors() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [media]
 dtmf = "morse"
@@ -278,7 +278,7 @@ fn unknown_top_level_section_is_tolerated() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -306,7 +306,7 @@ fn unknown_field_in_known_section_errors() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -324,7 +324,7 @@ fn no_default_route_loads_but_warns() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -346,7 +346,7 @@ fn duplicate_codecs_are_deduplicated() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [media]
 codecs = ["pcmu", "pcma", "pcmu"]
@@ -368,7 +368,7 @@ fn cdr_disabled_by_default() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -389,7 +389,7 @@ fn cdr_file_sink_compiles_with_path() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -417,7 +417,7 @@ fn cdr_webhook_sink_compiles_with_url_and_auth() {
     let env = MapEnv::new([("CDR_TOKEN", "tok-123")]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -449,7 +449,7 @@ fn cdr_file_enabled_without_path_errors() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -473,7 +473,7 @@ fn cdr_webhook_enabled_without_url_errors() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -501,7 +501,7 @@ fn cdr_disabled_overrides_sub_block_misconfig() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -527,7 +527,7 @@ fn register_blocks_default_to_empty() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -546,7 +546,7 @@ fn register_block_compiles_with_required_fields() {
     let env = MapEnv::new([("CUCM_PASS", "hunter2")]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -580,7 +580,7 @@ fn register_block_picks_default_port_per_transport() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -606,7 +606,7 @@ fn register_explicit_port_overrides_default() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -632,7 +632,7 @@ fn register_duplicate_name_errors() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -665,7 +665,7 @@ fn register_hostname_server_errors_in_v1() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -690,7 +690,7 @@ fn register_unknown_transport_errors() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -716,7 +716,7 @@ fn register_auth_username_defaults_to_username() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -741,7 +741,7 @@ fn sip_tls_disabled_by_default() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -790,7 +790,7 @@ fn sip_tls_explicit_listen_overrides_default() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 transports = ["tls"]
 
 [sip.tls]
@@ -816,7 +816,7 @@ fn sip_tls_missing_cert_errors() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 transports = ["tls"]
 
 [sip.tls]
@@ -839,7 +839,7 @@ fn sip_tls_missing_key_errors() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 transports = ["tls"]
 
 [sip.tls]
@@ -864,7 +864,7 @@ fn sip_tls_block_without_tls_transport_errors() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 transports = ["udp"]
 
 [sip.tls]
@@ -888,7 +888,7 @@ fn sip_tls_bad_listen_addr_errors() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 transports = ["tls"]
 
 [sip.tls]
@@ -917,7 +917,7 @@ fn webhooks_disabled_by_default() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -938,7 +938,7 @@ fn webhooks_enabled_compiles_with_url_auth_and_allowlist() {
     let env = MapEnv::new([("WEBHOOK_TOKEN", "wh-xyz")]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -976,7 +976,7 @@ fn webhooks_enabled_without_url_errors() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -999,7 +999,7 @@ fn webhooks_disabled_tolerates_missing_url() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -1021,7 +1021,7 @@ fn observability_disabled_by_default() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -1041,7 +1041,7 @@ fn observability_enabled_compiles_with_listen_addr() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -1065,7 +1065,7 @@ fn observability_enabled_without_listen_errors() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -1087,7 +1087,7 @@ fn observability_bad_listen_addr_errors() {
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
-listen = "0.0.0.0:5060"
+listen = "127.0.0.1:5060"
 
 [bridge]
 ws_url = "wss://x/y"
@@ -1112,7 +1112,35 @@ any = true
 #[test]
 fn defaults_kick_in_when_optional_blocks_omitted() {
     // Smallest valid config: just sip + bridge. Everything else
-    // gets a sensible default.
+    // gets a sensible default. The bind has to be a real IP (not
+    // 0.0.0.0) because the SDP answer needs a routable
+    // [node].public_address — see
+    // CompileError::PublicAddressRequiredForWildcardListen.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert_eq!(cfg.node.id, "siphon-ai");
+    assert_eq!(cfg.node.public_address, "127.0.0.1");
+    assert_eq!(cfg.sip.transports, vec![SipTransport::Udp]);
+    assert_eq!(cfg.bridge_defaults.codecs, vec![Codec::Pcmu, Codec::Pcma]);
+    assert_eq!(cfg.bridge_defaults.dtmf_payload_type, Some(101));
+    assert_eq!(cfg.bridge_defaults.connect_timeout, Duration::from_secs(5));
+    assert!(cfg.bridge_defaults.forward_headers.is_empty());
+}
+
+#[test]
+fn wildcard_listen_without_public_address_is_rejected() {
+    // The bug this guards: binding 0.0.0.0 with no
+    // [node].public_address would otherwise produce an SDP
+    // answer with c=IN IP4 0.0.0.0, which RTP can't route to.
+    // Refuse loudly at config compile rather than silently
+    // shipping a misconfig to prod.
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
@@ -1121,11 +1149,43 @@ listen = "0.0.0.0:5060"
 [bridge]
 ws_url = "wss://x/y"
 "#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("public_address") && msg.contains("unspecified"),
+        "expected the new wildcard-bind error, got: {msg}"
+    );
+}
+
+#[test]
+fn wildcard_listen_with_public_address_works() {
+    // Same bind, but with public_address spelled out — fine.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[node]
+public_address = "203.0.113.4"
+
+[sip]
+listen = "0.0.0.0:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
     let cfg = load_from_str_with_env(toml, &env).unwrap();
-    assert_eq!(cfg.node.id, "siphon-ai");
-    assert_eq!(cfg.sip.transports, vec![SipTransport::Udp]);
-    assert_eq!(cfg.bridge_defaults.codecs, vec![Codec::Pcmu, Codec::Pcma]);
-    assert_eq!(cfg.bridge_defaults.dtmf_payload_type, Some(101));
-    assert_eq!(cfg.bridge_defaults.connect_timeout, Duration::from_secs(5));
-    assert!(cfg.bridge_defaults.forward_headers.is_empty());
+    assert_eq!(cfg.node.public_address, "203.0.113.4");
+}
+
+#[test]
+fn ipv6_wildcard_listen_without_public_address_is_rejected() {
+    // Mirror of the v4 case: `::` is also unspecified.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "[::]:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("public_address"));
 }

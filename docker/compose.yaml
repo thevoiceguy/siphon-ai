@@ -84,4 +84,11 @@ services:
       # per-frame logs. Override with `--log` or RUST_LOG when
       # debugging a specific layer.
       RUST_LOG: "siphon_ai=info,siphon=info,forge=info"
+    # Resolve `host.docker.internal` on native Linux too — Docker
+    # Desktop adds it automatically; the host-gateway alias gives
+    # us parity. Used by configs that point at services running on
+    # the host or in a sibling compose stack
+    # (`examples/homer-stack/`).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped

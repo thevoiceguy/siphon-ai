@@ -251,6 +251,12 @@ pub enum CompileError {
     #[error("[hep].collector {0:?} is not a valid host:port socket address: {1}")]
     BadHepCollector(String, std::net::AddrParseError),
 
+    #[error("[hep].collector {0:?} failed DNS resolution: {1}")]
+    BadHepCollectorResolve(String, std::io::Error),
+
+    #[error("[hep].collector {0:?} resolved to no addresses")]
+    HepCollectorResolveEmpty(String),
+
     #[error("[hep].capture_id is required when [hep].enabled = true")]
     HepCaptureIdRequired,
 
@@ -656,9 +662,23 @@ fn compile_hep(raw: RawHep) -> Result<HepConfig, CompileError> {
     if collector_str.is_empty() {
         return Err(CompileError::HepCollectorRequired);
     }
-    let collector = collector_str
-        .parse()
-        .map_err(|e| CompileError::BadHepCollector(collector_str.clone(), e))?;
+    // Accept either a literal `host:port` socket address or a
+    // `hostname:port` that resolves via the system resolver. The
+    // hostname path is what makes service-discovery-style configs
+    // work (`host.docker.internal:9060`, `homer.internal:9060`,
+    // etc.) — without it operators have to bake the IP into
+    // config, which is painful in container deployments.
+    //
+    // We resolve once at startup, not per packet — HEP is a long-
+    // lived UDP socket. If the collector moves, restart the
+    // daemon.
+    let collector = match collector_str.parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr,
+        Err(_) => std::net::ToSocketAddrs::to_socket_addrs(collector_str.as_str())
+            .map_err(|e| CompileError::BadHepCollectorResolve(collector_str.clone(), e))?
+            .next()
+            .ok_or_else(|| CompileError::HepCollectorResolveEmpty(collector_str.clone()))?,
+    };
 
     let capture_id = raw.capture_id.ok_or(CompileError::HepCaptureIdRequired)?;
 

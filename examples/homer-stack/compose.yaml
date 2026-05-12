@@ -1,0 +1,116 @@
+# Local Homer stack — heplify-server (HEP3 collector) + Postgres +
+# Homer web UI. Pair with the daemon's docker/compose.yaml to see
+# every SIP message, RTCP report, and CDR SiphonAI emits stitched
+# into one call view in the Homer UI.
+#
+# Two-step bring-up:
+#
+#   # 1) Start Homer.
+#   docker compose -f examples/homer-stack/compose.yaml up -d
+#
+#   # 2) Edit docker/local-dev.toml to enable HEP and point at the
+#   #    collector, then start the daemon stack:
+#   #
+#   #    [hep]
+#   #    enabled = true
+#   #    collector = "host.docker.internal:9060"   # see README.md
+#   #    capture_id = 2001
+#   docker compose -f docker/compose.yaml up -d
+#
+#   # 3) Place a call (SIPp / softphone). Open http://127.0.0.1:9080/
+#   #    Default login: admin / sipcapture.
+#
+# This file is reference-grade, not production:
+#   * Postgres data is wiped on `docker compose down -v`.
+#   * No TLS on any service.
+#   * The Homer admin password is the upstream default.
+#   * No Prometheus / Loki / Grafana integration (Homer talks to
+#     those if pointed at them; out of scope for this example).
+
+services:
+  homer-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      # Two databases get created by the homer-app on startup
+      # (homer_config + homer_data); we only need an init DB so the
+      # postgres image is happy to come up. Naming it `homer` keeps
+      # the log output recognisable.
+      POSTGRES_DB: homer
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d homer"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # Persist DB state across compose restarts so call history
+    # survives `down` / `up`. Use `down -v` to wipe.
+    volumes:
+      - homer-db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  heplify-server:
+    image: sipcapture/heplify-server:latest
+    depends_on:
+      homer-db:
+        condition: service_healthy
+    # The upstream image ships `/bin/sh` as the entrypoint and
+    # expects the operator to invoke the binary explicitly. Spell
+    # it out so we don't accidentally drop into an interactive
+    # shell on `docker run`.
+    entrypoint: ["/root/heplify-server"]
+    environment:
+      # HEP3 listener — 9060/udp is the convention (Kamailio's
+      # `hep_port` default, FreeSWITCH `sofia profile … hep`'s
+      # default target).
+      HEPLIFYSERVER_HEPADDR: "0.0.0.0:9060"
+      HEPLIFYSERVER_DBSHEMA: "homer7"
+      HEPLIFYSERVER_DBDRIVER: postgres
+      HEPLIFYSERVER_DBADDR: "homer-db:5432"
+      HEPLIFYSERVER_DBUSER: postgres
+      HEPLIFYSERVER_DBPASS: postgres
+      HEPLIFYSERVER_DBDATATABLE: homer_data
+      HEPLIFYSERVER_DBCONFTABLE: homer_config
+      # Auto-create schema + rotate partitions. Without this the
+      # collector errors out on the first packet because there's
+      # nowhere to write it.
+      HEPLIFYSERVER_DBROTATE: "true"
+      # Disable cloud-vendor probes (etcd, prometheus, loki) so
+      # the logs stay readable in a local-only setup.
+      HEPLIFYSERVER_LOGLVL: info
+      HEPLIFYSERVER_LOGSTD: "true"
+    ports:
+      # Expose the HEP UDP listener on the host so SiphonAI (running
+      # in the sibling docker/compose stack) can reach it via
+      # host.docker.internal. macOS / Windows resolve that name out
+      # of the box; on Linux pass `--add-host=host.docker.internal:host-gateway`
+      # to the daemon stack OR change SiphonAI's `[hep].collector`
+      # to the host IP directly.
+      - "9060:9060/udp"
+      # heplify-server's own metrics + control HTTP. Optional.
+      - "9090:9090/tcp"
+    restart: unless-stopped
+
+  homer-webapp:
+    image: sipcapture/webapp:latest
+    depends_on:
+      heplify-server:
+        condition: service_started
+      homer-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: homer-db
+      DB_USER: postgres
+      DB_PASS: postgres
+      DB_HOMER_CONFIG: homer_config
+      DB_HOMER_DATA: homer_data
+      HOMER_LOGLEVEL: error
+    ports:
+      # Web UI on http://127.0.0.1:9080. The default admin
+      # credentials are admin / sipcapture — change them in the UI
+      # immediately if you expose this beyond localhost.
+      - "9080:80/tcp"
+    restart: unless-stopped
+
+volumes:
+  homer-db-data:

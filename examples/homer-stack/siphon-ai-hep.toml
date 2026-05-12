@@ -1,0 +1,61 @@
+# Drop-in SiphonAI config for the local Homer demo.
+#
+# Differences from `docker/local-dev.toml`:
+#
+#   * `[hep]` is enabled and points at heplify-server reachable via
+#     `host.docker.internal:9060`. On Linux that name doesn't
+#     resolve by default — start the daemon stack with
+#     `--add-host=host.docker.internal:host-gateway` (or edit the
+#     collector below to the docker bridge IP, typically
+#     `172.17.0.1`).
+#
+# Use:
+#
+#   docker compose \
+#     -f docker/compose.yaml \
+#     up -d
+#
+# …after editing docker/compose.yaml to mount THIS file instead of
+# docker/local-dev.toml. The simplest path is:
+#
+#   cp examples/homer-stack/siphon-ai-hep.toml docker/local-dev.toml
+#
+# and then `docker compose up -d` as usual.
+
+[node]
+id = "siphon-ai-homer-demo"
+public_address = "127.0.0.1"
+
+[sip]
+listen = "0.0.0.0:5070"
+transports = ["udp"]
+user_agent = "SiphonAI/homer-demo"
+
+[media]
+codecs = ["pcmu", "pcma"]
+dtmf = "rfc2833"
+rtp_port_range = [40000, 40100]
+
+[bridge]
+ws_url = "ws://echo-ws:8765/"
+ws_connect_timeout_ms = 3000
+audio_sample_rate = 8000
+
+[observability]
+enabled = true
+http_listen = "0.0.0.0:9091"
+
+# ─── HEP3 / Homer ─────────────────────────────────────────────
+# heplify-server bound on host.docker.internal:9060/udp by the
+# sibling compose stack at `examples/homer-stack/compose.yaml`.
+# capture_id is the Homer agent ID — pick any small integer per
+# node.
+[hep]
+enabled = true
+collector = "host.docker.internal:9060"
+capture_id = 2001
+
+[[route]]
+name = "default"
+[route.match]
+any = true

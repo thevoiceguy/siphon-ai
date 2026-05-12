@@ -180,3 +180,95 @@ fn answer_port_can_differ_from_offer_port() {
     let answer = build_answer(LINPHONE_PCMU_OFFER, &caps_pcmu_only(31337)).unwrap();
     assert!(answer.answer_text.contains("m=audio 31337 RTP/AVP"));
 }
+
+// ─── Hold / resume direction mirroring ────────────────────────────────
+
+use siphon_ai_media_glue::MediaDirection;
+
+fn pcmu_offer_with_direction(dir: &str) -> String {
+    format!(
+        "v=0\r\n\
+o=alice 1234 5678 IN IP4 10.0.0.5\r\n\
+s=Talk\r\n\
+c=IN IP4 10.0.0.5\r\n\
+t=0 0\r\n\
+m=audio 7078 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a={dir}\r\n"
+    )
+}
+
+#[test]
+fn sendrecv_offer_yields_sendrecv_answer() {
+    let answer = build_answer(
+        &pcmu_offer_with_direction("sendrecv"),
+        &caps_pcmu_only(20100),
+    )
+    .expect("negotiate");
+    assert_eq!(answer.negotiated_direction, MediaDirection::SendRecv);
+    assert!(answer.answer_text.contains("a=sendrecv"));
+    assert!(!answer.negotiated_direction.is_held());
+}
+
+#[test]
+fn sendonly_offer_yields_recvonly_answer() {
+    // Classic hold: caller plays music-on-hold (sendonly).
+    // RFC 3264 §6.1 — answerer mirrors to recvonly.
+    let answer = build_answer(
+        &pcmu_offer_with_direction("sendonly"),
+        &caps_pcmu_only(20100),
+    )
+    .expect("negotiate");
+    assert_eq!(answer.negotiated_direction, MediaDirection::RecvOnly);
+    assert!(answer.answer_text.contains("a=recvonly"));
+    assert!(answer.negotiated_direction.is_held());
+}
+
+#[test]
+fn recvonly_offer_yields_sendonly_answer() {
+    let answer = build_answer(
+        &pcmu_offer_with_direction("recvonly"),
+        &caps_pcmu_only(20100),
+    )
+    .expect("negotiate");
+    assert_eq!(answer.negotiated_direction, MediaDirection::SendOnly);
+    assert!(answer.answer_text.contains("a=sendonly"));
+    assert!(answer.negotiated_direction.is_held());
+}
+
+#[test]
+fn inactive_offer_currently_errors_at_negotiator() {
+    // RFC 3264 §6.1 says the answerer SHOULD mirror with `inactive`,
+    // but sip-sdp's negotiator treats `inactive` vs our advertised
+    // `sendrecv` caps as incompatible and returns an error rather
+    // than producing an inactive answer. This test pins the
+    // current behavior so we notice if the upstream fixes it.
+    //
+    // The pragmatic workaround for callers that need inactive
+    // answers (attended-transfer / call-park) is to build the
+    // answer manually with `MediaDirection::Inactive` rather than
+    // routing through `negotiate_answer`. Out of scope for v1.
+    let err = build_answer(
+        &pcmu_offer_with_direction("inactive"),
+        &caps_pcmu_only(20100),
+    )
+    .expect_err("upstream rejects inactive↔sendrecv");
+    assert!(
+        matches!(err, SdpError::Negotiate(_)),
+        "expected Negotiate error, got {err:?}"
+    );
+}
+
+#[test]
+fn missing_direction_attr_defaults_to_sendrecv() {
+    // RFC 4566 §6: absent direction means sendrecv.
+    let offer = "v=0\r\n\
+o=alice 1234 5678 IN IP4 10.0.0.5\r\n\
+s=Talk\r\n\
+c=IN IP4 10.0.0.5\r\n\
+t=0 0\r\n\
+m=audio 7078 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n";
+    let answer = build_answer(offer, &caps_pcmu_only(20100)).expect("negotiate");
+    assert_eq!(answer.negotiated_direction, MediaDirection::SendRecv);
+}

@@ -121,6 +121,21 @@ pub struct MatchedCall<'a> {
     pub route: &'a CompiledRoute,
 }
 
+/// Inputs to a re-INVITE handler. The routing handler dispatches
+/// in-dialog INVITEs (the SIP UAS resolves the dialog before us)
+/// here so the acceptor can answer with a new SDP — typically for
+/// hold/resume, where only the `a=` direction attribute changes.
+pub struct ReinviteCall<'a> {
+    pub request: &'a Request,
+    pub handle: ServerTransactionHandle,
+    pub transport: &'a TransportContext,
+    pub dialog: &'a Dialog,
+    /// The SIP `Call-ID` header value. Cached here so the acceptor
+    /// doesn't have to re-parse it to look up the cached answer
+    /// SDP in its registry.
+    pub sip_call_id: String,
+}
+
 /// Hook for the eventual `core::CallController`. SiphonAI's
 /// per-call setup logic — answer with SDP, attach MediaTap, open
 /// the WS bridge — implements this trait. Routing doesn't know
@@ -133,6 +148,16 @@ pub trait CallAcceptor: Send + Sync {
     /// arranging for a spawned task to do so); otherwise the call
     /// stays in 100 Trying until the transaction times out.
     async fn on_matched(&self, call: MatchedCall<'_>) -> anyhow::Result<()>;
+
+    /// A re-INVITE on an existing dialog arrived. The default impl
+    /// returns 501 Not Implemented; consumers that handle
+    /// hold/resume override this. Same contract as `on_matched`
+    /// re sending the final response.
+    async fn on_reinvite(&self, call: ReinviteCall<'_>) -> anyhow::Result<()> {
+        let response = UserAgentServer::create_response(call.request, 501, "Not Implemented");
+        call.handle.send_final(response).await;
+        Ok(())
+    }
 }
 
 /// `UasRequestHandler` that does INVITE routing and mid-dialog
@@ -197,19 +222,28 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
         ctx: &TransportContext,
         dialog: Option<&Dialog>,
     ) -> anyhow::Result<()> {
-        if dialog.is_some() {
-            // Re-INVITE on an existing dialog. Routing has nothing
-            // to say here; the dialog's controller should handle
-            // it. Until core::CallController exists, refuse cleanly.
-            debug!("re-INVITE received; routing layer cannot handle it yet");
-            handle
-                .send_final(UserAgentServer::create_response(
+        if let Some(dialog) = dialog {
+            // Re-INVITE on an existing dialog — hold / resume /
+            // mid-call codec change. Routing doesn't dispatch on
+            // route again; the acceptor knows the call's negotiated
+            // state (RTP port, codec, last answer SDP) and answers
+            // with a matching mid-dialog 200 OK.
+            let sip_call_id = request
+                .headers()
+                .get_smol("Call-ID")
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            debug!(sip_call_id = %sip_call_id, "re-INVITE → acceptor");
+            return self
+                .acceptor
+                .on_reinvite(ReinviteCall {
                     request,
-                    501,
-                    "Not Implemented",
-                ))
+                    handle,
+                    transport: ctx,
+                    dialog,
+                    sip_call_id,
+                })
                 .await;
-            return Ok(());
         }
 
         let register_source = (self.resolver)(request, ctx);

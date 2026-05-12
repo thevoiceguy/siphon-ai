@@ -44,10 +44,24 @@ use tracing::{debug, warn};
 
 use crate::call::CallHandle;
 
+/// Per-call session state the registry tracks. Beyond the shutdown
+/// handle, we cache the answer SDP we sent for the initial INVITE so
+/// re-INVITEs (hold/resume) can produce a matching answer with a
+/// flipped direction without re-allocating ports or re-running
+/// codec negotiation.
+#[derive(Debug, Clone)]
+pub struct CallEntry {
+    pub handle: CallHandle,
+    /// The SDP body sent in the 200 OK to the initial INVITE.
+    /// `None` for legacy tests / callers that don't track it; the
+    /// re-INVITE handler returns 501 in that case.
+    pub answer_text: Option<String>,
+}
+
 /// Process-wide handle table. Cheap to clone (`Arc` inside).
 #[derive(Debug, Clone, Default)]
 pub struct CallRegistry {
-    inner: Arc<RwLock<HashMap<String, CallHandle>>>,
+    inner: Arc<RwLock<HashMap<String, CallEntry>>>,
 }
 
 impl CallRegistry {
@@ -65,17 +79,17 @@ impl CallRegistry {
         self.inner.read().is_empty()
     }
 
-    /// Insert `handle` under `sip_call_id`. If a handle for the
+    /// Insert a call entry under `sip_call_id`. If an entry for the
     /// same Call-ID already existed, the previous one is dropped
     /// and a warning is logged — that situation is a bug in the
     /// caller (two concurrent acceptances of the same Call-ID).
-    pub fn insert(&self, sip_call_id: impl Into<String>, handle: CallHandle) {
+    pub fn insert(&self, sip_call_id: impl Into<String>, entry: CallEntry) {
         let key = sip_call_id.into();
         let mut guard = self.inner.write();
-        if let Some(prev) = guard.insert(key.clone(), handle) {
+        if let Some(prev) = guard.insert(key.clone(), entry) {
             warn!(
                 sip_call_id = %key,
-                bridge_call_id = %prev.call_id(),
+                bridge_call_id = %prev.handle.call_id(),
                 "registry insert collided with existing entry; previous handle dropped"
             );
         } else {
@@ -83,10 +97,16 @@ impl CallRegistry {
         }
     }
 
-    /// Look up a handle by SIP Call-ID. Returns a clone — the
-    /// underlying `CallHandle` is itself an `Arc`-of-`Notify`, so
+    /// Look up a [`CallHandle`] by SIP Call-ID. Returns a clone —
+    /// the underlying handle is itself an `Arc`-of-`Notify`, so
     /// cloning is essentially free.
     pub fn lookup(&self, sip_call_id: &str) -> Option<CallHandle> {
+        self.inner.read().get(sip_call_id).map(|e| e.handle.clone())
+    }
+
+    /// Borrow the full [`CallEntry`] for a Call-ID. Used by the
+    /// re-INVITE handler to read back the cached answer SDP.
+    pub fn entry(&self, sip_call_id: &str) -> Option<CallEntry> {
         self.inner.read().get(sip_call_id).cloned()
     }
 
@@ -98,7 +118,7 @@ impl CallRegistry {
         if removed.is_some() {
             debug!(sip_call_id = %sip_call_id, "deregistered call");
         }
-        removed
+        removed.map(|e| e.handle)
     }
 
     /// Snapshot every currently-registered Call-ID. Order is
@@ -142,6 +162,13 @@ mod tests {
     /// Build a real `CallHandle` by constructing a (never-run)
     /// `CallController`. Cheaper than mocking and exercises the
     /// actual handle plumbing.
+    fn fresh_entry(bridge_call_id: &str) -> CallEntry {
+        CallEntry {
+            handle: fresh_handle(bridge_call_id),
+            answer_text: None,
+        }
+    }
+
     fn fresh_handle(bridge_call_id: &str) -> CallHandle {
         let manager = Arc::new(MediaBridgeManager::new());
         let tap = MediaTap::attach(
@@ -191,7 +218,13 @@ mod tests {
         assert_eq!(reg.len(), 0);
 
         let h = fresh_handle("siphon-1");
-        reg.insert("abc@pbx", h.clone());
+        reg.insert(
+            "abc@pbx",
+            CallEntry {
+                handle: h.clone(),
+                answer_text: None,
+            },
+        );
         assert_eq!(reg.len(), 1);
 
         let looked_up = reg.lookup("abc@pbx").expect("present");
@@ -208,7 +241,7 @@ mod tests {
     #[test]
     fn lookup_returns_none_for_unknown_call_id() {
         let reg = CallRegistry::new();
-        reg.insert("abc@pbx", fresh_handle("siphon-1"));
+        reg.insert("abc@pbx", fresh_entry("siphon-1"));
         assert!(reg.lookup("never-seen@pbx").is_none());
     }
 
@@ -219,8 +252,8 @@ mod tests {
         // the regression we care about is that lookup returns the
         // *new* handle.)
         let reg = CallRegistry::new();
-        reg.insert("dupe@pbx", fresh_handle("siphon-old"));
-        reg.insert("dupe@pbx", fresh_handle("siphon-new"));
+        reg.insert("dupe@pbx", fresh_entry("siphon-old"));
+        reg.insert("dupe@pbx", fresh_entry("siphon-new"));
         assert_eq!(
             reg.lookup("dupe@pbx").unwrap().call_id().as_str(),
             "siphon-new"
@@ -231,8 +264,8 @@ mod tests {
     #[test]
     fn snapshot_lists_all_known_call_ids() {
         let reg = CallRegistry::new();
-        reg.insert("a@pbx", fresh_handle("siphon-a"));
-        reg.insert("b@pbx", fresh_handle("siphon-b"));
+        reg.insert("a@pbx", fresh_entry("siphon-a"));
+        reg.insert("b@pbx", fresh_entry("siphon-b"));
         let mut ids = reg.snapshot_call_ids();
         ids.sort();
         assert_eq!(ids, vec!["a@pbx".to_string(), "b@pbx".to_string()]);
@@ -245,7 +278,7 @@ mod tests {
         // and the BYE handler share one registry.
         let a = CallRegistry::new();
         let b = a.clone();
-        a.insert("x@pbx", fresh_handle("siphon-1"));
+        a.insert("x@pbx", fresh_entry("siphon-1"));
         assert!(b.lookup("x@pbx").is_some());
         b.remove("x@pbx");
         assert!(a.is_empty());

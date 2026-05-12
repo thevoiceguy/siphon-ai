@@ -39,6 +39,10 @@ sip-transaction.workspace = true
 # media-glue owns the session/bridge logic so we only need the type stubs.
 forge-core.workspace   = true
 forge-engine.workspace = true
+# Re-INVITE handling re-parses the inbound offer to read its
+# direction attribute. forge-sdp re-exports the sip-sdp types we
+# need (`SessionDescription`, `MediaType`, `Direction`).
+forge-sdp.workspace    = true
 
 [dev-dependencies]
 bytes.workspace                       = true
@@ -46,6 +50,5 @@ tokio-tungstenite.workspace           = true
 futures.workspace                     = true
 serde_json.workspace                  = true
 forge-rtp.workspace                   = true
-forge-sdp.workspace                   = true
 metrics-exporter-prometheus.workspace = true
 async-trait.workspace                 = true

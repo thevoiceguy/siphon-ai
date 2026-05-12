@@ -12,7 +12,8 @@ pub mod setup;
 pub mod tap;
 
 pub use sdp::{
-    build_answer, negotiate_answer, parse_offer, AnswerOutcome, Codec, LocalCapabilities, SdpError,
+    build_answer, negotiate_answer, parse_offer, AnswerOutcome, Codec, LocalCapabilities,
+    MediaDirection, SdpError,
 };
 pub use setup::{InboundAccepted, InboundCall, MediaSetup, SetupError};
 pub use tap::{BargeInAction, MediaTap, MediaTapError, TapCommand, TapDisconnect};

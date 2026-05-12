@@ -282,7 +282,13 @@ async fn prepare_exposes_handle_and_sip_call_id_for_registry_use() {
     assert_eq!(prepared.handle.call_id().as_str(), "siphon-test-fixed");
 
     // Mirror the on_matched register step.
-    registry.insert(prepared.sip_call_id.clone(), prepared.handle);
+    registry.insert(
+        prepared.sip_call_id.clone(),
+        siphon_ai_core::registry::CallEntry {
+            handle: prepared.handle,
+            answer_text: Some(prepared.answer.answer_text.clone()),
+        },
+    );
     let looked_up = registry.lookup("abc-123@pbx.example.com").expect("present");
     assert_eq!(looked_up.call_id().as_str(), "siphon-test-fixed");
     assert_eq!(registry.len(), 1);

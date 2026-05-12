@@ -316,13 +316,6 @@ pub struct RawBridge {
     /// WS handshake timeout. Default: 5000 ms.
     #[serde(default)]
     pub ws_connect_timeout_ms: Option<u64>,
-    /// `8000` or `16000`. Default: 8000. (Per-route can still
-    /// override via `[route.bridge].audio_sample_rate`, but the
-    /// negotiated codec ultimately decides — this is a *preference*
-    /// hint that becomes the answer's first-choice when our caps
-    /// support multiple rates.)
-    #[serde(default)]
-    pub audio_sample_rate: Option<u32>,
     /// SIP headers to forward on the bridge `start.sip.headers`.
     /// Names are case-insensitive at lookup time.
     #[serde(default)]

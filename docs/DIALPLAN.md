@@ -32,7 +32,6 @@ name = "main_reception"
 request_uri_user = "5000"
 [route.bridge]
 ws_url = "wss://reception.example.com/sip-bridge"
-audio_sample_rate = 16000
 
 [[route]]
 name = "default"

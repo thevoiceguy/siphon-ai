@@ -179,7 +179,6 @@ fn bridge_overrides_round_trip_through_compile() {
         request_uri_user = "5000"
         [route.bridge]
         ws_url = "wss://reception.example.com/sip-bridge"
-        audio_sample_rate = 16000
 
         [route.bridge.barge_in]
         enabled = true
@@ -191,7 +190,6 @@ fn bridge_overrides_round_trip_through_compile() {
         route.bridge.ws_url.as_deref(),
         Some("wss://reception.example.com/sip-bridge")
     );
-    assert_eq!(route.bridge.audio_sample_rate, Some(16000));
     assert_eq!(route.bridge.barge_in.enabled, Some(true));
     assert_eq!(route.bridge.barge_in.debounce_ms, Some(120));
 }

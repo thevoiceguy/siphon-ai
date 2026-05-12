@@ -83,7 +83,6 @@ pub struct RawRouteMatch {
 pub struct BridgeOverride {
     pub ws_url: Option<String>,
     pub ws_auth_header: Option<String>,
-    pub audio_sample_rate: Option<u32>,
     pub audio_direction: Option<String>,
     pub on_ws_failure: Option<String>,
     pub on_ws_failure_prompt: Option<String>,

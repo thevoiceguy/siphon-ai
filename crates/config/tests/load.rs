@@ -41,7 +41,7 @@ transports = ["udp", "tcp"]
 user_agent = "SiphonAI/0.1.0-test"
 
 [media]
-codecs = ["pcmu", "pcma", "opus"]
+codecs = ["pcmu", "pcma"]
 dtmf = "rfc2833"
 rtp_port_range = [16384, 32768]
 
@@ -49,7 +49,6 @@ rtp_port_range = [16384, 32768]
 ws_url = "wss://default.example.com/sip-bridge"
 ws_auth_header = "Bearer ${BRIDGE_TOKEN}"
 ws_connect_timeout_ms = 3000
-audio_sample_rate = 16000
 forward_headers = ["User-Agent", "X-Tenant-Id"]
 
 [[route]]
@@ -100,10 +99,7 @@ fn representative_config_compiles_into_consumable_pieces() {
         cfg.bridge_defaults.connect_timeout,
         Duration::from_millis(3000)
     );
-    assert_eq!(
-        cfg.bridge_defaults.codecs,
-        vec![Codec::Pcmu, Codec::Pcma, Codec::Opus],
-    );
+    assert_eq!(cfg.bridge_defaults.codecs, vec![Codec::Pcmu, Codec::Pcma]);
     assert_eq!(cfg.bridge_defaults.dtmf_payload_type, Some(101));
     assert_eq!(
         cfg.bridge_defaults.forward_headers,
@@ -217,18 +213,29 @@ ws_url = "wss://x/y"
 }
 
 #[test]
-fn audio_sample_rate_must_be_8k_or_16k() {
+fn opus_in_codec_list_is_rejected_at_load() {
+    // The WS audio path is PCM16 at 8 kHz or 16 kHz (CLAUDE.md
+    // §4.2). Opus samples at 48 kHz and would crash forge tap
+    // attach with `UnsupportedSampleRate(48000)`. Refuse at config
+    // compile so the operator sees the limitation before any
+    // INVITE arrives.
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
 listen = "127.0.0.1:5060"
 
+[media]
+codecs = ["pcmu", "opus"]
+
 [bridge]
 ws_url = "wss://x/y"
-audio_sample_rate = 44100
 "#;
     let err = load_from_str_with_env(toml, &env).unwrap_err();
-    assert!(err.to_string().contains("44100"));
+    let msg = err.to_string();
+    assert!(
+        msg.contains("opus") && msg.contains("48"),
+        "expected opus-rejection error, got: {msg}"
+    );
 }
 
 #[test]

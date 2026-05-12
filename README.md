@@ -41,6 +41,10 @@ siphon-ai` to apply.
 Prometheus metrics live on `http://127.0.0.1:9091/metrics`;
 `/health` and `/ready` are next to them.
 
+For the full HEP/Homer end-to-end demo (SIP + RTCP + CDRs
+correlated in one call view), see
+[`examples/homer-stack/`](examples/homer-stack/).
+
 ## Layout
 
 | Path | Purpose |

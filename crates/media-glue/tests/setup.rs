@@ -71,6 +71,7 @@ fn pcmu_call(call_id: &str, offer: &'static str) -> InboundCall<'static> {
         from_tag: Some("from-tag-1".to_string()),
         to_tag: Some("to-tag-1".to_string()),
         barge_in_action: ::siphon_ai_media_glue::BargeInAction::Notify,
+        inactivity_timeout: None,
     }
 }
 
@@ -228,6 +229,7 @@ async fn no_common_codec_rolls_back_session() {
             from_tag: None,
             to_tag: None,
             barge_in_action: ::siphon_ai_media_glue::BargeInAction::Notify,
+            inactivity_timeout: None,
         })
         .await;
     assert!(matches!(
@@ -263,6 +265,7 @@ async fn malformed_offer_does_not_allocate_ports() {
             from_tag: None,
             to_tag: None,
             barge_in_action: ::siphon_ai_media_glue::BargeInAction::Notify,
+            inactivity_timeout: None,
         })
         .await
         .unwrap_err();

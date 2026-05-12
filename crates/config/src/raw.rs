@@ -120,8 +120,7 @@ fn default_transports() -> Vec<String> {
     vec!["udp".to_string()]
 }
 
-/// `[media]` — codecs + DTMF + RTP port range. v1 ignores
-/// `inactivity_timeout_secs` (forge-engine has its own setting).
+/// `[media]` — codecs + DTMF + RTP port range + inactivity watchdog.
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawMedia {
@@ -135,6 +134,12 @@ pub struct RawMedia {
     /// unset, forge's default range is used.
     #[serde(default)]
     pub rtp_port_range: Option<(u16, u16)>,
+    /// Tear the call down after this many seconds with no inbound RTP.
+    /// `None` (unset) → defaults to 60 s at compile time. `Some(0)` →
+    /// watchdog disabled. Per-route `[route.media].inactivity_timeout_secs`
+    /// overrides this value.
+    #[serde(default)]
+    pub inactivity_timeout_secs: Option<u64>,
 }
 
 /// `[cdr]` — call detail record sinks. v1 supports a JSONL file

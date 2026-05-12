@@ -85,7 +85,6 @@ pub struct BridgeOverride {
     pub ws_auth_header: Option<String>,
     pub audio_direction: Option<String>,
     pub on_ws_failure: Option<String>,
-    pub on_ws_failure_prompt: Option<String>,
     pub ws_connect_timeout_ms: Option<u64>,
 
     #[serde(default)]

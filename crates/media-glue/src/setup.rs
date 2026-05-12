@@ -96,6 +96,10 @@ pub struct InboundCall<'a> {
     /// `[BargeInAction::AutoClear]` (drop pending outbound playout
     /// before forwarding). Set from `[bridge].barge_in.mode`.
     pub barge_in_action: BargeInAction,
+    /// Tear the call down after this many seconds of no inbound RTP.
+    /// `None` disables the watchdog. Resolved by the acceptor from
+    /// `[media].inactivity_timeout_secs` and the route's override.
+    pub inactivity_timeout: Option<std::time::Duration>,
 }
 
 /// What [`MediaSetup::accept_inbound`] hands back on success.
@@ -253,7 +257,8 @@ impl MediaSetup {
             call.call_id.clone(),
             answer.negotiated_audio_sample_rate,
             call.barge_in_action,
-        )?;
+        )?
+        .with_inactivity_timeout(call.inactivity_timeout);
 
         guard.disarm();
 
@@ -374,6 +379,7 @@ mod tests {
                 from_tag: None,
                 to_tag: None,
                 barge_in_action: BargeInAction::Notify,
+                inactivity_timeout: None,
             })
             .await;
 

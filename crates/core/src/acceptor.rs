@@ -117,6 +117,13 @@ pub struct BridgeDefaults {
     /// just forwards `speech_started` and leaves the decision to
     /// the WS server.
     pub barge_in: BargeInConfig,
+    /// Tear the call down after this many seconds of no inbound RTP.
+    /// `None` disables the watchdog entirely (the per-route
+    /// `[route.media].inactivity_timeout_secs = 0` opt-out resolves
+    /// to `None` here). Default in `Default::default()` is 60 s —
+    /// enough to weather a flap, short enough that an abandoned call
+    /// after PBX network failure releases its forge session quickly.
+    pub inactivity_timeout: Option<Duration>,
 }
 
 /// What the daemon does when forge-vad reports speech-started.
@@ -162,6 +169,7 @@ impl Default for BridgeDefaults {
             dtmf_payload_type: Some(101),
             forward_headers: Vec::new(),
             barge_in: BargeInConfig::default(),
+            inactivity_timeout: Some(Duration::from_secs(60)),
         }
     }
 }
@@ -418,6 +426,20 @@ fn parse_barge_in_mode_route(s: &str) -> Option<BargeInMode> {
         "auto_clear" => Some(BargeInMode::AutoClear),
         "notify_only" => Some(BargeInMode::NotifyOnly),
         _ => None,
+    }
+}
+
+/// Resolve the inactivity watchdog for one call. Route value wins
+/// when set, with `Some(0)` meaning "disabled for this route";
+/// otherwise the daemon default applies.
+pub fn resolve_inactivity_timeout(
+    defaults: &BridgeDefaults,
+    route: &CompiledRoute,
+) -> Option<Duration> {
+    match route.media.inactivity_timeout_secs {
+        None => defaults.inactivity_timeout,
+        Some(0) => None,
+        Some(n) => Some(Duration::from_secs(n)),
     }
 }
 
@@ -790,6 +812,7 @@ fn tap_detail(res: Option<Result<TapDisconnect, MediaTapError>>) -> String {
         None => String::new(),
         Some(Ok(TapDisconnect::CallEnded)) => "call_ended".into(),
         Some(Ok(TapDisconnect::ControllerHungUp)) => "controller_hung_up".into(),
+        Some(Ok(TapDisconnect::InactivityTimeout)) => "inactivity_timeout".into(),
         Some(Err(e)) => format!("error: {e}"),
     }
 }
@@ -1295,6 +1318,7 @@ impl BridgingAcceptor {
                 from_tag: None,
                 to_tag: None,
                 barge_in_action: barge_in_to_tap_action(&resolve_barge_in(&self.defaults, route)),
+                inactivity_timeout: resolve_inactivity_timeout(&self.defaults, route),
             })
             .await?;
 
@@ -1631,6 +1655,78 @@ a=sendrecv\r\n";
             ..BridgeDefaults::default()
         };
         assert_eq!(resolve_codecs(&defaults, route), vec![Codec::Pcmu]);
+    }
+
+    // ─── resolve_inactivity_timeout ────────────────────────────────
+
+    #[test]
+    fn inactivity_timeout_route_overrides_default() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            [route.media]
+            inactivity_timeout_secs = 30
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            inactivity_timeout: Some(Duration::from_secs(60)),
+            ..BridgeDefaults::default()
+        };
+        assert_eq!(
+            resolve_inactivity_timeout(&defaults, route),
+            Some(Duration::from_secs(30)),
+        );
+    }
+
+    #[test]
+    fn inactivity_timeout_zero_on_route_disables_watchdog() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            [route.media]
+            inactivity_timeout_secs = 0
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            inactivity_timeout: Some(Duration::from_secs(60)),
+            ..BridgeDefaults::default()
+        };
+        assert_eq!(resolve_inactivity_timeout(&defaults, route), None);
+    }
+
+    #[test]
+    fn inactivity_timeout_unset_route_inherits_default() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            inactivity_timeout: Some(Duration::from_secs(45)),
+            ..BridgeDefaults::default()
+        };
+        assert_eq!(
+            resolve_inactivity_timeout(&defaults, route),
+            Some(Duration::from_secs(45)),
+        );
     }
 
     // ─── resolve_dtmf_pt ──────────────────────────────────────────

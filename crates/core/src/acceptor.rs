@@ -548,6 +548,57 @@ struct InstalledTransfer {
     dialog_manager: Arc<DialogManager>,
 }
 
+/// Carried into the post-controller cleanup task. Same Arc'd UAC +
+/// DialogManager as REFER uses; we send the closing BYE through this
+/// when a call ends without the peer having sent BYE first. `None`
+/// when `install_transfer` was never called — see `run_call`.
+struct TeardownContext {
+    uac: Arc<IntegratedUAC>,
+    dialog_manager: Arc<DialogManager>,
+}
+
+/// Send an outbound BYE on the confirmed dialog for `sip_call_id`,
+/// if we have the plumbing for it. Logs the outcome and returns —
+/// the cleanup task can't recover from a BYE failure, so this is
+/// best-effort. `bridge_call_id` is only used for log correlation.
+async fn send_outbound_bye(
+    teardown: Option<&TeardownContext>,
+    sip_call_id: &str,
+    bridge_call_id: &str,
+) {
+    let Some(ctx) = teardown else {
+        warn!(
+            call_id = %bridge_call_id,
+            sip_call_id = %sip_call_id,
+            "controller exited without remote BYE but no UAC is installed; \
+             SIP dialog will linger until session-expires"
+        );
+        return;
+    };
+    let Some(dialog) = ctx.dialog_manager.find_by_call_id(sip_call_id) else {
+        debug!(
+            call_id = %bridge_call_id,
+            sip_call_id = %sip_call_id,
+            "no dialog to BYE — already torn down at the dialog layer"
+        );
+        return;
+    };
+    match ctx.uac.bye(&dialog).await {
+        Ok(resp) => debug!(
+            call_id = %bridge_call_id,
+            sip_call_id = %sip_call_id,
+            status = resp.code(),
+            "outbound BYE sent"
+        ),
+        Err(e) => warn!(
+            call_id = %bridge_call_id,
+            sip_call_id = %sip_call_id,
+            error = %e,
+            "outbound BYE failed; SIP dialog may linger"
+        ),
+    }
+}
+
 impl BridgingAcceptor {
     pub fn new(media: Arc<MediaSetup>, defaults: BridgeDefaults, registry: CallRegistry) -> Self {
         Self {
@@ -897,37 +948,23 @@ impl CallAcceptor for BridgingAcceptor {
             .await
         {
             Ok(prepared) => {
-                // 200 OK with the negotiated SDP via the canonical
-                // upstream helper (siphon-rs PR #35). This builds the
-                // response, auto-fills Via/Contact/User-Agent, sends
-                // it through the transaction handle, AND registers
-                // the confirmed dialog with the dialog manager that
-                // `dispatch` consults — so the follow-up BYE finds
-                // it instead of falling through to "unknown dialog".
                 let uas = self
                     .uas
                     .get()
                     .ok_or_else(|| anyhow::anyhow!(
                         "BridgingAcceptor::install_uas was not called; on_matched cannot accept INVITE without the IntegratedUAS handle"
                     ))?;
-                uas.accept_invite(
-                    call.request,
-                    &call.handle,
-                    call.transport,
-                    Some(&prepared.answer.answer_text),
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("failed to accept INVITE: {e}"))?;
 
-                // Start forge's RTP forwarding loop — this is what
-                // decodes inbound audio, runs the RFC-2833 detector,
-                // and publishes ForgeEvent::DtmfDigitDetected to the
-                // EventBus our taps subscribe to. Skipping it would
-                // leave the call silent and DTMF unheard, even though
-                // the SDP/200-OK round-trip looks healthy. forge's
-                // internal state requires Initializing → Active here;
-                // calling twice errors loudly, so do it exactly once
-                // per accepted INVITE.
+                // Start forge's RTP forwarding loop BEFORE the 200 OK.
+                // Decoding inbound audio, the RFC-2833 detector, and
+                // ForgeEvent::DtmfDigitDetected all depend on this
+                // step running. If it fails AFTER we accept the
+                // INVITE we have a confirmed SIP dialog with no media
+                // — RFC-3261's worst silent failure mode. Doing it
+                // first means a failure rejects the INVITE with 500
+                // and rolls back the forge session, no zombie call.
+                // forge's state machine requires Initializing →
+                // Active exactly once; we own that single call here.
                 if let Err(e) = self
                     .media
                     .session_manager()
@@ -937,8 +974,68 @@ impl CallAcceptor for BridgingAcceptor {
                     warn!(
                         call_id = %prepared.bridge_call_id,
                         error = %e,
-                        "forge start_session failed; call will be silent",
+                        "forge start_session failed; rejecting INVITE 500",
                     );
+                    // Roll back the forge session prepare_call
+                    // allocated so the RTP port is freed. Best-effort
+                    // — if stop_session itself fails the call is
+                    // already on its way out and a warn is the
+                    // operator's signal that something else is wrong.
+                    if let Err(stop_err) = self
+                        .media
+                        .session_manager()
+                        .stop_session(&prepared.forge_call_id)
+                        .await
+                    {
+                        warn!(
+                            call_id = %prepared.bridge_call_id,
+                            error = %stop_err,
+                            "stop_session after start_session failure also failed"
+                        );
+                    }
+                    let response = UserAgentServer::create_response(
+                        call.request,
+                        500,
+                        "Server Internal Error",
+                    );
+                    call.handle.send_final(response).await;
+                    metrics::counter!(INVITES_TOTAL, "result" => "rejected").increment(1);
+                    return Ok(());
+                }
+
+                // 200 OK with the negotiated SDP via the canonical
+                // upstream helper (siphon-rs PR #35). This builds the
+                // response, auto-fills Via/Contact/User-Agent, sends
+                // it through the transaction handle, AND registers
+                // the confirmed dialog with the dialog manager that
+                // `dispatch` consults — so the follow-up BYE finds
+                // it instead of falling through to "unknown dialog".
+                if let Err(e) = uas
+                    .accept_invite(
+                        call.request,
+                        &call.handle,
+                        call.transport,
+                        Some(&prepared.answer.answer_text),
+                    )
+                    .await
+                {
+                    // The 200 OK never reached the peer — roll back
+                    // the forge session we just activated so the
+                    // RTP port doesn't leak. Same best-effort policy
+                    // as the start_session error path above.
+                    if let Err(stop_err) = self
+                        .media
+                        .session_manager()
+                        .stop_session(&prepared.forge_call_id)
+                        .await
+                    {
+                        warn!(
+                            call_id = %prepared.bridge_call_id,
+                            error = %stop_err,
+                            "stop_session after accept_invite failure also failed"
+                        );
+                    }
+                    return Err(anyhow::anyhow!("failed to accept INVITE: {e}"));
                 }
 
                 metrics::counter!(INVITES_TOTAL, "result" => "accepted").increment(1);
@@ -988,6 +1085,12 @@ impl BridgingAcceptor {
             },
         };
 
+        // Clone the handle BEFORE moving it into the registry — the
+        // cleanup task needs it to consult `remote_bye_received()`
+        // so it knows whether to send an outbound BYE. `CallHandle`
+        // is cheap (Arc-of-Notify + Arc-of-AtomicBool inside).
+        let cleanup_handle = prepared.handle.clone();
+
         // Register before spawning so a BYE arriving on the very
         // next packet finds an entry to wake. Cache the answer SDP
         // we sent so a future re-INVITE (hold/resume) can rebuild a
@@ -1031,6 +1134,18 @@ impl BridgingAcceptor {
         let registry = self.registry.clone();
         let cdr_sink = Arc::clone(&self.cdr_sink);
         let webhook_sink = Arc::clone(&self.webhook_sink);
+        // Daemon-wide UAC + DialogManager Arc clones so the cleanup
+        // task can send an outbound BYE when teardown was driven
+        // locally (WS `hangup`, admin force-hangup, bridge ended).
+        // When `install_transfer` was never called these are `None`
+        // and we log + skip the BYE — the SIP leg lingers until the
+        // peer's own session-expires fires, which is the previous
+        // behaviour, but at least the registry no longer claims the
+        // call is dead while the dialog stays up.
+        let teardown = self.transfer.get().map(|t| TeardownContext {
+            uac: Arc::clone(&t.uac),
+            dialog_manager: Arc::clone(&t.dialog_manager),
+        });
 
         tokio::spawn(async move {
             let run_result = controller.run().await;
@@ -1040,6 +1155,15 @@ impl BridgingAcceptor {
                 cause = ?view.cause,
                 "call ended"
             );
+            // Send outbound BYE if the peer didn't already drive it.
+            // Order: BYE first, registry remove second, forge stop
+            // third. That way a follow-up BYE retransmit from the
+            // peer (which would be racing our outbound BYE in the
+            // wild) still finds the entry and gets a 200 OK instead
+            // of "unknown dialog".
+            if !cleanup_handle.remote_bye_received() {
+                send_outbound_bye(teardown.as_ref(), &sip_call_id, bridge_call_id.as_str()).await;
+            }
             registry.remove(&sip_call_id);
             if let Err(e) = media.session_manager().stop_session(&forge_call_id).await {
                 warn!(

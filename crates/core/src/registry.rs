@@ -143,6 +143,25 @@ impl DialogTerminator for CallRegistry {
             None => false,
         }
     }
+
+    /// BYE-driven shutdown: same as [`Self::terminate`], plus mark
+    /// the handle so the post-controller cleanup knows the peer
+    /// has already taken down the SIP dialog and skips sending an
+    /// outbound BYE. Without this, a controller that exited because
+    /// of a remote BYE would still try to BYE the peer back —
+    /// harmless but redundant. The asymmetry with CANCEL is
+    /// deliberate: a CANCEL is pre-2xx and the dialog never confirms,
+    /// so no outbound BYE is needed there either.
+    fn terminate_from_bye(&self, sip_call_id: &str) -> bool {
+        match self.lookup(sip_call_id) {
+            Some(handle) => {
+                handle.mark_remote_bye();
+                handle.shutdown();
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -288,4 +307,55 @@ mod tests {
     // exercised end-to-end in `tests/controller_lifecycle.rs` —
     // here the structural test (`cloned_registry_shares_state`)
     // pins the shared-Arc invariant and is enough.
+
+    #[test]
+    fn terminate_from_bye_marks_handle_then_signals_shutdown() {
+        // The acceptor's cleanup task reads `remote_bye_received()`
+        // to decide whether it needs to send an outbound BYE.
+        // Confirm the registry's BYE path flips that flag — without
+        // it, every BYE-terminated call would also send a redundant
+        // outbound BYE to the peer.
+        let reg = CallRegistry::new();
+        let handle = fresh_handle("siphon-1");
+        assert!(!handle.remote_bye_received());
+
+        reg.insert(
+            "abc@pbx",
+            CallEntry {
+                handle: handle.clone(),
+                answer_text: None,
+            },
+        );
+
+        let signalled = reg.terminate_from_bye("abc@pbx");
+        assert!(signalled);
+        assert!(handle.remote_bye_received());
+    }
+
+    #[test]
+    fn terminate_does_not_mark_remote_bye() {
+        // CANCEL goes through `terminate`, not `terminate_from_bye`,
+        // because CANCEL is pre-2xx and the dialog never confirmed.
+        // The flag must stay false so the cleanup task sees "local
+        // shutdown" semantics.
+        let reg = CallRegistry::new();
+        let handle = fresh_handle("siphon-2");
+        reg.insert(
+            "xyz@pbx",
+            CallEntry {
+                handle: handle.clone(),
+                answer_text: None,
+            },
+        );
+
+        let signalled = reg.terminate("xyz@pbx");
+        assert!(signalled);
+        assert!(!handle.remote_bye_received());
+    }
+
+    #[test]
+    fn terminate_from_bye_unknown_returns_false() {
+        let reg = CallRegistry::new();
+        assert!(!reg.terminate_from_bye("never-seen@pbx"));
+    }
 }

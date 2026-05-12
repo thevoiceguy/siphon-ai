@@ -54,6 +54,16 @@ pub trait DialogTerminator: Send + Sync {
     /// `true` if a call was found and signalled, `false` if no
     /// matching call exists. Implementations MUST NOT block.
     fn terminate(&self, sip_call_id: &str) -> bool;
+
+    /// Variant of [`Self::terminate`] for the case where teardown was
+    /// driven by an inbound BYE. Implementations must record that
+    /// fact on the call entry so the eventual post-controller
+    /// cleanup task knows it does NOT need to send an outbound BYE
+    /// — the peer has already done it. The default delegates to
+    /// [`Self::terminate`] for impls that don't care to distinguish.
+    fn terminate_from_bye(&self, sip_call_id: &str) -> bool {
+        self.terminate(sip_call_id)
+    }
 }
 
 /// Decide what to send back for a BYE.
@@ -68,7 +78,7 @@ pub fn dispatch_bye(terminator: &dyn DialogTerminator, request: &Request) -> Dia
         .get_smol("Call-ID")
         .map(|s| s.to_string())
         .unwrap_or_default();
-    let signalled = terminator.terminate(&sip_call_id);
+    let signalled = terminator.terminate_from_bye(&sip_call_id);
     if signalled {
         info!(sip_call_id = %sip_call_id, "BYE → controller shutdown");
     } else {
@@ -145,6 +155,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingTerminator {
         terminated: parking_lot::Mutex<Vec<String>>,
+        terminated_from_bye: parking_lot::Mutex<Vec<String>>,
         return_match: AtomicBool,
     }
 
@@ -161,10 +172,17 @@ mod tests {
             self.terminated.lock().push(sip_call_id.to_string());
             self.return_match.load(Ordering::Relaxed)
         }
+
+        fn terminate_from_bye(&self, sip_call_id: &str) -> bool {
+            self.terminated_from_bye
+                .lock()
+                .push(sip_call_id.to_string());
+            self.return_match.load(Ordering::Relaxed)
+        }
     }
 
     #[test]
-    fn bye_sends_200_and_calls_terminator_with_call_id() {
+    fn bye_sends_200_and_calls_terminate_from_bye_with_call_id() {
         let term = RecordingTerminator::matching();
         let request = req(Method::Bye, "abc-123@pbx");
         match dispatch_bye(&term, &request) {
@@ -173,7 +191,14 @@ mod tests {
                 assert_eq!(resp.reason(), "OK");
             }
         }
-        assert_eq!(*term.terminated.lock(), vec!["abc-123@pbx".to_string()]);
+        // BYE must go through the BYE-flavoured variant so the
+        // registry can mark the handle and the acceptor's cleanup
+        // task knows not to send a duplicate outbound BYE.
+        assert_eq!(
+            *term.terminated_from_bye.lock(),
+            vec!["abc-123@pbx".to_string()]
+        );
+        assert!(term.terminated.lock().is_empty());
     }
 
     #[test]
@@ -186,7 +211,19 @@ mod tests {
                 assert_eq!(resp.code(), 200);
             }
         }
-        assert_eq!(*term.terminated.lock(), vec!["ghost@pbx".to_string()]);
+        assert_eq!(
+            *term.terminated_from_bye.lock(),
+            vec!["ghost@pbx".to_string()]
+        );
+    }
+
+    #[test]
+    fn default_terminate_from_bye_delegates_to_terminate() {
+        // Impls that don't override `terminate_from_bye` get the
+        // trait default — which is `terminate`. The NullDialogTerminator
+        // is the canonical example.
+        let n = NullDialogTerminator;
+        assert!(!n.terminate_from_bye("anything"));
     }
 
     #[test]
@@ -221,6 +258,6 @@ mod tests {
         match dispatch_bye(&term, &request) {
             DialogAction::SendFinal(resp) => assert_eq!(resp.code(), 200),
         }
-        assert_eq!(*term.terminated.lock(), vec!["".to_string()]);
+        assert_eq!(*term.terminated_from_bye.lock(), vec!["".to_string()]);
     }
 }

@@ -257,6 +257,12 @@ pub enum CompileError {
     #[error("[hep].collector {0:?} resolved to no addresses")]
     HepCollectorResolveEmpty(String),
 
+    #[error(
+        "[node].public_address must be set when [sip].listen binds an unspecified address \
+         (got {0}); the SDP answer's c= line cannot use 0.0.0.0 / ::"
+    )]
+    PublicAddressRequiredForWildcardListen(std::net::IpAddr),
+
     #[error("[hep].capture_id is required when [hep].enabled = true")]
     HepCaptureIdRequired,
 
@@ -287,7 +293,7 @@ pub enum CompileError {
 /// Compile a raw config into the consumer-ready form.
 pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let sip = compile_sip(raw.sip)?;
-    let node = compile_node(raw.node, &sip);
+    let node = compile_node(raw.node, &sip)?;
     let media = compile_media(&raw.media)?;
     let bridge_defaults = compile_bridge(raw.bridge, &raw.media)?;
     let routes = compile_dialplan(raw.routes)?;
@@ -391,12 +397,27 @@ fn compile_sip_tls(
     }))
 }
 
-fn compile_node(raw: RawNode, sip: &SipConfig) -> NodeConfig {
+fn compile_node(raw: RawNode, sip: &SipConfig) -> Result<NodeConfig, CompileError> {
     let id = raw.id.unwrap_or_else(|| "siphon-ai".to_string());
-    let public_address = raw
-        .public_address
-        .unwrap_or_else(|| sip.listen_addr.ip().to_string());
-    NodeConfig { id, public_address }
+
+    // When the operator didn't supply `[node].public_address`, fall
+    // back to the SIP bind host — but ONLY if it's a real
+    // routable address. An unspecified bind (`0.0.0.0` / `::`)
+    // would otherwise leak into the SDP answer's `c=` line and
+    // RTP from the caller goes nowhere. Refuse loudly rather than
+    // silently misconfigure.
+    let public_address = match raw.public_address {
+        Some(addr) => addr,
+        None => {
+            let ip = sip.listen_addr.ip();
+            if ip.is_unspecified() {
+                return Err(CompileError::PublicAddressRequiredForWildcardListen(ip));
+            }
+            ip.to_string()
+        }
+    };
+
+    Ok(NodeConfig { id, public_address })
 }
 
 fn compile_media(raw: &RawMedia) -> Result<MediaConfig, CompileError> {

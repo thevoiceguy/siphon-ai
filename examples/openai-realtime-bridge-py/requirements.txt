@@ -1,0 +1,4 @@
+# The bridge itself only needs `websockets` — same as the echo
+# server. We deliberately keep this list short so the example stays
+# easy to read; production deployments should pin and audit.
+websockets>=13

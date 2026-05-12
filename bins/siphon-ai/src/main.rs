@@ -14,8 +14,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use siphon_ai::Runtime;
+use siphon_ai_telemetry::LogFilterHandle;
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Parser, Debug)]
 #[command(name = "siphon-ai", version, about = "SIP-to-WebSocket media bridge")]
@@ -34,7 +35,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    init_tracing(cli.log.as_deref());
+    let log_filter = init_tracing(cli.log.as_deref());
 
     info!(config = %cli.config.display(), "loading configuration");
     let config = siphon_ai_config::load_from_path(&cli.config)
@@ -48,20 +49,27 @@ async fn main() -> Result<()> {
         "configuration compiled",
     );
 
-    let runtime = Runtime::build(config)
+    let runtime = Runtime::build(config, log_filter)
         .await
         .context("runtime build failed")?;
 
     runtime.run(shutdown_signal()).await
 }
 
-/// Initialise the global tracing subscriber.
+/// Initialise the global tracing subscriber and return a reload
+/// handle the admin endpoint uses to swap the filter at runtime.
 ///
 /// Order of precedence for the filter: `--log` flag > `RUST_LOG` env
 /// var > built-in default. The default filter pulls siphon-ai
 /// crates in at `info` and silences busy upstream logs that don't
 /// add operator value at default verbosity.
-fn init_tracing(cli_filter: Option<&str>) {
+///
+/// Implementation note: we build the subscriber as
+/// `Registry → reload(EnvFilter) → fmt-layer` rather than the
+/// shorthand `tracing_subscriber::fmt()` builder, because the
+/// shorthand doesn't expose a reload handle. The layered form is
+/// the canonical way to make `EnvFilter` mutable at runtime.
+fn init_tracing(cli_filter: Option<&str>) -> LogFilterHandle {
     const DEFAULT: &str = "siphon_ai=info,siphon_ai_core=info,siphon_ai_media_glue=info,\
          siphon_ai_sip_glue=info,siphon_ai_bridge=info,siphon_ai_routes=info,\
          siphon_ai_config=info,sip_uas=warn,sip_transaction=warn,\
@@ -72,10 +80,18 @@ fn init_tracing(cli_filter: Option<&str>) {
         None => EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT)),
     };
 
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(true)
+    let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(env_filter);
+    let fmt_layer = tracing_subscriber::fmt::layer().with_target(true);
+    // `try_init` so tests that initialise the subscriber separately
+    // don't crash this process; the second init is a noop. The
+    // reload handle works either way because the layer is part of
+    // the subscriber, not a global cell.
+    let _ = tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(fmt_layer)
         .try_init();
+
+    LogFilterHandle::new(reload_handle)
 }
 
 /// Resolve when SIGINT (Ctrl-C) or SIGTERM is received. On Windows

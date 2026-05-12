@@ -80,7 +80,9 @@ use siphon_ai_sip_glue::{
     RoutingHandler,
 };
 use siphon_ai_telemetry::{
-    install_recorder, HepTelemetry, HepTelemetryBuild, ObservabilityServer, ReadinessFlag,
+    admin::{AdminCallRegistry, AdminState, CallRegistryHandle, RegistrationRow},
+    install_recorder, HepTelemetry, HepTelemetryBuild, HepWorkerHandle, LogFilterHandle,
+    ObservabilityServer, ReadinessFlag,
 };
 use siphon_ai_webhooks::{
     FilteredSink as WebhookFilteredSink, HttpSink as WebhookHttpSink,
@@ -107,10 +109,16 @@ pub struct Runtime {
     /// `Some` when `[observability].enabled = true`. Dropped on
     /// shutdown to stop the HTTP listener.
     observability: Option<ObservabilityServer>,
-    /// `Some` when `[hep].enabled = true`. Owned here so the UDP
-    /// worker stays alive for the daemon's lifetime; dropped on
-    /// shutdown so the worker exits.
-    hep_telemetry: Option<HepTelemetry>,
+    /// `Some` when `[hep].enabled = true`. Share-by-Arc so the admin
+    /// state, CDR sink, and per-call code can borrow it; the UDP
+    /// worker lives separately on `hep_worker` for shutdown. The
+    /// field is held for its drop-on-shutdown side effect (releasing
+    /// the last Arc clone the worker observes via the shared sink).
+    #[allow(dead_code)]
+    hep_telemetry: Option<Arc<HepTelemetry>>,
+    /// The HEP UDP worker JoinHandle. Held for the daemon's
+    /// lifetime; aborted on shutdown.
+    hep_worker: Option<HepWorkerHandle>,
     /// Per-`[[register]]` background tasks. v1's tasks are no-ops
     /// (UAC drive lands in a follow-up); we still own the handles
     /// so shutdown awaits them cleanly.
@@ -123,7 +131,7 @@ impl Runtime {
     ///
     /// Binds the UDP socket eagerly so a "port already in use" error
     /// surfaces during startup, not after we've logged "ready".
-    pub async fn build(config: Config) -> Result<Self> {
+    pub async fn build(config: Config, log_filter: LogFilterHandle) -> Result<Self> {
         let Config {
             node,
             sip,
@@ -137,17 +145,26 @@ impl Runtime {
             hep,
         } = config;
 
-        // ─── Telemetry: install Prometheus recorder + spawn HTTP ───
+        // ─── Telemetry: install Prometheus recorder ─────────────────
+        // We defer the HTTP listener until after the call registry +
+        // registration manager exist so admin routes have dependencies
+        // wired in. Prometheus install can happen up-front; the
+        // recorder is a global static.
         let readiness = ReadinessFlag::new();
-        let observability_server = build_observability(observability, readiness.clone()).await?;
+        let prometheus_handle =
+            install_recorder().map_err(|e| anyhow!("install Prometheus recorder: {e}"))?;
 
         // ─── HEP3 / Homer wiring ──────────────────────────────────
         // Built before any SIP / forge traffic so the global emitters
         // are installed before the listeners can fire. When `[hep]
         // .enabled = false` returns `None` with zero cost.
-        let hep_telemetry = build_hep_telemetry(&node, hep).await?;
+        let hep_built = build_hep_telemetry(&node, hep).await?;
+        let (hep_telemetry, hep_worker) = match hep_built {
+            Some((t, w)) => (Some(t), Some(w)),
+            None => (None, None),
+        };
 
-        let cdr_sink = build_cdr_sink(cdr, hep_telemetry.as_ref()).await?;
+        let cdr_sink = build_cdr_sink(cdr, hep_telemetry.as_deref()).await?;
         // The same sink fans out call lifecycle events from the
         // acceptor AND registration_state_changed events from the
         // per-[[register]] tasks. Cheap to share — Arc<dyn …>.
@@ -330,6 +347,36 @@ impl Runtime {
             tls_server_config,
         );
 
+        // ─── Build admin state + observability HTTP listener ──────
+        // Deferred until now so admin endpoints have the call
+        // registry, registration manager, hep telemetry, and log-
+        // filter reload handle all wired in. Any of these being None
+        // makes the corresponding endpoint return 503 rather than
+        // crashing — see telemetry::admin docs.
+        let call_registry_for_admin = acceptor.registry().clone();
+        let registration_mgr_for_admin = registration_mgr.clone();
+        let admin_state = AdminState {
+            call_registry: Some(Arc::new(RuntimeCallRegistry {
+                inner: call_registry_for_admin,
+            }) as AdminCallRegistry),
+            registration_snapshot: Some(Arc::new(move || {
+                registration_mgr_for_admin
+                    .snapshot()
+                    .into_iter()
+                    .map(registration_state_to_row)
+                    .collect()
+            })),
+            log_filter: Some(log_filter),
+            hep: hep_telemetry.clone(),
+        };
+        let observability_server = build_observability(
+            observability,
+            readiness.clone(),
+            prometheus_handle,
+            admin_state,
+        )
+        .await?;
+
         // We're now serving SIP — let the readiness probe flip.
         readiness.mark_ready();
 
@@ -341,6 +388,7 @@ impl Runtime {
             listeners,
             observability: observability_server,
             hep_telemetry,
+            hep_worker,
             registration_mgr,
             registration_listeners,
         })
@@ -402,12 +450,12 @@ impl Runtime {
             server.shutdown().await;
         }
 
-        // Drain the HEP UDP worker — drops the sink reference, the
-        // worker sees its channel close, and exits. Bounded by the
-        // sink's queue depth (default 256 packets, ~milliseconds at
-        // typical call volumes).
-        if let Some(hep) = self.hep_telemetry {
-            hep.shutdown().await;
+        // Drain the HEP UDP worker — aborts the task, bounded wait.
+        // The telemetry handle itself is dropped here too (Arc
+        // refcount goes to zero once `self.hep_telemetry` is out of
+        // scope at function end).
+        if let Some(worker) = self.hep_worker {
+            worker.shutdown().await;
         }
 
         // Drop the UAS / TM Arcs so any per-call task that's still
@@ -424,16 +472,17 @@ impl Runtime {
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
-/// Install the Prometheus recorder + spawn the `/health` /
-/// `/ready` / `/metrics` HTTP server. When the operator hasn't
-/// enabled `[observability]` we still install the recorder (so
-/// metric calls in the call layers don't crash) but skip the HTTP
-/// listener — the recorder is just unconsumed in that case.
+/// Spawn the observability `/health` / `/ready` / `/metrics` HTTP
+/// server with admin routes installed. The Prometheus recorder is
+/// installed earlier in `Runtime::build` (so metric calls in call
+/// layers don't crash even when `[observability]` is disabled); the
+/// `prometheus` handle here is just the renderer for `/metrics`.
 async fn build_observability(
     cfg: ObservabilityConfig,
     readiness: ReadinessFlag,
+    prometheus: siphon_ai_telemetry::PrometheusHandle,
+    admin: AdminState,
 ) -> Result<Option<ObservabilityServer>> {
-    let handle = install_recorder().context("install Prometheus recorder")?;
     if !cfg.enabled {
         debug!("[observability].enabled = false; skipping HTTP listener");
         return Ok(None);
@@ -441,10 +490,45 @@ async fn build_observability(
     let listen = cfg
         .http_listen
         .ok_or_else(|| anyhow!("[observability].http_listen unexpectedly empty"))?;
-    let server = ObservabilityServer::start(listen, handle, readiness)
+    let server = ObservabilityServer::start(listen, prometheus, readiness, admin)
         .await
         .with_context(|| format!("bind observability HTTP {listen}"))?;
     Ok(Some(server))
+}
+
+/// Adapter that exposes `CallRegistry` through the `admin` trait
+/// surface without forcing telemetry to depend on `siphon-ai-core`.
+struct RuntimeCallRegistry {
+    inner: CallRegistry,
+}
+
+impl CallRegistryHandle for RuntimeCallRegistry {
+    fn snapshot_ids(&self) -> Vec<String> {
+        self.inner.snapshot_call_ids()
+    }
+    fn hangup(&self, sip_call_id: &str) -> bool {
+        match self.inner.lookup(sip_call_id) {
+            Some(handle) => {
+                handle.shutdown();
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Map `siphon-ai-sip-glue`'s `RegistrationState` onto the
+/// telemetry crate's `RegistrationRow`. Lives here (not in
+/// telemetry) so telemetry doesn't have to dep on sip-glue.
+fn registration_state_to_row(s: siphon_ai_sip_glue::RegistrationState) -> RegistrationRow {
+    RegistrationRow {
+        name: s.name,
+        server_addr: s.server_addr.to_string(),
+        status: s.status.as_str().to_string(),
+        last_attempt_at: s.last_attempt_at.map(|t| t.to_rfc3339()),
+        expires_at: s.expires_at.map(|t| t.to_rfc3339()),
+        last_error: s.last_error,
+    }
 }
 
 /// Build the daemon's HEP3 plumbing from compiled `[hep]` config.
@@ -452,7 +536,10 @@ async fn build_observability(
 /// installing both `sip-hep` and `forge-hep` global emitters as a
 /// side effect so siphon-rs and forge-media start shipping the
 /// moment the first packet flows.
-async fn build_hep_telemetry(node: &NodeConfig, cfg: HepConfig) -> Result<Option<HepTelemetry>> {
+async fn build_hep_telemetry(
+    node: &NodeConfig,
+    cfg: HepConfig,
+) -> Result<Option<(Arc<HepTelemetry>, HepWorkerHandle)>> {
     if !cfg.enabled {
         debug!("[hep].enabled = false; HEP shipping disabled");
         return Ok(None);
@@ -467,7 +554,7 @@ async fn build_hep_telemetry(node: &NodeConfig, cfg: HepConfig) -> Result<Option
         .capture_id
         .ok_or_else(|| anyhow!("[hep].capture_id unexpectedly empty when enabled"))?;
 
-    let telemetry = HepTelemetry::build(HepTelemetryBuild {
+    let (telemetry, worker) = HepTelemetry::build(HepTelemetryBuild {
         collector,
         capture_id,
         capture_password: cfg.capture_password,
@@ -482,7 +569,7 @@ async fn build_hep_telemetry(node: &NodeConfig, cfg: HepConfig) -> Result<Option
         capture_id,
         "HEP3 shipping active (SIP + RTCP + RTP-QoS + log + CDR chunks)"
     );
-    Ok(Some(telemetry))
+    Ok(Some((Arc::new(telemetry), worker)))
 }
 
 /// Build the `RegisterSourceResolver` closure that the routing

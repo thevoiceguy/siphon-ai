@@ -50,7 +50,9 @@ async fn runtime_starts_and_shuts_down_cleanly() {
     ]);
     let cfg = load_from_str_with_env(FIXTURE, &env).expect("config compiles");
 
-    let runtime = Runtime::build(cfg).await.expect("runtime builds");
+    let runtime = Runtime::build(cfg, siphon_ai_telemetry::LogFilterHandle::noop())
+        .await
+        .expect("runtime builds");
 
     // The kernel should have picked a non-zero port.
     let bound = runtime.local_addr().expect("local_addr");
@@ -118,7 +120,9 @@ async fn runtime_with_udp_and_tcp_transports_binds_both() {
     ]);
     let cfg = load_from_str_with_env(TCP_FIXTURE, &env).expect("config compiles");
 
-    let runtime = Runtime::build(cfg).await.expect("runtime builds");
+    let runtime = Runtime::build(cfg, siphon_ai_telemetry::LogFilterHandle::noop())
+        .await
+        .expect("runtime builds");
     let bound = runtime.local_addr().expect("local_addr");
     assert!(bound.port() > 0);
 
@@ -200,7 +204,9 @@ async fn registrations_seed_into_manager_on_startup() {
     ]);
     let cfg = load_from_str_with_env(REGISTER_FIXTURE, &env).expect("config compiles");
 
-    let runtime = Runtime::build(cfg).await.expect("runtime builds");
+    let runtime = Runtime::build(cfg, siphon_ai_telemetry::LogFilterHandle::noop())
+        .await
+        .expect("runtime builds");
     let snapshot = runtime.registration_snapshot();
     assert_eq!(snapshot.len(), 2);
 
@@ -257,7 +263,7 @@ async fn build_fails_when_listen_port_is_busy() {
     ]);
     let cfg = load_from_str_with_env(FIXTURE, &env).expect("config compiles");
 
-    let result = Runtime::build(cfg).await;
+    let result = Runtime::build(cfg, siphon_ai_telemetry::LogFilterHandle::noop()).await;
     assert!(result.is_err(), "expected bind conflict, got Ok");
 
     drop(placeholder);
@@ -328,7 +334,9 @@ async fn runtime_with_hep_enabled_binds_and_drains_worker_on_shutdown() {
     ]);
     let cfg = load_from_str_with_env(HEP_FIXTURE, &env).expect("config compiles");
 
-    let runtime = Runtime::build(cfg).await.expect("runtime builds with HEP");
+    let runtime = Runtime::build(cfg, siphon_ai_telemetry::LogFilterHandle::noop())
+        .await
+        .expect("runtime builds with HEP");
     let bound = runtime.local_addr().expect("local_addr");
     assert!(bound.port() > 0, "kernel must pick a port");
 

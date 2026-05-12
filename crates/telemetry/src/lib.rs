@@ -19,17 +19,25 @@
 //! - Dynamic log-level admin endpoint.
 //! - Per-call HEP correlation chunks.
 
+pub mod admin;
 pub mod hep;
 pub mod http;
+pub mod log_filter;
 pub mod metrics;
 pub mod readiness;
 
-pub use hep::{HepBuildError, HepTelemetry, HepTelemetryBuild};
+pub use admin::{AdminCallRegistry, AdminState, CallRegistryHandle, RegistrationRow};
+pub use hep::{HepBuildError, HepTelemetry, HepTelemetryBuild, HepWorkerHandle};
 pub use http::ObservabilityServer;
+pub use log_filter::{LogFilterError, LogFilterHandle};
+
+// Re-exports for the daemon binary so it doesn't need a second
+// direct dep on `metrics-exporter-prometheus`.
 pub use metrics::{
     install_recorder, prometheus_builder, register_descriptions, InitError, CALLS_ACTIVE,
     CALLS_TOTAL, CALL_DURATION_BUCKETS, CALL_DURATION_SECONDS, INVITES_TOTAL,
     REGISTER_ATTEMPTS_TOTAL, REGISTER_STATE, ROUTE_MATCH_TOTAL, SDP_NEGOTIATE_BUCKETS,
     SDP_NEGOTIATE_SECONDS, WS_CONNECT_BUCKETS, WS_CONNECT_SECONDS,
 };
+pub use metrics_exporter_prometheus::PrometheusHandle;
 pub use readiness::ReadinessFlag;

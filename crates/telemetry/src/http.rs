@@ -1,16 +1,21 @@
-//! Hyper-based HTTP server for `/health`, `/ready`, `/metrics`.
+//! Hyper-based HTTP server for `/health`, `/ready`, `/metrics`,
+//! and the `/admin/*` operator surface.
 //!
-//! Single bind, three routes. Spawns a per-connection task; the
-//! routes themselves are zero-allocation in the steady state
+//! Single bind, all routes. Spawns a per-connection task; the
+//! probe routes are zero-allocation in the steady state
 //! (`/health` and `/ready` produce literal byte slices,
 //! `/metrics` calls `PrometheusHandle::render` which owns the
 //! string allocation).
 //!
+//! ## Admin endpoints
+//!
+//! See [`crate::admin`]. They go through the same listener so
+//! operators have one HTTP surface to point a probe / dashboard
+//! at, not two. Routes that need dependencies the runtime hasn't
+//! wired up return 503 (e.g., `/admin/hep/test` with HEP disabled).
+//!
 //! ## What's NOT here
 //!
-//! - **No admin endpoints** — dynamic log-level adjustment, force-
-//!   hangup, etc. are listed in `docs/DEV_PLAN.md` §11.7 as part of
-//!   the admin surface; that's a follow-up.
 //! - **No auth** — these endpoints are intended to bind on a
 //!   loopback or trusted-network address (k8s pods, localhost). If
 //!   exposed publicly, sit them behind an authenticating reverse
@@ -22,7 +27,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::header::CONTENT_TYPE;
 use hyper::service::service_fn;
@@ -33,7 +38,13 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 
+use crate::admin::{self, AdminState};
 use crate::readiness::ReadinessFlag;
+
+/// Body byte cap on PUT/POST admin requests. 8 KiB is far more than
+/// any directive string or hangup body needs; protects against a
+/// noisy probe consuming the daemon's heap.
+const ADMIN_MAX_BODY: usize = 8 * 1024;
 
 /// Handle to a running observability HTTP server. Drop or call
 /// [`Self::shutdown`] to stop accepting new connections.
@@ -53,6 +64,7 @@ impl ObservabilityServer {
         addr: SocketAddr,
         prometheus: PrometheusHandle,
         readiness: ReadinessFlag,
+        admin: AdminState,
     ) -> Result<Self> {
         let listener = TcpListener::bind(addr)
             .await
@@ -63,6 +75,7 @@ impl ObservabilityServer {
         let state = Arc::new(SharedState {
             prometheus,
             readiness,
+            admin,
         });
 
         let listener = tokio::spawn(async move {
@@ -91,6 +104,7 @@ impl ObservabilityServer {
 struct SharedState {
     prometheus: PrometheusHandle,
     readiness: ReadinessFlag,
+    admin: AdminState,
 }
 
 async fn run_accept_loop(listener: TcpListener, state: Arc<SharedState>) {
@@ -124,28 +138,75 @@ async fn run_accept_loop(listener: TcpListener, state: Arc<SharedState>) {
 }
 
 async fn handle_request(req: Request<Incoming>, state: Arc<SharedState>) -> Response<Full<Bytes>> {
-    match (req.method(), req.uri().path()) {
-        (&hyper::Method::GET, "/health") => respond(StatusCode::OK, "text/plain", b"ok\n"),
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+
+    // Probe routes first — they're hot, parameter-less, and the
+    // existing /metrics scraper polls /metrics every few seconds.
+    match (&method, path.as_str()) {
+        (&hyper::Method::GET, "/health") => {
+            return respond(StatusCode::OK, "text/plain", b"ok\n");
+        }
         (&hyper::Method::GET, "/ready") => {
             if state.readiness.is_ready() {
-                respond(StatusCode::OK, "text/plain", b"ready\n")
-            } else {
-                respond(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "text/plain",
-                    b"not ready\n",
-                )
+                return respond(StatusCode::OK, "text/plain", b"ready\n");
             }
+            return respond(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "text/plain",
+                b"not ready\n",
+            );
         }
         (&hyper::Method::GET, "/metrics") => {
             let body = state.prometheus.render();
-            respond(
+            return respond(
                 StatusCode::OK,
                 "text/plain; version=0.0.4; charset=utf-8",
                 body.as_bytes(),
-            )
+            );
         }
-        _ => respond(StatusCode::NOT_FOUND, "text/plain", b"not found\n"),
+        _ => {}
+    }
+
+    // Admin routes — read the body (bounded) once, then dispatch.
+    if path.starts_with("/admin") {
+        let body = match read_admin_body(req).await {
+            Ok(b) => b,
+            Err(resp) => return resp,
+        };
+        if let Some(resp) = admin::dispatch(&method, &path, body, &state.admin).await {
+            return resp;
+        }
+    }
+
+    respond(StatusCode::NOT_FOUND, "text/plain", b"not found\n")
+}
+
+/// Bounded body reader for `/admin/*` PUT / POST. Returns the bytes
+/// on success or a ready-to-send error response on failure.
+async fn read_admin_body(req: Request<Incoming>) -> Result<Bytes, Response<Full<Bytes>>> {
+    use hyper::body::Body;
+
+    // Reject `Content-Length` past the cap before reading a byte.
+    if let Some(hint) = req.body().size_hint().upper() {
+        if hint as usize > ADMIN_MAX_BODY {
+            return Err(respond(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "application/json",
+                br#"{"error":"admin request body exceeds 8 KiB"}"#,
+            ));
+        }
+    }
+    match req.into_body().collect().await {
+        Ok(collected) => Ok(collected.to_bytes()),
+        Err(e) => {
+            debug!(error = %e, "admin body read failed");
+            Err(respond(
+                StatusCode::BAD_REQUEST,
+                "application/json",
+                br#"{"error":"failed to read body"}"#,
+            ))
+        }
     }
 }
 
@@ -176,9 +237,14 @@ mod tests {
         // Tag a metric so /metrics has something interesting; we
         // can't install globally inside the test (other tests do
         // the same), so just reuse the handle without installing.
-        let server = ObservabilityServer::start("127.0.0.1:0".parse().unwrap(), handle, readiness)
-            .await
-            .expect("start");
+        let server = ObservabilityServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            handle,
+            readiness,
+            AdminState::default(),
+        )
+        .await
+        .expect("start");
         let url = format!("http://{}", server.bound_addr());
         (server, url)
     }
@@ -255,6 +321,7 @@ mod tests {
             "127.0.0.1:0".parse().unwrap(),
             handle,
             ReadinessFlag::new(),
+            AdminState::default(),
         )
         .await
         .expect("start");

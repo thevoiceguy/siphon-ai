@@ -173,10 +173,7 @@ async fn dispatch_bye_wakes_running_controller_via_registry() {
     let registry = CallRegistry::new();
     registry.insert(
         "abc-123@pbx.example.com",
-        siphon_ai_core::registry::CallEntry {
-            handle,
-            answer_text: None,
-        },
+        siphon_ai_core::registry::CallEntry::new(handle, None),
     );
 
     let run = tokio::spawn(async move { controller.run().await });
@@ -258,10 +255,7 @@ async fn bye_drives_wire_stop_with_caller_hangup_reason() {
     let registry = CallRegistry::new();
     registry.insert(
         "bye-reason@pbx",
-        siphon_ai_core::registry::CallEntry {
-            handle,
-            answer_text: None,
-        },
+        siphon_ai_core::registry::CallEntry::new(handle, None),
     );
 
     let run = tokio::spawn(async move { controller.run().await });

@@ -80,6 +80,24 @@ pub enum BridgeOut {
         duration_ms: u64,
     },
 
+    /// Mid-dialog re-INVITE flipped the audio direction to
+    /// something other than `sendrecv` — typically a soft-phone
+    /// hold (`sendonly`) or full pause (`inactive`). The server
+    /// SHOULD stop sending audio for the duration; the peer isn't
+    /// listening. The matching `Resume` event arrives when the
+    /// direction returns to `sendrecv`.
+    Hold {
+        call_id: CallId,
+        seq: Seq,
+        /// One of `"sendonly"`, `"recvonly"`, `"inactive"` —
+        /// mirrors the peer's offered direction per RFC 3264 §6.1.
+        direction: String,
+    },
+
+    /// Direction returned to `sendrecv` after a [`BridgeOut::Hold`].
+    /// The server may resume sending audio.
+    Resume { call_id: CallId, seq: Seq },
+
     /// The caller pressed a DTMF key.
     Dtmf {
         call_id: CallId,

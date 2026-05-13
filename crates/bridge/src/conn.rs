@@ -122,6 +122,15 @@ pub enum OutgoingEvent {
     Mark {
         name: String,
     },
+    /// Mid-dialog re-INVITE flipped peer audio direction to
+    /// something other than `sendrecv`. The conn stamps `seq` and
+    /// emits [`BridgeOut::Hold`].
+    Hold {
+        /// `"sendonly"`, `"recvonly"`, or `"inactive"` per RFC 3264.
+        direction: String,
+    },
+    /// Direction returned to `sendrecv` after a [`Self::Hold`].
+    Resume,
     Stop {
         reason: StopReason,
     },
@@ -416,6 +425,12 @@ fn build_bridge_out(event: OutgoingEvent, call_id: CallId, seq: Seq) -> BridgeOu
             method,
         },
         OutgoingEvent::Mark { name } => BridgeOut::Mark { call_id, seq, name },
+        OutgoingEvent::Hold { direction } => BridgeOut::Hold {
+            call_id,
+            seq,
+            direction,
+        },
+        OutgoingEvent::Resume => BridgeOut::Resume { call_id, seq },
         OutgoingEvent::Stop { reason } => BridgeOut::Stop {
             call_id,
             seq,

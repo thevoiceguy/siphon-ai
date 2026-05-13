@@ -43,6 +43,8 @@ use siphon_ai_sip_glue::DialogTerminator;
 use tracing::{debug, warn};
 
 use crate::call::CallHandle;
+use forge_core::CallId as ForgeCallId;
+use siphon_ai_media_glue::MediaDirection;
 
 /// Per-call session state the registry tracks. Beyond the shutdown
 /// handle, we cache the answer SDP we sent for the initial INVITE so
@@ -56,6 +58,40 @@ pub struct CallEntry {
     /// `None` for legacy tests / callers that don't track it; the
     /// re-INVITE handler returns 501 in that case.
     pub answer_text: Option<String>,
+    /// The audio direction the call is currently in. Set to
+    /// `SendRecv` on accept; updated to the new offer's direction
+    /// on every accepted re-INVITE. Lets the acceptor emit
+    /// `Hold` / `Resume` only on transitions rather than on every
+    /// mid-dialog re-INVITE.
+    pub current_direction: Arc<RwLock<MediaDirection>>,
+    /// Forge engine's per-call id. Needed by `on_reinvite` to push
+    /// a peer RTP-address update through `SessionManager::get_session`
+    /// when the peer's m=audio port or c= address changes
+    /// mid-call. `None` for test fixtures that don't drive
+    /// re-INVITE.
+    pub forge_call_id: Option<ForgeCallId>,
+}
+
+impl CallEntry {
+    /// Build a fresh entry for a just-accepted call. Initial
+    /// direction is `SendRecv` (the only direction we accept on
+    /// the initial INVITE in v1). `forge_call_id` is `None` here;
+    /// production callers set it via [`Self::with_forge_call_id`].
+    pub fn new(handle: CallHandle, answer_text: Option<String>) -> Self {
+        Self {
+            handle,
+            answer_text,
+            current_direction: Arc::new(RwLock::new(MediaDirection::SendRecv)),
+            forge_call_id: None,
+        }
+    }
+
+    /// Attach the forge engine call id so re-INVITE handling can
+    /// push remote_addr updates through `SessionManager`.
+    pub fn with_forge_call_id(mut self, forge_call_id: ForgeCallId) -> Self {
+        self.forge_call_id = Some(forge_call_id);
+        self
+    }
 }
 
 /// Process-wide handle table. Cheap to clone (`Arc` inside).
@@ -182,10 +218,7 @@ mod tests {
     /// `CallController`. Cheaper than mocking and exercises the
     /// actual handle plumbing.
     fn fresh_entry(bridge_call_id: &str) -> CallEntry {
-        CallEntry {
-            handle: fresh_handle(bridge_call_id),
-            answer_text: None,
-        }
+        CallEntry::new(fresh_handle(bridge_call_id), None)
     }
 
     fn fresh_handle(bridge_call_id: &str) -> CallHandle {
@@ -237,13 +270,7 @@ mod tests {
         assert_eq!(reg.len(), 0);
 
         let h = fresh_handle("siphon-1");
-        reg.insert(
-            "abc@pbx",
-            CallEntry {
-                handle: h.clone(),
-                answer_text: None,
-            },
-        );
+        reg.insert("abc@pbx", CallEntry::new(h.clone(), None));
         assert_eq!(reg.len(), 1);
 
         let looked_up = reg.lookup("abc@pbx").expect("present");
@@ -319,13 +346,7 @@ mod tests {
         let handle = fresh_handle("siphon-1");
         assert!(!handle.remote_bye_received());
 
-        reg.insert(
-            "abc@pbx",
-            CallEntry {
-                handle: handle.clone(),
-                answer_text: None,
-            },
-        );
+        reg.insert("abc@pbx", CallEntry::new(handle.clone(), None));
 
         let signalled = reg.terminate_from_bye("abc@pbx");
         assert!(signalled);
@@ -340,13 +361,7 @@ mod tests {
         // shutdown" semantics.
         let reg = CallRegistry::new();
         let handle = fresh_handle("siphon-2");
-        reg.insert(
-            "xyz@pbx",
-            CallEntry {
-                handle: handle.clone(),
-                answer_text: None,
-            },
-        );
+        reg.insert("xyz@pbx", CallEntry::new(handle.clone(), None));
 
         let signalled = reg.terminate("xyz@pbx");
         assert!(signalled);

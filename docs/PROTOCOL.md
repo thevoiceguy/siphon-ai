@@ -148,7 +148,27 @@ Emitted only when `bridge.vad = true` is configured. Default off.
 
 `ts_ms` is monotonic milliseconds since `start` was sent (NOT wall-clock).
 
-### 3.3 `dtmf` — caller pressed a key
+### 3.3 `hold` / `resume` — peer paused or resumed media
+
+Emitted when a mid-dialog re-INVITE flips the audio direction
+across the `sendrecv` boundary. SiphonAI mirrors the peer's
+direction per RFC 3264 §6.1 and reports the transition here so the
+server can stop / resume sending audio. Servers SHOULD pause
+outbound audio for the duration of the hold — the peer isn't
+listening — and resume on `resume`.
+
+```json
+{ "type": "hold", "call_id": "...", "seq": 95, "direction": "sendonly" }
+{ "type": "resume", "call_id": "...", "seq": 142 }
+```
+
+`direction` is one of `"sendonly"`, `"recvonly"`, or `"inactive"`.
+Transitions between non-`sendrecv` states (e.g. `sendonly` →
+`inactive`) do NOT emit a second `hold` — the server already knows
+the call is paused. The matching `resume` arrives when the peer
+returns to `sendrecv`.
+
+### 3.4 `dtmf` — caller pressed a key
 
 ```json
 { "type": "dtmf", "call_id": "...", "seq": 88, "digit": "5", "duration_ms": 120, "method": "rfc2833" }
@@ -157,7 +177,7 @@ Emitted only when `bridge.vad = true` is configured. Default off.
 `digit` is one of `0-9 * # A B C D`.
 `method` is `"rfc2833"` or `"inband"` — depending on detection source.
 
-### 3.4 `mark` — playback marker fired
+### 3.5 `mark` — playback marker fired
 
 The acknowledgement to a server-initiated `mark` (§4.2). SiphonAI emits
 this when the audio queued *before* the server's `mark` request has
@@ -167,7 +187,7 @@ been fully played out into the call.
 { "type": "mark", "call_id": "...", "seq": 91, "name": "greeting_done" }
 ```
 
-### 3.5 `stop` — call ended
+### 3.6 `stop` — call ended
 
 ```json
 { "type": "stop", "call_id": "...", "seq": 200, "reason": "caller_hangup" }
@@ -186,7 +206,7 @@ been fully played out into the call.
 `stop` is the last message SiphonAI sends on the connection. SiphonAI
 then closes the WebSocket cleanly (close code 1000).
 
-### 3.6 `error` — fatal error
+### 3.7 `error` — fatal error
 
 ```json
 { "type": "error", "call_id": "...", "seq": 201, "code": "rtp_timeout", "message": "no RTP for 30s on leg A" }

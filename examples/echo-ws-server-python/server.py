@@ -189,7 +189,15 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
                 # simply drop out of the loop.
                 break
 
-            elif mtype in {"speech_started", "speech_stopped", "dtmf", "mark", "error"}:
+            elif mtype in {
+                "speech_started",
+                "speech_stopped",
+                "dtmf",
+                "mark",
+                "hold",
+                "resume",
+                "error",
+            }:
                 LOG.info("%s: %s", mtype, _redact(msg))
 
             else:

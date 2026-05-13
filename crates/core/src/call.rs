@@ -180,14 +180,22 @@ pub struct CallHandle {
     /// without it, a WS-side `hangup` would leave the SIP leg up
     /// because the controller only stops the WS/tap path.
     remote_bye: std::sync::Arc<AtomicBool>,
+    /// External-event push channel. The acceptor's `on_reinvite`
+    /// uses this to surface mid-dialog state changes (currently
+    /// `Hold` / `Resume`) to the WS bridge without going through
+    /// the controller's main select loop. Cloned from the same
+    /// sender the controller and tap push onto, so all three
+    /// producers feed one consumer (the bridge task).
+    bridge_events_tx: mpsc::Sender<OutgoingEvent>,
 }
 
 impl CallHandle {
-    fn new(call_id: CallId) -> Self {
+    fn new(call_id: CallId, bridge_events_tx: mpsc::Sender<OutgoingEvent>) -> Self {
         Self {
             notify: std::sync::Arc::new(Notify::new()),
             call_id,
             remote_bye: std::sync::Arc::new(AtomicBool::new(false)),
+            bridge_events_tx,
         }
     }
 
@@ -214,23 +222,48 @@ impl CallHandle {
     pub fn call_id(&self) -> &CallId {
         &self.call_id
     }
+
+    /// Push an event to the WS bridge from outside the controller's
+    /// own select loop. Used by the acceptor's `on_reinvite` to
+    /// emit `Hold` / `Resume` events when peer direction changes
+    /// without having to route through the controller. `try_send`
+    /// rather than `send` so a backed-up control channel (which
+    /// means the bridge is in trouble) doesn't block the SIP
+    /// dispatch thread. Drop with a warn — re-INVITE events are
+    /// informational and a missed Hold/Resume isn't fatal.
+    pub fn push_bridge_event(&self, event: OutgoingEvent) {
+        if let Err(e) = self.bridge_events_tx.try_send(event) {
+            tracing::warn!(
+                call_id = %self.call_id,
+                error = %e,
+                "bridge_events_tx full or closed; dropping external event"
+            );
+        }
+    }
 }
 
 /// The controller itself.
 pub struct CallController {
     cfg: CallControllerConfig,
     handle: CallHandle,
+    /// Receiver side of the OutgoingEvent channel whose sender
+    /// is on the handle. Lives here until `run()` hands it to the
+    /// bridge task.
+    control_out_rx: mpsc::Receiver<OutgoingEvent>,
 }
 
 impl CallController {
     /// Construct a controller. Returns it together with a
     /// [`CallHandle`] the spawner can use to signal shutdown.
     pub fn new(cfg: CallControllerConfig) -> (Self, CallHandle) {
-        let handle = CallHandle::new(cfg.call_id.clone());
+        let (control_out_tx, control_out_rx) =
+            mpsc::channel::<OutgoingEvent>(CONTROL_CHANNEL_CAPACITY);
+        let handle = CallHandle::new(cfg.call_id.clone(), control_out_tx);
         (
             Self {
                 cfg,
                 handle: handle.clone(),
+                control_out_rx,
             },
             handle,
         )
@@ -246,7 +279,11 @@ impl CallController {
     /// [`CallOutcome`] is the source of truth for what happened.
     #[instrument(skip(self), fields(call_id = %self.cfg.call_id))]
     pub async fn run(self) -> Result<CallOutcome, CallError> {
-        let CallController { cfg, handle } = self;
+        let CallController {
+            cfg,
+            handle,
+            control_out_rx,
+        } = self;
         let CallControllerConfig {
             call_id,
             bridge,
@@ -262,9 +299,11 @@ impl CallController {
         let (caller_audio_tx, caller_audio_rx) = mpsc::channel::<Vec<u8>>(AUDIO_CHANNEL_CAPACITY);
         // bridge → tap: 20 ms PCM16 frames from server (playout)
         let (playout_audio_tx, playout_audio_rx) = mpsc::channel::<Vec<u8>>(AUDIO_CHANNEL_CAPACITY);
-        // controller → bridge: outgoing events (Stop, Mark, …)
-        let (control_out_tx, control_out_rx) =
-            mpsc::channel::<OutgoingEvent>(CONTROL_CHANNEL_CAPACITY);
+        // controller → bridge: outgoing events (Stop, Mark, …). The
+        // sender lives on the CallHandle so external callers
+        // (acceptor's on_reinvite) can push too. The controller
+        // gets its own clone via the handle.
+        let control_out_tx = handle.bridge_events_tx.clone();
         // bridge → controller: BridgeIn from server
         let (control_in_tx, mut control_in_rx) =
             mpsc::channel::<BridgeIn>(CONTROL_CHANNEL_CAPACITY);

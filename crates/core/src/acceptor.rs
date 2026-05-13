@@ -64,7 +64,7 @@ use sip_uas::integrated::{AcceptInviteAsyncOutcome, IntegratedUAS};
 use sip_uas::{NegotiatedSessionTimer, SessionTimerPolicy, UserAgentServer};
 use siphon_ai_bridge::{
     AudioEncoding, AudioFormat, BridgeConfig, CallId as BridgeCallId, Direction, DisconnectReason,
-    SipMeta, StartMsg, PROTOCOL_VERSION,
+    OutgoingEvent, SipMeta, StartMsg, PROTOCOL_VERSION,
 };
 use siphon_ai_cdr::{
     AudioInfo as CdrAudioInfo, CdrRecord, CdrSinkHandle, Direction as CdrDirection, NullSink,
@@ -939,6 +939,19 @@ fn sdp_audio_payload_types(session: &forge_sdp::SessionDescription) -> Vec<Strin
         .unwrap_or_default()
 }
 
+/// Resolve the peer's RTP endpoint from an offer SDP. Media-level
+/// `c=` overrides the session-level `c=` per RFC 4566 §5.7. Returns
+/// `None` when neither carries a valid IP address or when audio is
+/// absent. Used by `on_reinvite` to push a `remote_addr` update to
+/// forge when the peer changes its RTP endpoint mid-call.
+fn sdp_audio_remote_addr(session: &forge_sdp::SessionDescription) -> Option<std::net::SocketAddr> {
+    use forge_sdp::MediaType;
+    let media = session.find_media(MediaType::Audio)?;
+    let conn = media.connection.as_ref().or(session.connection.as_ref())?;
+    let ip: std::net::IpAddr = conn.connection_address.as_str().parse().ok()?;
+    Some(std::net::SocketAddr::new(ip, media.port))
+}
+
 /// Rejection signal returned by [`prepare_reinvite_answer`] when
 /// the re-INVITE offer can't be safely answered with the cached
 /// SDP — the caller sends the carried response and exits.
@@ -960,6 +973,12 @@ struct ReinviteAnswer {
     /// the cached one by construction.
     offer_direction: Option<siphon_ai_media_glue::MediaDirection>,
     answer_direction: Option<siphon_ai_media_glue::MediaDirection>,
+    /// Peer's audio RTP endpoint advertised in the offer's media
+    /// `c=` / `m=` lines. `None` for body-less re-INVITEs. The
+    /// acceptor pushes this to forge so RTP follows the peer to
+    /// the new address instead of relying on symmetric-RTP
+    /// latching.
+    remote_addr: Option<std::net::SocketAddr>,
 }
 
 /// Validate an inbound re-INVITE against the cached initial answer
@@ -991,6 +1010,7 @@ fn prepare_reinvite_answer(
                 answer_sdp: prev_answer.to_string(),
                 offer_direction: None,
                 answer_direction: None,
+                remote_addr: None,
             });
         }
         Err(e) => {
@@ -1055,11 +1075,13 @@ fn prepare_reinvite_answer(
     let offer_direction = sdp_audio_direction(&offer_session).unwrap_or_default();
     let answer_direction = mirror_direction(offer_direction);
     let answer_sdp = rewrite_sdp_direction(prev_answer, answer_direction);
+    let remote_addr = sdp_audio_remote_addr(&offer_session);
 
     Ok(ReinviteAnswer {
         answer_sdp,
         offer_direction: Some(offer_direction),
         answer_direction: Some(answer_direction),
+        remote_addr,
     })
 }
 
@@ -1167,6 +1189,7 @@ impl CallAcceptor for BridgingAcceptor {
         let new_answer = reinvite.answer_sdp;
         let offer_direction = reinvite.offer_direction;
         let answer_direction = reinvite.answer_direction;
+        let new_remote_addr = reinvite.remote_addr;
 
         // Send 200 OK via the canonical helper so the dialog
         // manager gets the updated CSeq / route-set.
@@ -1219,6 +1242,77 @@ impl CallAcceptor for BridgingAcceptor {
                 // Keep the existing dialog + timer running; the peer
                 // can resend with a larger value.
                 return Ok(());
+            }
+        }
+
+        // Push the peer's new RTP endpoint to forge if the offer
+        // advertised one. Forge would otherwise fall back to
+        // symmetric-RTP latching — adequate when the peer keeps
+        // sending from the latched address, but brittle when the
+        // peer switches port (a soft-phone reconfigure, NAT pinhole
+        // shift) and pauses sending. The explicit update closes
+        // that gap. Best-effort: a session that just ended races
+        // with the cleanup task, so we log + ignore on miss.
+        if let (Some(addr), Some(forge_call_id)) = (new_remote_addr, entry.forge_call_id.as_ref()) {
+            if let Some(session) = self.media.session_manager().get_session(forge_call_id) {
+                let update = forge_engine::ParticipantMediaUpdate {
+                    remote_addr: Some(Some(addr)),
+                    ..Default::default()
+                };
+                match session
+                    .update_participant_media(forge_engine::ParticipantLabel::A, update)
+                    .await
+                {
+                    Ok(_) => debug!(
+                        sip_call_id = %call.sip_call_id,
+                        remote_addr = %addr,
+                        "pushed peer RTP endpoint to forge"
+                    ),
+                    Err(e) => warn!(
+                        sip_call_id = %call.sip_call_id,
+                        error = %e,
+                        "failed to push peer RTP endpoint to forge; \
+                         relying on symmetric-RTP latching"
+                    ),
+                }
+            }
+        }
+
+        // Hold / Resume emission. The cached `entry.current_direction`
+        // started at SendRecv on the initial INVITE; on each accepted
+        // re-INVITE we update it and emit a transition event when
+        // we cross the SendRecv ↔ non-SendRecv boundary. Body-less
+        // re-INVITEs (session-timer refresh) don't carry a direction
+        // and don't generate a transition.
+        if let Some(new_direction) = offer_direction {
+            let mut current = entry.current_direction.write();
+            let prev = *current;
+            *current = new_direction;
+            drop(current);
+            let was_held = prev.is_held();
+            let now_held = new_direction.is_held();
+            match (was_held, now_held) {
+                (false, true) => {
+                    debug!(
+                        sip_call_id = %call.sip_call_id,
+                        direction = new_direction.as_attr(),
+                        "emitting Hold on WS bridge"
+                    );
+                    entry.handle.push_bridge_event(OutgoingEvent::Hold {
+                        direction: new_direction.as_attr().to_string(),
+                    });
+                }
+                (true, false) => {
+                    debug!(
+                        sip_call_id = %call.sip_call_id,
+                        "emitting Resume on WS bridge"
+                    );
+                    entry.handle.push_bridge_event(OutgoingEvent::Resume);
+                }
+                _ => {
+                    // No transition (held→held with different flavor,
+                    // or sendrecv→sendrecv). No event needed.
+                }
             }
         }
 
@@ -1474,10 +1568,11 @@ impl BridgingAcceptor {
         // matching answer with just the direction flipped.
         self.registry.insert(
             prepared.sip_call_id.clone(),
-            crate::registry::CallEntry {
-                handle: prepared.handle,
-                answer_text: Some(prepared.answer.answer_text.clone()),
-            },
+            crate::registry::CallEntry::new(
+                prepared.handle,
+                Some(prepared.answer.answer_text.clone()),
+            )
+            .with_forge_call_id(prepared.forge_call_id.clone()),
         );
 
         // Per-route counter is owned-by-route — bounded cardinality
@@ -2489,5 +2584,51 @@ a=sendrecv\r\n",
         assert_eq!(outcome.offer_direction, None);
         assert_eq!(outcome.answer_direction, None);
         assert_eq!(outcome.answer_sdp, cached_answer_pcmu());
+        assert_eq!(outcome.remote_addr, None);
+    }
+
+    // ─── sdp_audio_remote_addr ─────────────────────────────────────
+
+    #[test]
+    fn reinvite_remote_addr_extracted_from_offer() {
+        // Peer changed RTP endpoint mid-call (port + connection
+        // address). prepare_reinvite_answer must surface the new
+        // address so the acceptor can push it to forge.
+        let req = invite_with(
+            Some("application/sdp"),
+            "v=0\r\n\
+o=alice 2 2 IN IP4 10.0.0.99\r\n\
+s=t\r\n\
+c=IN IP4 10.0.0.99\r\n\
+t=0 0\r\n\
+m=audio 19999 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=sendrecv\r\n",
+        );
+        let outcome = prepare_reinvite_answer(&req, cached_answer_pcmu(), "abc-123@pbx")
+            .expect("re-INVITE should be accepted");
+        let addr = outcome.remote_addr.expect("remote_addr present");
+        assert_eq!(addr.to_string(), "10.0.0.99:19999");
+    }
+
+    #[test]
+    fn reinvite_remote_addr_media_level_connection_wins() {
+        // RFC 4566 §5.7: media-level `c=` overrides session-level.
+        let req = invite_with(
+            Some("application/sdp"),
+            "v=0\r\n\
+o=alice 2 2 IN IP4 10.0.0.5\r\n\
+s=t\r\n\
+c=IN IP4 10.0.0.5\r\n\
+t=0 0\r\n\
+m=audio 7000 RTP/AVP 0\r\n\
+c=IN IP4 192.168.42.5\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=sendrecv\r\n",
+        );
+        let outcome = prepare_reinvite_answer(&req, cached_answer_pcmu(), "abc-123@pbx")
+            .expect("re-INVITE should be accepted");
+        let addr = outcome.remote_addr.expect("remote_addr present");
+        assert_eq!(addr.to_string(), "192.168.42.5:7000");
     }
 }

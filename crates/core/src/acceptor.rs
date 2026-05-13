@@ -49,16 +49,19 @@
 //!   caller passes a list, but the daemon doesn't read it from
 //!   config yet.
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
 use sip_core::Request;
-use sip_dialog::DialogManager;
+use sip_dialog::session_timer_manager::{SessionTimerEvent, SessionTimerManager};
+use sip_dialog::{DialogId, DialogManager};
 use sip_uac::integrated::IntegratedUAC;
-use sip_uas::integrated::IntegratedUAS;
-use sip_uas::UserAgentServer;
+use sip_uas::integrated::{AcceptInviteAsyncOutcome, IntegratedUAS};
+use sip_uas::{NegotiatedSessionTimer, SessionTimerPolicy, UserAgentServer};
 use siphon_ai_bridge::{
     AudioEncoding, AudioFormat, BridgeConfig, CallId as BridgeCallId, Direction, DisconnectReason,
     SipMeta, StartMsg, PROTOCOL_VERSION,
@@ -562,12 +565,39 @@ pub struct BridgingAcceptor {
     cdr_sink: CdrSinkHandle,
     webhook_sink: WebhookSinkHandle,
     call_id_factory: CallIdFactory,
+    /// RFC 4028 negotiation policy used on every inbound INVITE.
+    /// Defaults to the upstream `SessionTimerPolicy::default()` (90 s
+    /// floor, no preference, no force-refresher) until the daemon's
+    /// `[sip]` config calls `with_session_timer_policy`.
+    session_timer_policy: SessionTimerPolicy,
+    /// Authoritative timer for every dialog we accepted with session
+    /// timers. The fan-out task subscribed in `new()` reads its event
+    /// stream and dispatches `SessionExpired` to the per-dialog
+    /// handle in `dialog_handles` — turning a timer event into a
+    /// controller shutdown that, via PR #19's path, sends an outbound
+    /// BYE to the peer.
+    session_timer_manager: Arc<SessionTimerManager>,
+    /// `DialogId → CallHandle` map populated when a call is accepted
+    /// with timers and drained when it ends. Read by the fan-out
+    /// task; written by `on_matched` and `run_call`'s cleanup arm.
+    dialog_handles: Arc<RwLock<HashMap<DialogId, crate::call::CallHandle>>>,
 }
 
 /// Daemon-wide REFER plumbing (shared across every accepted call).
 struct InstalledTransfer {
     uac: Arc<IntegratedUAC>,
     dialog_manager: Arc<DialogManager>,
+}
+
+/// Pair handed to [`BridgingAcceptor::run_call`] when a call was
+/// accepted via the session-timer-aware path. `dialog` keys the
+/// session-timer registry; `timer` is `Some` iff RFC 4028
+/// negotiated successfully on this INVITE. Tests that drive
+/// `run_call` directly (without the full acceptor flow) pass
+/// `None` for the outer Option and skip session-timer wiring.
+pub struct AcceptedSession {
+    pub dialog: sip_dialog::Dialog,
+    pub timer: Option<NegotiatedSessionTimer>,
 }
 
 /// Carried into the post-controller cleanup task. Same Arc'd UAC +
@@ -623,6 +653,58 @@ async fn send_outbound_bye(
 
 impl BridgingAcceptor {
     pub fn new(media: Arc<MediaSetup>, defaults: BridgeDefaults, registry: CallRegistry) -> Self {
+        let session_timer_manager = Arc::new(SessionTimerManager::new());
+        let dialog_handles: Arc<RwLock<HashMap<DialogId, crate::call::CallHandle>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
+        // Fan-out: drain the manager's event stream and dispatch
+        // `SessionExpired` to the per-dialog handle. The subscribe()
+        // call is one-shot upstream (last subscriber wins), so doing
+        // it here at construction guarantees nobody else can race us
+        // for the receiver. Spawning in sync code is fine because
+        // every callsite (daemon main, integration tests) runs inside
+        // a tokio runtime — if a caller forgets to set one up the
+        // panic surfaces immediately.
+        let mgr_for_fanout = Arc::clone(&session_timer_manager);
+        let map_for_fanout = Arc::clone(&dialog_handles);
+        tokio::spawn(async move {
+            let mut events = mgr_for_fanout.subscribe().await;
+            while let Some(ev) = events.recv().await {
+                match ev {
+                    SessionTimerEvent::SessionExpired(dialog_id) => {
+                        let handle = map_for_fanout.read().get(&dialog_id).cloned();
+                        if let Some(handle) = handle {
+                            info!(
+                                sip_call_id = %dialog_id.call_id(),
+                                "RFC 4028 session expired; tearing down call"
+                            );
+                            handle.shutdown();
+                        } else {
+                            debug!(
+                                sip_call_id = %dialog_id.call_id(),
+                                "session expired for unknown dialog — already torn down"
+                            );
+                        }
+                    }
+                    SessionTimerEvent::RefreshNeeded(dialog_id) => {
+                        // We default to `refresher=uac`, so this only
+                        // fires when an operator forced the UAS to be
+                        // the refresher AND the half-deadline elapsed
+                        // without a refresh re-INVITE going out. v1
+                        // doesn't initiate refreshes, so log and let
+                        // the same dialog's `SessionExpired` fire at
+                        // the full deadline.
+                        warn!(
+                            sip_call_id = %dialog_id.call_id(),
+                            "RFC 4028 refresh due but UAS-initiated refresh \
+                             is not implemented in v1 — call will tear down \
+                             at session-expires"
+                        );
+                    }
+                }
+            }
+        });
+
         Self {
             media,
             defaults,
@@ -632,6 +714,9 @@ impl BridgingAcceptor {
             cdr_sink: Arc::new(NullSink),
             webhook_sink: Arc::new(WebhookNullSink),
             call_id_factory: default_call_id_factory(),
+            session_timer_policy: SessionTimerPolicy::default(),
+            session_timer_manager,
+            dialog_handles,
         }
     }
 
@@ -686,6 +771,15 @@ impl BridgingAcceptor {
     /// an HTTP sink based on `[webhooks]` config.
     pub fn with_webhook_sink(mut self, sink: WebhookSinkHandle) -> Self {
         self.webhook_sink = sink;
+        self
+    }
+
+    /// Replace the RFC 4028 negotiation policy. The daemon builds
+    /// one from `[sip].min_session_expires_secs` and
+    /// `[sip].preferred_session_expires_secs` at startup; tests
+    /// override it for focused coverage.
+    pub fn with_session_timer_policy(mut self, policy: SessionTimerPolicy) -> Self {
+        self.session_timer_policy = policy;
         self
     }
 
@@ -942,14 +1036,52 @@ impl CallAcceptor for BridgingAcceptor {
                 "BridgingAcceptor::install_uas was not called; on_reinvite cannot accept INVITE"
             )
         })?;
-        uas.accept_invite(
-            call.request,
-            &call.handle,
-            call.transport,
-            Some(&new_answer),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to accept re-INVITE: {e}"))?;
+        let outcome = uas
+            .accept_invite_with_session_timer(
+                call.request,
+                &call.handle,
+                call.transport,
+                Some(&new_answer),
+                &self.session_timer_policy,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to accept re-INVITE: {e}"))?;
+
+        // If the refresh re-INVITE carried Session-Expires (whether
+        // hold/resume or a pure timer refresh), reset the per-dialog
+        // timer to the freshly-negotiated value. A 422-too-small
+        // outcome here means the peer's refresh asks for a shorter
+        // session than our Min-SE; the helper already sent the 422,
+        // and the original timer keeps running — the peer is
+        // expected to retry with a larger value.
+        match outcome {
+            AcceptInviteAsyncOutcome::Accepted {
+                dialog,
+                session_timer: Some(timer),
+            } => {
+                self.session_timer_manager.refresh_timer(
+                    dialog.id().clone(),
+                    timer.session_expires,
+                    matches!(timer.refresher, sip_core::RefresherRole::Uas),
+                );
+                debug!(
+                    sip_call_id = %call.sip_call_id,
+                    session_expires_secs = timer.session_expires.as_secs(),
+                    "re-INVITE refreshed RFC 4028 timer"
+                );
+            }
+            AcceptInviteAsyncOutcome::Accepted { .. } => { /* no timer renegotiated */ }
+            AcceptInviteAsyncOutcome::SessionIntervalTooSmall { required_min_se } => {
+                warn!(
+                    sip_call_id = %call.sip_call_id,
+                    required_min_se_secs = required_min_se.as_secs(),
+                    "re-INVITE rejected 422: refresh Session-Expires below Min-SE"
+                );
+                // Keep the existing dialog + timer running; the peer
+                // can resend with a larger value.
+                return Ok(());
+            }
+        }
 
         debug!(
             sip_call_id = %call.sip_call_id,
@@ -999,23 +1131,12 @@ impl CallAcceptor for BridgingAcceptor {
                         error = %e,
                         "forge start_session failed; rejecting INVITE 500",
                     );
-                    // Roll back the forge session prepare_call
-                    // allocated so the RTP port is freed. Best-effort
-                    // — if stop_session itself fails the call is
-                    // already on its way out and a warn is the
-                    // operator's signal that something else is wrong.
-                    if let Err(stop_err) = self
-                        .media
-                        .session_manager()
-                        .stop_session(&prepared.forge_call_id)
-                        .await
-                    {
-                        warn!(
-                            call_id = %prepared.bridge_call_id,
-                            error = %stop_err,
-                            "stop_session after start_session failure also failed"
-                        );
-                    }
+                    self.rollback_forge_session(
+                        &prepared.bridge_call_id,
+                        &prepared.forge_call_id,
+                        "start_session",
+                    )
+                    .await;
                     let response = UserAgentServer::create_response(
                         call.request,
                         500,
@@ -1027,42 +1148,84 @@ impl CallAcceptor for BridgingAcceptor {
                 }
 
                 // 200 OK with the negotiated SDP via the canonical
-                // upstream helper (siphon-rs PR #35). This builds the
-                // response, auto-fills Via/Contact/User-Agent, sends
-                // it through the transaction handle, AND registers
-                // the confirmed dialog with the dialog manager that
-                // `dispatch` consults — so the follow-up BYE finds
-                // it instead of falling through to "unknown dialog".
-                if let Err(e) = uas
-                    .accept_invite(
+                // session-timer-aware upstream helper (siphon-rs
+                // PR #40). This builds the response, parses any
+                // `Session-Expires` header for RFC 4028 negotiation,
+                // appends `Session-Expires` + `Require: timer` to
+                // the 2xx when timers are in play, auto-fills
+                // Via/Contact/User-Agent, sends through the
+                // transaction handle, AND registers the confirmed
+                // dialog with the dialog manager that `dispatch`
+                // consults.
+                let accept_outcome = match uas
+                    .accept_invite_with_session_timer(
                         call.request,
                         &call.handle,
                         call.transport,
                         Some(&prepared.answer.answer_text),
+                        &self.session_timer_policy,
                     )
                     .await
                 {
-                    // The 200 OK never reached the peer — roll back
-                    // the forge session we just activated so the
-                    // RTP port doesn't leak. Same best-effort policy
-                    // as the start_session error path above.
-                    if let Err(stop_err) = self
-                        .media
-                        .session_manager()
-                        .stop_session(&prepared.forge_call_id)
-                        .await
-                    {
+                    Ok(o) => o,
+                    Err(e) => {
+                        // The 200 OK never reached the peer — roll back
+                        // the forge session we just activated so the
+                        // RTP port doesn't leak.
+                        self.rollback_forge_session(
+                            &prepared.bridge_call_id,
+                            &prepared.forge_call_id,
+                            "accept_invite",
+                        )
+                        .await;
+                        return Err(anyhow::anyhow!("failed to accept INVITE: {e}"));
+                    }
+                };
+
+                let (dialog, session_timer) = match accept_outcome {
+                    AcceptInviteAsyncOutcome::Accepted {
+                        dialog,
+                        session_timer,
+                    } => (dialog, session_timer),
+                    AcceptInviteAsyncOutcome::SessionIntervalTooSmall { required_min_se } => {
+                        // The helper already sent the 422; we just need
+                        // to release the forge session that prepare_call
+                        // / start_session set up. No dialog, no call.
                         warn!(
                             call_id = %prepared.bridge_call_id,
-                            error = %stop_err,
-                            "stop_session after accept_invite failure also failed"
+                            required_min_se_secs = required_min_se.as_secs(),
+                            "rejecting INVITE 422: Session-Expires below configured Min-SE"
                         );
+                        self.rollback_forge_session(
+                            &prepared.bridge_call_id,
+                            &prepared.forge_call_id,
+                            "session_interval_too_small",
+                        )
+                        .await;
+                        metrics::counter!(INVITES_TOTAL, "result" => "rejected").increment(1);
+                        return Ok(());
                     }
-                    return Err(anyhow::anyhow!("failed to accept INVITE: {e}"));
+                };
+
+                if let Some(ref timer) = session_timer {
+                    debug!(
+                        call_id = %prepared.bridge_call_id,
+                        sip_call_id = %dialog.id().call_id(),
+                        session_expires_secs = timer.session_expires.as_secs(),
+                        refresher = ?timer.refresher,
+                        "RFC 4028 session timer negotiated"
+                    );
                 }
 
                 metrics::counter!(INVITES_TOTAL, "result" => "accepted").increment(1);
-                self.run_call(prepared, call.route.name.as_str());
+                self.run_call(
+                    prepared,
+                    call.route.name.as_str(),
+                    Some(AcceptedSession {
+                        dialog,
+                        timer: session_timer,
+                    }),
+                );
                 Ok(())
             }
             Err(e) => {
@@ -1088,10 +1251,38 @@ impl BridgingAcceptor {
     /// stops the forge session, and emits the CDR. Returns the
     /// `JoinHandle` of the spawned task — production callers
     /// (`on_matched`) drop it; tests `await` it.
+    /// Best-effort `stop_session` cleanup. Called from every error
+    /// path between `prepare_call` (which allocates the forge
+    /// session) and a successful controller spawn — start_session
+    /// failure, accept_invite failure, and 422-too-small. Logs a
+    /// warning if `stop_session` itself errors and otherwise stays
+    /// quiet.
+    async fn rollback_forge_session(
+        &self,
+        bridge_call_id: &BridgeCallId,
+        forge_call_id: &forge_core::CallId,
+        reason: &'static str,
+    ) {
+        if let Err(stop_err) = self
+            .media
+            .session_manager()
+            .stop_session(forge_call_id)
+            .await
+        {
+            warn!(
+                call_id = %bridge_call_id,
+                error = %stop_err,
+                reason,
+                "stop_session after {reason} failure also failed"
+            );
+        }
+    }
+
     pub fn run_call(
         &self,
         prepared: PreparedCall,
         route_name: &str,
+        accepted: Option<AcceptedSession>,
     ) -> tokio::task::JoinHandle<()> {
         let call_start = CallStart {
             bridge_call_id: prepared.bridge_call_id.clone(),
@@ -1113,6 +1304,30 @@ impl BridgingAcceptor {
         // so it knows whether to send an outbound BYE. `CallHandle`
         // is cheap (Arc-of-Notify + Arc-of-AtomicBool inside).
         let cleanup_handle = prepared.handle.clone();
+
+        // Wire the RFC 4028 timer if negotiation produced one. The
+        // fan-out task spawned in `new()` reads `SessionExpired`
+        // events from the manager and looks the handle up in
+        // `dialog_handles` to drive teardown. Stopping the timer is
+        // the cleanup task's job below.
+        let session_timer_key = match accepted.as_ref() {
+            Some(AcceptedSession {
+                dialog,
+                timer: Some(timer),
+            }) => {
+                let id = dialog.id().clone();
+                self.dialog_handles
+                    .write()
+                    .insert(id.clone(), cleanup_handle.clone());
+                self.session_timer_manager.start_timer(
+                    id.clone(),
+                    timer.session_expires,
+                    matches!(timer.refresher, sip_core::RefresherRole::Uas),
+                );
+                Some(id)
+            }
+            _ => None,
+        };
 
         // Register before spawning so a BYE arriving on the very
         // next packet finds an entry to wake. Cache the answer SDP
@@ -1169,6 +1384,9 @@ impl BridgingAcceptor {
             uac: Arc::clone(&t.uac),
             dialog_manager: Arc::clone(&t.dialog_manager),
         });
+        let session_timer_manager = Arc::clone(&self.session_timer_manager);
+        let dialog_handles = Arc::clone(&self.dialog_handles);
+        let cleanup_session_timer_key = session_timer_key;
 
         tokio::spawn(async move {
             let run_result = controller.run().await;
@@ -1178,6 +1396,14 @@ impl BridgingAcceptor {
                 cause = ?view.cause,
                 "call ended"
             );
+            // Stop the RFC 4028 timer and drop the handle map entry
+            // first — otherwise a `SessionExpired` racing the
+            // controller exit would try to shutdown an already-gone
+            // controller. Cheap when no timer was negotiated.
+            if let Some(dialog_id) = cleanup_session_timer_key.as_ref() {
+                session_timer_manager.stop_timer(dialog_id);
+                dialog_handles.write().remove(dialog_id);
+            }
             // Send outbound BYE if the peer didn't already drive it.
             // Order: BYE first, registry remove second, forge stop
             // third. That way a follow-up BYE retransmit from the

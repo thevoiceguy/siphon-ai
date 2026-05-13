@@ -213,6 +213,70 @@ ws_url = "wss://x/y"
 }
 
 #[test]
+fn session_timer_defaults_to_90s_floor() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert_eq!(cfg.sip.min_session_expires, Duration::from_secs(90));
+    assert_eq!(cfg.sip.preferred_session_expires, None);
+}
+
+#[test]
+fn session_timer_below_90s_rejected_at_load() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+min_session_expires_secs = 30
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("90") && msg.contains("30"),
+        "expected RFC 4028 floor rejection, got: {msg}"
+    );
+}
+
+#[test]
+fn session_timer_explicit_values_compile() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+min_session_expires_secs = 300
+preferred_session_expires_secs = 1800
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert_eq!(cfg.sip.min_session_expires, Duration::from_secs(300));
+    assert_eq!(
+        cfg.sip.preferred_session_expires,
+        Some(Duration::from_secs(1800)),
+    );
+}
+
+#[test]
 fn on_ws_failure_only_accepts_hangup() {
     // v1 supports "hangup" only — `play_prompt` would need a
     // forge-driven prompt player that isn't built. Reject the

@@ -927,6 +927,142 @@ fn sdp_audio_direction(
         .and_then(siphon_ai_media_glue::MediaDirection::from_attr)
 }
 
+/// Audio payload-type list from a parsed SDP. Used by re-INVITE
+/// handling to confirm the peer's new offer still proposes a codec
+/// we accepted on the initial INVITE. Empty when there's no audio
+/// media.
+fn sdp_audio_payload_types(session: &forge_sdp::SessionDescription) -> Vec<String> {
+    use forge_sdp::MediaType;
+    session
+        .find_media(MediaType::Audio)
+        .map(|m| m.formats.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default()
+}
+
+/// Rejection signal returned by [`prepare_reinvite_answer`] when
+/// the re-INVITE offer can't be safely answered with the cached
+/// SDP — the caller sends the carried response and exits.
+#[derive(Debug)]
+struct ReinviteRejection {
+    code: u16,
+    reason: &'static str,
+}
+
+/// Inputs to the canonical accept_invite_with_session_timer call
+/// for a re-INVITE. Built by [`prepare_reinvite_answer`].
+struct ReinviteAnswer {
+    /// SDP body to put in the 2xx (a direction-flipped version of
+    /// the cached initial answer, or the cached answer verbatim on
+    /// a body-less re-INVITE).
+    answer_sdp: String,
+    /// `None` for body-less re-INVITEs. Only used for the closing
+    /// debug log; otherwise the new SDP carries the same media as
+    /// the cached one by construction.
+    offer_direction: Option<siphon_ai_media_glue::MediaDirection>,
+    answer_direction: Option<siphon_ai_media_glue::MediaDirection>,
+}
+
+/// Validate an inbound re-INVITE against the cached initial answer
+/// and produce the SDP for the 200 OK. Rejects (instead of producing
+/// a 200 with stale SDP) when:
+///
+/// - The body is present but malformed → 400 Bad Request.
+/// - The offer parses but lists payload types we never accepted →
+///   488 Not Acceptable Here (mid-call codec change is post-v1).
+///
+/// A body-less re-INVITE is treated as a session-timer refresh per
+/// RFC 3261 §14.2 — the cached answer stands.
+fn prepare_reinvite_answer(
+    request: &Request,
+    prev_answer: &str,
+    sip_call_id: &str,
+) -> Result<ReinviteAnswer, ReinviteRejection> {
+    let offer_text = match extract_offer_sdp(request) {
+        Ok(t) => t,
+        Err(OfferError::NoBody) => {
+            // RFC 3261 §14.2: body-less re-INVITE refreshes the
+            // session without renegotiating media. Echo the cached
+            // answer so the peer keeps the same media path.
+            debug!(
+                sip_call_id = %sip_call_id,
+                "re-INVITE has no SDP body — treating as session-timer refresh"
+            );
+            return Ok(ReinviteAnswer {
+                answer_sdp: prev_answer.to_string(),
+                offer_direction: None,
+                answer_direction: None,
+            });
+        }
+        Err(e) => {
+            warn!(
+                sip_call_id = %sip_call_id,
+                error = %e,
+                "re-INVITE rejected 400: malformed body"
+            );
+            return Err(ReinviteRejection {
+                code: 400,
+                reason: "Bad Request",
+            });
+        }
+    };
+
+    let offer_session = siphon_ai_media_glue::parse_offer(offer_text).map_err(|e| {
+        warn!(
+            sip_call_id = %sip_call_id,
+            error = %e,
+            "re-INVITE rejected 488: offer parse failed"
+        );
+        ReinviteRejection {
+            code: 488,
+            reason: "Not Acceptable Here",
+        }
+    })?;
+
+    // The previously-sent answer parses through the same routine
+    // since it's a valid SDP we generated. Failure here would be
+    // a daemon bug.
+    let cached_session = siphon_ai_media_glue::parse_offer(prev_answer).map_err(|e| {
+        warn!(
+            sip_call_id = %sip_call_id,
+            error = %e,
+            "cached answer failed to re-parse — rejecting 500"
+        );
+        ReinviteRejection {
+            code: 500,
+            reason: "Server Internal Error",
+        }
+    })?;
+
+    let offer_pts = sdp_audio_payload_types(&offer_session);
+    let cached_pts = sdp_audio_payload_types(&cached_session);
+    let has_common_pt =
+        !cached_pts.is_empty() && offer_pts.iter().any(|pt| cached_pts.contains(pt));
+    if !has_common_pt {
+        warn!(
+            sip_call_id = %sip_call_id,
+            offer_pts = ?offer_pts,
+            cached_pts = ?cached_pts,
+            "re-INVITE rejected 488: payload types diverge from accepted call \
+             (mid-call codec change unsupported in v1)"
+        );
+        return Err(ReinviteRejection {
+            code: 488,
+            reason: "Not Acceptable Here",
+        });
+    }
+
+    // RFC 3264 §6.1 direction mirror.
+    let offer_direction = sdp_audio_direction(&offer_session).unwrap_or_default();
+    let answer_direction = mirror_direction(offer_direction);
+    let answer_sdp = rewrite_sdp_direction(prev_answer, answer_direction);
+
+    Ok(ReinviteAnswer {
+        answer_sdp,
+        offer_direction: Some(offer_direction),
+        answer_direction: Some(answer_direction),
+    })
+}
+
 /// RFC 3264 §6.1 direction mirror. Hold/resume re-INVITE answering
 /// depends on this — see `BridgingAcceptor::on_reinvite`.
 fn mirror_direction(
@@ -1008,26 +1144,29 @@ impl CallAcceptor for BridgingAcceptor {
             return Ok(());
         };
 
-        // Determine the offer's new direction. Anything malformed
-        // or missing the audio media falls back to sendrecv per
-        // RFC 4566 §6.
-        let offer_direction = extract_offer_sdp(call.request)
-            .ok()
-            .and_then(|t| siphon_ai_media_glue::parse_offer(t).ok())
-            .as_ref()
-            .and_then(sdp_audio_direction)
-            .unwrap_or_default();
-
-        // RFC 3264 §6.1 mirror: offer sendonly → answer recvonly,
-        // offer recvonly → answer sendonly, offer inactive →
-        // answer inactive, offer sendrecv → answer sendrecv.
-        let answer_direction = mirror_direction(offer_direction);
-
-        // Take the cached answer SDP and flip its direction
-        // attribute. Re-using everything else (port, codecs,
-        // payload types) keeps forge's session intact — hold/
-        // resume by design only changes the `a=` line.
-        let new_answer = rewrite_sdp_direction(&prev_answer, answer_direction);
+        // Strict offer validation. The cached `prev_answer` only
+        // carries direction; mirroring the offer's `a=` line is
+        // safe ONLY when the offer still proposes the same codec /
+        // PT we negotiated on the initial INVITE. v1 doesn't
+        // implement mid-call codec / port renegotiation, so anything
+        // beyond a direction change gets a clean 488 instead of a
+        // 200 OK with an SDP that doesn't correspond to the offer.
+        //
+        // RFC 3261 §14.2 permits a body-less re-INVITE as a session-
+        // timer refresh; the previous answer stands unchanged on
+        // that path.
+        let reinvite = match prepare_reinvite_answer(call.request, &prev_answer, &call.sip_call_id)
+        {
+            Ok(r) => r,
+            Err(ReinviteRejection { code, reason }) => {
+                let response = UserAgentServer::create_response(call.request, code, reason);
+                call.handle.send_final(response).await;
+                return Ok(());
+            }
+        };
+        let new_answer = reinvite.answer_sdp;
+        let offer_direction = reinvite.offer_direction;
+        let answer_direction = reinvite.answer_direction;
 
         // Send 200 OK via the canonical helper so the dialog
         // manager gets the updated CSeq / route-set.
@@ -2243,5 +2382,112 @@ a=sendrecv\r\n";
         assert!(out.contains("a=sendonly\n"));
         // No spurious CR added.
         assert!(!out.contains("\r"));
+    }
+
+    // ─── prepare_reinvite_answer ───────────────────────────────────
+
+    /// SDP we'd cache after accepting an initial INVITE that offered
+    /// PCMU. Matches what `build_answer` would produce shape-wise.
+    fn cached_answer_pcmu() -> &'static str {
+        "v=0\r\n\
+o=siphon 1 1 IN IP4 192.168.1.10\r\n\
+s=-\r\n\
+c=IN IP4 192.168.1.10\r\n\
+t=0 0\r\n\
+m=audio 20100 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=sendrecv\r\n"
+    }
+
+    #[test]
+    fn reinvite_matching_pt_with_hold_returns_mirrored_answer() {
+        // Peer puts the call on hold by sending a re-INVITE with
+        // sendonly + same PT (PCMU). We should answer recvonly and
+        // keep the same media line otherwise.
+        let req = invite_with(
+            Some("application/sdp"),
+            "v=0\r\n\
+o=alice 2 2 IN IP4 10.0.0.5\r\n\
+s=t\r\n\
+c=IN IP4 10.0.0.5\r\n\
+t=0 0\r\n\
+m=audio 7000 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=sendonly\r\n",
+        );
+        let outcome = prepare_reinvite_answer(&req, cached_answer_pcmu(), "abc-123@pbx")
+            .expect("re-INVITE should be accepted");
+        assert_eq!(
+            outcome.offer_direction,
+            Some(siphon_ai_media_glue::MediaDirection::SendOnly)
+        );
+        assert_eq!(
+            outcome.answer_direction,
+            Some(siphon_ai_media_glue::MediaDirection::RecvOnly)
+        );
+        assert!(outcome.answer_sdp.contains("a=recvonly"));
+        // Media line preserved.
+        assert!(outcome.answer_sdp.contains("m=audio 20100 RTP/AVP 0"));
+    }
+
+    #[test]
+    fn reinvite_with_unsupported_pt_rejected_488() {
+        // Original call negotiated PCMU (PT 0). Peer's re-INVITE
+        // proposes only G.722 (PT 9). v1 doesn't renegotiate
+        // codecs mid-call — must be 488, not a stale 200.
+        let req = invite_with(
+            Some("application/sdp"),
+            "v=0\r\n\
+o=alice 2 2 IN IP4 10.0.0.5\r\n\
+s=t\r\n\
+c=IN IP4 10.0.0.5\r\n\
+t=0 0\r\n\
+m=audio 7000 RTP/AVP 9\r\n\
+a=rtpmap:9 G722/8000\r\n\
+a=sendrecv\r\n",
+        );
+        match prepare_reinvite_answer(&req, cached_answer_pcmu(), "abc-123@pbx") {
+            Err(ReinviteRejection { code, reason }) => {
+                assert_eq!(code, 488);
+                assert_eq!(reason, "Not Acceptable Here");
+            }
+            Ok(_) => panic!("expected 488 rejection on codec divergence"),
+        }
+    }
+
+    #[test]
+    fn reinvite_with_malformed_body_rejected_488() {
+        // Body is non-SDP — parse fails. RFC 3261 §13.3 maps a
+        // failed offer to 488 (we choose 488 over 400 because the
+        // peer SENT a body and we just can't accept it).
+        let req = invite_with(Some("application/sdp"), "not actually sdp\r\n");
+        match prepare_reinvite_answer(&req, cached_answer_pcmu(), "abc-123@pbx") {
+            Err(ReinviteRejection { code, .. }) => assert_eq!(code, 488),
+            Ok(_) => panic!("expected rejection on parse failure"),
+        }
+    }
+
+    #[test]
+    fn reinvite_without_content_type_but_with_body_rejected_400() {
+        // No Content-Type header but a body is present — that's
+        // malformed SIP (RFC 3261 §20.15). 400 Bad Request, not 488.
+        let req = invite_with(None, "v=0\r\n");
+        match prepare_reinvite_answer(&req, cached_answer_pcmu(), "abc-123@pbx") {
+            Err(ReinviteRejection { code, .. }) => assert_eq!(code, 400),
+            Ok(_) => panic!("expected 400 on missing Content-Type"),
+        }
+    }
+
+    #[test]
+    fn reinvite_without_body_treated_as_session_refresh() {
+        // RFC 3261 §14.2: body-less re-INVITE is permitted for
+        // session refresh. We answer with the unchanged cached SDP
+        // and no direction info (nothing to mirror).
+        let req = invite_with(None, "");
+        let outcome = prepare_reinvite_answer(&req, cached_answer_pcmu(), "abc-123@pbx")
+            .expect("body-less re-INVITE should be accepted");
+        assert_eq!(outcome.offer_direction, None);
+        assert_eq!(outcome.answer_direction, None);
+        assert_eq!(outcome.answer_sdp, cached_answer_pcmu());
     }
 }

@@ -150,6 +150,13 @@ fn spawn_one(
 /// Inner loop. Returns `Err` only on unrecoverable setup failures
 /// (UAC builder rejected the config). Per-attempt failures stay in
 /// the loop and roll over to a backoff retry.
+///
+/// 8 args is over clippy's 7-arg threshold; each is independent
+/// daemon-side plumbing (manager, cfg, two transaction/transport
+/// arcs, resolver, local addr, webhook sink, shutdown). Bundling
+/// them into a `Drive Context` struct buys nothing — the call site
+/// is one place and each arg is named at construction.
+#[allow(clippy::too_many_arguments)]
 #[instrument(skip_all, fields(name = %cfg.name, server = %cfg.server_addr))]
 async fn drive(
     manager: &RegistrationManager,

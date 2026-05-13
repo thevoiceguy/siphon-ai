@@ -73,6 +73,42 @@ async fn server_acks_start_then_idles(port_tx: tokio::sync::oneshot::Sender<u16>
     }
 }
 
+/// Same as [`server_acks_start_then_idles`] but captures the `reason`
+/// field of the controller's `stop` event and reports it back. Used
+/// to verify PROTOCOL.md §6: BYE → `caller_hangup`, WS hangup →
+/// `server_hangup`.
+async fn server_capture_stop_reason(
+    port_tx: tokio::sync::oneshot::Sender<u16>,
+    reason_tx: tokio::sync::oneshot::Sender<String>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let _ = port_tx.send(port);
+    let (stream, _) = listener.accept().await.expect("accept");
+    let mut ws = tokio_tungstenite::accept_hdr_async(stream, echo_subprotocol)
+        .await
+        .expect("ws accept");
+
+    let mut reason_tx = Some(reason_tx);
+    while let Some(msg) = ws.next().await {
+        match msg {
+            Ok(Message::Text(t)) => {
+                let v: Value = serde_json::from_str(&t).unwrap();
+                if v["type"] == "stop" {
+                    if let Some(tx) = reason_tx.take() {
+                        let r = v["reason"].as_str().unwrap_or("").to_string();
+                        let _ = tx.send(r);
+                    }
+                    let _ = ws.send(Message::Close(None)).await;
+                    break;
+                }
+            }
+            Ok(Message::Close(_)) | Err(_) => break,
+            _ => {}
+        }
+    }
+}
+
 fn bye_request(call_id: &str) -> Request {
     let uri = SipUri::parse("sip:5000@siphon.example.com").unwrap();
     let mut h = Headers::new();
@@ -166,6 +202,91 @@ async fn dispatch_bye_wakes_running_controller_via_registry() {
         .expect("task didn't panic")
         .expect("controller returns Ok");
     assert_eq!(outcome.termination, CallTermination::LocalShutdown);
+}
+
+#[tokio::test]
+async fn bye_drives_wire_stop_with_caller_hangup_reason() {
+    // PROTOCOL.md §6: `caller_hangup` means the SIP peer sent BYE.
+    // The shutdown.notified() arm in call.rs reads
+    // `handle.remote_bye_received()` to disambiguate; this end-to-
+    // end check goes from BYE → registry → controller exit and
+    // observes the `reason` field on the WS `stop` frame.
+    let (port_tx, port_rx) = tokio::sync::oneshot::channel();
+    let (reason_tx, reason_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(server_capture_stop_reason(port_tx, reason_tx));
+    let port = port_rx.await.expect("server announces port");
+
+    let manager = Arc::new(MediaBridgeManager::new());
+    let forge_call_id = ForgeCallId::new("siphon-bye-reason");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        forge_call_id,
+        8000,
+    )
+    .expect("attach");
+    let cfg = CallControllerConfig {
+        call_id: BridgeCallId::new("siphon-bye-reason"),
+        bridge: BridgeConfig {
+            ws_url: format!("ws://127.0.0.1:{port}/"),
+            connect_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+        start: StartMsg {
+            version: "1".into(),
+            call_id: BridgeCallId::new("siphon-bye-reason"),
+            seq: 0,
+            from: "+13125551234".into(),
+            to: "5000".into(),
+            direction: Direction::Inbound,
+            audio: AudioFormat {
+                encoding: AudioEncoding::Pcm16le,
+                sample_rate: 8000,
+                channels: 1,
+                frame_ms: 20,
+            },
+            sip: SipMeta {
+                call_id: "bye-reason@pbx".into(),
+                headers: HashMap::new(),
+            },
+        },
+        media_tap: tap,
+        transfer: None,
+    };
+    let (controller, handle) = CallController::new(cfg);
+
+    let registry = CallRegistry::new();
+    registry.insert(
+        "bye-reason@pbx",
+        siphon_ai_core::registry::CallEntry {
+            handle,
+            answer_text: None,
+        },
+    );
+
+    let run = tokio::spawn(async move { controller.run().await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Dispatch via the BYE path — `terminate_from_bye` flips
+    // `remote_bye` on the handle before signalling shutdown.
+    let bye = bye_request("bye-reason@pbx");
+    let _ = dispatch_bye(&registry, &bye);
+
+    let outcome = tokio::time::timeout(Duration::from_secs(3), run)
+        .await
+        .expect("controller exits after BYE")
+        .expect("task didn't panic")
+        .expect("controller returns Ok");
+    assert_eq!(outcome.termination, CallTermination::LocalShutdown);
+
+    let reason = tokio::time::timeout(Duration::from_secs(2), reason_rx)
+        .await
+        .expect("WS observed stop")
+        .expect("server sent reason");
+    assert_eq!(
+        reason, "caller_hangup",
+        "BYE-driven teardown must surface as caller_hangup on the WS"
+    );
 }
 
 #[tokio::test]

@@ -29,6 +29,24 @@ python server.py --bind 0.0.0.0:8765
 
 Point `[bridge].ws_url = "ws://127.0.0.1:8765/"` at it from the daemon.
 
+## `examples/deepgram-openai-bot-node/`
+
+A closed-loop voice agent in Node. Caller speaks → Deepgram STT →
+OpenAI Chat (streaming) → Deepgram TTS → caller hears. The
+canonical port-from-FreeSWITCH-`mod_audio_fork` example: shows
+what changes when you swap ESL / `uuid_broadcast` for SiphonAI's
+single-WS-streams-both-directions model.
+
+Pair with `docs/FREESWITCH_INTEGRATION.md` for an end-to-end
+demo: a softphone registered to FreeSWITCH dials `9000` and
+talks to the bot through SiphonAI.
+
+```sh
+cd examples/deepgram-openai-bot-node
+npm install
+DEEPGRAM_API_KEY=… OPENAI_API_KEY=… npm start
+```
+
 ## `examples/openai-realtime-bridge-py/`
 
 A working WS server that bridges every accepted call into OpenAI's

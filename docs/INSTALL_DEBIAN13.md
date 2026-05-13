@@ -89,13 +89,18 @@ state directory for CDR files. The convention this guide uses:
 | `/var/log/siphon-ai/`                 | CDR JSONL files (optional). |
 | `/run/siphon-ai/`                     | Sockets / pidfiles (systemd manages). |
 
-Create the dirs and the dedicated user:
+Create the dirs and the dedicated service user. The user is
+intentionally distinct from any operator-side `siphon` /
+admin login: it has no login shell, no home outside its state
+dir, and the daemon runs as it under systemd. Splitting the
+two means a breach of the daemon doesn't hand the attacker a
+sudo-capable account.
 
 ```bash
-sudo useradd --system --home-dir /var/lib/siphon-ai --shell /usr/sbin/nologin siphon
-sudo install -d -o root  -g root  -m 0755 /etc/siphon-ai
-sudo install -d -o siphon -g siphon -m 0750 /etc/siphon-ai/env.d
-sudo install -d -o siphon -g siphon -m 0750 /var/log/siphon-ai
+sudo useradd --system --home-dir /var/lib/siphon-ai --shell /usr/sbin/nologin siphon-ai
+sudo install -d -o root      -g root      -m 0755 /etc/siphon-ai
+sudo install -d -o siphon-ai -g siphon-ai -m 0750 /etc/siphon-ai/env.d
+sudo install -d -o siphon-ai -g siphon-ai -m 0750 /var/log/siphon-ai
 sudo install -m 0755 target/release/siphon-ai /usr/local/bin/siphon-ai
 ```
 
@@ -143,7 +148,7 @@ name = "default"
 [route.match]
 any = true
 EOF
-sudo chown root:siphon /etc/siphon-ai/siphon-ai.toml
+sudo chown root:siphon-ai /etc/siphon-ai/siphon-ai.toml
 sudo chmod 0640 /etc/siphon-ai/siphon-ai.toml
 ```
 
@@ -161,7 +166,7 @@ sudo tee /etc/siphon-ai/env >/dev/null <<'EOF'
 BRIDGE_TOKEN=replace-me
 HEP_PASSWORD=replace-me
 EOF
-sudo chown root:siphon /etc/siphon-ai/env
+sudo chown root:siphon-ai /etc/siphon-ai/env
 sudo chmod 0640 /etc/siphon-ai/env
 ```
 
@@ -178,8 +183,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=siphon
-Group=siphon
+User=siphon-ai
+Group=siphon-ai
 EnvironmentFile=-/etc/siphon-ai/env
 ExecStart=/usr/local/bin/siphon-ai --config /etc/siphon-ai/siphon-ai.toml
 Restart=always

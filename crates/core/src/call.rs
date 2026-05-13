@@ -327,12 +327,26 @@ impl CallController {
             tokio::select! {
                 biased;
 
-                // External cancel — drive cooperative teardown.
+                // External cancel — drive cooperative teardown. The
+                // stop reason on the WS reflects who actually drove
+                // teardown: a remote-side BYE flips `remote_bye` on
+                // the handle (via `CallRegistry::terminate_from_bye`
+                // from PR #19), so the controller can distinguish
+                // `caller_hangup` from `server_hangup` per
+                // PROTOCOL.md §6. Anything else that wakes
+                // `shutdown` (admin force-hangup, RFC 4028 session
+                // expiry) is daemon-initiated and maps to
+                // `server_hangup` from the WS server's point of view.
                 _ = shutdown.notified() => {
-                    info!(call_id = %call_id, "controller shutdown requested");
+                    let reason = if handle.remote_bye_received() {
+                        StopReason::CallerHangup
+                    } else {
+                        StopReason::ServerHangup
+                    };
+                    info!(call_id = %call_id, ?reason, "controller shutdown requested");
                     termination = CallTermination::LocalShutdown;
                     let _ = control_out_tx
-                        .send(OutgoingEvent::Stop { reason: StopReason::ServerHangup })
+                        .send(OutgoingEvent::Stop { reason })
                         .await;
                     break;
                 }

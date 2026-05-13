@@ -760,8 +760,9 @@ async fn clear_command_does_not_kill_tap() {
 
     cmd_tx.send(TapCommand::Clear).await.expect("send clear");
 
-    // Drain whatever the Clear pushed (Flush).
-    let _ = tokio::time::timeout(Duration::from_millis(300), async {
+    // Drain whatever the Clear pushed (Flush). `expect` returns
+    // unit, so no binding — just propagate the timeout assertion.
+    tokio::time::timeout(Duration::from_millis(300), async {
         loop {
             if let Some(req) = manager.try_recv_outbound_request(&call).await {
                 if matches!(req, OutboundMediaRequest::Flush { .. }) {

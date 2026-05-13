@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  reinvite_unsupported_codec_488 — the call is set up with PCMU; the
+  peer then sends a re-INVITE that proposes only G.722 (PT 9). v1
+  doesn't renegotiate codecs mid-call, so the daemon MUST reject
+  with 488 Not Acceptable Here and leave the original call alive.
+
+  Validates PR #24's `prepare_reinvite_answer` payload-type check
+  end-to-end through the SIP stack.
+-->
+<scenario name="reinvite_unsupported_codec_488">
+  <send>
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp-codec@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp-codec@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="200" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp-codec@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <!-- re-INVITE proposing G.722 only — daemon answered PCMU on
+       the initial INVITE, so this is a codec-change request that
+       v1 doesn't support. -->
+  <send>
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-reinv
+Max-Forwards: 70
+From: <sip:sipp-codec@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 INVITE
+Contact: <sip:sipp-codec@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687638 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 9
+a=rtpmap:9 G722/8000
+a=sendrecv
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <!-- MUST be 488. The original call stays up. -->
+  <recv response="488" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-reinv-ack
+Max-Forwards: 70
+From: <sip:sipp-codec@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <!-- The original call should still be alive — BYE proves it. -->
+  <send>
+<![CDATA[
+BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-bye
+Max-Forwards: 70
+From: <sip:sipp-codec@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 3 BYE
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="200" rtd="true"/>
+
+  <ResponseTimeRepartition value="200, 500, 1000"/>
+</scenario>

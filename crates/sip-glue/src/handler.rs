@@ -19,10 +19,14 @@
 //! ## Re-INVITE
 //!
 //! Routing only applies to *new* calls (`dialog: None`). Mid-dialog
-//! re-INVITEs (hold/resume, codec change) belong to the
-//! `CallController`, not the routing layer. Until core lands, this
-//! handler responds 501 to re-INVITEs — see CLAUDE.md §8 for what's
-//! deferred to Week 3+.
+//! re-INVITEs belong to the `CallController`'s acceptor — the
+//! routing handler dispatches them via `CallAcceptor::on_reinvite`,
+//! which validates the offer, mirrors the direction (hold / resume),
+//! and answers 200 OK. The trait's default `on_reinvite` still
+//! responds 501 for acceptors that didn't override it; production
+//! impls (e.g., `BridgingAcceptor`) override and answer for real.
+//! Mid-call codec / port renegotiation is rejected with 488 per
+//! `BridgingAcceptor::on_reinvite` — that's a post-v1 feature.
 //!
 //! ## Contact / User-Agent on the 404
 //!

@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  reinvite_hold_resume — end-to-end coverage of the hold/resume
+  re-INVITE path through the SIP stack.
+
+  Sequence:
+    1. INVITE  with PCMU + sendrecv      → 200 OK (sendrecv)
+    2. ACK
+    3. re-INVITE with PCMU + sendonly    → 200 OK MUST carry recvonly
+       (RFC 3264 §6.1 mirror; PR #17 + PR #24)
+    4. ACK
+    5. re-INVITE with PCMU + sendrecv    → 200 OK MUST carry sendrecv
+    6. ACK
+    7. BYE                                → 200 OK
+
+  The two re-INVITEs reuse the call's existing payload type (PCMU)
+  to stay on the "direction-only change" code path; the codec
+  divergence path is covered by `reinvite_unsupported_codec_488.xml`.
+-->
+<scenario name="reinvite_hold_resume">
+  <!-- Initial INVITE -->
+  <send>
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp-hold@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp-hold@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+  <recv response="200" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp-hold@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <!-- HOLD: same codec, direction = sendonly. -->
+  <send>
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-hold
+Max-Forwards: 70
+From: <sip:sipp-hold@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 INVITE
+Contact: <sip:sipp-hold@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687638 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendonly
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <!-- 200 OK MUST carry recvonly (mirror of sendonly). -->
+  <recv response="200" rtd="true">
+    <action>
+      <ereg regexp="a=recvonly"
+            search_in="msg"
+            check_it="true"
+            assign_to="hold_dir"/>
+      <log message="hold answer captured: a=[$hold_dir]"/>
+    </action>
+  </recv>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-hold-ack
+Max-Forwards: 70
+From: <sip:sipp-hold@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <!-- RESUME: same codec, direction = sendrecv. -->
+  <send>
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-resume
+Max-Forwards: 70
+From: <sip:sipp-hold@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 3 INVITE
+Contact: <sip:sipp-hold@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687639 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="200" rtd="true">
+    <action>
+      <ereg regexp="a=sendrecv"
+            search_in="msg"
+            check_it="true"
+            assign_to="resume_dir"/>
+      <log message="resume answer captured: a=[$resume_dir]"/>
+    </action>
+  </recv>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-resume-ack
+Max-Forwards: 70
+From: <sip:sipp-hold@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 3 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <!-- Tear down cleanly. -->
+  <send>
+<![CDATA[
+BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-bye
+Max-Forwards: 70
+From: <sip:sipp-hold@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 4 BYE
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="200" rtd="true"/>
+
+  <ResponseTimeRepartition value="200, 500, 1000"/>
+</scenario>

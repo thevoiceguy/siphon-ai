@@ -203,10 +203,22 @@ impl Runtime {
         // an Arc to this acceptor. We close the cycle below via
         // `acceptor.install_uas(...)` once the UAS exists.
         let registry = CallRegistry::new();
+        // Translate `[sip].min_session_expires_secs` /
+        // `preferred_session_expires_secs` into the upstream policy
+        // every accepted INVITE negotiates against. v1 always picks
+        // refresher=uac (the peer drives refreshes) — gateway-style
+        // UASes don't initiate UPDATE refreshes themselves, so this
+        // matches the implementation.
+        let session_timer_policy = sip_uas::SessionTimerPolicy {
+            min_se: sip.min_session_expires,
+            preferred_se: sip.preferred_session_expires,
+            force_refresher: Some(sip_core::RefresherRole::Uac),
+        };
         let acceptor = Arc::new(
             BridgingAcceptor::new(media_setup, bridge_defaults, registry.clone())
                 .with_cdr_sink(cdr_sink)
-                .with_webhook_sink(webhook_sink),
+                .with_webhook_sink(webhook_sink)
+                .with_session_timer_policy(session_timer_policy),
         );
 
         // ─── Registration manager ──────────────────────────────────

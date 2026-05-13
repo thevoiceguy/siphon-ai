@@ -167,7 +167,7 @@ async fn full_call_lifecycle_emits_expected_metrics() {
     // Mirror what on_matched does on the accept path so the
     // accepted-counter increment is exercised here too.
     metrics::counter!(INVITES_TOTAL, "result" => "accepted").increment(1);
-    let run_handle = acceptor.run_call(prepared, "metrics_route");
+    let run_handle = acceptor.run_call(prepared, "metrics_route", None);
 
     tokio::time::sleep(Duration::from_millis(150)).await;
     let h = registry.lookup("abc-metrics@pbx").expect("registered");

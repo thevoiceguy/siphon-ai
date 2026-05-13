@@ -58,6 +58,7 @@ scenarios=(
     basic_call_then_bye.xml
     caller_cancels_during_setup.xml
     unsupported_codec_488.xml
+    session_timer_echo.xml
 )
 
 run_scenario() {

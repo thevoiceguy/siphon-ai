@@ -171,6 +171,13 @@ pub struct SipConfig {
     /// transports list. `None` when TLS isn't enabled. Daemon
     /// loads cert/key from these paths at startup.
     pub tls: Option<SipTlsConfig>,
+    /// RFC 4028 Min-SE for the UAS (`[sip].min_session_expires_secs`).
+    /// Defaults to 90 (RFC minimum).
+    pub min_session_expires: Duration,
+    /// Optional cap on Session-Expires when negotiating
+    /// (`[sip].preferred_session_expires_secs`). `None` = honour
+    /// the peer's value uncapped.
+    pub preferred_session_expires: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -278,6 +285,12 @@ pub enum CompileError {
     #[error("[hep].capture_id is required when [hep].enabled = true")]
     HepCaptureIdRequired,
 
+    #[error(
+        "[sip].min_session_expires_secs = {0} is below the RFC 4028 floor of 90 \
+         seconds; raise it or omit the field to use the 90 s default"
+    )]
+    SessionTimerMinSeTooSmall(u32),
+
     #[error("[[register]] block at index {index} has empty name")]
     RegisterEmptyName { index: usize },
 
@@ -359,12 +372,25 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
     let tls_enabled = transports.contains(&SipTransport::Tls);
     let tls = compile_sip_tls(raw.tls, tls_enabled, &listen_addr)?;
 
+    // RFC 4028: 90 s is the floor (Min-SE). An operator setting
+    // something smaller is asking for trouble; reject at load.
+    let min_session_expires = match raw.min_session_expires_secs {
+        None => Duration::from_secs(90),
+        Some(n) if n < 90 => return Err(CompileError::SessionTimerMinSeTooSmall(n)),
+        Some(n) => Duration::from_secs(n as u64),
+    };
+    let preferred_session_expires = raw
+        .preferred_session_expires_secs
+        .map(|n| Duration::from_secs(n as u64));
+
     Ok(SipConfig {
         listen_addr,
         transports,
         user_agent: raw.user_agent,
         contact: raw.contact,
         tls,
+        min_session_expires,
+        preferred_session_expires,
     })
 }
 

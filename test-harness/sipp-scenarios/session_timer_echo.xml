@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  session_timer_echo — UAC sends INVITE with Session-Expires=300 +
+  refresher=uac and Supported: timer. UAS (SiphonAI) must echo
+  Session-Expires back on the 2xx with Require: timer so the peer
+  knows timer support was honoured. Validates the wire-level
+  contract from the RFC 4028 plumbing (siphon-rs PR #40, siphon-ai
+  acceptor wiring).
+
+  The scenario doesn't drive any refresh — that's the soak harness's
+  job. Here we just confirm:
+    1. INVITE with Session-Expires negotiates successfully.
+    2. The 2xx carries Session-Expires + Require:timer.
+    3. BYE flows clean.
+-->
+<scenario name="session_timer_echo">
+  <send retrans="500">
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp-timer@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp-timer@[local_ip]:[local_port]>
+Supported: timer
+Session-Expires: 300;refresher=uac
+Min-SE: 90
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [auto_media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+
+  <!--
+    The 2xx MUST carry both `Session-Expires` and `Require: timer`.
+    `regexp_match` evaluates against the received message body +
+    headers; "Session-Expires:" and "Require:" both appear in the
+    daemon's response per the upstream PR. SIPp fails the scenario
+    if the regex doesn't match.
+  -->
+  <recv response="200" rtd="true">
+    <action>
+      <!-- check_it_inverse fails the scenario when the regex does
+           NOT match; assign_to is a no-op sink (the parser needs
+           a slot but we never reference the captured value). -->
+      <ereg regexp="Session-Expires:[ \t]*[0-9]+"
+            search_in="msg"
+            check_it="true"
+            assign_to="se_capture"/>
+      <log message="captured Session-Expires=[$se_capture]"/>
+      <ereg regexp="Require:[ \t]*[A-Za-z0-9_, \t]*timer"
+            search_in="msg"
+            check_it="true"
+            assign_to="req_capture"/>
+      <log message="captured Require=[$req_capture]"/>
+    </action>
+  </recv>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp-timer@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="500"/>
+
+  <send retrans="500">
+<![CDATA[
+BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-bye
+Max-Forwards: 70
+From: <sip:sipp-timer@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 BYE
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="200"/>
+
+  <ResponseTimeRepartition value="200, 500, 1000"/>
+</scenario>

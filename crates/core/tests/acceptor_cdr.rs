@@ -163,7 +163,7 @@ async fn run_call_emits_cdr_when_controller_exits() {
 
     // Drive the call. Trigger the BYE-style shutdown a moment
     // later so the controller exits via LocalShutdown.
-    let run_handle = acceptor.run_call(prepared, "main_reception");
+    let run_handle = acceptor.run_call(prepared, "main_reception", None);
 
     // Give the bridge time to handshake and send `start`.
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -242,7 +242,7 @@ async fn null_sink_is_the_default_when_no_sink_configured() {
         .await
         .expect("prepare");
 
-    let run_handle = acceptor.run_call(prepared, "main_reception");
+    let run_handle = acceptor.run_call(prepared, "main_reception", None);
     tokio::time::sleep(Duration::from_millis(150)).await;
     let h = registry
         .lookup("abc-cdr@pbx.example.com")

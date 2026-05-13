@@ -94,6 +94,15 @@ pub struct RawSip {
     /// for UDP-only deployments.
     #[serde(default)]
     pub tls: RawSipTls,
+    /// RFC 4028 Min-SE we'll enforce on inbound INVITEs. Defaults
+    /// to 90 (RFC minimum). Smaller values are rejected with 422.
+    #[serde(default)]
+    pub min_session_expires_secs: Option<u32>,
+    /// Optional UAS preference for Session-Expires. When the peer's
+    /// request exceeds this value the negotiated timer is capped
+    /// here. Unset = honour the peer's value uncapped.
+    #[serde(default)]
+    pub preferred_session_expires_secs: Option<u32>,
 }
 
 /// `[sip.tls]` — TLS server configuration. Required when

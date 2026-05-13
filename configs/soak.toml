@@ -1,0 +1,30 @@
+[node]
+id = "siphon-ai-soak"
+
+[sip]
+listen = "127.0.0.1:5060"
+transports = ["udp"]
+user_agent = "SiphonAI/soak"
+
+[media]
+codecs = ["pcma", "pcmu"]
+dtmf = "rfc2833"
+# 500 calls × 2 ports each = 1000. Widen the range so the burst
+# scenario doesn't 503 on port-pool exhaustion.
+rtp_port_range = [40000, 41100]
+# Disabled for the burst (no RTP flowing); the long_call scenario
+# streams PCMA so the watchdog would never fire anyway.
+inactivity_timeout_secs = 0
+
+[bridge]
+ws_url = "ws://127.0.0.1:8765/"
+ws_connect_timeout_ms = 3000
+
+[observability]
+enabled = true
+http_listen = "127.0.0.1:9091"
+
+[[route]]
+name = "default"
+[route.match]
+any = true

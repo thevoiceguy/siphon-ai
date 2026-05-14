@@ -121,6 +121,76 @@ exponential backoff (5s → 5 min cap) on failure.
 | `expires_secs`         | integer | `3600`                  | Registration lifetime. |
 | `register_on_startup`  | bool    | `true`                  | `false` keeps the block configured-but-idle (useful for incident response). |
 
+## `[[trunk]]` — peer-trunk allowlist
+
+Identifies inbound SIP peers (other PBXes / carriers) by source IP
+and/or `From:` URI host. Acts as a 403 gate at the SIP layer so
+the daemon doesn't have to rely on a firewall in front of it for
+trust decisions.
+
+| Field        | Type     | Default      | Notes |
+|--------------|----------|--------------|-------|
+| `name`       | string   | required, unique | Dialplan handle. Becomes the call's `register_source` when this trunk matches. |
+| `peer_addrs` | string[] | unset        | Allowed source addresses. Each entry is either an exact IP (`"203.0.113.10"`) or a CIDR (`"10.0.0.0/24"`, `"2001:db8::/32"`). Exact IPs are stored as `/32` (IPv4) or `/128` (IPv6). |
+| `from_hosts` | string[] | unset        | Allowed `From:` URI hostnames, case-insensitive. For trunks whose egress IP rotates but the SIP From domain is stable. |
+
+```toml
+[[trunk]]
+name       = "freeswitch-main"
+peer_addrs = ["10.0.0.10"]
+
+[[trunk]]
+name       = "lab-pbx"
+peer_addrs = ["10.1.0.0/24"]
+
+[[trunk]]
+name       = "carrier-b"
+from_hosts = ["sip.carrier-b.example"]   # rotating IPs; pin by domain
+
+[[route]]
+name = "fs-9000"
+[route.match]
+register_source = "freeswitch-main"      # scope route to this trunk
+request_uri_user = "9000"
+```
+
+### Semantics
+
+- A trunk MUST declare at least one of `peer_addrs` / `from_hosts`.
+  A trunk with neither is refused at config load (an empty trunk
+  would accept anything claiming its name).
+- When both fields are populated, **both must match** (defense
+  in depth). For an OR relationship, declare two `[[trunk]]`
+  blocks.
+- Trunks are walked in declaration order; first match wins.
+- **Zero `[[trunk]]` blocks defined**: the daemon stays in legacy
+  "accept any source" mode. `register_source` defaults to
+  `"trunk"` for unregistered inbound (matching today's behavior).
+  Documented as **dev / behind-firewall only** — production
+  deployments should declare trunks.
+- **One or more `[[trunk]]` blocks defined**: an INVITE that
+  matches no trunk is rejected with `403 Forbidden` at the
+  routing layer, before any media setup or per-call task runs.
+  Logged at WARN with peer IP for diagnostics.
+
+### Threat model
+
+- `peer_addrs` is strong against off-path attackers. Weak against
+  on-path attackers (anyone who can spoof IPv4 source addresses on
+  your network) and against attackers who can reach you from any
+  IP inside the allowlisted CIDR.
+- `from_hosts` is a shared-secret-in-a-header pattern. Any peer
+  that can reach you on UDP 5060 can forge `From: <sip:x@your-host>`.
+  Useful as a *second factor* alongside `peer_addrs`; marginally
+  useful alone if a trusted upstream firewall validates From
+  rewrites.
+- The strong combination is `peer_addrs` + `from_hosts` + TLS
+  transport. Internet-facing deployments with `from_hosts`-only
+  trunks should pin TLS at the transport (`transports = ["tls"]`
+  with the carrier's cert pinned by the OS trust store).
+- Digest auth on inbound INVITEs (RFC 3261 §22) is the proper
+  "no trust in network" answer; it's a post-v1 feature.
+
 ## `[cdr]`
 
 ```toml

@@ -1,0 +1,25 @@
+[node]
+id = "siphon-trunk-test"
+
+[sip]
+listen = "127.0.0.1:5060"
+transports = ["udp"]
+
+[media]
+codecs = ["pcmu", "pcma"]
+rtp_port_range = [40600, 40700]
+inactivity_timeout_secs = 0
+
+[bridge]
+ws_url = "ws://127.0.0.1:8765/"
+
+# Allowlist that DOESN'T cover 127.0.0.1 — every loopback INVITE
+# should hit the 403 path. Used by trunk_unauthorized_403.xml.
+[[trunk]]
+name = "lan-only"
+peer_addrs = ["10.0.0.0/8"]
+
+[[route]]
+name = "default"
+[route.match]
+any = true

@@ -423,6 +423,191 @@ ws_url = "wss://x/y"
     );
 }
 
+// ─── [[trunk]] allowlist ───────────────────────────────────────
+
+#[test]
+fn no_trunks_means_no_gate() {
+    // Zero [[trunk]] blocks → daemon stays in legacy "accept any
+    // source" mode. The compiled `trunks` list is empty.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(cfg.trunks.is_empty());
+}
+
+#[test]
+fn trunk_with_ip_only_compiles() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[trunk]]
+name = "freeswitch-main"
+peer_addrs = ["10.0.0.10", "10.0.1.0/24"]
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert_eq!(cfg.trunks.len(), 1);
+    let t = &cfg.trunks[0];
+    assert_eq!(t.name, "freeswitch-main");
+    assert_eq!(t.peer_addrs.len(), 2);
+    // Exact IP normalises to /32; CIDR keeps its prefix.
+    assert_eq!(t.peer_addrs[0].prefix_len, 32);
+    assert_eq!(t.peer_addrs[1].prefix_len, 24);
+    assert!(t.from_hosts.is_empty());
+}
+
+#[test]
+fn trunk_with_from_hosts_only_compiles() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[trunk]]
+name = "carrier-a"
+from_hosts = ["sip.carrier-a.example", "BACKUP.CARRIER-A.example"]
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    let t = &cfg.trunks[0];
+    assert!(t.peer_addrs.is_empty());
+    // Lowercased + trim'd.
+    assert_eq!(
+        t.from_hosts,
+        vec!["sip.carrier-a.example", "backup.carrier-a.example"]
+    );
+}
+
+#[test]
+fn trunk_without_match_criteria_rejected() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[trunk]]
+name = "anonymous"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("anonymous") && msg.contains("neither peer_addrs nor from_hosts"),
+        "got: {msg}"
+    );
+}
+
+#[test]
+fn trunk_with_bad_cidr_rejected() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[trunk]]
+name = "broken"
+peer_addrs = ["not-an-ip"]
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("broken") && msg.contains("not-an-ip"),
+        "got: {msg}"
+    );
+}
+
+#[test]
+fn duplicate_trunk_names_rejected() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[trunk]]
+name = "twice"
+peer_addrs = ["10.0.0.1"]
+
+[[trunk]]
+name = "twice"
+peer_addrs = ["10.0.0.2"]
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("twice"));
+}
+
+#[test]
+fn trunk_cidr_contains_v4() {
+    use siphon_ai_config::TrunkCidr;
+    let cidr = TrunkCidr::parse("10.0.0.0/24").unwrap();
+    assert!(cidr.contains("10.0.0.5".parse().unwrap()));
+    assert!(cidr.contains("10.0.0.255".parse().unwrap()));
+    assert!(!cidr.contains("10.0.1.0".parse().unwrap()));
+    let exact = TrunkCidr::parse("203.0.113.10").unwrap();
+    assert_eq!(exact.prefix_len, 32);
+    assert!(exact.contains("203.0.113.10".parse().unwrap()));
+    assert!(!exact.contains("203.0.113.11".parse().unwrap()));
+}
+
+#[test]
+fn trunk_cidr_contains_v6() {
+    use siphon_ai_config::TrunkCidr;
+    let cidr = TrunkCidr::parse("2001:db8::/32").unwrap();
+    assert!(cidr.contains("2001:db8:1::1".parse().unwrap()));
+    assert!(!cidr.contains("2001:db9::1".parse().unwrap()));
+    // v4 ↔ v6 never match.
+    assert!(!cidr.contains("10.0.0.1".parse().unwrap()));
+}
+
 #[test]
 fn dtmf_off_disables_payload_type() {
     let env = MapEnv::new([]);

@@ -143,6 +143,23 @@ ws_connect_timeout_ms = 3000
 enabled     = true
 http_listen = "127.0.0.1:9091"
 
+# ─── Trunk allowlist ─────────────────────────────────────────
+# Required for production. Identifies inbound peers by source IP
+# and/or From-URI host. Anything not matching a [[trunk]] block
+# is rejected with 403 Forbidden at the SIP layer. Omit [[trunk]]
+# entirely to accept INVITEs from ANY source — dev / behind-
+# firewall only. See docs/CONFIG.md §"[[trunk]]" for the threat
+# model and CIDR / from_hosts grammar.
+[[trunk]]
+name       = "freeswitch-main"
+peer_addrs = ["10.0.0.10"]     # FreeSWITCH server
+
+[[route]]
+name = "fs-9000"
+[route.match]
+register_source = "freeswitch-main"
+request_uri_user = "9000"
+
 [[route]]
 name = "default"
 [route.match]
@@ -215,17 +232,23 @@ typo never makes it past `systemctl start`.
 
 ## 7. Firewall
 
-The daemon binds SIP UDP and the RTP pool. Open both inbound from
-the PBX / softphone network, plus the observability port from the
-ops network only (`/admin/*` is unauthenticated in v1 — do NOT
-expose to the public internet):
+Two layers of trust:
+
+1. **SiphonAI's `[[trunk]]` block** (above) is the primary
+   identity gate. Anything not matching a trunk gets `403
+   Forbidden` at the SIP layer, before media setup.
+2. **Host firewall** is defense in depth — it stops abuse (port
+   scans, UDP floods) from reaching SiphonAI in the first place.
+   Don't rely on the firewall alone for *identity* — flat ACLs
+   drift, and SiphonAI's log line for a 403 is more useful than
+   `nftables drop`.
 
 ```bash
-# Replace 10.0.0.0/24 with your trunk peer's address.
+# Replace 10.0.0.10 with your trunk peer's address.
 sudo nft add table inet siphon_ai
 sudo nft add chain inet siphon_ai input '{ type filter hook input priority 0; }'
-sudo nft add rule inet siphon_ai input udp dport 5060           ip saddr 10.0.0.0/24 accept
-sudo nft add rule inet siphon_ai input udp dport 40000-40500    ip saddr 10.0.0.0/24 accept
+sudo nft add rule inet siphon_ai input udp dport 5060           ip saddr 10.0.0.10 accept
+sudo nft add rule inet siphon_ai input udp dport 40000-40500    ip saddr 10.0.0.10 accept
 sudo nft add rule inet siphon_ai input tcp dport 9091           ip saddr 10.0.0.0/24 accept
 ```
 

@@ -54,6 +54,12 @@ pub struct Config {
     pub bridge_defaults: BridgeDefaults,
     pub routes: RouteSet,
     pub registrations: Vec<RegisterConfig>,
+    /// `[[trunk]]` allowlist. Empty when no trunk blocks were
+    /// declared (daemon accepts INVITEs from any source —
+    /// "legacy" posture, documented as dev / behind-firewall
+    /// only). Non-empty enables strict-allowlist mode: every
+    /// inbound INVITE must match a trunk or it's 403'd.
+    pub trunks: Vec<TrunkConfig>,
     pub cdr: CdrConfig,
     pub observability: ObservabilityConfig,
     pub webhooks: WebhooksConfig,
@@ -82,6 +88,108 @@ pub struct RegisterConfig {
     pub realm: Option<String>,
     pub expires: Duration,
     pub register_on_startup: bool,
+}
+
+/// Compiled `[[trunk]]` allowlist entry. The daemon's sip-glue
+/// `TrunkMatcher` walks these in order on each inbound INVITE;
+/// when both `peer_addrs` and `from_hosts` are populated, both
+/// must match (defense in depth).
+#[derive(Debug, Clone)]
+pub struct TrunkConfig {
+    pub name: String,
+    /// Allowed source addresses as parsed CIDR ranges. An exact
+    /// IP is stored as a `/32` (IPv4) or `/128` (IPv6).
+    /// Empty when `peer_addrs` was unset in the raw config — the
+    /// matcher then skips the IP check for this trunk.
+    pub peer_addrs: Vec<TrunkCidr>,
+    /// Allowed From-URI hostnames, lowercased. Empty = skip
+    /// From-host check.
+    pub from_hosts: Vec<String>,
+}
+
+/// CIDR range matcher used by [`TrunkConfig::peer_addrs`]. Stored
+/// pre-parsed at config-load time so the per-INVITE match is a
+/// few bit-and / compare ops rather than re-parsing strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrunkCidr {
+    pub network: std::net::IpAddr,
+    /// Prefix length in bits. 32 for an exact IPv4, 128 for IPv6.
+    pub prefix_len: u8,
+}
+
+impl TrunkCidr {
+    /// Parse `"a.b.c.d"` or `"a.b.c.d/n"`. Hosts-only strings get
+    /// an implicit `/32` (IPv4) or `/128` (IPv6).
+    pub fn parse(s: &str) -> Result<Self, TrunkCidrParseError> {
+        let (host, prefix) = match s.find('/') {
+            Some(slash) => {
+                let prefix: u8 = s[slash + 1..]
+                    .parse()
+                    .map_err(|_| TrunkCidrParseError::BadPrefix(s.to_string()))?;
+                (&s[..slash], Some(prefix))
+            }
+            None => (s, None),
+        };
+        let ip: std::net::IpAddr = host
+            .parse()
+            .map_err(|_| TrunkCidrParseError::BadAddress(s.to_string()))?;
+        let prefix_len = match (ip, prefix) {
+            (std::net::IpAddr::V4(_), Some(p)) if p > 32 => {
+                return Err(TrunkCidrParseError::PrefixOutOfRange(s.to_string()));
+            }
+            (std::net::IpAddr::V6(_), Some(p)) if p > 128 => {
+                return Err(TrunkCidrParseError::PrefixOutOfRange(s.to_string()));
+            }
+            (std::net::IpAddr::V4(_), Some(p)) => p,
+            (std::net::IpAddr::V6(_), Some(p)) => p,
+            (std::net::IpAddr::V4(_), None) => 32,
+            (std::net::IpAddr::V6(_), None) => 128,
+        };
+        Ok(TrunkCidr {
+            network: ip,
+            prefix_len,
+        })
+    }
+
+    /// True iff `candidate` falls inside this CIDR.
+    pub fn contains(&self, candidate: std::net::IpAddr) -> bool {
+        match (self.network, candidate) {
+            (std::net::IpAddr::V4(net), std::net::IpAddr::V4(c)) => {
+                let net_bits = u32::from(net);
+                let c_bits = u32::from(c);
+                let shift = 32u32.saturating_sub(self.prefix_len as u32);
+                if shift == 32 {
+                    // /0 — matches everything.
+                    return true;
+                }
+                let mask = u32::MAX.checked_shl(shift).unwrap_or(0);
+                (net_bits & mask) == (c_bits & mask)
+            }
+            (std::net::IpAddr::V6(net), std::net::IpAddr::V6(c)) => {
+                let net_bits = u128::from(net);
+                let c_bits = u128::from(c);
+                let shift = 128u128.saturating_sub(self.prefix_len as u128);
+                if shift == 128 {
+                    return true;
+                }
+                let mask = u128::MAX.checked_shl(shift as u32).unwrap_or(0);
+                (net_bits & mask) == (c_bits & mask)
+            }
+            _ => false, // v4 ↔ v6 never match
+        }
+    }
+}
+
+/// Errors `TrunkCidr::parse` can surface. Wrapped by
+/// `CompileError::BadTrunkPeerAddr` at the config layer.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TrunkCidrParseError {
+    #[error("not a valid IP address: {0:?}")]
+    BadAddress(String),
+    #[error("not a valid prefix length: {0:?}")]
+    BadPrefix(String),
+    #[error("prefix length out of range: {0:?}")]
+    PrefixOutOfRange(String),
 }
 
 /// Resolved lifecycle-webhook plan. The daemon binary turns this
@@ -291,6 +399,32 @@ pub enum CompileError {
     )]
     SessionTimerMinSeTooSmall(u32),
 
+    #[error("[[trunk]] block at index {index} has empty name")]
+    TrunkEmptyName { index: usize },
+
+    #[error("two [[trunk]] blocks share name {name:?} (#{first} and #{second})")]
+    TrunkDuplicateName {
+        name: String,
+        first: usize,
+        second: usize,
+    },
+
+    #[error(
+        "[[trunk]] {name:?} declares neither peer_addrs nor from_hosts — a trunk \
+         must identify its peer by IP, From-URI host, or both"
+    )]
+    TrunkNoMatchCriteria { name: String },
+
+    #[error("[[trunk]] {name:?} peer_addrs entry {value:?} is invalid: {err}")]
+    TrunkBadPeerAddr {
+        name: String,
+        value: String,
+        err: TrunkCidrParseError,
+    },
+
+    #[error("[[trunk]] {name:?} from_hosts entry {value:?} is empty / whitespace-only")]
+    TrunkEmptyFromHost { name: String, value: String },
+
     #[error("[[register]] block at index {index} has empty name")]
     RegisterEmptyName { index: usize },
 
@@ -323,6 +457,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let bridge_defaults = compile_bridge(raw.bridge, &raw.media)?;
     let routes = compile_dialplan(raw.routes)?;
     let registrations = compile_registrations(raw.registrations)?;
+    let trunks = compile_trunks(raw.trunks)?;
     let cdr = compile_cdr(raw.cdr)?;
     let observability = compile_observability(raw.observability)?;
     let webhooks = compile_webhooks(raw.webhooks)?;
@@ -341,6 +476,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         bridge_defaults,
         routes,
         registrations,
+        trunks,
         cdr,
         observability,
         webhooks,
@@ -617,6 +753,65 @@ fn compile_webhooks(raw: RawWebhooks) -> Result<WebhooksConfig, CompileError> {
         retry_max: raw.retry_max.unwrap_or(3),
         timeout: Duration::from_millis(raw.timeout_ms.unwrap_or(5000)),
     })
+}
+
+fn compile_trunks(raw: Vec<crate::raw::RawTrunk>) -> Result<Vec<TrunkConfig>, CompileError> {
+    let mut compiled: Vec<TrunkConfig> = Vec::with_capacity(raw.len());
+    for (i, t) in raw.into_iter().enumerate() {
+        if t.name.trim().is_empty() {
+            return Err(CompileError::TrunkEmptyName { index: i });
+        }
+        for (j, prior) in compiled.iter().enumerate() {
+            if prior.name == t.name {
+                return Err(CompileError::TrunkDuplicateName {
+                    name: t.name.clone(),
+                    first: j,
+                    second: i,
+                });
+            }
+        }
+        let peer_addrs = match t.peer_addrs {
+            None => Vec::new(),
+            Some(values) => {
+                let mut out = Vec::with_capacity(values.len());
+                for v in values {
+                    let cidr =
+                        TrunkCidr::parse(&v).map_err(|err| CompileError::TrunkBadPeerAddr {
+                            name: t.name.clone(),
+                            value: v.clone(),
+                            err,
+                        })?;
+                    out.push(cidr);
+                }
+                out
+            }
+        };
+        let from_hosts = match t.from_hosts {
+            None => Vec::new(),
+            Some(values) => {
+                let mut out = Vec::with_capacity(values.len());
+                for v in values {
+                    if v.trim().is_empty() {
+                        return Err(CompileError::TrunkEmptyFromHost {
+                            name: t.name.clone(),
+                            value: v,
+                        });
+                    }
+                    out.push(v.trim().to_ascii_lowercase());
+                }
+                out
+            }
+        };
+        if peer_addrs.is_empty() && from_hosts.is_empty() {
+            return Err(CompileError::TrunkNoMatchCriteria { name: t.name });
+        }
+        compiled.push(TrunkConfig {
+            name: t.name,
+            peer_addrs,
+            from_hosts,
+        });
+    }
+    Ok(compiled)
 }
 
 fn compile_registrations(raw: Vec<RawRegister>) -> Result<Vec<RegisterConfig>, CompileError> {

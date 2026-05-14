@@ -247,3 +247,8 @@ implements the SiphonAI bridge protocol. It uses Deepgram for
 STT/TTS and OpenAI for the LLM, and (unlike the FreeSWITCH
 `audio_fork` model) sends TTS audio back as PCM16 frames over
 the same WebSocket — no `uuid_broadcast` or ESL needed.
+
+For a step-by-step walkthrough of installing the bot on the
+same Debian 13 host that runs SiphonAI (Node setup, systemd
+unit, API-key wiring, end-to-end verification), see
+`docs/BOT_LOCALHOST_SETUP.md`.

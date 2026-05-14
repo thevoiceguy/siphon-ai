@@ -39,6 +39,16 @@ pub struct RawConfig {
     #[serde(default, rename = "register")]
     pub registrations: Vec<RawRegister>,
 
+    /// `[[trunk]]` — peer-trunk allowlist. Identifies inbound SIP
+    /// peers by source IP and/or From-URI host. When zero blocks
+    /// are declared, the daemon accepts INVITEs from any source
+    /// (legacy / dev posture). When one or more are declared,
+    /// every inbound INVITE must match a trunk or it's rejected
+    /// 403. See `docs/CONFIG.md` for the full grammar and threat
+    /// model.
+    #[serde(default, rename = "trunk")]
+    pub trunks: Vec<RawTrunk>,
+
     #[serde(default)]
     pub cdr: RawCdr,
 
@@ -237,6 +247,32 @@ pub struct RawRegister {
     /// during outages). Default `true`.
     #[serde(default)]
     pub register_on_startup: Option<bool>,
+}
+
+/// `[[trunk]]` — peer-trunk allowlist entry. Identifies inbound
+/// SIP peers by source IP (CIDR) and/or From-URI host. A trunk
+/// MUST declare at least one of the two fields; if both are set,
+/// BOTH must match (defense in depth). The matched trunk's `name`
+/// becomes the call's `register_source`, so routes can scope per
+/// trunk via the existing `[route.match].register_source = "..."`
+/// matcher.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawTrunk {
+    pub name: String,
+    /// Allowed source addresses. Each entry is either an exact IP
+    /// (`"203.0.113.10"`) or a CIDR (`"10.0.0.0/24"`, `"2001:db8::/32"`).
+    /// Empty / unset means "don't constrain by IP" — but the trunk
+    /// must then declare `from_hosts` instead.
+    #[serde(default)]
+    pub peer_addrs: Option<Vec<String>>,
+    /// Allowed `From:` URI hostnames (case-insensitive). Useful for
+    /// trunks whose egress IP rotates but the SIP From domain is
+    /// stable (carrier federation). From-host matching is forgeable
+    /// by an on-path attacker — pair with `peer_addrs` where
+    /// possible. See `docs/CONFIG.md` for the threat model.
+    #[serde(default)]
+    pub from_hosts: Option<Vec<String>>,
 }
 
 /// `[webhooks]` — out-of-band lifecycle events (call_start /

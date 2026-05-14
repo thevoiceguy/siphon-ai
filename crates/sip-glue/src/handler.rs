@@ -65,6 +65,28 @@ use crate::route::{route_invite, RouteDecision};
 /// that consults the daemon's registration registry.
 pub type RegisterSourceResolver = Arc<dyn Fn(&Request, &TransportContext) -> String + Send + Sync>;
 
+/// Allowlist gate consulted on every inbound INVITE (new dialogs
+/// only — re-INVITEs use the previously-established register
+/// source). Implementations identify the peer by source IP, From
+/// URI host, or both. When configured and the peer does not match
+/// any trunk, the routing handler rejects the INVITE with
+/// `403 Forbidden` BEFORE any route matching or media setup runs.
+///
+/// `RoutingHandler::new` installs no gate (legacy "accept any
+/// source" posture). The daemon's runtime installs a real impl
+/// when `[[trunk]]` blocks are declared in the TOML config.
+pub trait TrunkAllowlist: Send + Sync {
+    /// Identify the inbound peer. `Some(register_source)` means
+    /// the peer matched a trunk and the daemon should treat the
+    /// call as originating from that trunk's name. `None` means
+    /// no trunk matched and the routing handler should respond
+    /// `403 Forbidden`.
+    fn identify(&self, request: &Request, ctx: &TransportContext) -> Option<String>;
+}
+
+/// Convenience alias for the trait-object form.
+pub type TrunkAllowlistHandle = Arc<dyn TrunkAllowlist>;
+
 /// What [`dispatch_invite`] decided the daemon should do.
 #[derive(Debug)]
 pub enum RouteAction<'a> {
@@ -173,6 +195,11 @@ pub struct RoutingHandler<A> {
     acceptor: Arc<A>,
     resolver: RegisterSourceResolver,
     terminator: DialogTerminatorHandle,
+    /// Trunk gate. `None` means "no `[[trunk]]` blocks declared"
+    /// — accept INVITEs from any source (legacy posture). `Some`
+    /// flips the daemon into strict-allowlist mode: an INVITE
+    /// that doesn't match any trunk gets 403.
+    trunk_gate: Option<TrunkAllowlistHandle>,
 }
 
 impl<A> RoutingHandler<A> {
@@ -188,6 +215,7 @@ impl<A> RoutingHandler<A> {
             acceptor,
             resolver: default_resolver(),
             terminator: Arc::new(NullDialogTerminator),
+            trunk_gate: None,
         }
     }
 
@@ -204,6 +232,15 @@ impl<A> RoutingHandler<A> {
     /// `CallAcceptor` registers handles into.
     pub fn with_dialog_terminator(mut self, terminator: DialogTerminatorHandle) -> Self {
         self.terminator = terminator;
+        self
+    }
+
+    /// Install the trunk allowlist gate. Pass `None` (or simply
+    /// don't call this method) to keep legacy "accept any source"
+    /// behaviour. The daemon constructs an impl from the TOML
+    /// `[[trunk]]` blocks.
+    pub fn with_trunk_gate(mut self, gate: TrunkAllowlistHandle) -> Self {
+        self.trunk_gate = Some(gate);
         self
     }
 
@@ -250,7 +287,27 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                 .await;
         }
 
-        let register_source = (self.resolver)(request, ctx);
+        // Trunk allowlist gate, when configured. Runs BEFORE route
+        // matching so a rejected peer never reaches media setup or
+        // the per-call task. When no gate is installed (legacy
+        // mode), fall back to the resolver — typically "trunk".
+        let register_source = if let Some(gate) = self.trunk_gate.as_ref() {
+            match gate.identify(request, ctx) {
+                Some(name) => name,
+                None => {
+                    warn!(
+                        peer = %ctx.peer(),
+                        "INVITE rejected: no trunk matched (403 Forbidden)"
+                    );
+                    let response = UserAgentServer::create_response(request, 403, "Forbidden");
+                    handle.send_final(response).await;
+                    return Ok(());
+                }
+            }
+        } else {
+            (self.resolver)(request, ctx)
+        };
+
         match dispatch_invite(&self.routes, &register_source, request) {
             RouteAction::SendFinal(response) => {
                 handle.send_final(response).await;

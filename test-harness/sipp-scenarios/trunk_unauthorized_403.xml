@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  trunk_unauthorized_403 — daemon with a `[[trunk]]` allowlist
+  receives an INVITE from a peer that doesn't match any trunk
+  (neither IP nor From-URI host). MUST reject with 403 Forbidden
+  at the routing layer before any media setup runs.
+
+  This scenario is paired with `trunk_unauthorized_403.toml` —
+  the regression runner's daemon must be started with a config
+  that declares a [[trunk]] block whose peer_addrs DON'T include
+  127.0.0.1 (so this scenario's source — SIPp on loopback —
+  fails the gate). See run-trunk-403.sh for the standalone
+  driver, or run by hand:
+
+    siphon-ai --config trunk_unauthorized_403.toml &
+    sipp -sf trunk_unauthorized_403.xml -m 1 -p 5080 \
+         -s 9000 -timeout 10s 127.0.0.1:5060
+-->
+<scenario name="trunk_unauthorized_403">
+  <send retrans="500">
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp-unauthorized@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp-unauthorized@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+
+  <!-- MUST be 403, before any media setup. The daemon log should
+       show `INVITE rejected: no trunk matched` at WARN. The
+       transaction layer auto-ACKs non-2xx finals (RFC 3261
+       §17.1.1.3) so the scenario stops after the 403. -->
+  <recv response="403" rtd="true"/>
+
+  <ResponseTimeRepartition value="200, 500, 1000"/>
+</scenario>

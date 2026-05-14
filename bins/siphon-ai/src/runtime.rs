@@ -139,6 +139,7 @@ impl Runtime {
             bridge_defaults,
             routes,
             registrations,
+            trunks,
             cdr,
             observability,
             webhooks,
@@ -239,11 +240,21 @@ impl Runtime {
 
         // ─── SIP routing handler ───────────────────────────────────
         let dialog_terminator: DialogTerminatorHandle = Arc::new(registry);
-        let routing_handler = Arc::new(
+        // Trunk allowlist gate. Installed only when the operator
+        // declared one or more `[[trunk]]` blocks; with zero blocks
+        // we leave the gate unset and the routing handler accepts
+        // INVITEs from any source (legacy posture, documented as
+        // dev / behind-firewall only).
+        let mut routing_handler_builder =
             RoutingHandler::new(Arc::new(routes), Arc::clone(&acceptor))
                 .with_dialog_terminator(dialog_terminator)
-                .with_register_source_resolver(register_source_resolver(&registration_mgr)),
-        );
+                .with_register_source_resolver(register_source_resolver(&registration_mgr));
+        if !trunks.is_empty() {
+            let gate: Arc<dyn siphon_ai_sip_glue::TrunkAllowlist> =
+                Arc::new(ConfigTrunkAllowlist::new(trunks));
+            routing_handler_builder = routing_handler_builder.with_trunk_gate(gate);
+        }
+        let routing_handler = Arc::new(routing_handler_builder);
 
         // ─── SIP transports + transaction manager ──────────────────
         // Bind UDP eagerly so a port-busy error surfaces here, not
@@ -594,6 +605,78 @@ fn register_source_resolver(mgr: &RegistrationManager) -> RegisterSourceResolver
         Some(name) => name,
         None => "trunk".to_string(),
     })
+}
+
+/// `[[trunk]]` allowlist consulted by the routing handler on every
+/// new INVITE. Walks the operator-declared list in order: an entry
+/// matches when its source-IP allowlist (if any) AND its
+/// From-host allowlist (if any) both match. The first matching
+/// trunk's name becomes the call's `register_source`. No match →
+/// the handler responds 403. See `docs/CONFIG.md` §11 for the
+/// threat model.
+struct ConfigTrunkAllowlist {
+    trunks: Vec<siphon_ai_config::TrunkConfig>,
+}
+
+impl ConfigTrunkAllowlist {
+    fn new(trunks: Vec<siphon_ai_config::TrunkConfig>) -> Self {
+        Self { trunks }
+    }
+
+    /// Extract the host part of the inbound INVITE's `From:` URI,
+    /// lowercased for case-insensitive match. Returns `None` when
+    /// the header is missing or the URI doesn't parse — those
+    /// requests can still match an IP-only trunk but never a
+    /// from_hosts-only one.
+    fn extract_from_host(request: &sip_core::Request) -> Option<String> {
+        let raw = request.headers().get_smol("From")?;
+        // SIP `From` headers look like `"Display" <sip:user@host:port>;tag=…`
+        // or bare `sip:user@host` — pull out whatever is between the
+        // first `@` and the next `;` / `>` / end-of-string.
+        let s = raw.as_str();
+        let at = s.find('@')?;
+        let after_at = &s[at + 1..];
+        let end = after_at
+            .find(['>', ';', ' ', '\t'])
+            .unwrap_or(after_at.len());
+        let host_with_port = &after_at[..end];
+        // Strip optional `:port`.
+        let host = match host_with_port.rfind(':') {
+            Some(colon) => &host_with_port[..colon],
+            None => host_with_port,
+        };
+        if host.is_empty() {
+            return None;
+        }
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+impl siphon_ai_sip_glue::TrunkAllowlist for ConfigTrunkAllowlist {
+    fn identify(
+        &self,
+        request: &sip_core::Request,
+        ctx: &sip_transaction::TransportContext,
+    ) -> Option<String> {
+        let peer_ip = ctx.peer().ip();
+        let from_host = Self::extract_from_host(request);
+        for trunk in &self.trunks {
+            let ip_ok = trunk.peer_addrs.is_empty()
+                || trunk
+                    .peer_addrs
+                    .iter()
+                    .any(|cidr: &siphon_ai_config::TrunkCidr| cidr.contains(peer_ip));
+            let host_ok = trunk.from_hosts.is_empty()
+                || from_host
+                    .as_deref()
+                    .map(|h| trunk.from_hosts.iter().any(|allowed| allowed == h))
+                    .unwrap_or(false);
+            if ip_ok && host_ok {
+                return Some(trunk.name.clone());
+            }
+        }
+        None
+    }
 }
 
 /// Load the TLS server config (cert + key) from disk paths in
@@ -1012,3 +1095,158 @@ impl TransportDispatcher for MultiTransportDispatcher {
 /// — but reserved for the future drain-active-calls path.
 #[allow(dead_code)]
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+#[cfg(test)]
+mod trunk_allowlist_tests {
+    use super::*;
+    use bytes::Bytes;
+    use sip_core::{Headers as SipHeaders, Method, Request, RequestLine, SipUri};
+    use siphon_ai_config::{TrunkCidr, TrunkConfig};
+
+    fn invite_with_from(from_header: &str) -> Request {
+        let uri = SipUri::parse("sip:9000@siphon.example.com").unwrap();
+        let mut h = SipHeaders::new();
+        h.push("Via", "SIP/2.0/UDP test;branch=z9hG4bK1").unwrap();
+        h.push("From", from_header).unwrap();
+        h.push("To", "<sip:9000@siphon.example.com>").unwrap();
+        h.push("Call-ID", "trunk-test").unwrap();
+        h.push("CSeq", "1 INVITE").unwrap();
+        Request::new(RequestLine::new(Method::Invite, uri), h, Bytes::new()).unwrap()
+    }
+
+    #[test]
+    fn extract_from_host_handles_bracketed_uri() {
+        let req = invite_with_from("\"Alice\" <sip:alice@10.0.0.10:5060>;tag=abc");
+        assert_eq!(
+            ConfigTrunkAllowlist::extract_from_host(&req).as_deref(),
+            Some("10.0.0.10"),
+        );
+    }
+
+    #[test]
+    fn extract_from_host_handles_bare_uri() {
+        let req = invite_with_from("sip:carrier@sip.carrier.example;tag=xyz");
+        assert_eq!(
+            ConfigTrunkAllowlist::extract_from_host(&req).as_deref(),
+            Some("sip.carrier.example"),
+        );
+    }
+
+    #[test]
+    fn extract_from_host_lowercases() {
+        let req = invite_with_from("<sip:bob@SIP.CARRIER.EXAMPLE>;tag=t");
+        assert_eq!(
+            ConfigTrunkAllowlist::extract_from_host(&req).as_deref(),
+            Some("sip.carrier.example"),
+        );
+    }
+
+    fn allowlist(trunks: Vec<TrunkConfig>) -> ConfigTrunkAllowlist {
+        ConfigTrunkAllowlist::new(trunks)
+    }
+
+    fn ctx(peer: &str) -> sip_transaction::TransportContext {
+        sip_transaction::TransportContext::new(
+            sip_transaction::TransportKind::Udp,
+            peer.parse().unwrap(),
+            None,
+        )
+    }
+
+    #[test]
+    fn ip_only_trunk_matches_in_range() {
+        let trunks = vec![TrunkConfig {
+            name: "fs".into(),
+            peer_addrs: vec![TrunkCidr::parse("10.0.0.0/24").unwrap()],
+            from_hosts: vec![],
+        }];
+        let gate = allowlist(trunks);
+        let req = invite_with_from("<sip:caller@somewhere>;tag=t");
+        assert_eq!(
+            siphon_ai_sip_glue::TrunkAllowlist::identify(&gate, &req, &ctx("10.0.0.5:5060")),
+            Some("fs".to_string()),
+        );
+        assert_eq!(
+            siphon_ai_sip_glue::TrunkAllowlist::identify(&gate, &req, &ctx("10.0.1.5:5060")),
+            None,
+        );
+    }
+
+    #[test]
+    fn from_host_only_trunk_matches_regardless_of_ip() {
+        let trunks = vec![TrunkConfig {
+            name: "carrier".into(),
+            peer_addrs: vec![],
+            from_hosts: vec!["sip.carrier.example".into()],
+        }];
+        let gate = allowlist(trunks);
+        let req = invite_with_from("<sip:in@sip.carrier.example>;tag=t");
+        assert_eq!(
+            siphon_ai_sip_glue::TrunkAllowlist::identify(&gate, &req, &ctx("203.0.113.99:5060")),
+            Some("carrier".to_string()),
+        );
+        // Wrong From host → no match even if IP would have been ok
+        // (which it isn't here since we didn't set peer_addrs).
+        let bad_req = invite_with_from("<sip:in@evil.example>;tag=t");
+        assert_eq!(
+            siphon_ai_sip_glue::TrunkAllowlist::identify(
+                &gate,
+                &bad_req,
+                &ctx("203.0.113.99:5060")
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn ip_and_from_host_both_required_when_both_set() {
+        let trunks = vec![TrunkConfig {
+            name: "strict".into(),
+            peer_addrs: vec![TrunkCidr::parse("10.0.0.10").unwrap()],
+            from_hosts: vec!["sip.carrier.example".into()],
+        }];
+        let gate = allowlist(trunks);
+        let good_req = invite_with_from("<sip:in@sip.carrier.example>;tag=t");
+        let bad_host_req = invite_with_from("<sip:in@evil.example>;tag=t");
+        assert_eq!(
+            siphon_ai_sip_glue::TrunkAllowlist::identify(&gate, &good_req, &ctx("10.0.0.10:5060")),
+            Some("strict".to_string()),
+        );
+        // Right IP, wrong From → 403.
+        assert_eq!(
+            siphon_ai_sip_glue::TrunkAllowlist::identify(
+                &gate,
+                &bad_host_req,
+                &ctx("10.0.0.10:5060"),
+            ),
+            None,
+        );
+        // Right From, wrong IP → 403.
+        assert_eq!(
+            siphon_ai_sip_glue::TrunkAllowlist::identify(&gate, &good_req, &ctx("10.0.0.11:5060")),
+            None,
+        );
+    }
+
+    #[test]
+    fn first_matching_trunk_wins() {
+        let trunks = vec![
+            TrunkConfig {
+                name: "first".into(),
+                peer_addrs: vec![TrunkCidr::parse("10.0.0.0/16").unwrap()],
+                from_hosts: vec![],
+            },
+            TrunkConfig {
+                name: "second".into(),
+                peer_addrs: vec![TrunkCidr::parse("10.0.0.0/8").unwrap()],
+                from_hosts: vec![],
+            },
+        ];
+        let gate = allowlist(trunks);
+        let req = invite_with_from("<sip:c@x>;tag=t");
+        assert_eq!(
+            siphon_ai_sip_glue::TrunkAllowlist::identify(&gate, &req, &ctx("10.0.5.1:5060")),
+            Some("first".to_string()),
+        );
+    }
+}

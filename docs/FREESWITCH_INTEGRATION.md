@@ -50,9 +50,17 @@ inactivity_timeout_secs = 60
 ws_url                = "ws://10.0.0.30:8080/"
 ws_connect_timeout_ms = 3000
 
+# Trunk allowlist — INVITEs from any other peer get 403.
+# Required for production. See docs/CONFIG.md §"[[trunk]]" for
+# the threat model.
+[[trunk]]
+name       = "freeswitch-main"
+peer_addrs = ["10.0.0.10"]              # FreeSWITCH server
+
 [[route]]
 name = "freeswitch-9000"
 [route.match]
+register_source = "freeswitch-main"     # only accept from this trunk
 request_uri_user = "9000"
 [route.bridge]
 # Per-route override: an auth header if the bot wants it.
@@ -61,8 +69,16 @@ ws_auth_header = "Bearer ${BOT_TOKEN}"
 [[route]]
 name = "default"
 [route.match]
-any = true
+register_source = "freeswitch-main"     # still scoped to the trunk
+any             = true
 ```
+
+The trunk gate runs *before* route matching, so by the time a
+route is consulted the INVITE has already been authenticated as
+coming from `freeswitch-main`. Scoping each route by
+`register_source` isn't required for security — it's clarity:
+operators looking at the dialplan can see which routes belong
+to which trunk without having to cross-reference the gate.
 
 `BOT_TOKEN` lives in `/etc/siphon-ai/env` (see install guide
 §5). Apply with `sudo systemctl restart siphon-ai`.
@@ -86,10 +102,11 @@ isn't accepting FreeSWITCH's source IP — fix and retry.
 
 ### Gateway (peer trunk, no REGISTER)
 
-SiphonAI doesn't authenticate trunk peers in v1 — IP allowlist on
-the SiphonAI host firewall is the boundary. So the gateway here
-is "peer mode": no `register`, no `username`/`password`. Put this
-in `/etc/freeswitch/sip_profiles/external/siphon-ai.xml`:
+SiphonAI's `[[trunk]]` allowlist (above) handles peer
+identification by IP. SIP-digest auth on inbound INVITEs is
+post-v1, so the FreeSWITCH gateway runs in "peer mode": no
+`register`, no `username`/`password`. Put this in
+`/etc/freeswitch/sip_profiles/external/siphon-ai.xml`:
 
 ```xml
 <include>

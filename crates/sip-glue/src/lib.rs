@@ -32,7 +32,7 @@ pub use dialog::{
 };
 pub use handler::{
     dispatch_invite, CallAcceptor, MatchedCall, RegisterSourceResolver, ReinviteCall, RouteAction,
-    RoutingHandler,
+    RoutingHandler, TrunkAllowlist, TrunkAllowlistHandle,
 };
 pub use invite::InviteFacts;
 pub use register::{

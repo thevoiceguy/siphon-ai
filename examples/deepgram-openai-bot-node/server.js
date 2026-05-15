@@ -29,7 +29,19 @@
 //   BOT_SYSTEM_PROMPT       optional override
 //   BOT_GREETING            optional override
 
-const { WebSocketServer } = require('ws');
+// Force the Deepgram SDK to use the `ws` package's WebSocket
+// instead of Node 22's built-in (undici) one. Node 22 ships a
+// global `WebSocket` that's stricter about the
+// `Sec-WebSocket-Protocol` header — when the SDK constructs a
+// live client it ends up passing an empty / unset value and
+// undici throws `Invalid Sec-WebSocket-Protocol value`. The `ws`
+// package tolerates the same call shape.
+//
+// This MUST happen before requiring `@deepgram/sdk` so the SDK
+// sees the polyfilled global at module-load time.
+const { WebSocket, WebSocketServer } = require('ws');
+globalThis.WebSocket = WebSocket;
+
 const { createClient } = require('@deepgram/sdk');
 const OpenAI = require('openai');
 

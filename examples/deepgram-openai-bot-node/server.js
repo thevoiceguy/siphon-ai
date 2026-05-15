@@ -127,9 +127,17 @@ function makePlayout(ws, sampleRate, log) {
   /** @type {Buffer} partial frame across chunks. */
   let carry = Buffer.alloc(0);
   let timer = null;
+  // Diagnostic counters — `playout summary` logs them on stop()
+  // so a silent caller can be distinguished from a non-firing
+  // pump. Reset on every start() so each TTS phrase reports its
+  // own batch.
+  let runSent = 0;
+  let runErrors = 0;
 
   function pump() {
-    if (ws.readyState !== ws.OPEN) {
+    const rs = ws.readyState;
+    if (rs !== ws.OPEN) {
+      log(`playout: ws not OPEN (readyState=${rs}), dropping ${frames.length} pending frames`);
       stop();
       return;
     }
@@ -138,11 +146,20 @@ function makePlayout(ws, sampleRate, log) {
       stop();
       return;
     }
-    ws.send(f);
+    try {
+      ws.send(f);
+      runSent++;
+    } catch (e) {
+      runErrors++;
+      log('playout: ws.send threw:', e?.message || e);
+    }
   }
 
   function start() {
     if (timer) return;
+    runSent = 0;
+    runErrors = 0;
+    log('playout: pump started');
     // 20 ms cadence. setInterval is rough at the ms boundary; for
     // production-quality timing you'd run a monotonic clock loop
     // (see `forge-media`'s playout loop), but for a demo the OS
@@ -154,6 +171,7 @@ function makePlayout(ws, sampleRate, log) {
     if (timer) {
       clearInterval(timer);
       timer = null;
+      log(`playout: pump stopped (sent=${runSent} errors=${runErrors} carry=${carry.length})`);
     }
   }
 
@@ -467,8 +485,9 @@ async function handleCall(ws, req) {
     }
   });
 
-  ws.on('close', () => {
-    log('WS closed');
+  ws.on('close', (code, reason) => {
+    const r = reason ? Buffer.from(reason).toString('utf8') : '';
+    log(`WS closed (code=${code} reason=${JSON.stringify(r)})`);
     try { dgStt?.requestClose(); } catch {}
     playout?.cancel();
   });
@@ -489,6 +508,9 @@ wss.on('listening', () => {
 });
 
 wss.on('connection', (ws, req) => {
+  const remote = req.socket?.remoteAddress;
+  const subproto = ws.protocol || '(none)';
+  console.log(`[ws] connection from ${remote} subprotocol=${subproto}`);
   handleCall(ws, req).catch((err) => {
     console.error('handleCall threw:', err);
     try { ws.close(); } catch {}

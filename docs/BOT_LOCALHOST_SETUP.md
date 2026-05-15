@@ -72,11 +72,24 @@ since it holds API credentials.
 ## 4. Smoke test in the foreground
 
 Before wiring systemd, run it directly so you can see what it
-prints on the first call:
+prints on the first call. Two ways to feed the env file you
+created in §3:
 
 ```bash
 cd /opt/siphon-ai-src/examples/deepgram-openai-bot-node
-DEEPGRAM_API_KEY=… OPENAI_API_KEY=… BOT_BIND=127.0.0.1:8080 node server.js
+
+# Option A — source the env file you wrote in §3.
+set -a; sudo --preserve-env=PATH bash -c 'set -a; . /etc/siphon-bot/env; exec node server.js'
+
+# Option B — inline the keys (handy for one-off testing).
+# IMPORTANT: replace the literal ellipsis with your real keys.
+# Pasting `…` verbatim sneaks a Unicode character past the env
+# check; the bot bails with a clear "non-printable / non-ASCII
+# characters" message rather than crashing inside the WS library.
+DEEPGRAM_API_KEY='dg_real_key_here' \
+OPENAI_API_KEY='sk-real_key_here' \
+BOT_BIND=127.0.0.1:8080 \
+node server.js
 ```
 
 Expected output:

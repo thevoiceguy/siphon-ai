@@ -222,6 +222,27 @@ The bot enforces `pcm16le / 20 ms / 8 kHz or 16 kHz` from the
 codec — PCMU produces 8 kHz, G.722 produces 16 kHz. Anything
 else would mean a daemon-side bug; report it.
 
+### Bot crashes on the first call with `Invalid Sec-WebSocket-Protocol value`
+
+Stack ends in `at new WebSocket (node:internal/deps/undici/undici:…)`
+and `at openDeepgramStt`. Symptom on the daemon side is the same
+fast-fail signature as a missing bot — `state=Active` →
+`cause=BridgeEnded` in microseconds, no `bridge connected`
+between them, because the bot died mid-handshake.
+
+The bot's `server.js` polyfills `globalThis.WebSocket` to the
+`ws` package's class before requiring the Deepgram SDK, which
+should prevent this. If you see the crash anyway, check the top
+of `server.js` includes:
+
+```js
+const { WebSocket, WebSocketServer } = require('ws');
+globalThis.WebSocket = WebSocket;
+```
+
+…and that it appears BEFORE `require('@deepgram/sdk')`. Pulling
+the latest from `main` picks up the fix.
+
 ### Bot prints `TTS error` repeatedly
 
 Usually a Deepgram API key issue — wrong key, expired, exceeded

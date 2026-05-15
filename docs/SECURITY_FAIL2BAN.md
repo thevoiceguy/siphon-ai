@@ -18,11 +18,12 @@ the trust gate; fail2ban is the noise filter.
 ```
 contrib/fail2ban/
 ├── filter.d/siphon-ai.conf      # regex that matches our 403 log line
-└── jail.d/siphon-ai.local       # ban policy (5 strikes / 10 min / 24 h)
+├── jail.d/siphon-ai.local       # primary jail (5 strikes / 10 min / 24 h)
+└── jail.d/recidive.local        # second-tier jail for repeat offenders
 ```
 
-Both files are short and operator-tunable. Read them — they
-explain the trade-offs inline.
+All three files are short and operator-tunable. Read them —
+they explain the trade-offs inline.
 
 ---
 
@@ -35,6 +36,7 @@ SiphonAI logging to journald via systemd.
 sudo apt install -y fail2ban
 sudo cp /opt/siphon-ai-src/contrib/fail2ban/filter.d/siphon-ai.conf  /etc/fail2ban/filter.d/
 sudo cp /opt/siphon-ai-src/contrib/fail2ban/jail.d/siphon-ai.local   /etc/fail2ban/jail.d/
+sudo cp /opt/siphon-ai-src/contrib/fail2ban/jail.d/recidive.local    /etc/fail2ban/jail.d/
 sudo systemctl enable --now fail2ban
 sudo systemctl status fail2ban --no-pager
 ```
@@ -42,9 +44,13 @@ sudo systemctl status fail2ban --no-pager
 Replace `/opt/siphon-ai-src` with your clone path.
 
 The default jail bans after **5 failed INVITEs from the same IP
-in 10 minutes** for **24 hours**. Tune `maxretry`/`findtime`/`bantime`
-in `siphon-ai.local` to taste. For a busy internet endpoint hit
-by carrier-grade scanner farms you might drop to `maxretry = 3`.
+in 10 minutes** for **24 hours**. The recidive jail re-bans IPs
+that have already been banned 3+ times in a week for **a week
+each subsequent hit** — see §"Recidive: long bans for repeat
+offenders" below. Tune `maxretry`/`findtime`/`bantime` in each
+jail file to taste. For a busy internet endpoint hit by
+carrier-grade scanner farms you might drop the primary jail to
+`maxretry = 3`.
 
 ---
 
@@ -93,12 +99,29 @@ sudo fail2ban-regex \
 
 ---
 
-## Escalation: permanent bans for repeat offenders
+## Recidive: long bans for repeat offenders
 
-The default 24 h ban resets after the offender's been quiet for
-the ban duration. For abuse-heavy networks you probably want
-repeat offenders to get progressively longer bans, eventually
-permanent. Enable in `/etc/fail2ban/fail2ban.conf`:
+The primary jail's 24 h ban resets after the offender has been
+quiet for the ban duration. A bot that comes back the next day
+starts fresh and only gets dropped after another 5 strikes.
+That's noise you don't need.
+
+`recidive.local` (shipped in this PR) is a second-tier jail
+that watches fail2ban's OWN log for ban events. When an IP gets
+banned by the `siphon-ai` jail 3 or more times in a week,
+recidive picks it up and bans it for a *week*. Combined with
+`bantime.increment` (below), the second recidive hit lands at
+~24 weeks and the third at the year cap. A persistent botnet IP
+is effectively gone after two appearances.
+
+The recidive filter is bundled with the fail2ban package
+(`/etc/fail2ban/filter.d/recidive.conf`); we only ship the jail
+snippet.
+
+### Stack the two
+
+To get progressively longer recidive bans, enable
+`bantime.increment` in `/etc/fail2ban/fail2ban.conf`:
 
 ```ini
 [DEFAULT]
@@ -107,10 +130,37 @@ bantime.factor     = 24
 bantime.maxtime    = 31536000   # 1 year
 ```
 
-`bantime.factor = 24` with the jail's `bantime = 86400` means
-the second offense lands at 24 days, the third at ~576 days
-(capped to `maxtime`). A botnet IP that comes back tomorrow gets
-shut out for a month.
+With `bantime.increment = true` applied to recidive's
+`bantime = 604800` (1 week):
+
+| Offense in recidive | Ban duration                 |
+|---------------------|------------------------------|
+| 1st                 | 1 week                       |
+| 2nd                 | ~24 weeks                    |
+| 3rd+                | 1 year (`maxtime` cap)       |
+
+The same setting also escalates the primary `siphon-ai` jail's
+24 h ban, but recidive matters more — it's the long-tail
+filter.
+
+### Inspect recidive
+
+```bash
+sudo fail2ban-client status recidive
+# Status for the jail: recidive
+# |- Filter
+# |  |- Currently failed: 0
+# |  |- Total failed:     12
+# |  `- Journal matches:  _SYSTEMD_UNIT=fail2ban.service
+# `- Actions
+#    |- Currently banned: 2
+#    |- Total banned:     4
+#    `- Banned IP list:   31.70.66.9 31.70.75.115
+```
+
+Two banned IPs in the example output have shown up three or
+more times across the past week, so they're locked out for a
+week (or longer if `bantime.increment` is on).
 
 ---
 

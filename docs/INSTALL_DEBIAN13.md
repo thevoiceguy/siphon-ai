@@ -255,6 +255,15 @@ sudo nft add rule inet siphon_ai input tcp dport 9091           ip saddr 10.0.0.
 (`ufw` / `iptables` / cloud SG equivalents work too; the
 permission set is what matters.)
 
+### Fail2ban for repeat offenders
+
+The `[[trunk]]` allowlist 403s every scanner INVITE at the SIP
+layer, but scanners retry forever and fill the journal. For
+internet-facing deployments, set up fail2ban to drop repeat
+offenders at the kernel after N strikes — see
+`docs/SECURITY_FAIL2BAN.md` for the filter, jail config, and
+walkthrough. ~5 minutes; recommended for any public IP.
+
 ---
 
 ## 8. Verify

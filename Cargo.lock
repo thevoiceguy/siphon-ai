@@ -524,7 +524,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -612,7 +612,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 [[package]]
 name = "forge-codecs"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#faf5e8bc450ec57ee71420c7328c22fa706cf373"
 dependencies = [
  "ezk-g722",
  "lazy_static",
@@ -623,7 +623,7 @@ dependencies = [
 [[package]]
 name = "forge-core"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#faf5e8bc450ec57ee71420c7328c22fa706cf373"
 dependencies = [
  "chrono",
  "serde",
@@ -638,7 +638,7 @@ dependencies = [
 [[package]]
 name = "forge-dtmf"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#faf5e8bc450ec57ee71420c7328c22fa706cf373"
 dependencies = [
  "chrono",
  "forge-core",
@@ -650,7 +650,7 @@ dependencies = [
 [[package]]
 name = "forge-engine"
 version = "0.4.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#faf5e8bc450ec57ee71420c7328c22fa706cf373"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -668,7 +668,7 @@ dependencies = [
  "forge-vad",
  "metrics 0.21.1",
  "parking_lot",
- "rand 0.8.6",
+ "rand 0.9.4",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -680,7 +680,7 @@ dependencies = [
 [[package]]
 name = "forge-hep"
 version = "0.0.1"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#faf5e8bc450ec57ee71420c7328c22fa706cf373"
 dependencies = [
  "bytes",
  "hep-rs",
@@ -693,7 +693,7 @@ dependencies = [
 [[package]]
 name = "forge-injection"
 version = "0.1.1"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#faf5e8bc450ec57ee71420c7328c22fa706cf373"
 dependencies = [
  "forge-core",
  "rubato",
@@ -706,7 +706,7 @@ dependencies = [
 [[package]]
 name = "forge-recorder"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#faf5e8bc450ec57ee71420c7328c22fa706cf373"
 dependencies = [
  "bytes",
  "forge-core",
@@ -720,7 +720,7 @@ dependencies = [
 [[package]]
 name = "forge-resampler"
 version = "0.1.1"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#faf5e8bc450ec57ee71420c7328c22fa706cf373"
 dependencies = [
  "thiserror 2.0.18",
  "tracing",
@@ -729,7 +729,7 @@ dependencies = [
 [[package]]
 name = "forge-rtp"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#faf5e8bc450ec57ee71420c7328c22fa706cf373"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -738,7 +738,7 @@ dependencies = [
  "hmac",
  "libc",
  "metrics 0.21.1",
- "rand 0.8.6",
+ "rand 0.9.4",
  "sha1",
  "sha2",
  "socket2 0.6.3",
@@ -751,7 +751,7 @@ dependencies = [
 [[package]]
 name = "forge-sdp"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#faf5e8bc450ec57ee71420c7328c22fa706cf373"
 dependencies = [
  "chrono",
  "forge-core",
@@ -763,7 +763,7 @@ dependencies = [
 [[package]]
 name = "forge-transcoder"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#faf5e8bc450ec57ee71420c7328c22fa706cf373"
 dependencies = [
  "bytes",
  "forge-codecs",
@@ -776,7 +776,7 @@ dependencies = [
 [[package]]
 name = "forge-vad"
 version = "0.1.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#faf5e8bc450ec57ee71420c7328c22fa706cf373"
 dependencies = [
  "thiserror 2.0.18",
 ]
@@ -1179,7 +1179,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -1799,7 +1799,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1836,7 +1836,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.52.0",
 ]
@@ -2102,7 +2102,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2438,7 +2438,7 @@ dependencies = [
 [[package]]
 name = "sip-sdp"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/forge-media?branch=main#15ed1f37ec23d72b1ec9e0a9d704eead4a932166"
+source = "git+https://github.com/thevoiceguy/forge-media?branch=main#faf5e8bc450ec57ee71420c7328c22fa706cf373"
 dependencies = [
  "nom",
  "smol_str",
@@ -3076,7 +3076,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

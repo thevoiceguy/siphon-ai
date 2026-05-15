@@ -283,24 +283,30 @@ async function handleCall(ws, req) {
 
   // ─── TTS streaming → playout ───
   async function speakStreaming(text) {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       let collected = 0;
       const tts = deepgram.speak.live({
         model: 'aura-2-thalia-en',
         encoding: 'linear16',
         sample_rate: sampleRate,
       });
-      tts.on('open', () => {
+      // NB: the SDK uses *different* casing for STT vs TTS event
+      // names — `LiveTranscriptionEvents` is lowercase
+      // (`'open'`/`'close'`/`'error'`) but `LiveTTSEvents` is
+      // PascalCase (`'Open'`/`'Close'`/`'Error'`). Match the TTS
+      // enum exactly; lowercase listeners silently never fire.
+      tts.on('Open', () => {
         // `Speak`+`Flush` pattern: synthesize one phrase, close.
         tts.send(JSON.stringify({ type: 'Speak', text }));
         tts.send(JSON.stringify({ type: 'Flush' }));
       });
-      tts.on('error', (e) => {
+      tts.on('Error', (e) => {
         log('TTS error:', e?.message || e);
-        reject(e);
+        // Don't reject — the outer turn loop treats a missed
+        // phrase as silence and continues. Rejecting here would
+        // abort the entire turn for a transient TTS hiccup.
+        resolve();
       });
-      // SDK v4 emits binary audio chunks via the `Audio` event;
-      // metadata (Flushed, Speaker) is delivered via Metadata.
       tts.on('Audio', (chunk) => {
         // chunk can be Buffer, Uint8Array, or ArrayBuffer depending on
         // transport. Normalise to Buffer.
@@ -319,7 +325,7 @@ async function handleCall(ws, req) {
         try { tts.requestClose(); } catch { /* ignore */ }
         resolve();
       });
-      tts.on('close', () => {
+      tts.on('Close', () => {
         // If we get close without Flushed (e.g. mid-barge-in), still
         // resolve so the caller doesn't hang.
         resolve();

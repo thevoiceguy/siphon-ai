@@ -1,0 +1,28 @@
+# SiphonAI jail. Drop in /etc/fail2ban/jail.d/.
+#
+# Tunables you might want to adjust per deployment:
+#   maxretry — how many 403s before banning. 5 is conservative;
+#              busy internet endpoints might want 3.
+#   findtime — sliding window (seconds). 600 (10 min) suits the
+#              "slow scanner" pattern in field logs.
+#   bantime  — how long a banned IP stays in the drop list. 24 h
+#              is reasonable; `-1` means permanent (compose with
+#              `bantime.increment = true` in fail2ban.conf for
+#              repeat-offender escalation).
+#
+# `nftables-allports` drops the offender from ALL ports, not just
+# 5060. A bot that's hammering SIP isn't somebody you want
+# poking at SSH either. If you use iptables instead, swap the
+# action to `iptables-allports[name=siphon-ai]`.
+
+[siphon-ai]
+enabled      = true
+port         = 5060
+protocol     = udp
+filter       = siphon-ai
+backend      = systemd
+journalmatch = _SYSTEMD_UNIT=siphon-ai.service
+maxretry     = 5
+findtime     = 600
+bantime      = 86400
+action       = nftables-allports[name=siphon-ai]

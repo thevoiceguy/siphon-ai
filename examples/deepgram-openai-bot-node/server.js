@@ -57,14 +57,33 @@ const [BIND_HOST, BIND_PORT] = (process.env.BOT_BIND || '0.0.0.0:8080').split(':
 
 const DG_KEY = process.env.DEEPGRAM_API_KEY;
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
-if (!DG_KEY) {
-  console.error('ERROR: DEEPGRAM_API_KEY not set.');
-  process.exit(1);
+
+/**
+ * Validate an API key env var. Bails on missing OR
+ * non-printable-ASCII values so a placeholder like `…` from the
+ * docs (Unicode U+2026, common copy-paste hazard) fails here with
+ * a clear message instead of three layers deeper inside the WS
+ * library as `Invalid character in header content`. Real API
+ * keys are ASCII tokens, so the check is sound.
+ */
+function requireKey(name, value) {
+  if (!value) {
+    console.error(`ERROR: ${name} not set.`);
+    process.exit(1);
+  }
+  // RFC 9110 §5.5 visible-ASCII range (0x20–0x7E) covers every
+  // real API key shape we've seen.
+  if (!/^[\x20-\x7E]+$/.test(value)) {
+    console.error(
+      `ERROR: ${name} contains non-printable / non-ASCII characters. ` +
+        `If you copy-pasted "…" or another placeholder from the docs, ` +
+        `replace it with your real key.`,
+    );
+    process.exit(1);
+  }
 }
-if (!OPENAI_KEY) {
-  console.error('ERROR: OPENAI_API_KEY not set.');
-  process.exit(1);
-}
+requireKey('DEEPGRAM_API_KEY', DG_KEY);
+requireKey('OPENAI_API_KEY', OPENAI_KEY);
 
 const SYSTEM_PROMPT =
   process.env.BOT_SYSTEM_PROMPT ||

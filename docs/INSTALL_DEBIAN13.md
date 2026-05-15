@@ -112,13 +112,22 @@ A working trunk-mode config — accept inbound INVITEs on UDP 5060,
 bridge every call to a WebSocket server, expose Prometheus +
 admin on 127.0.0.1:9091. Adjust IPs and the WS URL.
 
+> **Replace `<YOUR_PUBLIC_IP>` below with this server's actual
+> reachable address.** It's pasted into `c=IN IP4 …` in every SDP
+> answer. Get it with `ip -4 addr show | grep "inet "` — pick the
+> address your trunk peer (FreeSWITCH, ITSP) can reach. **Leaving
+> the placeholder produces a call that signals fine but plays no
+> audio**, because RTP from the peer is sent into a black hole
+> and a tcpdump on this host sees nothing inbound.
+
 ```bash
 sudo tee /etc/siphon-ai/siphon-ai.toml >/dev/null <<'EOF'
 [node]
 id             = "siphon-prod-1"
 # Required when [sip].listen binds the wildcard. Use the daemon's
 # routable IP — this is what the SDP answer's c= line advertises.
-public_address = "203.0.113.42"
+# Do NOT leave the placeholder; see the WARNING above.
+public_address = "<YOUR_PUBLIC_IP>"
 
 [sip]
 listen     = "0.0.0.0:5060"

@@ -29,19 +29,26 @@
 //   BOT_SYSTEM_PROMPT       optional override
 //   BOT_GREETING            optional override
 
-// Force the Deepgram SDK to use the `ws` package's WebSocket
-// instead of Node 22's built-in (undici) one. Node 22 ships a
-// global `WebSocket` that's stricter about the
-// `Sec-WebSocket-Protocol` header — when the SDK constructs a
-// live client it ends up passing an empty / unset value and
-// undici throws `Invalid Sec-WebSocket-Protocol value`. The `ws`
-// package tolerates the same call shape.
+// Hide Node 22's built-in `globalThis.WebSocket` from the
+// Deepgram SDK. The SDK detects native-WebSocket availability
+// via `typeof WebSocket !== "undefined"` and, when true, opens
+// its live client with `new WebSocket(url, ["token", apiKey])` —
+// passing the API key as a Sec-WebSocket-Protocol value.
+// Subprotocol tokens are RFC-2616 tokens (no whitespace, limited
+// punctuation), so a real Deepgram API key fails the validation
+// in both undici (`Invalid Sec-WebSocket-Protocol value`) and
+// the `ws` package (`invalid or duplicated subprotocol`).
 //
-// This MUST happen before requiring `@deepgram/sdk` so the SDK
-// sees the polyfilled global at module-load time.
-const { WebSocket, WebSocketServer } = require('ws');
-globalThis.WebSocket = WebSocket;
+// Deleting the global flips the SDK's detection to the fallback
+// branch, which `require('ws')` and authenticates via the
+// `Authorization` header instead — the working path.
+//
+// MUST run before `require('@deepgram/sdk')` so the SDK's
+// module-load-time `NATIVE_WEBSOCKET_AVAILABLE` constant sees
+// the deletion.
+delete globalThis.WebSocket;
 
+const { WebSocketServer } = require('ws');
 const { createClient } = require('@deepgram/sdk');
 const OpenAI = require('openai');
 

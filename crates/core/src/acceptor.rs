@@ -943,13 +943,12 @@ fn sdp_audio_payload_types(session: &forge_sdp::SessionDescription) -> Vec<Strin
 /// `c=` overrides the session-level `c=` per RFC 4566 §5.7. Returns
 /// `None` when neither carries a valid IP address or when audio is
 /// absent. Used by `on_reinvite` to push a `remote_addr` update to
-/// forge when the peer changes its RTP endpoint mid-call.
+/// forge when the peer changes its RTP endpoint mid-call. The initial
+/// INVITE path uses the same helper through `media-glue`, applied at
+/// `accept_inbound` time so forge has the address before the answer
+/// goes out.
 fn sdp_audio_remote_addr(session: &forge_sdp::SessionDescription) -> Option<std::net::SocketAddr> {
-    use forge_sdp::MediaType;
-    let media = session.find_media(MediaType::Audio)?;
-    let conn = media.connection.as_ref().or(session.connection.as_ref())?;
-    let ip: std::net::IpAddr = conn.connection_address.as_str().parse().ok()?;
-    Some(std::net::SocketAddr::new(ip, media.port))
+    siphon_ai_media_glue::audio_remote_addr(session)
 }
 
 /// Rejection signal returned by [`prepare_reinvite_answer`] when

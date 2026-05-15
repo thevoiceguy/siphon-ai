@@ -137,6 +137,14 @@ async fn happy_path_returns_answer_session_and_attached_tap() {
     assert_eq!(media_state.payload_type, 0);
     assert_eq!(media_state.clock_rate, 8000);
     assert_eq!(media_state.telephone_event_payload_type, 101);
+
+    // (h) Peer RTP endpoint from the offer's c= / m= lines is pushed
+    //     to forge at accept time so outbound playout starts immediately
+    //     instead of waiting on the symmetric-RTP latch.
+    assert_eq!(
+        media_state.remote_rtp_addr,
+        Some("10.0.0.5:7078".parse().unwrap()),
+    );
 }
 
 #[tokio::test]

@@ -228,17 +228,27 @@ impl MediaSetup {
         };
         let answer = negotiate_answer(&offer, &caps)?;
 
-        // (4) Apply the negotiated codec to the SIP leg.
+        // (4) Apply the negotiated codec AND the peer's RTP endpoint
+        //     to the SIP leg. Pushing `remote_addr` here means forge's
+        //     scheduled-playout loop can fire as soon as the call
+        //     answers, rather than waiting for the symmetric-RTP latch
+        //     to learn the address from the first inbound packet
+        //     (~500 ms gap that swallows the start of any greeting).
         let codec_config = ParticipantCodecConfig {
             payload_type: answer.negotiated_payload_type,
             codec: forge_audio_codec(answer.negotiated_codec),
             clock_rate: answer.negotiated_clock_rate,
         };
+        let remote_addr = crate::sdp::audio_remote_addr(&offer);
         let media_update = ParticipantMediaUpdate {
             codec_config: Some(codec_config),
             telephone_event_payload_type: call.dtmf_payload_type,
+            remote_addr: remote_addr.map(Some),
             ..Default::default()
         };
+        if let Some(addr) = remote_addr {
+            debug!(remote_addr = %addr, "seeding leg A remote RTP address from offer SDP");
+        }
         self.session_manager
             .update_participant_media(&call.call_id, ParticipantLabel::A, media_update)
             .await

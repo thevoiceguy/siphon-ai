@@ -312,6 +312,23 @@ pub fn parse_offer(sdp: &str) -> Result<SessionDescription, SdpError> {
     SessionDescription::from_str(sdp).map_err(|e| SdpError::Parse(e.to_string()))
 }
 
+/// The peer's audio RTP endpoint as advertised in an offer's `c=` /
+/// `m=audio` lines. The media-level `c=` wins over the session-level
+/// `c=` when both are present (RFC 4566 §5.7). Returns `None` if
+/// either is absent or the connection address doesn't parse as an IP.
+///
+/// We hand this to forge as `ParticipantMediaUpdate.remote_addr` so
+/// outbound RTP can begin the moment the call answers, instead of
+/// waiting for forge's symmetric-RTP latch to learn the address from
+/// the first inbound packet — that wait blocks the first ~500 ms of
+/// any greeting otherwise.
+pub fn audio_remote_addr(session: &SessionDescription) -> Option<std::net::SocketAddr> {
+    let media = session.find_media(MediaType::Audio)?;
+    let conn = media.connection.as_ref().or(session.connection.as_ref())?;
+    let ip: std::net::IpAddr = conn.connection_address.as_str().parse().ok()?;
+    Some(std::net::SocketAddr::new(ip, media.port))
+}
+
 /// Negotiate an answer for `offer` against `caps`. The answer's
 /// `c=` line and `m=audio` port reflect `caps.local_ip` and
 /// `caps.local_port`.
@@ -379,4 +396,42 @@ pub fn negotiate_answer(
 pub fn build_answer(offer_sdp: &str, caps: &LocalCapabilities) -> Result<AnswerOutcome, SdpError> {
     let offer = parse_offer(offer_sdp)?;
     negotiate_answer(&offer, caps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SDP_SESSION_LEVEL_C: &str = "\
+v=0\r\n\
+o=- 1 1 IN IP4 198.51.100.10\r\n\
+s=-\r\n\
+c=IN IP4 198.51.100.10\r\n\
+t=0 0\r\n\
+m=audio 27492 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n";
+
+    const SDP_MEDIA_LEVEL_C_WINS: &str = "\
+v=0\r\n\
+o=- 1 1 IN IP4 198.51.100.10\r\n\
+s=-\r\n\
+c=IN IP4 198.51.100.10\r\n\
+t=0 0\r\n\
+m=audio 27492 RTP/AVP 0\r\n\
+c=IN IP4 203.0.113.7\r\n\
+a=rtpmap:0 PCMU/8000\r\n";
+
+    #[test]
+    fn audio_remote_addr_from_session_level_connection() {
+        let s = parse_offer(SDP_SESSION_LEVEL_C).unwrap();
+        let addr = audio_remote_addr(&s).expect("address present");
+        assert_eq!(addr.to_string(), "198.51.100.10:27492");
+    }
+
+    #[test]
+    fn audio_remote_addr_prefers_media_level_connection() {
+        let s = parse_offer(SDP_MEDIA_LEVEL_C_WINS).unwrap();
+        let addr = audio_remote_addr(&s).expect("address present");
+        assert_eq!(addr.to_string(), "203.0.113.7:27492");
+    }
 }

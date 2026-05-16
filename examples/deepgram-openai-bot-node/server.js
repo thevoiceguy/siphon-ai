@@ -99,6 +99,168 @@ const GREETING = process.env.BOT_GREETING || 'Hi there! How can I help you today
 // guessing.
 const SUPPORTED_RATES = new Set([8000, 16000]);
 
+// ─── Metrics ──────────────────────────────────────────────────────────────
+
+/**
+ * Per-call metric collector. Emits one log line per event with a
+ * `+Nms` offset from call start, plus call-wide counters that
+ * accumulate (barge-ins, clears, dropped frames). Designed to be
+ * grep-friendly: every line starts with `metric `.
+ *
+ * Derived latencies (computed in `turn.finish()`):
+ *   - user_stop_to_audio_ms  = first_outbound_frame_at − utterance_end_at
+ *   - llm_first_token_ms     = llm_first_token_at      − llm_start_at
+ *   - llm_completion_ms      = llm_completed_at        − llm_start_at
+ *   - tts_first_byte_ms      = tts_first_byte_at       − tts_start_at
+ *   - total_response_ms      = last_outbound_frame_at  − utterance_end_at
+ */
+function makeCallMetrics(log) {
+  const callStart = Date.now();
+  const counts = { bargeIn: 0, clear: 0, droppedFrames: 0 };
+  let sttOpenAt = null;
+  let firstUserAudioAt = null;
+
+  function elapsed(when = Date.now()) {
+    return when - callStart;
+  }
+  function emit(event, fields = {}) {
+    const parts = [`metric ${event} +${elapsed()}ms`];
+    for (const [k, v] of Object.entries(fields)) {
+      if (v === null || v === undefined) continue;
+      parts.push(`${k}=${v}`);
+    }
+    log(parts.join(' '));
+  }
+
+  return {
+    elapsed,
+    emit,
+    markSttOpen() {
+      if (sttOpenAt) return;
+      sttOpenAt = Date.now();
+      emit('stt_open');
+    },
+    markFirstUserAudio() {
+      if (firstUserAudioAt) return;
+      firstUserAudioAt = Date.now();
+      emit('first_user_audio');
+    },
+    incBargeIn() {
+      counts.bargeIn++;
+      emit('barge_in', { count: counts.bargeIn });
+    },
+    incClear() {
+      counts.clear++;
+    },
+    addDroppedFrames(n) {
+      if (!n || n <= 0) return;
+      counts.droppedFrames += n;
+      emit('frames_dropped', { added: n, total: counts.droppedFrames });
+    },
+    snapshot() {
+      return {
+        callStart,
+        sttOpenAt,
+        firstUserAudioAt,
+        bargeInCount: counts.bargeIn,
+        clearCount: counts.clear,
+        droppedFrameCount: counts.droppedFrames,
+      };
+    },
+  };
+}
+
+/**
+ * Per-turn metric tracker. A "turn" is either the greeting (no
+ * preceding utterance — `startedAt` is the call start) or a
+ * reply (started at UtteranceEnd). LLM + TTS + first/last
+ * outbound frame timings are tracked through to `finish()`,
+ * which emits a `turn_summary` line with derived latencies.
+ */
+function makeTurnMetrics(metrics, label) {
+  const startedAt = Date.now();
+  const t = {
+    label,
+    startedAt,
+    llmStartAt: null,
+    llmFirstTokenAt: null,
+    llmCompletedAt: null,
+    ttsStartAt: null,
+    ttsFirstByteAt: null,
+    firstOutboundFrameAt: null,
+    lastOutboundFrameAt: null,
+    framesSent: 0,
+    maxQueueDepth: 0,
+  };
+
+  function diff(a, b) {
+    return a !== null && b !== null ? a - b : null;
+  }
+
+  return {
+    label,
+    state: t,
+    markLlmStart() {
+      t.llmStartAt = Date.now();
+      metrics.emit('llm_start', { turn: label });
+    },
+    markLlmFirstToken() {
+      if (t.llmFirstTokenAt) return;
+      t.llmFirstTokenAt = Date.now();
+      metrics.emit('llm_first_token', {
+        turn: label,
+        latency_ms: diff(t.llmFirstTokenAt, t.llmStartAt),
+      });
+    },
+    markLlmCompleted() {
+      t.llmCompletedAt = Date.now();
+      metrics.emit('llm_completed', {
+        turn: label,
+        latency_ms: diff(t.llmCompletedAt, t.llmStartAt),
+      });
+    },
+    markTtsStart() {
+      t.ttsStartAt = Date.now();
+      metrics.emit('tts_start', { turn: label });
+    },
+    markTtsFirstByte() {
+      if (t.ttsFirstByteAt) return;
+      t.ttsFirstByteAt = Date.now();
+      metrics.emit('tts_first_byte', {
+        turn: label,
+        latency_ms: diff(t.ttsFirstByteAt, t.ttsStartAt),
+      });
+    },
+    onFrameSent() {
+      const now = Date.now();
+      if (!t.firstOutboundFrameAt) {
+        t.firstOutboundFrameAt = now;
+        metrics.emit('first_outbound_frame', {
+          turn: label,
+          user_to_audio_ms: diff(t.firstOutboundFrameAt, t.startedAt),
+        });
+      }
+      t.lastOutboundFrameAt = now;
+      t.framesSent++;
+    },
+    observeQueueDepth(n) {
+      if (n > t.maxQueueDepth) t.maxQueueDepth = n;
+    },
+    finish() {
+      metrics.emit('turn_summary', {
+        turn: label,
+        user_to_audio_ms: diff(t.firstOutboundFrameAt, t.startedAt),
+        llm_first_token_ms: diff(t.llmFirstTokenAt, t.llmStartAt),
+        llm_completion_ms: diff(t.llmCompletedAt, t.llmStartAt),
+        tts_first_byte_ms: diff(t.ttsFirstByteAt, t.ttsStartAt),
+        total_response_ms: diff(t.lastOutboundFrameAt, t.startedAt),
+        frames_sent: t.framesSent,
+        max_queue_depth: t.maxQueueDepth,
+      });
+    },
+  };
+}
+
 // ─── Audio plumbing ───────────────────────────────────────────────────────
 
 /**
@@ -120,7 +282,7 @@ function bytesPerFrame(sampleRate) {
  * `cancel()` drops every pending frame — used by barge-in and
  * end-of-turn cleanup.
  */
-function makePlayout(ws, sampleRate, log) {
+function makePlayout(ws, sampleRate, log, hooks = {}) {
   const frameSize = bytesPerFrame(sampleRate);
   /** @type {Buffer[]} queued exactly-20ms frames. */
   let frames = [];
@@ -138,6 +300,8 @@ function makePlayout(ws, sampleRate, log) {
     const rs = ws.readyState;
     if (rs !== ws.OPEN) {
       log(`playout: ws not OPEN (readyState=${rs}), dropping ${frames.length} pending frames`);
+      if (hooks.onCanceled && frames.length > 0) hooks.onCanceled(frames.length);
+      frames = [];
       stop();
       return;
     }
@@ -149,6 +313,7 @@ function makePlayout(ws, sampleRate, log) {
     try {
       ws.send(f);
       runSent++;
+      if (hooks.onFrameSent) hooks.onFrameSent();
     } catch (e) {
       runErrors++;
       log('playout: ws.send threw:', e?.message || e);
@@ -186,6 +351,7 @@ function makePlayout(ws, sampleRate, log) {
         frames.push(work.subarray(i, i + frameSize));
       }
       carry = work.subarray(usable);
+      if (hooks.observeQueueDepth) hooks.observeQueueDepth(frames.length);
       start();
     },
 
@@ -193,6 +359,8 @@ function makePlayout(ws, sampleRate, log) {
      *  and on turn end. The daemon's outbound buffer keeps its
      *  own state; pair with a `clear` to flush that too. */
     cancel() {
+      const dropped = frames.length + (carry.length > 0 ? 1 : 0);
+      if (hooks.onCanceled && dropped > 0) hooks.onCanceled(dropped);
       frames = [];
       carry = Buffer.alloc(0);
       stop();
@@ -232,6 +400,14 @@ async function handleCall(ws, req) {
   let sampleRate = null;
   let playout = null;
 
+  // Per-call metrics. Per-turn metrics live on `currentTurn` and
+  // get rotated on each new speakStreaming sequence (greeting,
+  // each reply). Playout hooks dispatch frame-sent events to the
+  // active turn so latency math (utterance_end → first audio)
+  // is computed without threading callbacks down through TTS.
+  const metrics = makeCallMetrics(log);
+  let currentTurn = null;
+
   // ─── Deepgram STT (built lazily, once we have the sample rate) ───
   const deepgram = createClient(DG_KEY);
   const openai = new OpenAI({ apiKey: OPENAI_KEY });
@@ -243,6 +419,8 @@ async function handleCall(ws, req) {
   let speaking = false;
   let pendingUtterance = null;
   let utteranceBuf = '';
+  let sawFirstInterimThisUtterance = false;
+  let sawFirstFinalThisUtterance = false;
 
   async function openDeepgramStt() {
     dgStt = deepgram.listen.live({
@@ -259,6 +437,7 @@ async function handleCall(ws, req) {
     });
     dgStt.on('open', () => {
       log(`STT open at ${sampleRate} Hz`);
+      metrics.markSttOpen();
       dgSttReady = true;
     });
     dgStt.on('error', (e) => log('STT error:', e?.message || e));
@@ -271,9 +450,17 @@ async function handleCall(ws, req) {
     const transcript = data?.channel?.alternatives?.[0]?.transcript;
     if (!transcript) return;
     if (data.is_final) {
+      if (!sawFirstFinalThisUtterance) {
+        sawFirstFinalThisUtterance = true;
+        metrics.emit('first_final_transcript');
+      }
       utteranceBuf += (utteranceBuf ? ' ' : '') + transcript;
       log(`(final fragment): "${transcript}"`);
     } else {
+      if (!sawFirstInterimThisUtterance) {
+        sawFirstInterimThisUtterance = true;
+        metrics.emit('first_interim_transcript');
+      }
       log(`interim: "${transcript}"`);
     }
   }
@@ -282,6 +469,9 @@ async function handleCall(ws, req) {
     if (!utteranceBuf.trim()) return;
     const u = utteranceBuf.trim();
     utteranceBuf = '';
+    sawFirstInterimThisUtterance = false;
+    sawFirstFinalThisUtterance = false;
+    metrics.emit('utterance_end');
     log(`UTTERANCE: "${u}"`);
     if (speaking) {
       // Defer until we're done talking; barge-in handles the
@@ -290,19 +480,27 @@ async function handleCall(ws, req) {
       pendingUtterance = u;
       return;
     }
-    await handleUserTurn(u);
+    // Start a new turn at the moment the utterance ends — that's
+    // the t=0 for the "user-stop-to-agent-audio" latency.
+    currentTurn = makeTurnMetrics(metrics, 'reply');
+    await handleUserTurn(u, currentTurn);
+    currentTurn.finish();
     while (pendingUtterance && !speaking) {
       const next = pendingUtterance;
       pendingUtterance = null;
       log(`processing queued: "${next}"`);
-      await handleUserTurn(next);
+      currentTurn = makeTurnMetrics(metrics, 'reply');
+      await handleUserTurn(next, currentTurn);
+      currentTurn.finish();
     }
+    currentTurn = null;
   }
 
   // ─── TTS streaming → playout ───
-  async function speakStreaming(text) {
+  async function speakStreaming(text, turn) {
     return new Promise((resolve) => {
       let collected = 0;
+      if (turn) turn.markTtsStart();
       const tts = deepgram.speak.live({
         model: 'aura-2-thalia-en',
         encoding: 'linear16',
@@ -334,6 +532,7 @@ async function handleCall(ws, req) {
             : chunk instanceof ArrayBuffer
               ? Buffer.from(new Uint8Array(chunk))
               : Buffer.from(chunk);
+        if (turn) turn.markTtsFirstByte();
         collected += buf.length;
         playout.push(buf);
       });
@@ -352,7 +551,7 @@ async function handleCall(ws, req) {
   }
 
   // ─── Conversation turn ───
-  async function handleUserTurn(userText) {
+  async function handleUserTurn(userText, turn) {
     speaking = true;
     conversation.push({ role: 'user', content: userText });
     let fullResponse = '';
@@ -360,6 +559,7 @@ async function handleCall(ws, req) {
     const phrases = [];
 
     try {
+      if (turn) turn.markLlmStart();
       const stream = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
         messages: conversation,
@@ -368,6 +568,7 @@ async function handleCall(ws, req) {
       for await (const chunk of stream) {
         const delta = chunk.choices?.[0]?.delta?.content;
         if (!delta) continue;
+        if (turn) turn.markLlmFirstToken();
         phraseBuf += delta;
         fullResponse += delta;
         // Phrase-level chunking: TTS each clause as it lands so
@@ -381,10 +582,11 @@ async function handleCall(ws, req) {
         }
       }
       if (phraseBuf.trim()) phrases.push(phraseBuf.trim());
+      if (turn) turn.markLlmCompleted();
 
       for (const p of phrases) {
         if (!speaking) break; // barge-in killed us
-        await speakStreaming(p);
+        await speakStreaming(p, turn);
       }
 
       // Wait for the playout pipe to drain before declaring the
@@ -409,6 +611,7 @@ async function handleCall(ws, req) {
   // ─── Wire events from SiphonAI ───
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
+      metrics.markFirstUserAudio();
       if (dgSttReady) {
         try {
           dgStt.send(data);
@@ -441,16 +644,25 @@ async function handleCall(ws, req) {
         return;
       }
       sampleRate = rate;
-      playout = makePlayout(ws, sampleRate, log);
+      playout = makePlayout(ws, sampleRate, log, {
+        onFrameSent: () => { if (currentTurn) currentTurn.onFrameSent(); },
+        onCanceled: (n) => metrics.addDroppedFrames(n),
+        observeQueueDepth: (n) => { if (currentTurn) currentTurn.observeQueueDepth(n); },
+      });
       openDeepgramStt().then(async () => {
         // Greet after a brief settle so the daemon's first inbound
         // frames don't crash into our outbound.
         await new Promise((r) => setTimeout(r, 200));
         speaking = true;
-        await speakStreaming(GREETING);
+        // Greeting is a "turn" too — t=0 is the call start, so
+        // user_to_audio_ms here measures call-answer-to-greeting.
+        currentTurn = makeTurnMetrics(metrics, 'greeting');
+        await speakStreaming(GREETING, currentTurn);
         while (playout.isActive()) {
           await new Promise((r) => setTimeout(r, 50));
         }
+        currentTurn.finish();
+        currentTurn = null;
         speaking = false;
       });
     } else if (t === 'speech_started') {
@@ -459,9 +671,11 @@ async function handleCall(ws, req) {
       // its outbound buffer too.
       if (playout?.isActive()) {
         log('barge-in: dropping playout + sending clear');
+        metrics.incBargeIn();
         playout.cancel();
         try {
           ws.send(JSON.stringify({ type: 'clear', call_id: callId }));
+          metrics.incClear();
         } catch {}
         speaking = false;
       }
@@ -490,6 +704,15 @@ async function handleCall(ws, req) {
     log(`WS closed (code=${code} reason=${JSON.stringify(r)})`);
     try { dgStt?.requestClose(); } catch {}
     playout?.cancel();
+    // Final call-wide tally. Useful for: how many times did the
+    // caller cut us off? did we leak frames anywhere?
+    const s = metrics.snapshot();
+    metrics.emit('call_summary', {
+      duration_ms: metrics.elapsed(),
+      barge_in_count: s.bargeInCount,
+      clear_count: s.clearCount,
+      dropped_frame_count: s.droppedFrameCount,
+    });
   });
   ws.on('error', (e) => log('WS error:', e?.message || e));
 }

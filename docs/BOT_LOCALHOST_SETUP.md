@@ -100,19 +100,56 @@ siphon-ai bot listening on ws://127.0.0.1:8080/
 
 Leave it running. In another shell, place a test call from
 FreeSWITCH (or whatever was triggering the failed call from your
-log). The bot should now print something like:
+log). The bot prints structured `metric` log lines tagged with
+`+Nms` offsets from call start, plus a `turn_summary` line per
+greeting/reply and a `call_summary` line at hangup. Typical
+sequence:
 
 ```
 [siphon-XXXX] START from=1001 to=9000 audio=pcm16le@8000Hz/20ms
 [siphon-XXXX] STT open at 8000 Hz
-[siphon-XXXX] TTS Flushed: NNN bytes
-[siphon-XXXX] (interim): "..."
+[siphon-XXXX] metric stt_open +123ms
+[siphon-XXXX] metric first_user_audio +145ms
+[siphon-XXXX] metric tts_start +321ms turn=greeting
+[siphon-XXXX] metric tts_first_byte +789ms turn=greeting latency_ms=468
+[siphon-XXXX] playout: pump started
+[siphon-XXXX] metric first_outbound_frame +812ms turn=greeting user_to_audio_ms=812
+[siphon-XXXX] TTS Flushed: 38400 bytes
+[siphon-XXXX] metric turn_summary +2700ms turn=greeting user_to_audio_ms=812 …
+[siphon-XXXX] metric first_interim_transcript +4200ms
 [siphon-XXXX] UTTERANCE: "..."
-[siphon-XXXX] turn N start
-[siphon-XXXX] LLM first token at +XXXms
-[siphon-XXXX] first audio playing at +XXXms
-…
+[siphon-XXXX] metric utterance_end +5100ms
+[siphon-XXXX] metric llm_start +5102ms turn=reply
+[siphon-XXXX] metric llm_first_token +5430ms turn=reply latency_ms=328
+[siphon-XXXX] metric llm_completed +6210ms turn=reply latency_ms=1108
+[siphon-XXXX] metric tts_first_byte +5680ms turn=reply latency_ms=…
+[siphon-XXXX] metric first_outbound_frame +5710ms turn=reply user_to_audio_ms=610
+[siphon-XXXX] metric turn_summary +7400ms turn=reply user_to_audio_ms=610 …
+[siphon-XXXX] metric call_summary +12345ms barge_in_count=0 clear_count=0 dropped_frame_count=0
 ```
+
+Every metric is one line, `metric <event> +Nms [k=v …]`. Easy to
+grep, easy to plot. The events you'll want to track for SLOs:
+
+| Event | What it measures |
+|-------|------------------|
+| `stt_open` | Time to Deepgram STT WS handshake from call start |
+| `first_user_audio` | Time to first inbound binary frame from the daemon |
+| `first_interim_transcript` | First Deepgram interim per utterance |
+| `first_final_transcript` | First final per utterance |
+| `utterance_end` | Caller stopped talking (Deepgram VAD verdict) |
+| `llm_start` / `llm_first_token` / `llm_completed` | LLM streaming timings per turn |
+| `tts_start` / `tts_first_byte` | Per-phrase TTS timings |
+| `first_outbound_frame` | First audio byte sent to daemon for this turn |
+| `barge_in` | Caller interrupted us (count tracked on call_summary) |
+| `frames_dropped` | Pending frames cancelled or sent against a closed WS |
+| `turn_summary` | Derived per-turn latencies (the big SLO line) |
+| `call_summary` | Final tally — duration, barge-ins, clears, dropped frames |
+
+The single line that matters most for "how fast does the bot feel"
+is **`turn_summary` with `user_to_audio_ms`** — that's wall-clock
+time from when the caller stopped speaking to when the first audio
+byte for the response leaves the bot.
 
 And on the daemon side, `journalctl -u siphon-ai -f` should now
 show `bridge connected` right after `state=Active` (the missing

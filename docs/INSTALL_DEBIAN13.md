@@ -264,6 +264,20 @@ sudo nft add rule inet siphon_ai input tcp dport 9091           ip saddr 10.0.0.
 (`ufw` / `iptables` / cloud SG equivalents work too; the
 permission set is what matters.)
 
+> **RTP source IP caveat:** the SIP `dport 5060` rule above always
+> comes from the trunk peer (FreeSWITCH, ITSP, etc.) and is safe
+> to lock by source IP. The **RTP** `dport 40000-40500` rule
+> assumes RTP arrives from the same peer — which is true for
+> default FreeSWITCH bridges. If you use `bypass_media=true` in
+> the FS dialplan (recommended — see
+> `docs/FREESWITCH_INTEGRATION.md`), RTP flows **directly between
+> the original caller and SiphonAI**, bypassing FS. In that case
+> the RTP source IP is the caller's IP — which can be anywhere
+> — and you'll want either an open RTP source ACL (rely on
+> conntrack + rate-limiting for safety) or a wider CIDR matching
+> your expected caller pool. SIP identity is still gated by the
+> `[[trunk]]` allowlist, so this doesn't loosen auth.
+
 ### Fail2ban for repeat offenders
 
 The `[[trunk]]` allowlist 403s every scanner INVITE at the SIP

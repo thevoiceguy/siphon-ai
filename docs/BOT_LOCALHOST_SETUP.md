@@ -282,6 +282,45 @@ to FreeSWITCH being blocked. Run `tcpdump -i any -n 'udp portrange
 see frames flowing both directions. If only inbound, FreeSWITCH's
 side has a firewall rule dropping our RTP.
 
+**Or** — if the FreeSWITCH dialplan is missing `bypass_media=true`,
+FS's anchored bridge silently drops the SiphonAI→softphone
+direction whenever the softphone offers `a=rtcp-mux` (most modern
+softphones do, Zoiper included). See `docs/FREESWITCH_INTEGRATION.md`
+§"Why bypass_media" for the full diagnosis. The fix is a one-line
+dialplan addition; the rest of the system is fine.
+
+### Bot speech cuts in and out every 1–2 seconds
+
+Bot keeps interrupting itself mid-sentence. The log shows lots
+of `barge-in: dropping playout + sending clear` lines back-to-back.
+
+This is acoustic feedback: caller is on speakerphone with the
+speaker right next to the mic, the bot's voice plays through the
+speaker, the mic picks it up, the daemon's VAD says
+`speech_started`, and the bot's `speech_started` handler cancels
+its own playout. The bot is barging in on itself.
+
+Options:
+
+1. **Use a headset on the softphone.** Eliminates the acoustic
+   loop instantly. This is the right answer for any production
+   caller (real phones have hardware AEC).
+2. **Switch the daemon's barge-in mode to `notify_only`.** The
+   daemon still emits `speech_started` to the bot but doesn't
+   auto-flush its playout buffer. The reference bot still does
+   its own cancel, so for a fully-tolerant demo you'd also want
+   to comment out the `playout.cancel()` line in the bot's
+   `speech_started` handler. In `/etc/siphon-ai/siphon-ai.toml`:
+   ```toml
+   [bridge.barge_in]
+   mode = "notify_only"
+   ```
+   Then `sudo systemctl restart siphon-ai`.
+
+Don't try to "fix" this in production by raising the VAD
+threshold — real callers' phones have AEC and the chop never
+appears. It's purely an artifact of the speakerphone test setup.
+
 ---
 
 ## What this skips

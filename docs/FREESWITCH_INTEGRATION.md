@@ -134,6 +134,11 @@ In `/etc/freeswitch/dialplan/default/99_siphon_ai.xml`:
 <include>
   <extension name="siphon-ai-9000">
     <condition field="destination_number" expression="^9000$">
+      <!-- CRITICAL: take FreeSWITCH out of the audio path. With
+           anchored media, FS's bridge fails to relay one direction
+           when the legs have asymmetric attributes (softphone offers
+           rtcp-mux, SiphonAI doesn't). See "Why bypass_media" below. -->
+      <action application="set" data="bypass_media=true"/>
       <!-- Force PCMU on the trunk leg so SiphonAI doesn't have
            to deal with re-negotiation. -->
       <action application="set" data="absolute_codec_string=PCMU"/>
@@ -151,6 +156,51 @@ In `/etc/freeswitch/dialplan/default/99_siphon_ai.xml`:
   </extension>
 </include>
 ```
+
+### Why `bypass_media=true`
+
+Without `bypass_media`, FreeSWITCH anchors media in the middle of
+the call: softphone sends RTP to FS's port, FS re-emits to
+SiphonAI's port, and vice versa. This is the default and usually
+works fine — except in our specific shape.
+
+What goes wrong: most softphones (Zoiper among them) offer
+`a=rtcp-mux` and a bundle of codecs (Opus first, then PCMU,
+PCMA, …). FS accepts rtcp-mux on the softphone leg. On the
+outbound leg to SiphonAI, FS offers the same codec list but
+SiphonAI advertises only PCMU **without** `a=rtcp-mux` (the
+daemon does not negotiate rtcp-mux in v1). Both legs settle on
+PCMU so there is no transcoding required — but the FS bridge
+appears unable to relay the SiphonAI→softphone direction once
+this asymmetry is present. A tcpdump on the FS host confirms:
+
+| Direction               | RTP packets/sec |
+|-------------------------|-----------------|
+| softphone → FS          | ~50 ✓           |
+| FS → SiphonAI           | ~50 ✓           |
+| SiphonAI → FS           | ~50 ✓           |
+| **FS → softphone**      | **~0**          |
+
+`bypass_media=true` makes FS get out of the media path entirely:
+its 200 OK to the softphone advertises **SiphonAI's** RTP
+endpoint, and its INVITE to SiphonAI proxies through the
+softphone's SDP. RTP then flows directly between the softphone
+and SiphonAI, with FS only handling SIP signaling. Cleaner,
+fewer hops, and it sidesteps the anchored-bridge bug.
+
+**Caveat:** in bypass-media mode, neither endpoint can use
+mid-call FreeSWITCH features that need to inspect media
+(recording on FS, IVR menus, mod_avmd, etc.) on this call leg.
+Move those features to SiphonAI (which records via CDR + WS
+events) or the bot if you need them.
+
+**Caveat 2:** the softphone and SiphonAI must be able to reach
+each other directly over UDP for RTP. For a public-IP softphone
+(or one behind a cone NAT that opens a mapping on outbound
+traffic), this works out of the box. For a softphone behind
+symmetric NAT with no port forwarding, you'd need to revert to
+anchored media and find a different workaround — open an issue
+if you hit that shape.
 
 Reload:
 
@@ -223,20 +273,38 @@ RTP back to FreeSWITCH or a `c=` line advertising the wrong IP
 
 ### Common interop gotchas
 
+- **Caller hears nothing but FreeSWITCH echo (9196) works**: the
+  classic asymmetric-bridge symptom. With `bypass_media=true`
+  in the dialplan (above) this won't happen. If it does, you
+  forgot the `<action application="set" data="bypass_media=true"/>`
+  line. Diagnostic: tcpdump on the FS host showing 50 pps in
+  three of the four RTP directions but ~0 in the fourth.
 - **No audio one direction**: the side missing audio has a firewall
   blocking the other side's RTP. Test with `tcpdump -i any -n
-  udp portrange 40000-40500`.
+  udp portrange 40000-40500`. Remember that with `bypass_media`,
+  RTP goes directly softphone↔SiphonAI; the FS host is no longer
+  in the path, so test from the SiphonAI host.
 - **One-way then full audio**: symmetric-RTP latching kicked in
   after the first inbound frame. Acceptable, but it means the
-  peer changed RTP endpoints — PR #26 wires
-  `update_participant_media` so this should no longer happen on
-  re-INVITE; if it does on initial INVITE, check `[node].public_address`.
+  peer changed RTP endpoints. PR #38 seeds `remote_addr` from
+  the offer SDP at INVITE accept time so playout starts
+  immediately rather than waiting on the latch — if you still
+  see this on the initial INVITE, check `[node].public_address`
+  (must be a routable IP, not the placeholder).
 - **488 Not Acceptable Here**: FreeSWITCH and SiphonAI's `[media].codecs`
   don't intersect. With `absolute_codec_string=PCMU` and
   `codecs = ["pcmu"]` they will.
 - **No `start` event reaches the bot**: SiphonAI couldn't connect
   to `ws_url`. Check `journalctl -u siphon-ai -f` for
   `bridge connected` vs a connect error.
+- **Audio chops every 1–2 seconds during the bot's reply**: bot is
+  cancelling its own playout on self-feedback. Common when the
+  caller's softphone is on **speakerphone with no echo cancellation**
+  — the bot's voice plays out the speaker, the mic picks it up,
+  the daemon's VAD reports `speech_started`, and the bot does a
+  barge-in cancel. Fix: use a headset on the softphone, OR set
+  `[bridge.barge_in].mode = "notify_only"` in the daemon config
+  to keep the bot from auto-cancelling on detected speech.
 
 ---
 

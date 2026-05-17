@@ -220,7 +220,13 @@ function makeTurnMetrics(metrics, label) {
       });
     },
     markTtsStart() {
-      t.ttsStartAt = Date.now();
+      // Always emit the event (per-phrase visibility) but only
+      // pin the turn-level ttsStartAt to the FIRST phrase's
+      // request time. Otherwise the turn_summary's
+      // tts_first_byte_ms diff is computed against the last
+      // phrase's start, which goes negative once the first
+      // phrase's audio has already been pumped.
+      if (!t.ttsStartAt) t.ttsStartAt = Date.now();
       metrics.emit('tts_start', { turn: label });
     },
     markTtsFirstByte() {
@@ -407,6 +413,10 @@ async function handleCall(ws, req) {
   // is computed without threading callbacks down through TTS.
   const metrics = makeCallMetrics(log);
   let currentTurn = null;
+  // Flips when the WS closes. Used to short-circuit in-flight
+  // LLM / TTS pipelines so we don't generate a flood of
+  // "ws not OPEN, dropping frames" lines after the caller hangs up.
+  let callEnded = false;
 
   // ─── Deepgram STT (built lazily, once we have the sample rate) ───
   const deepgram = createClient(DG_KEY);
@@ -430,8 +440,15 @@ async function handleCall(ws, req) {
       channels: 1,
       punctuate: true,
       interim_results: true,
-      endpointing: 300,
-      utterance_end_ms: 1000,
+      // Aggressive endpointing for low end-of-turn latency. 150 ms
+      // of trailing silence before STT closes the segment; 600 ms
+      // before Deepgram fires `UtteranceEnd`. Defaults were
+      // 300/1000 — the trade-off is faster perceived response vs.
+      // a slightly higher chance of clipping the last word of a
+      // slow speaker. Raise both if you see "Hello [pause] there"
+      // get split into two utterances.
+      endpointing: 150,
+      utterance_end_ms: 600,
       vad_events: true,
       smart_format: false,
     });
@@ -499,6 +516,9 @@ async function handleCall(ws, req) {
   // ─── TTS streaming → playout ───
   async function speakStreaming(text, turn) {
     return new Promise((resolve) => {
+      // No-op if the call already ended — generates audio that
+      // can't go anywhere and floods the log with frame drops.
+      if (callEnded) { resolve(); return; }
       let collected = 0;
       if (turn) turn.markTtsStart();
       const tts = deepgram.speak.live({
@@ -524,6 +544,7 @@ async function handleCall(ws, req) {
         resolve();
       });
       tts.on('Audio', (chunk) => {
+        if (callEnded) return;
         // chunk can be Buffer, Uint8Array, or ArrayBuffer depending on
         // transport. Normalise to Buffer.
         const buf =
@@ -551,12 +572,29 @@ async function handleCall(ws, req) {
   }
 
   // ─── Conversation turn ───
+  //
+  // LLM → TTS is pipelined: the moment a phrase completes from the
+  // LLM stream (sentence punctuation or a long enough comma chunk),
+  // we kick off its speakStreaming() against a serial chain. The LLM
+  // continues streaming in parallel; subsequent phrases queue behind
+  // the first. The caller hears the first sentence as soon as TTS
+  // has rendered it, rather than waiting for the whole LLM response.
   async function handleUserTurn(userText, turn) {
     speaking = true;
     conversation.push({ role: 'user', content: userText });
     let fullResponse = '';
     let phraseBuf = '';
-    const phrases = [];
+    // Serial TTS chain: every phrase appended waits for the
+    // previous to finish, so playout order matches LLM order.
+    let ttsChain = Promise.resolve();
+
+    function speakPhrase(p) {
+      if (!p) return;
+      ttsChain = ttsChain.then(async () => {
+        if (!speaking) return; // barge-in or WS close mid-stream
+        await speakStreaming(p, turn);
+      });
+    }
 
     try {
       if (turn) turn.markLlmStart();
@@ -571,23 +609,24 @@ async function handleCall(ws, req) {
         if (turn) turn.markLlmFirstToken();
         phraseBuf += delta;
         fullResponse += delta;
-        // Phrase-level chunking: TTS each clause as it lands so
-        // the first audio plays well before the LLM finishes.
+        // Phrase-level chunking: hand off to TTS the moment we
+        // have a complete clause. The first phrase typically
+        // arrives a few hundred ms after first_token; that's the
+        // perceived "agent starts speaking" moment, not
+        // llm_completed.
         if (
           /[.!?]$/.test(phraseBuf.trim()) ||
           (/,$/.test(phraseBuf.trim()) && phraseBuf.length > 40)
         ) {
-          phrases.push(phraseBuf.trim());
+          speakPhrase(phraseBuf.trim());
           phraseBuf = '';
         }
       }
-      if (phraseBuf.trim()) phrases.push(phraseBuf.trim());
       if (turn) turn.markLlmCompleted();
+      if (phraseBuf.trim()) speakPhrase(phraseBuf.trim());
 
-      for (const p of phrases) {
-        if (!speaking) break; // barge-in killed us
-        await speakStreaming(p, turn);
-      }
+      // Wait for all phrases to finish synthesising.
+      await ttsChain;
 
       // Wait for the playout pipe to drain before declaring the
       // turn done — the LLM finishing isn't the same as the
@@ -702,6 +741,8 @@ async function handleCall(ws, req) {
   ws.on('close', (code, reason) => {
     const r = reason ? Buffer.from(reason).toString('utf8') : '';
     log(`WS closed (code=${code} reason=${JSON.stringify(r)})`);
+    callEnded = true;
+    speaking = false;
     try { dgStt?.requestClose(); } catch {}
     playout?.cancel();
     // Final call-wide tally. Useful for: how many times did the

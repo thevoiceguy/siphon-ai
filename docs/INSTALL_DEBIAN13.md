@@ -34,19 +34,25 @@ ships SIPp v3.7 which is plenty new for the bundled scenarios.
 
 ### Rust toolchain
 
-Debian 13's `rustc` is current enough, but `rustup` makes
-toolchain bumps painless when a sibling crate moves its MSRV:
+**Use `rustup` — not Debian's `rustc` package.** Debian 13 ships
+`rustc 1.85`, which is too old: transitive deps from
+`forge-media` / `siphon-rs` (the `icu_*`, `smol_str`, `time`,
+etc. families) require `rustc 1.89` or newer. The workspace's
+`rust-toolchain.toml` pins the channel to `stable`, so rustup
+picks up the right version automatically; `apt install rustc`
+gets you a hard `error: rustc 1.85 is not supported` mid-build.
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 source "$HOME/.cargo/env"
-rustc --version    # 1.85+ for the workspace
+rustc --version    # 1.89+ for the workspace
 ```
 
-If you'd rather use distro Rust:
+If `rustup` is already installed from an earlier setup, make
+sure stable is current:
 
 ```bash
-sudo apt install -y rustc cargo
+rustup update stable
 ```
 
 ---

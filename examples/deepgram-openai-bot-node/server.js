@@ -440,15 +440,17 @@ async function handleCall(ws, req) {
       channels: 1,
       punctuate: true,
       interim_results: true,
-      // Aggressive endpointing for low end-of-turn latency. 150 ms
-      // of trailing silence before STT closes the segment; 600 ms
-      // before Deepgram fires `UtteranceEnd`. Defaults were
-      // 300/1000 — the trade-off is faster perceived response vs.
-      // a slightly higher chance of clipping the last word of a
-      // slow speaker. Raise both if you see "Hello [pause] there"
-      // get split into two utterances.
+      // `endpointing` (ms of trailing silence before a "final"
+      // transcript chunk fires) is safe to drop well below the
+      // Deepgram default (10–300 are all accepted). 150 ms shaves
+      // perceived latency without splitting "Hello [pause] there"
+      // into two utterances.
       endpointing: 150,
-      utterance_end_ms: 600,
+      // `utterance_end_ms` has a HARD MINIMUM of 1000 enforced by
+      // Deepgram — values below that get the connection rejected
+      // with a 400 at handshake time. Leave at 1000 unless
+      // Deepgram raises the floor.
+      utterance_end_ms: 1000,
       vad_events: true,
       smart_format: false,
     });
@@ -457,7 +459,19 @@ async function handleCall(ws, req) {
       metrics.markSttOpen();
       dgSttReady = true;
     });
-    dgStt.on('error', (e) => log('STT error:', e?.message || e));
+    dgStt.on('error', (e) => {
+      log('STT error:', e?.message || e);
+      // If STT never opened, the call is unusable — caller would
+      // hear the greeting and then dead air forever. Close the
+      // WS so the daemon ends the call instead of stranding the
+      // caller. (If STT was open and dies mid-call, dgSttReady
+      // is already true and we leave the call up so any
+      // in-flight LLM/TTS finishes.)
+      if (!dgSttReady) {
+        log('STT failed before opening — closing WS so daemon tears the call down');
+        try { ws.close(1011, 'STT failed'); } catch {}
+      }
+    });
     dgStt.on('close', () => log('STT closed'));
     dgStt.on('Results', onSttResults);
     dgStt.on('UtteranceEnd', onUtteranceEnd);

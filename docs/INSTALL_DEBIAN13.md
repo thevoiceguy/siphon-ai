@@ -9,6 +9,23 @@ end-to-end on a small VM.
 Assumes a non-root user with `sudo`. Replace `siphon@host` with
 your shell prompt; replace IPs with your own.
 
+> **TL;DR — there's a script.** Sections 1–6 are automated by
+> `scripts/install-debian13.sh`. After cloning the repo:
+> ```bash
+> cd /opt/siphon-ai-src    # or wherever you cloned
+> TRUNK_PEER_IP=10.0.0.10 ./scripts/install-debian13.sh
+> ```
+> It prompts for the trunk peer IP and the host's public IP,
+> installs everything, writes the config, and brings the systemd
+> service up. Idempotent — re-running is safe; existing
+> config files are backed up before being rewritten.
+>
+> Read the rest of this doc if you want to know **why** each step
+> exists, customise something the script doesn't expose, or run
+> sections 7–9 (firewall, verify, ops) by hand. The script
+> deliberately skips the firewall step — it varies too much by
+> host/cloud.
+
 ---
 
 ## 1. System prerequisites

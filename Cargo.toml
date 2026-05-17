@@ -16,7 +16,7 @@ members = [
 [workspace.package]
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 authors = ["SiphonAI contributors"]
 repository = "https://github.com/thevoiceguy/siphon-ai"

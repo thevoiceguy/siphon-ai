@@ -93,21 +93,23 @@ uuid        = { version = "1", features = ["v4", "serde"] }
 chrono      = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
 # ─── Upstream voice stack (separate repos, owned by us) ──────────────────────
-# These are git deps for now; once published to crates.io we'll switch to versioned
-# releases. For reproducibility, pin to a specific rev before v0.1.0 ships
-# (see CLAUDE.md §7.5 "Bumping Upstream Dep").
+# These are git deps for now; once published to crates.io we'll switch to
+# versioned releases. Pinned to specific commit revs for reproducibility —
+# `branch = "main"` would mean a tagged release could build different code
+# later if upstream moves. To bump, run `git ls-remote` for the upstream's
+# main branch and replace the rev hashes here (see CLAUDE.md §7.5).
 
 # siphon-rs — RFC 3261 SIP stack
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "main" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #
@@ -123,17 +125,26 @@ sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", branch = "
 # forge-ice, Cow/lifetime in forge-recorder), but the subset SiphonAI
 # pulls — forge-core, forge-rtp, forge-engine (g722 only), forge-codecs,
 # forge-sdp, forge-dtmf, forge-vad, forge-hep — all build cleanly.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", branch = "main", default-features = false, features = ["g722"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
-forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
-forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", branch = "main" }
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e", default-features = false, features = ["g722"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e" }
+forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e" }
+forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.
+#
+# Kept on `branch = "main"` (NOT rev-pinned) on purpose: both
+# siphon-rs and forge-media depend on hep-rs as `branch = "main"`,
+# so pinning a `rev` here would create two distinct source URLs in
+# the dep graph (`?rev=X` vs `?branch=main`) — cargo treats those
+# as different crates, causing the classic "two different versions
+# of crate `hep_rs` are being used" build error.
+# Reproducibility for hep-rs is still enforced via the checked-in
+# Cargo.lock entry (`source = git+…hep-rs?branch=main#<commit>`).
 hep-rs = { git = "https://github.com/thevoiceguy/hep-rs", branch = "main" }
 
 [profile.release]

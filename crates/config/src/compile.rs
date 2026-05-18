@@ -893,25 +893,75 @@ fn compile_registrations(raw: Vec<RawRegister>) -> Result<Vec<RegisterConfig>, C
     Ok(compiled)
 }
 
-/// Split the configured `server` ("host" or "host:port") + optional
-/// explicit `port` into `(host_str, port)`. Explicit `port` wins
-/// when both are present.
+/// Split the configured `server` into `(host_str, port)`. The
+/// `server` field accepts three shapes:
+///
+/// - `"host"` or `"1.2.3.4"` — bare host/IPv4, port from
+///   `explicit_port` or `default_port`.
+/// - `"host:5061"` or `"1.2.3.4:5061"` — host + port. Explicit
+///   `port` (the `[[register]].port` TOML field) wins if also set.
+/// - `"2001:db8::1"` — bare IPv6 literal (no port). The function
+///   recognises this by parsing the whole string as an [`IpAddr`].
+/// - `"[2001:db8::1]:5061"` — bracketed IPv6 + port, RFC 3986 §3.2.2.
+///
+/// Previously the function did `server.rsplit_once(':')` and
+/// parsed the right half as a port unconditionally, which
+/// misparsed `"2001:db8::1"` as host=`"2001:db8:"` + port=`":1"`
+/// (the latter then failing as a number). IPv6 registrars were
+/// effectively impossible to configure even though the documented
+/// "v1 accepts only literal IPs" contract didn't exclude IPv6.
 fn parse_register_server(
     server: &str,
     explicit_port: Option<u16>,
     default_port: u16,
 ) -> Result<(String, u16), String> {
-    if server.trim().is_empty() {
+    use std::net::IpAddr;
+
+    let trimmed = server.trim();
+    if trimmed.is_empty() {
         return Err("server must not be empty".into());
     }
-    let (host, port_in_str) = match server.rsplit_once(':') {
+
+    // Bracketed IPv6: `[2001:db8::1]` or `[2001:db8::1]:5061`.
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        let (inside, after) = rest
+            .split_once(']')
+            .ok_or_else(|| format!("unterminated '[' in server {trimmed:?}"))?;
+        let port_in_str = match after {
+            "" => None,
+            other => {
+                let p = other.strip_prefix(':').ok_or_else(|| {
+                    format!("expected ':<port>' after ']' in server {trimmed:?}, got {other:?}")
+                })?;
+                Some(
+                    p.parse::<u16>()
+                        .map_err(|e: std::num::ParseIntError| e.to_string())?,
+                )
+            }
+        };
+        let port = explicit_port.or(port_in_str).unwrap_or(default_port);
+        return Ok((inside.to_string(), port));
+    }
+
+    // Bare IPv6 with no port (e.g. `2001:db8::1`). Detected by a
+    // whole-string IPv6 parse — that's the only shape with `:`
+    // characters that's also a valid IP literal.
+    if trimmed.parse::<IpAddr>().is_ok() && trimmed.contains(':') {
+        // Pure IPv6 literal. Port comes from explicit_port / default.
+        return Ok((trimmed.to_string(), explicit_port.unwrap_or(default_port)));
+    }
+
+    // Host or IPv4, optionally with `:port`. Splitting on the
+    // rightmost `:` is safe here because we've already excluded
+    // IPv6 above.
+    let (host, port_in_str) = match trimmed.rsplit_once(':') {
         Some((h, p)) => {
             let parsed: u16 = p
                 .parse()
                 .map_err(|e: std::num::ParseIntError| e.to_string())?;
             (h.to_string(), Some(parsed))
         }
-        None => (server.to_string(), None),
+        None => (trimmed.to_string(), None),
     };
     let port = explicit_port.or(port_in_str).unwrap_or(default_port);
     Ok((host, port))
@@ -1022,4 +1072,87 @@ fn compile_cdr(raw: RawCdr) -> Result<CdrConfig, CompileError> {
         file,
         webhook,
     })
+}
+
+#[cfg(test)]
+mod parse_register_server_tests {
+    use super::parse_register_server;
+
+    // Tests for the IPv6 fix on `parse_register_server`. The pre-fix
+    // implementation did `server.rsplit_once(':')` and parsed the
+    // right half as a u16 port, which:
+    //   * misparsed `"2001:db8::1"` as host=`"2001:db8:"` port=":1"
+    //     (the latter failing as a number);
+    //   * had no concept of the bracketed `[host]:port` form.
+
+    const SIP_PORT: u16 = 5060;
+
+    #[test]
+    fn ipv4_host_only_uses_default_port() {
+        let (h, p) = parse_register_server("10.0.0.10", None, SIP_PORT).unwrap();
+        assert_eq!((h.as_str(), p), ("10.0.0.10", SIP_PORT));
+    }
+
+    #[test]
+    fn ipv4_host_port_parses() {
+        let (h, p) = parse_register_server("10.0.0.10:5061", None, SIP_PORT).unwrap();
+        assert_eq!((h.as_str(), p), ("10.0.0.10", 5061));
+    }
+
+    #[test]
+    fn explicit_port_wins_over_inline() {
+        let (h, p) = parse_register_server("10.0.0.10:5061", Some(5070), SIP_PORT).unwrap();
+        assert_eq!((h.as_str(), p), ("10.0.0.10", 5070));
+    }
+
+    #[test]
+    fn hostname_only_uses_default_port() {
+        let (h, p) = parse_register_server("sip.example.com", None, SIP_PORT).unwrap();
+        assert_eq!((h.as_str(), p), ("sip.example.com", SIP_PORT));
+    }
+
+    #[test]
+    fn ipv6_literal_uses_default_port() {
+        let (h, p) = parse_register_server("2001:db8::1", None, SIP_PORT).unwrap();
+        assert_eq!((h.as_str(), p), ("2001:db8::1", SIP_PORT));
+    }
+
+    #[test]
+    fn ipv6_literal_with_explicit_port() {
+        let (h, p) = parse_register_server("2001:db8::1", Some(5061), SIP_PORT).unwrap();
+        assert_eq!((h.as_str(), p), ("2001:db8::1", 5061));
+    }
+
+    #[test]
+    fn ipv6_bracketed_host_port_parses() {
+        let (h, p) = parse_register_server("[2001:db8::1]:5061", None, SIP_PORT).unwrap();
+        assert_eq!((h.as_str(), p), ("2001:db8::1", 5061));
+    }
+
+    #[test]
+    fn ipv6_bracketed_no_port_uses_default() {
+        let (h, p) = parse_register_server("[2001:db8::1]", None, SIP_PORT).unwrap();
+        assert_eq!((h.as_str(), p), ("2001:db8::1", SIP_PORT));
+    }
+
+    #[test]
+    fn ipv6_bracketed_missing_close_bracket_errors() {
+        assert!(parse_register_server("[2001:db8::1", None, SIP_PORT).is_err());
+    }
+
+    #[test]
+    fn ipv6_bracketed_garbage_after_close_bracket_errors() {
+        assert!(parse_register_server("[2001:db8::1]junk", None, SIP_PORT).is_err());
+    }
+
+    #[test]
+    fn empty_server_errors() {
+        assert!(parse_register_server("", None, SIP_PORT).is_err());
+        assert!(parse_register_server("   ", None, SIP_PORT).is_err());
+    }
+
+    #[test]
+    fn unparseable_port_errors() {
+        assert!(parse_register_server("10.0.0.10:nope", None, SIP_PORT).is_err());
+    }
 }

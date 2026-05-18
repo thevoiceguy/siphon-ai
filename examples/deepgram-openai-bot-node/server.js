@@ -56,7 +56,23 @@ const OpenAI = require('openai');
 const [BIND_HOST, BIND_PORT] = (process.env.BOT_BIND || '0.0.0.0:8080').split(':');
 
 const DG_KEY = process.env.DEEPGRAM_API_KEY;
-const OPENAI_KEY = process.env.OPENAI_API_KEY;
+
+// LLM: any OpenAI-compatible chat-completions endpoint works (OpenAI,
+// Groq, Together, OpenRouter, Fireworks, Anthropic's OAI-compat API,
+// local Ollama, …). `BOT_LLM_BASE_URL` switches providers without
+// touching code; `BOT_LLM_MODEL` picks the model name; the API key
+// can come from either `BOT_LLM_API_KEY` (preferred for non-OpenAI
+// providers) or the legacy `OPENAI_API_KEY` env var.
+const LLM_BASE_URL  = process.env.BOT_LLM_BASE_URL || undefined;
+const LLM_MODEL     = process.env.BOT_LLM_MODEL    || 'gpt-4o-mini';
+const LLM_API_KEY   = process.env.BOT_LLM_API_KEY  || process.env.OPENAI_API_KEY;
+const LLM_API_KEY_VAR = process.env.BOT_LLM_API_KEY ? 'BOT_LLM_API_KEY' : 'OPENAI_API_KEY';
+const LLM_MAX_TOKENS  = process.env.BOT_LLM_MAX_TOKENS
+  ? Number.parseInt(process.env.BOT_LLM_MAX_TOKENS, 10)
+  : undefined;
+const LLM_TEMPERATURE = process.env.BOT_LLM_TEMPERATURE
+  ? Number.parseFloat(process.env.BOT_LLM_TEMPERATURE)
+  : undefined;
 
 /**
  * Validate an API key env var. Bails on missing OR
@@ -83,7 +99,7 @@ function requireKey(name, value) {
   }
 }
 requireKey('DEEPGRAM_API_KEY', DG_KEY);
-requireKey('OPENAI_API_KEY', OPENAI_KEY);
+requireKey(LLM_API_KEY_VAR, LLM_API_KEY);
 
 const SYSTEM_PROMPT =
   process.env.BOT_SYSTEM_PROMPT ||
@@ -92,6 +108,12 @@ const SYSTEM_PROMPT =
     'Avoid markdown, lists, or formatting.';
 
 const GREETING = process.env.BOT_GREETING || 'Hi there! How can I help you today?';
+
+console.log(
+  `[llm] model=${LLM_MODEL} base_url=${LLM_BASE_URL || '(OpenAI default)'} ` +
+  `max_tokens=${LLM_MAX_TOKENS ?? '(provider default)'} ` +
+  `temperature=${LLM_TEMPERATURE ?? '(provider default)'}`,
+);
 
 // SiphonAI's protocol pins these: pcm16le, mono, 20 ms frames,
 // 8 kHz or 16 kHz. Anything else means a daemon misconfig or a
@@ -420,7 +442,10 @@ async function handleCall(ws, req) {
 
   // ─── Deepgram STT (built lazily, once we have the sample rate) ───
   const deepgram = createClient(DG_KEY);
-  const openai = new OpenAI({ apiKey: OPENAI_KEY });
+  const openai = new OpenAI({
+    apiKey: LLM_API_KEY,
+    ...(LLM_BASE_URL ? { baseURL: LLM_BASE_URL } : {}),
+  });
   let dgStt = null;
   let dgSttReady = false;
 
@@ -613,9 +638,11 @@ async function handleCall(ws, req) {
     try {
       if (turn) turn.markLlmStart();
       const stream = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: LLM_MODEL,
         messages: conversation,
         stream: true,
+        ...(LLM_MAX_TOKENS  != null ? { max_tokens:  LLM_MAX_TOKENS  } : {}),
+        ...(LLM_TEMPERATURE != null ? { temperature: LLM_TEMPERATURE } : {}),
       });
       for await (const chunk of stream) {
         const delta = chunk.choices?.[0]?.delta?.content;

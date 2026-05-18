@@ -73,8 +73,14 @@ services:
       - "5070:5070/udp"
       # SIP TCP — same port, different namespace.
       - "5070:5070/tcp"
-      # Prometheus metrics + /health + /ready.
-      - "9091:9091/tcp"
+      # Prometheus metrics + /health + /ready + /admin/*.
+      # Bound to 127.0.0.1 on the HOST side: the admin API has no
+      # built-in auth and can take calls down (see
+      # crates/telemetry/src/admin.rs §"Threat model"). Exposing
+      # it on the LAN would let anyone POST
+      # /admin/calls/<id>/hangup or PUT /admin/log. Keep it on
+      # loopback; reach it from the host via `curl 127.0.0.1:9091`.
+      - "127.0.0.1:9091:9091/tcp"
       # RTP port pool. forge's port allocator picks from this range
       # for the answer SDP's `m=audio` line; without these forwarded
       # the caller's media flows nowhere.

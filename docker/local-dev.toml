@@ -44,6 +44,14 @@ ws_connect_timeout_ms = 3000
 
 [observability]
 enabled = true
+# Bound to the container's wildcard so the compose port mapping
+# can forward to it. The host side of that mapping is restricted
+# to 127.0.0.1 (see compose.yaml `ports:`), so /admin/* is
+# reachable from the docker host's loopback but NOT from the LAN.
+# The admin API has no built-in auth (see
+# crates/telemetry/src/admin.rs §"Threat model") and can take
+# calls down, so it MUST NOT be on a public interface. Front with
+# an authenticating reverse proxy if you want to expose it.
 http_listen = "0.0.0.0:9091"
 
 [[route]]

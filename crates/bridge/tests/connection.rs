@@ -246,7 +246,7 @@ fn fixture_channels() -> (
 fn fixture_config(url: String) -> BridgeConfig {
     BridgeConfig {
         ws_url: url,
-        auth_bearer: None,
+        auth_header: None,
         connect_timeout: Duration::from_secs(2),
     }
 }
@@ -295,12 +295,15 @@ async fn upgrade_carries_subprotocol_user_agent_and_call_id() {
     assert_eq!(result, DisconnectReason::StopSent);
 }
 
+/// `BridgeConfig.auth_header` is sent verbatim, including the
+/// scheme. Bare-token normalisation happens upstream in
+/// `core::acceptor` and `config::compile`, NOT here.
 #[tokio::test]
-async fn bearer_token_forwarded_when_configured() {
+async fn auth_header_forwarded_verbatim_bearer() {
     let server = spawn_server(ServerOpts::echoing()).await;
     let (chans, _audio_out, control_out, _audio_in, _control_in) = fixture_channels();
     let mut cfg = fixture_config(server.ws_url());
-    cfg.auth_bearer = Some("s3cret".into());
+    cfg.auth_header = Some("Bearer s3cret".into());
 
     let conn = tokio::spawn(connect_and_run(cfg, fixture_start("c"), chans));
 
@@ -308,6 +311,33 @@ async fn bearer_token_forwarded_when_configured() {
     assert_eq!(
         server.captured.lock().authorization.as_deref(),
         Some("Bearer s3cret"),
+    );
+
+    control_out
+        .send(OutgoingEvent::Stop {
+            reason: StopReason::ServerHangup,
+        })
+        .await
+        .unwrap();
+    let _ = conn.await.unwrap();
+}
+
+/// Regression for the auth-scheme bug: non-Bearer schemes were
+/// previously double-prefixed (`Authorization: Bearer Basic …`).
+/// Now the bridge sends the configured value untouched.
+#[tokio::test]
+async fn auth_header_forwarded_verbatim_basic() {
+    let server = spawn_server(ServerOpts::echoing()).await;
+    let (chans, _audio_out, control_out, _audio_in, _control_in) = fixture_channels();
+    let mut cfg = fixture_config(server.ws_url());
+    cfg.auth_header = Some("Basic dXNlcjpwYXNz".into());
+
+    let conn = tokio::spawn(connect_and_run(cfg, fixture_start("c"), chans));
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        server.captured.lock().authorization.as_deref(),
+        Some("Basic dXNlcjpwYXNz"),
     );
 
     control_out
@@ -584,7 +614,7 @@ async fn unsupported_url_returns_invalid_config_or_ws_error() {
     let (chans, _audio_out, _control_out, _audio_in, _control_in) = fixture_channels();
     let cfg = BridgeConfig {
         ws_url: "not-a-url".into(),
-        auth_bearer: None,
+        auth_header: None,
         connect_timeout: Duration::from_millis(500),
     };
     let result = connect_and_run(cfg, fixture_start("c"), chans).await;
@@ -606,7 +636,7 @@ async fn auth_failure_at_upgrade_time_propagates_as_websocket_error() {
     .await;
     let (chans, _audio_out, _control_out, _audio_in, _control_in) = fixture_channels();
     let mut cfg = fixture_config(server.ws_url());
-    cfg.auth_bearer = Some("wrong-token".into());
+    cfg.auth_header = Some("wrong-token".into());
 
     let result = connect_and_run(cfg, fixture_start("c"), chans).await;
     assert!(

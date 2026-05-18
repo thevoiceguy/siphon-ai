@@ -619,10 +619,10 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         .ws_connect_timeout_ms
         .map(Duration::from_millis)
         .unwrap_or_else(|| Duration::from_secs(5));
-    let auth_bearer = raw
+    let auth_header = raw
         .ws_auth_header
         .as_deref()
-        .map(strip_bearer_prefix)
+        .map(normalize_auth_header)
         .filter(|s| !s.is_empty());
 
     let barge_in = compile_barge_in_default(&raw.barge_in)?;
@@ -638,7 +638,7 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
 
     Ok(BridgeDefaults {
         ws_url: raw.ws_url.filter(|s| !s.is_empty()),
-        auth_bearer,
+        auth_header,
         connect_timeout,
         codecs,
         dtmf_payload_type,
@@ -705,13 +705,20 @@ fn default_codecs() -> Vec<Codec> {
     vec![Codec::Pcmu, Codec::Pcma]
 }
 
-fn strip_bearer_prefix(value: &str) -> String {
-    const PREFIX: &str = "Bearer ";
+/// Normalize a configured WS auth header into the full
+/// `Authorization` value the bridge emits verbatim. See the
+/// matching helper in `core::acceptor::normalize_auth_header` for
+/// the full rationale — both crates accept input via the same
+/// `ws_auth_header` TOML key and must produce the same wire bytes.
+///
+/// - `"Bearer xxx"`, `"Basic abc"`, `"Digest …"` → returned as-is.
+/// - `"xxx"` (a bare token with no whitespace) → `"Bearer xxx"`.
+fn normalize_auth_header(value: &str) -> String {
     let trimmed = value.trim();
-    if trimmed.len() >= PREFIX.len() && trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
-        trimmed[PREFIX.len()..].trim().to_string()
-    } else {
+    if trimmed.contains(char::is_whitespace) {
         trimmed.to_string()
+    } else {
+        format!("Bearer {trimmed}")
     }
 }
 

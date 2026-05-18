@@ -90,10 +90,13 @@ fn representative_config_compiles_into_consumable_pieces() {
         Some("wss://default.example.com/sip-bridge"),
     );
     // ws_auth_header arrived as "Bearer abc-secret-123" after env
-    // expansion; the Bearer prefix is stripped on the way in.
+    // expansion. Stored verbatim — the bridge emits the full
+    // value as `Authorization:` on the WS upgrade. (Bare tokens
+    // get normalised to `Bearer <token>` upstream; values that
+    // already contain a scheme pass through.)
     assert_eq!(
-        cfg.bridge_defaults.auth_bearer.as_deref(),
-        Some("abc-secret-123")
+        cfg.bridge_defaults.auth_header.as_deref(),
+        Some("Bearer abc-secret-123")
     );
     assert_eq!(
         cfg.bridge_defaults.connect_timeout,

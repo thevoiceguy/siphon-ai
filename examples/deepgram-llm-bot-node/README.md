@@ -1,8 +1,15 @@
-# Deepgram + OpenAI voice agent — Node bot for SiphonAI
+# Deepgram + LLM voice agent — Node bot for SiphonAI
 
 A working closed-loop voice agent that speaks SiphonAI's bridge
-protocol v1. Caller speaks → Deepgram STT → OpenAI Chat
-(streaming) → Deepgram TTS → caller hears.
+protocol v1. Caller speaks → Deepgram STT → streaming LLM →
+Deepgram TTS → caller hears.
+
+The LLM is any OpenAI-compatible chat-completions endpoint
+chosen via env vars at startup (OpenAI, Groq, Anthropic's
+OpenAI-compat API, OpenRouter, Fireworks, local Ollama, …).
+Defaults to OpenAI `gpt-4o-mini`. See
+`docs/BOT_LOCALHOST_SETUP.md` §"Choosing the LLM" for provider
+recipes.
 
 Use this as the WS endpoint in `[bridge].ws_url` from
 `docs/INSTALL_DEBIAN13.md`, then drive it via the FreeSWITCH

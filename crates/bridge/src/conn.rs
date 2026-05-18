@@ -67,8 +67,12 @@ const MAX_TEXT_BYTES: usize = 256 * 1024;
 pub struct BridgeConfig {
     /// Full WebSocket URL: `ws://host:port/path` or `wss://...`.
     pub ws_url: String,
-    /// If set, sent as `Authorization: Bearer <token>` on the upgrade.
-    pub auth_bearer: Option<String>,
+    /// Full `Authorization` header value (including the scheme).
+    /// Sent verbatim on the WS upgrade. Bare tokens get normalised
+    /// to `Bearer <token>` upstream in `core::acceptor`; values
+    /// that already contain a scheme (`Bearer xxx`, `Basic abc`,
+    /// `Digest …`) pass through untouched.
+    pub auth_header: Option<String>,
     /// How long to wait for the WS handshake before giving up.
     pub connect_timeout: Duration,
 }
@@ -77,7 +81,7 @@ impl Default for BridgeConfig {
     fn default() -> Self {
         Self {
             ws_url: String::new(),
-            auth_bearer: None,
+            auth_header: None,
             connect_timeout: Duration::from_secs(5),
         }
     }
@@ -246,11 +250,16 @@ fn build_upgrade_request(
             BridgeError::InvalidConfig(format!("call_id is not a valid HTTP header value: {e}"))
         })?,
     );
-    if let Some(token) = &config.auth_bearer {
+    if let Some(value) = &config.auth_header {
+        // Sent verbatim — `core::acceptor::normalize_auth_header`
+        // already prepended `Bearer ` for the bare-token case, and
+        // any pre-existing scheme (`Bearer`, `Basic`, `Digest`,
+        // custom) survives untouched. Reformatting here would
+        // double-prefix non-Bearer schemes.
         headers.insert(
             "Authorization",
-            HeaderValue::from_str(&format!("Bearer {token}")).map_err(|e| {
-                BridgeError::InvalidConfig(format!("auth_bearer is not a valid token: {e}"))
+            HeaderValue::from_str(value).map_err(|e| {
+                BridgeError::InvalidConfig(format!("auth_header is not a valid HTTP header value: {e}"))
             })?,
         );
     }

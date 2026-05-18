@@ -103,7 +103,10 @@ pub struct BridgeDefaults {
     /// matched route MUST set its own `ws_url` or the call is
     /// rejected with 503 (see module-level docs).
     pub ws_url: Option<String>,
-    pub auth_bearer: Option<String>,
+    /// Full `Authorization` header value (with scheme) to set on
+    /// every WS upgrade by default. `None` ⇒ no header. Per-route
+    /// `[route.bridge].ws_auth_header` overrides if set.
+    pub auth_header: Option<String>,
     pub connect_timeout: Duration,
     /// Codecs to advertise, in priority order.
     pub codecs: Vec<Codec>,
@@ -166,7 +169,7 @@ impl Default for BridgeDefaults {
     fn default() -> Self {
         Self {
             ws_url: None,
-            auth_bearer: None,
+            auth_header: None,
             connect_timeout: Duration::from_secs(5),
             codecs: vec![Codec::Pcmu, Codec::Pcma],
             dtmf_payload_type: Some(101),
@@ -302,7 +305,7 @@ pub fn extract_sip_call_id(request: &Request) -> String {
 /// Rules per CLAUDE.md §4.6 ("Per-route overrides only override.
 /// Anything not specified inherits from globals"):
 /// - `ws_url`: route override > daemon default; one MUST be set.
-/// - `auth_bearer`: derived from `ws_auth_header` (route override
+/// - `auth_header`: derived from `ws_auth_header` (route override
 ///   only, since the daemon default is global) when it's a `Bearer`
 ///   token; other auth schemes pass through to the WS handshake but
 ///   we don't crack them open here.
@@ -322,9 +325,9 @@ pub fn build_bridge_config(
         return Err(BridgeBuildError::NoWsUrl);
     }
 
-    let auth_bearer = match route.bridge.ws_auth_header.as_deref() {
-        Some("") | None => defaults.auth_bearer.clone(),
-        Some(header) => Some(strip_bearer_prefix(header)),
+    let auth_header = match route.bridge.ws_auth_header.as_deref() {
+        Some("") | None => defaults.auth_header.clone(),
+        Some(header) => Some(normalize_auth_header(header)),
     };
 
     let connect_timeout = route
@@ -335,25 +338,35 @@ pub fn build_bridge_config(
 
     Ok(BridgeConfig {
         ws_url,
-        auth_bearer,
+        auth_header,
         connect_timeout,
     })
 }
 
-/// `Authorization: Bearer xxx` → `xxx`. Other schemes pass through
-/// verbatim — the WS conn layer doesn't reformat headers we hand it.
-fn strip_bearer_prefix(header: &str) -> String {
-    const PREFIX: &str = "Bearer ";
-    if let Some(rest) = header.strip_prefix(PREFIX) {
-        rest.trim().to_string()
-    } else if header
-        .get(..PREFIX.len())
-        .map(|p| p.eq_ignore_ascii_case(PREFIX))
-        .unwrap_or(false)
-    {
-        header[PREFIX.len()..].trim().to_string()
+/// Normalize a configured WS auth header into the full
+/// `Authorization` value the bridge emits verbatim.
+///
+/// - `"Bearer xxx"`, `"Basic abc"`, `"Digest …"` → returned as-is
+///   (any RFC 9110 scheme works; the WS conn layer sends what we
+///   hand it without reformatting).
+/// - `"xxx"` (a bare token with no whitespace) → `"Bearer xxx"`.
+///   Preserves the historic UX where operators wrote just the
+///   token for Bearer-auth WS servers.
+///
+/// Previously this function was named `strip_bearer_prefix` and
+/// returned only the token portion of "Bearer xxx", leaving the
+/// caller (`bridge/conn.rs`) to re-prepend "Bearer " unconditionally
+/// when emitting the header. That broke any non-Bearer scheme:
+/// `"Basic abc"` would survive the strip unchanged, then become
+/// `"Bearer Basic abc"` on the wire.
+fn normalize_auth_header(header: &str) -> String {
+    let trimmed = header.trim();
+    // A bare token has no inner whitespace; an "Authorization"
+    // header always has a scheme keyword followed by a space.
+    if trimmed.contains(char::is_whitespace) {
+        trimmed.to_string()
     } else {
-        header.to_string()
+        format!("Bearer {trimmed}")
     }
 }
 
@@ -2010,7 +2023,7 @@ a=sendrecv\r\n";
     }
 
     #[test]
-    fn route_bearer_auth_strips_scheme_prefix() {
+    fn route_bearer_auth_passes_through_verbatim() {
         let routes = first_route(
             r#"
             [[route]]
@@ -2024,7 +2037,50 @@ a=sendrecv\r\n";
         );
         let route = routes.find_match(&dummy_call_info()).unwrap();
         let cfg = build_bridge_config(&BridgeDefaults::default(), route).unwrap();
-        assert_eq!(cfg.auth_bearer.as_deref(), Some("abc123"));
+        // Stored verbatim — the bridge emits the full value as
+        // `Authorization:` on the WS upgrade.
+        assert_eq!(cfg.auth_header.as_deref(), Some("Bearer abc123"));
+    }
+
+    #[test]
+    fn route_basic_auth_passes_through_verbatim() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            ws_auth_header = "Basic dXNlcjpwYXNz"
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let cfg = build_bridge_config(&BridgeDefaults::default(), route).unwrap();
+        // Non-Bearer scheme survives. Previous behaviour would
+        // double-prefix this into `Bearer Basic dXNlcjpwYXNz` on
+        // the wire.
+        assert_eq!(cfg.auth_header.as_deref(), Some("Basic dXNlcjpwYXNz"));
+    }
+
+    #[test]
+    fn route_bare_token_normalized_to_bearer() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            ws_auth_header = "abc123"
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let cfg = build_bridge_config(&BridgeDefaults::default(), route).unwrap();
+        // Bare tokens (no scheme keyword) get the historic
+        // Bearer-by-default treatment.
+        assert_eq!(cfg.auth_header.as_deref(), Some("Bearer abc123"));
     }
 
     // ─── resolve_codecs ────────────────────────────────────────────
@@ -2584,6 +2640,41 @@ a=sendrecv\r\n",
         assert_eq!(outcome.answer_direction, None);
         assert_eq!(outcome.answer_sdp, cached_answer_pcmu());
         assert_eq!(outcome.remote_addr, None);
+    }
+
+    // ─── normalize_auth_header ─────────────────────────────────────
+
+    #[test]
+    fn normalize_auth_header_passes_bearer_through() {
+        assert_eq!(normalize_auth_header("Bearer abc"), "Bearer abc");
+    }
+
+    #[test]
+    fn normalize_auth_header_passes_basic_through() {
+        assert_eq!(
+            normalize_auth_header("Basic dXNlcjpwYXNz"),
+            "Basic dXNlcjpwYXNz"
+        );
+    }
+
+    #[test]
+    fn normalize_auth_header_passes_digest_through() {
+        assert_eq!(
+            normalize_auth_header("Digest username=\"foo\""),
+            "Digest username=\"foo\""
+        );
+    }
+
+    #[test]
+    fn normalize_auth_header_promotes_bare_token_to_bearer() {
+        // Historic UX: operators wrote just the token for Bearer auth.
+        assert_eq!(normalize_auth_header("xyz123"), "Bearer xyz123");
+    }
+
+    #[test]
+    fn normalize_auth_header_trims_outer_whitespace() {
+        assert_eq!(normalize_auth_header("  Bearer abc  "), "Bearer abc");
+        assert_eq!(normalize_auth_header("  xyz123  "), "Bearer xyz123");
     }
 
     // ─── sdp_audio_remote_addr ─────────────────────────────────────

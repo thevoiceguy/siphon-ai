@@ -81,7 +81,7 @@ pub fn pack_pcm16_le(samples: &[i16]) -> Vec<u8> {
 /// counterparty is buggy.
 #[inline]
 pub fn unpack_pcm16_le(bytes: &[u8]) -> Result<Vec<i16>, AudioError> {
-    if bytes.len() % BYTES_PER_SAMPLE != 0 {
+    if !bytes.len().is_multiple_of(BYTES_PER_SAMPLE) {
         return Err(AudioError::OddByteCount(bytes.len()));
     }
     let mut out = Vec::with_capacity(bytes.len() / BYTES_PER_SAMPLE);

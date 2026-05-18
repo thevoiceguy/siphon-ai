@@ -107,7 +107,7 @@ fn make_controller(port: u16, call_id: &str) -> (CallController, siphon_ai_core:
         call_id: CallId::new(call_id),
         bridge: BridgeConfig {
             ws_url: format!("ws://127.0.0.1:{port}/"),
-            auth_bearer: None,
+            auth_header: None,
             connect_timeout: Duration::from_secs(2),
         },
         start: start_msg(call_id),

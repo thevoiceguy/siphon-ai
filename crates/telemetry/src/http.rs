@@ -184,27 +184,31 @@ async fn handle_request(req: Request<Incoming>, state: Arc<SharedState>) -> Resp
 
 /// Bounded body reader for `/admin/*` PUT / POST. Returns the bytes
 /// on success or a ready-to-send error response on failure.
+///
+/// Enforces the cap via [`http_body_util::Limited`], which fails
+/// streaming reads the moment more than `ADMIN_MAX_BODY` bytes have
+/// been received. The old version trusted `size_hint().upper()` for
+/// a cheap pre-check and then unconditionally `collect()`-ed — but
+/// chunked-transfer-encoded PUTs leave `size_hint().upper()` as
+/// `None`, so the pre-check is skipped and the subsequent `collect()`
+/// buffers arbitrary bytes before failing (or OOMing).
 async fn read_admin_body(req: Request<Incoming>) -> Result<Bytes, Response<Full<Bytes>>> {
-    use hyper::body::Body;
+    use http_body_util::Limited;
 
-    // Reject `Content-Length` past the cap before reading a byte.
-    if let Some(hint) = req.body().size_hint().upper() {
-        if hint as usize > ADMIN_MAX_BODY {
-            return Err(respond(
+    let limited = Limited::new(req.into_body(), ADMIN_MAX_BODY);
+    match limited.collect().await {
+        Ok(collected) => Ok(collected.to_bytes()),
+        Err(e) => {
+            debug!(error = %e, "admin body exceeded cap or read failed");
+            // `Limited` errors when the cap is exceeded OR when the
+            // underlying body fails. We map both to 413 since the
+            // adversarial case (chunked flood) is the one that
+            // matters; legitimate ill-formed bodies are a rounding
+            // error and the operator can re-issue with curl -v.
+            Err(respond(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "application/json",
                 br#"{"error":"admin request body exceeds 8 KiB"}"#,
-            ));
-        }
-    }
-    match req.into_body().collect().await {
-        Ok(collected) => Ok(collected.to_bytes()),
-        Err(e) => {
-            debug!(error = %e, "admin body read failed");
-            Err(respond(
-                StatusCode::BAD_REQUEST,
-                "application/json",
-                br#"{"error":"failed to read body"}"#,
             ))
         }
     }
@@ -302,6 +306,56 @@ mod tests {
         let (server, url) = spawn_test_server(ReadinessFlag::new()).await;
         let (status, _) = get(format!("{url}/totally-not-a-route")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+        server.shutdown().await;
+    }
+
+    /// Regression: a chunked-transfer-encoded PUT longer than the
+    /// 8 KiB admin cap must be rejected with 413 instead of being
+    /// buffered to completion.
+    ///
+    /// Previously, `read_admin_body` only checked `size_hint().upper()`
+    /// before calling `collect()`. For chunked encoding `size_hint()`
+    /// returns `(0, None)`, so the cheap pre-check was skipped and
+    /// `collect()` ran unbounded — a hostile client could force
+    /// arbitrary buffering. This test issues exactly that wire-level
+    /// shape (raw TCP, `Transfer-Encoding: chunked`, ~16 KiB total
+    /// across several chunks) and asserts the daemon refuses it.
+    #[tokio::test]
+    async fn admin_chunked_body_over_cap_is_rejected() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let (server, url) = spawn_test_server(ReadinessFlag::new()).await;
+        let addr_str = url.strip_prefix("http://").unwrap();
+        let mut sock = TcpStream::connect(addr_str).await.expect("connect");
+
+        // Build a chunked PUT to /admin/log. Eight 2 KiB chunks =
+        // 16 KiB total, well past the 8 KiB cap. Each chunk's size
+        // prefix is the byte count in hex; "0\r\n\r\n" terminates.
+        let chunk_payload = "a".repeat(2048);
+        let chunk_header = format!("{:x}\r\n", chunk_payload.len());
+        let head = "PUT /admin/log HTTP/1.1\r\n\
+                    Host: localhost\r\n\
+                    Transfer-Encoding: chunked\r\n\
+                    Content-Type: text/plain\r\n\
+                    Connection: close\r\n\r\n";
+        sock.write_all(head.as_bytes()).await.expect("write head");
+        for _ in 0..8 {
+            sock.write_all(chunk_header.as_bytes()).await.expect("chunk header");
+            sock.write_all(chunk_payload.as_bytes()).await.expect("chunk body");
+            sock.write_all(b"\r\n").await.expect("chunk crlf");
+        }
+        sock.write_all(b"0\r\n\r\n").await.expect("terminator");
+
+        // Read the response. We only care about the status line.
+        let mut buf = Vec::with_capacity(2048);
+        let _ = tokio::time::timeout(Duration::from_secs(3), sock.read_to_end(&mut buf)).await;
+        let response = String::from_utf8_lossy(&buf);
+        assert!(
+            response.starts_with("HTTP/1.1 413"),
+            "expected 413 Payload Too Large, got:\n{response}",
+        );
+
         server.shutdown().await;
     }
 

@@ -67,6 +67,59 @@ sudo chmod 0640 /etc/siphon-bot/env
 Replace the `xxxxxx` placeholders. Set the file mode to `0640`
 since it holds API credentials.
 
+### Choosing the LLM
+
+The bot uses the OpenAI SDK against an OpenAI-compatible chat-completions
+endpoint, so any provider that speaks that protocol drops in via env
+vars. STT and TTS stay on Deepgram regardless.
+
+| Variable | What it sets | Default |
+|---|---|---|
+| `BOT_LLM_MODEL` | Model name | `gpt-4o-mini` |
+| `BOT_LLM_BASE_URL` | OpenAI-compatible base URL | OpenAI's API |
+| `BOT_LLM_API_KEY` | API key for the LLM endpoint | falls back to `OPENAI_API_KEY` |
+| `BOT_LLM_MAX_TOKENS` | Cap response length | provider default |
+| `BOT_LLM_TEMPERATURE` | Sampling temperature | provider default |
+
+Recipes for popular providers:
+
+**OpenAI (default)** — no changes needed beyond `OPENAI_API_KEY`.
+
+**Groq (typically the lowest TTFT — 100-300 ms):**
+```
+BOT_LLM_BASE_URL=https://api.groq.com/openai/v1
+BOT_LLM_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxx
+BOT_LLM_MODEL=llama-3.3-70b-versatile
+```
+
+**Anthropic Claude (via their OpenAI-compatible endpoint):**
+```
+BOT_LLM_BASE_URL=https://api.anthropic.com/v1/
+BOT_LLM_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx
+BOT_LLM_MODEL=claude-haiku-4-5-20251001
+```
+
+**OpenRouter (one key → 100+ models):**
+```
+BOT_LLM_BASE_URL=https://openrouter.ai/api/v1
+BOT_LLM_API_KEY=sk-or-xxxxxxxxxxxxxxxxxxxxxxxx
+BOT_LLM_MODEL=meta-llama/llama-3.3-70b-instruct
+```
+
+**Local Ollama:**
+```
+BOT_LLM_BASE_URL=http://127.0.0.1:11434/v1
+BOT_LLM_API_KEY=ollama        # any non-empty value
+BOT_LLM_MODEL=llama3.2:3b
+```
+
+On bot startup, the resolved configuration is logged so you can
+verify which provider is live:
+
+```
+[llm] model=llama-3.3-70b-versatile base_url=https://api.groq.com/openai/v1 max_tokens=(provider default) temperature=(provider default)
+```
+
 ---
 
 ## 4. Smoke test in the foreground

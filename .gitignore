@@ -19,8 +19,12 @@ Thumbs.db
 .env.*
 !.env.example
 
-# Claude Code local state
-.claude/settings.local.json
+# Local agent-tool state (Claude Code, Codex, etc.)
+.claude/
+.codex
+
+# Ad-hoc pcaps captured during debugging
+/*.pcap
 
 # Python
 __pycache__/

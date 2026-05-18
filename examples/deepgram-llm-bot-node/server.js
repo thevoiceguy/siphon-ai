@@ -1,8 +1,13 @@
 // server.js — SiphonAI bridge protocol v1 bot.
 //
 // Closed-loop voice agent:
-//   caller speaks → Deepgram STT → OpenAI Chat (streaming) →
-//   Deepgram TTS → caller hears.
+//   caller speaks → Deepgram STT → streaming LLM → Deepgram TTS →
+//   caller hears.
+//
+// The LLM is any OpenAI-compatible chat-completions endpoint
+// selected via env vars at startup (OpenAI, Groq, Anthropic's
+// OpenAI-compat API, OpenRouter, Fireworks, local Ollama, …).
+// Defaults to OpenAI `gpt-4o-mini`.
 //
 // Differences from the FreeSWITCH `mod_audio_fork` model this was
 // ported from:
@@ -22,12 +27,18 @@
 //     starts talking. We send `clear` back, which drops anything
 //     queued in the daemon's outbound buffer.
 //
-// Env:
-//   DEEPGRAM_API_KEY        required
-//   OPENAI_API_KEY          required
+// Env (see docs/BOT_LOCALHOST_SETUP.md §"Choosing the LLM"):
+//   DEEPGRAM_API_KEY        required — STT + TTS
+//   OPENAI_API_KEY          required (or set BOT_LLM_API_KEY)
+//   BOT_LLM_MODEL           default `gpt-4o-mini`
+//   BOT_LLM_BASE_URL        OpenAI-compatible endpoint URL
+//                           (e.g. `https://api.groq.com/openai/v1`)
+//   BOT_LLM_API_KEY         alternative to OPENAI_API_KEY for non-OpenAI providers
+//   BOT_LLM_MAX_TOKENS      cap response length (default: provider default)
+//   BOT_LLM_TEMPERATURE     sampling temperature (default: provider default)
 //   BOT_BIND                default `0.0.0.0:8080`
-//   BOT_SYSTEM_PROMPT       optional override
-//   BOT_GREETING            optional override
+//   BOT_SYSTEM_PROMPT       optional system prompt override
+//   BOT_GREETING            optional greeting override
 
 // Hide Node 22's built-in `globalThis.WebSocket` from the
 // Deepgram SDK. The SDK detects native-WebSocket availability

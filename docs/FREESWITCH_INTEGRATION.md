@@ -310,7 +310,7 @@ RTP back to FreeSWITCH or a `c=` line advertising the wrong IP
 
 ## 4. Building the bot
 
-See `examples/deepgram-openai-bot-node/` for a working bot that
+See `examples/deepgram-llm-bot-node/` for a working bot that
 implements the SiphonAI bridge protocol. It uses Deepgram for
 STT/TTS and OpenAI for the LLM, and (unlike the FreeSWITCH
 `audio_fork` model) sends TTS audio back as PCM16 frames over

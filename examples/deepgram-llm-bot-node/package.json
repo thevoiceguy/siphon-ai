@@ -1,8 +1,8 @@
 {
-  "name": "siphon-ai-deepgram-openai-bot",
+  "name": "siphon-ai-deepgram-llm-bot",
   "version": "0.0.0",
   "private": true,
-  "description": "Closed-loop voice agent over SiphonAI's WebSocket bridge protocol. Deepgram STT + OpenAI Chat + Deepgram TTS.",
+  "description": "Closed-loop voice agent over SiphonAI's WebSocket bridge protocol. Deepgram STT + any OpenAI-compatible LLM (OpenAI, Groq, Anthropic, OpenRouter, Ollama, …) + Deepgram TTS.",
   "main": "server.js",
   "engines": {
     "node": ">=20"

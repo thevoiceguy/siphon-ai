@@ -1,7 +1,7 @@
-# Running the Deepgram/OpenAI bot on the same host as SiphonAI
+# Running the Deepgram/LLM bot on the same host as SiphonAI
 
 A focused walkthrough for putting the reference Node bot
-(`examples/deepgram-openai-bot-node/`) on the same Debian 13 box
+(`examples/deepgram-llm-bot-node/`) on the same Debian 13 box
 that runs the daemon. Bot listens on `127.0.0.1:8080`; daemon
 connects to it over loopback.
 
@@ -38,7 +38,7 @@ The bot ships in the repo you already cloned to
 example directory:
 
 ```bash
-cd /opt/siphon-ai-src/examples/deepgram-openai-bot-node
+cd /opt/siphon-ai-src/examples/deepgram-llm-bot-node
 npm install
 ```
 
@@ -129,7 +129,7 @@ prints on the first call. Two ways to feed the env file you
 created in §3:
 
 ```bash
-cd /opt/siphon-ai-src/examples/deepgram-openai-bot-node
+cd /opt/siphon-ai-src/examples/deepgram-llm-bot-node
 
 # Option A — source the env file you wrote in §3.
 set -a; sudo --preserve-env=PATH bash -c 'set -a; . /etc/siphon-bot/env; exec node server.js'
@@ -232,13 +232,14 @@ sudo journalctl -u siphon-ai -n 20 --no-pager
 Put the bot under systemd so it survives reboots and restarts on
 crash. The unit assumes the bot is running as your existing
 `siphon` user (the operator account, not the `siphon-ai` service
-account — the bot needs internet egress to Deepgram/OpenAI, and
-keeping a separate `siphon-bot` user is overkill for one VM).
+account — the bot needs internet egress to Deepgram and the
+configured LLM provider, and keeping a separate `siphon-bot` user
+is overkill for one VM).
 
 ```bash
 sudo tee /etc/systemd/system/siphon-bot.service >/dev/null <<'EOF'
 [Unit]
-Description=SiphonAI Deepgram/OpenAI voice agent
+Description=SiphonAI Deepgram/LLM voice agent
 After=network-online.target
 Wants=network-online.target
 
@@ -246,7 +247,7 @@ Wants=network-online.target
 Type=simple
 User=siphon
 Group=siphon
-WorkingDirectory=/opt/siphon-ai-src/examples/deepgram-openai-bot-node
+WorkingDirectory=/opt/siphon-ai-src/examples/deepgram-llm-bot-node
 EnvironmentFile=/etc/siphon-bot/env
 ExecStart=/usr/bin/node server.js
 Restart=always

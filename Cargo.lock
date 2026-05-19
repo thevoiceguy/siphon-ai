@@ -2550,6 +2550,7 @@ dependencies = [
  "forge-engine",
  "forge-rtp",
  "metrics 0.23.1",
+ "rustls",
  "sip-core",
  "sip-dns",
  "sip-parse",

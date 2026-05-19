@@ -34,6 +34,19 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install rustls' process-wide `CryptoProvider` before any TLS
+    // code path runs. Required from rustls 0.23 onward whenever the
+    // dep graph contains more than one provider crate — ours pulls
+    // both `aws-lc-rs` and `ring` transitively via different
+    // upstreams. Without this, enabling `[sip.tls]` panics on
+    // startup with:
+    //     "Could not automatically determine the process-level
+    //      CryptoProvider from Rustls crate features."
+    // `aws_lc_rs` is the BoringSSL-derived modern default; `.ok()`
+    // makes the call idempotent so a test harness that already
+    // installed a provider doesn't break the second install.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let cli = Cli::parse();
     let log_filter = init_tracing(cli.log.as_deref());
 

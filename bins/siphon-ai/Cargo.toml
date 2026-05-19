@@ -51,6 +51,16 @@ sip-dns.workspace         = true
 # sip_transport::load_rustls_server_config.
 tokio-rustls.workspace = true
 
+# rustls: pulled here only so `main()` can install a process-level
+# `CryptoProvider` before any TLS code path fires. Without this,
+# enabling `[sip.tls]` panics on startup with
+# "Could not automatically determine the process-level
+# CryptoProvider from Rustls crate features" — rustls 0.23+
+# requires either a feature-selected provider OR an explicit
+# install when both `aws-lc-rs` and `ring` end up in the dep
+# graph (they do, transitively).
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
+
 # Upstream — forge-media (session manager, media bridge).
 forge-core.workspace   = true
 forge-engine.workspace = true

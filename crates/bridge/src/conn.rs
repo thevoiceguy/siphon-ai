@@ -259,7 +259,9 @@ fn build_upgrade_request(
         headers.insert(
             "Authorization",
             HeaderValue::from_str(value).map_err(|e| {
-                BridgeError::InvalidConfig(format!("auth_header is not a valid HTTP header value: {e}"))
+                BridgeError::InvalidConfig(format!(
+                    "auth_header is not a valid HTTP header value: {e}"
+                ))
             })?,
         );
     }

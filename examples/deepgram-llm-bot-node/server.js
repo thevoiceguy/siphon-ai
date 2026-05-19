@@ -549,18 +549,31 @@ async function handleCall(ws, req) {
     }
     // Start a new turn at the moment the utterance ends — that's
     // the t=0 for the "user-stop-to-agent-audio" latency.
-    currentTurn = makeTurnMetrics(metrics, 'reply');
-    await handleUserTurn(u, currentTurn);
-    currentTurn.finish();
+    //
+    // Pin a local reference (`turn`) and only use the closure-wide
+    // `currentTurn` for the playout pump hooks. Two concurrent
+    // onUtteranceEnd invocations can interleave when a mid-turn
+    // barge-in flips `speaking = false` before the first turn's
+    // `handleUserTurn` has returned — the second invocation would
+    // then overwrite `currentTurn` and (after its own finish + null)
+    // leave the first call's `currentTurn.finish()` reading a null.
+    // The local `turn` reference survives any concurrent mutation.
+    const turn = makeTurnMetrics(metrics, 'reply');
+    currentTurn = turn;
+    await handleUserTurn(u, turn);
+    turn.finish();
     while (pendingUtterance && !speaking) {
       const next = pendingUtterance;
       pendingUtterance = null;
       log(`processing queued: "${next}"`);
-      currentTurn = makeTurnMetrics(metrics, 'reply');
-      await handleUserTurn(next, currentTurn);
-      currentTurn.finish();
+      const nextTurn = makeTurnMetrics(metrics, 'reply');
+      currentTurn = nextTurn;
+      await handleUserTurn(next, nextTurn);
+      nextTurn.finish();
     }
-    currentTurn = null;
+    // Only clear the global ref if it still points at OUR turn —
+    // a concurrent invocation may have already replaced it.
+    if (currentTurn === turn) currentTurn = null;
   }
 
   // ─── TTS streaming → playout ───
@@ -747,13 +760,18 @@ async function handleCall(ws, req) {
         speaking = true;
         // Greeting is a "turn" too — t=0 is the call start, so
         // user_to_audio_ms here measures call-answer-to-greeting.
-        currentTurn = makeTurnMetrics(metrics, 'greeting');
-        await speakStreaming(GREETING, currentTurn);
+        // Pin a local reference like onUtteranceEnd does (see the
+        // comment there) so a barge-in racing with the first user
+        // utterance can't null the closure-wide currentTurn before
+        // we call .finish() on it.
+        const turn = makeTurnMetrics(metrics, 'greeting');
+        currentTurn = turn;
+        await speakStreaming(GREETING, turn);
         while (playout.isActive()) {
           await new Promise((r) => setTimeout(r, 50));
         }
-        currentTurn.finish();
-        currentTurn = null;
+        turn.finish();
+        if (currentTurn === turn) currentTurn = null;
         speaking = false;
       });
     } else if (t === 'speech_started') {

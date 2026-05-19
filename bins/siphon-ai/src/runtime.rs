@@ -976,9 +976,13 @@ async fn handle_packet(
     uas: &Arc<IntegratedUAS>,
     packet: InboundPacket,
 ) {
-    let peer = packet.peer();
-    let transport = packet.transport();
-    let payload = packet.into_payload();
+    // For TCP/TLS the listener hands us the per-connection writer
+    // channel via `stream`; threading it into `TransportContext` is
+    // what lets the transaction manager send responses back over
+    // the same inbound socket instead of opening a fresh outbound
+    // connection (or, for TLS, failing outright because the
+    // dispatcher has no way to originate one).
+    let (transport, peer, payload, stream) = packet.into_parts();
 
     let Some(request) = parse_request(&payload) else {
         // Not a request. Try parsing as a response — the daemon's
@@ -996,7 +1000,7 @@ async fn handle_packet(
     };
 
     let tx_kind = map_transport_kind(transport);
-    let ctx = TransportContext::new(tx_kind, peer, None);
+    let ctx = TransportContext::new(tx_kind, peer, stream);
 
     if request.method().as_str() == "ACK" {
         // ACK doesn't open a server transaction; just notify the
@@ -1039,9 +1043,11 @@ fn map_transport_kind(kind: TpTransportKind) -> TxTransportKind {
 // We're inbound-only (UAS) in v1: every response goes back over the
 // same transport the request arrived on. For UDP we own the socket
 // and `send_udp` writes to the peer. For stream transports
-// (TCP/TLS), `run_tcp` / `run_tls` set `ctx.stream()` to the per-
-// connection writer channel; `send_stream` pushes the payload
-// through that channel back to the peer.
+// (TCP/TLS), `run_tcp` / `run_tls` hand us the per-connection
+// writer channel on the `InboundPacket`; `handle_packet` threads
+// it into `TransportContext`, and `send_stream` pushes the
+// response payload through that channel back to the peer over the
+// established socket.
 //
 // Outbound TCP/TLS connect (without a `stream` already set in
 // ctx) is what UAC mode would need — for v1 we error out cleanly

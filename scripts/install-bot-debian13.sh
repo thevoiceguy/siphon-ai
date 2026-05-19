@@ -334,7 +334,7 @@ Bot listens on ws://${BOT_BIND}/  (running as user '${BOT_USER}')
 
 Tail logs:        sudo journalctl -u siphon-bot -f
 Restart:          sudo systemctl restart siphon-bot
-Edit env file:    sudo $EDITOR /etc/siphon-bot/env  (then restart)
+Edit env file:    sudo "\${EDITOR:-nano}" /etc/siphon-bot/env  (then restart)
 
 Next:
   1. If the script didn't repoint it for you: set

@@ -49,6 +49,23 @@ before TOML parsing. Unset variables without a default fail the load.
 | `cert`   | path        | required when TLS on | PEM cert chain on disk. |
 | `key`    | path        | required when TLS on | PEM private key on disk. |
 
+> **Experimental — inbound listening only in v0.1.0.** The TLS
+> listener accepts connections and the daemon parses inbound SIP
+> requests correctly, but the upstream `siphon-rs` transport layer
+> doesn't yet reuse the established inbound TLS socket to send the
+> response. Real traffic that needs a response (INVITE, OPTIONS,
+> REGISTER) ends with the daemon logging:
+>
+> ```
+> ERROR sip_transaction::manager: server transport dispatch failed
+>   e=outbound Tls without an existing stream is not supported in v1
+> ```
+>
+> and the caller times out. Use UDP or TCP for production traffic
+> until bidirectional TLS streaming lands upstream. The
+> `cert`/`key`/`listen` config surface itself is stable — only the
+> transport-internal response path is missing.
+
 ## `[media]`
 
 | Field                       | Type             | Default                | Notes |

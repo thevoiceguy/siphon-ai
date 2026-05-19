@@ -13,6 +13,27 @@ with a different `ws_url` and a firewall hole for the WS port.
 Assumes you've followed `docs/INSTALL_DEBIAN13.md` already and
 have a running `siphon-ai` service.
 
+> **TL;DR — there's a script.** Sections 1–6 are automated by
+> `scripts/install-bot-debian13.sh`. After cloning the repo:
+> ```bash
+> cd /opt/siphon-ai-src    # wherever you cloned
+> DEEPGRAM_API_KEY=dg_xxx OPENAI_API_KEY=sk-xxx \
+>     ./scripts/install-bot-debian13.sh
+> ```
+> It installs Node 22, runs `npm install`, writes
+> `/etc/siphon-bot/env`, installs the systemd unit, and (with
+> confirmation) repoints the daemon's `[bridge].ws_url` at the
+> bot. Idempotent — re-running is safe; existing env file and
+> service unit get backed up first.
+>
+> For Groq / Anthropic / OpenRouter / Ollama, set
+> `BOT_LLM_BASE_URL` (and optionally `BOT_LLM_API_KEY`,
+> `BOT_LLM_MODEL`) before running. The recipes are in §3 below.
+>
+> Read the rest of this doc if you want to know **why** each step
+> exists, customise what the script doesn't expose, or do the
+> manual smoke test before going live.
+
 ---
 
 ## 1. Install Node 20+

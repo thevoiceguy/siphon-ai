@@ -341,8 +341,12 @@ mod tests {
                     Connection: close\r\n\r\n";
         sock.write_all(head.as_bytes()).await.expect("write head");
         for _ in 0..8 {
-            sock.write_all(chunk_header.as_bytes()).await.expect("chunk header");
-            sock.write_all(chunk_payload.as_bytes()).await.expect("chunk body");
+            sock.write_all(chunk_header.as_bytes())
+                .await
+                .expect("chunk header");
+            sock.write_all(chunk_payload.as_bytes())
+                .await
+                .expect("chunk body");
             sock.write_all(b"\r\n").await.expect("chunk crlf");
         }
         sock.write_all(b"0\r\n\r\n").await.expect("terminator");

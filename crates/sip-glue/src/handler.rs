@@ -360,29 +360,33 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
         }
     }
 
-    #[instrument(skip_all, fields(method = "BYE"))]
+    #[instrument(skip_all, fields(method = "BYE", peer = %ctx.peer()))]
     async fn on_bye(
         &self,
         request: &Request,
         handle: ServerTransactionHandle,
+        ctx: &TransportContext,
         _dialog: &Dialog,
     ) -> anyhow::Result<()> {
         match dispatch_bye(self.terminator.as_ref(), request) {
-            DialogAction::SendFinal(response) => {
+            DialogAction::SendFinal(mut response) => {
+                self.fill_response(&mut response, ctx).await;
                 handle.send_final(response).await;
                 Ok(())
             }
         }
     }
 
-    #[instrument(skip_all, fields(method = "CANCEL"))]
+    #[instrument(skip_all, fields(method = "CANCEL", peer = %ctx.peer()))]
     async fn on_cancel(
         &self,
         request: &Request,
         handle: ServerTransactionHandle,
+        ctx: &TransportContext,
     ) -> anyhow::Result<()> {
         match dispatch_cancel(self.terminator.as_ref(), request) {
-            DialogAction::SendFinal(response) => {
+            DialogAction::SendFinal(mut response) => {
+                self.fill_response(&mut response, ctx).await;
                 handle.send_final(response).await;
                 Ok(())
             }

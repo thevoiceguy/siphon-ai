@@ -38,13 +38,13 @@
 //! responses; if a deployment needs it, the `RegisterSourceResolver`
 //! seam is the right place to plug in a Contact-aware finalizer.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use sip_core::{Request, Response};
 use sip_dialog::Dialog;
 use sip_transaction::{ServerTransactionHandle, TransportContext};
-use sip_uas::integrated::UasRequestHandler;
+use sip_uas::integrated::{IntegratedUAS, UasRequestHandler};
 use sip_uas::UserAgentServer;
 use siphon_ai_routes::{CompiledRoute, RouteSet};
 use tracing::{debug, info, instrument, warn};
@@ -200,6 +200,16 @@ pub struct RoutingHandler<A> {
     /// flips the daemon into strict-allowlist mode: an INVITE
     /// that doesn't match any trunk gets 403.
     trunk_gate: Option<TrunkAllowlistHandle>,
+    /// Weak ref to the `IntegratedUAS` we feed. Used to apply
+    /// `prepare_response` (rport / received / Contact / User-Agent
+    /// auto-fill) to responses the handler builds directly — the
+    /// trunk-rejection 403 and the route-no-match 404 / 488 paths
+    /// otherwise bypass the auto-fill that the rest of the UAS
+    /// applies via its dispatch loop. Weak avoids the cyclic
+    /// `Arc<UAS>` ↔ `Arc<RoutingHandler>` reference. Injected by
+    /// the daemon via `install_uas_filler` once the UAS exists;
+    /// `OnceLock` because the install is one-shot at startup.
+    uas_filler: std::sync::OnceLock<Weak<IntegratedUAS>>,
 }
 
 impl<A> RoutingHandler<A> {
@@ -216,6 +226,26 @@ impl<A> RoutingHandler<A> {
             resolver: default_resolver(),
             terminator: Arc::new(NullDialogTerminator),
             trunk_gate: None,
+            uas_filler: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Inject a weak reference to the `IntegratedUAS` whose
+    /// `prepare_response` (Contact / User-Agent / topmost-Via
+    /// `rport` + `received`) should be applied to responses the
+    /// handler builds directly. Set once at daemon startup once
+    /// both the UAS and the handler exist (the cycle is broken
+    /// by `Weak`). Calling again is a no-op.
+    pub fn install_uas_filler(&self, uas: Weak<IntegratedUAS>) {
+        let _ = self.uas_filler.set(uas);
+    }
+
+    /// Apply UAS auto-fill to a response the handler is about to
+    /// send. No-op when the daemon hasn't injected a UAS reference
+    /// (used in tests and as a fail-safe).
+    async fn fill_response(&self, response: &mut Response, ctx: &TransportContext) {
+        if let Some(uas) = self.uas_filler.get().and_then(Weak::upgrade) {
+            uas.prepare_response(response, ctx).await;
         }
     }
 
@@ -299,7 +329,9 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                         peer = %ctx.peer(),
                         "INVITE rejected: no trunk matched (403 Forbidden)"
                     );
-                    let response = UserAgentServer::create_response(request, 403, "Forbidden");
+                    let mut response =
+                        UserAgentServer::create_response(request, 403, "Forbidden");
+                    self.fill_response(&mut response, ctx).await;
                     handle.send_final(response).await;
                     return Ok(());
                 }
@@ -309,7 +341,8 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
         };
 
         match dispatch_invite(&self.routes, &register_source, request) {
-            RouteAction::SendFinal(response) => {
+            RouteAction::SendFinal(mut response) => {
+                self.fill_response(&mut response, ctx).await;
                 handle.send_final(response).await;
                 Ok(())
             }

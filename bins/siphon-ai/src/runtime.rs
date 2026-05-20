@@ -294,7 +294,7 @@ impl Runtime {
         // ─── Integrated UAS ────────────────────────────────────────
         let local_uri = sip_local_uri(&node, &sip);
         let contact_uri = sip.contact.as_deref().unwrap_or(&local_uri).to_string();
-        let uas: Arc<dyn UasRequestHandler> = routing_handler;
+        let uas: Arc<dyn UasRequestHandler> = Arc::clone(&routing_handler) as _;
         let mut uas_builder = IntegratedUAS::builder()
             .local_uri(&local_uri)
             .contact_uri(&contact_uri)
@@ -318,6 +318,17 @@ impl Runtime {
         // dialog_manager that `IntegratedUAS::dispatch` consults on
         // the follow-up BYE.
         acceptor.install_uas(Arc::clone(&uas));
+
+        // Wire the routing handler's response-auto-fill path. The
+        // trunk-rejection 403 and the route-no-match 404/488 paths
+        // build responses directly with `UserAgentServer::
+        // create_response` and bypass the auto-fill that the rest
+        // of the UAS dispatch loop applies (Contact / User-Agent /
+        // topmost-Via `rport` + `received`). The handler holds a
+        // `Weak<IntegratedUAS>` and upgrades it on every fill call,
+        // so this is a one-way reference that doesn't create a
+        // cycle with `IntegratedUAS::request_handler`.
+        routing_handler.install_uas_filler(Arc::downgrade(&uas));
 
         // ─── Daemon-wide REFER UAC ─────────────────────────────────
         // One IntegratedUAC instance handles every accepted call's

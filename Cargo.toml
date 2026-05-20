@@ -100,16 +100,16 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # main branch and replace the rev hashes here (see CLAUDE.md §7.5).
 
 # siphon-rs — RFC 3261 SIP stack
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62fe4da697dc" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "39760e767ed9" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "39760e767ed9" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "39760e767ed9", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "39760e767ed9" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "39760e767ed9" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "39760e767ed9" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "39760e767ed9" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "39760e767ed9" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "39760e767ed9" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "39760e767ed9" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #
@@ -125,14 +125,14 @@ sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "62f
 # forge-ice, Cow/lifetime in forge-recorder), but the subset SiphonAI
 # pulls — forge-core, forge-rtp, forge-engine (g722 only), forge-codecs,
 # forge-sdp, forge-dtmf, forge-vad, forge-hep — all build cleanly.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e", default-features = false, features = ["g722"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e" }
-forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e" }
-forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "faf5e8bc450e" }
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "62be6237202a" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "62be6237202a" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "62be6237202a", default-features = false, features = ["g722"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "62be6237202a" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "62be6237202a" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "62be6237202a" }
+forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "62be6237202a" }
+forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "62be6237202a" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.

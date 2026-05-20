@@ -173,6 +173,15 @@ impl LocalCapabilities {
                 .expect("telephone-event rtpmap");
         }
 
+        // siphon-ai always packetizes audio at 20 ms (160 samples
+        // @ 8 kHz / 320 @ 16 kHz — see CLAUDE.md §4.2). Declaring
+        // `a=ptime:20` in the local capabilities makes the
+        // upstream negotiator carry it into the answer so peers
+        // know what frame size to send.
+        let audio = audio
+            .add_attribute("ptime", "20")
+            .expect("ptime attribute is well-formed");
+
         // sendrecv is the v1 default; hold/resume re-INVITE flips
         // direction in a separate exchange.
         let audio = audio

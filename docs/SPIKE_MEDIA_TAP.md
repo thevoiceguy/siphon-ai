@@ -82,7 +82,7 @@ the codec packetization (typically `ptime=20` in SDP). Our bridge crate
 must *re-frame* outbound chunks to exactly 20 ms before they hit the WS,
 and accept inbound chunks of any size from the WS and re-frame them to
 whatever forge expects on the way back in. That re-framing lives in
-`crates/media-glue` (or `crates/bridge` — TBD; see Week 2).
+`crates/media-glue`.
 
 ## Out-of-band events
 

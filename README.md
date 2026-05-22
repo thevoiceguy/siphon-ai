@@ -42,7 +42,7 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
-**v0.1.0-rc** — pre-release. The audio path, WS protocol, SIP signaling,
+**v0.1.0** — first public release. The audio path, WS protocol, SIP signaling,
 HEP capture, CDR/webhook sinks, and trunk-allowlist gate are in. Real-world
 FreeSWITCH-bridged calls work with sub-second user-to-audio latency on a
 Groq LLM. A 500-concurrent burst soak completes with no rejections and no

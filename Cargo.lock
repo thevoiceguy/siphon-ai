@@ -2732,7 +2732,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2768,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-bridge"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "base64",
  "bytes",
@@ -2784,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-cdr"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-config"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "regex",
  "serde",
@@ -2819,7 +2819,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2855,7 +2855,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-media-glue"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2875,7 +2875,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-routes"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "regex",
  "serde",
@@ -2886,7 +2886,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-sip-glue"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2909,7 +2909,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-telemetry"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "forge-hep",
@@ -2930,7 +2930,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-webhooks"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",

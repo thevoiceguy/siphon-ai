@@ -12,18 +12,15 @@ repository.workspace   = true
 tokio.workspace       = true
 async-trait.workspace = true
 serde.workspace       = true
-serde_json.workspace  = true
-reqwest.workspace     = true
 chrono.workspace      = true
 thiserror.workspace   = true
 tracing.workspace     = true
+# Internal — shared retrying JSON-POST transport behind the HTTP sink.
+siphon-ai-http.workspace = true
 
 # v1 doesn't ship HMAC signing — left as a follow-up per docs/DEV_PLAN.md
 # §11.6 ("Lifecycle Webhooks"). Re-enable hmac/sha2/base64 when that lands.
 
 [dev-dependencies]
-hyper.workspace          = true
-hyper-util.workspace     = true
-http-body-util.workspace = true
-bytes.workspace          = true
-parking_lot.workspace    = true
+serde_json.workspace  = true
+parking_lot.workspace = true

@@ -9,9 +9,12 @@
 //! - `HepProtocol::Log` (0x64): one short text line per call lifecycle
 //!   event (start, end, register state change). Carries the call_id
 //!   as the correlation chunk so Homer threads it through the same
-//!   SIP / RTCP view.
-//! - `HepProtocol::Cdr` (0x65): the full CDR JSON when a call ends,
-//!   same correlation key.
+//!   SIP / RTCP view. See [`HepTelemetry::emit_log`].
+//!
+//! `HepProtocol::Cdr` (0x65) chunks — the full CDR JSON emitted when a
+//! call ends — are composed by `siphon-ai-cdr`'s `HepCdrSink`, which
+//! shares this module's `HepSink` via [`HepTelemetry::sink`] rather
+//! than duplicating the packet-composition here.
 //!
 //! Per CLAUDE.md §4.7 emission is best-effort, never blocking. The
 //! underlying `UdpHepSink` drops on full and the drop counter is
@@ -152,24 +155,6 @@ impl HepTelemetry {
             timestamp: SystemTime::now(),
             correlation_id: correlation_id.map(|s| s.to_string()),
             payload: message.as_bytes().to_vec(),
-        });
-    }
-
-    /// Emit a CDR JSON blob as chunk-type 101 (`Cdr`). Caller is
-    /// responsible for serializing the CDR before invocation —
-    /// telemetry doesn't pull the CDR schema in to avoid a dep on
-    /// `siphon-ai-cdr`.
-    pub fn emit_cdr_json(&self, json: &[u8], correlation_id: Option<&str>) {
-        self.sink.send(HepPacket {
-            capture_id: self.capture_id,
-            capture_password: self.capture_password.clone(),
-            protocol: HepProtocol::Cdr,
-            transport: IpProto::Udp,
-            src: unspecified_addr(),
-            dst: unspecified_addr(),
-            timestamp: SystemTime::now(),
-            correlation_id: correlation_id.map(|s| s.to_string()),
-            payload: json.to_vec(),
         });
     }
 

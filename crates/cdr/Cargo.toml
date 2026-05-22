@@ -13,18 +13,15 @@ tokio.workspace       = true
 async-trait.workspace = true
 serde.workspace       = true
 serde_json.workspace  = true
-reqwest.workspace     = true
 chrono.workspace      = true
 uuid.workspace        = true
 thiserror.workspace   = true
 tracing.workspace     = true
+# Internal — shared retrying JSON-POST transport behind the webhook sink.
+siphon-ai-http.workspace = true
 # HEP3 emission target for `HepCdrSink`. Optional dep so deployments
 # that don't want HEP shipping don't pull `hep-rs` + tokio sub-deps.
 hep-rs.workspace      = true
 
 [dev-dependencies]
 tempfile = "3"
-hyper.workspace          = true
-hyper-util.workspace     = true
-http-body-util.workspace = true
-bytes.workspace          = true

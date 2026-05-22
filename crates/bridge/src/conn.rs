@@ -251,11 +251,11 @@ fn build_upgrade_request(
         })?,
     );
     if let Some(value) = &config.auth_header {
-        // Sent verbatim — `core::acceptor::normalize_auth_header`
-        // already prepended `Bearer ` for the bare-token case, and
-        // any pre-existing scheme (`Bearer`, `Basic`, `Digest`,
-        // custom) survives untouched. Reformatting here would
-        // double-prefix non-Bearer schemes.
+        // Sent verbatim — `normalize_auth_header` already prepended
+        // `Bearer ` for the bare-token case, and any pre-existing
+        // scheme (`Bearer`, `Basic`, `Digest`, custom) survives
+        // untouched. Reformatting here would double-prefix
+        // non-Bearer schemes.
         headers.insert(
             "Authorization",
             HeaderValue::from_str(value).map_err(|e| {
@@ -267,6 +267,33 @@ fn build_upgrade_request(
     }
 
     Ok(request)
+}
+
+/// Normalize a configured WS auth header into the full `Authorization`
+/// value the bridge sends verbatim on the WS handshake (see
+/// [`build_request`]).
+///
+/// - `"Bearer xxx"`, `"Basic abc"`, `"Digest …"` → returned as-is.
+///   Any RFC 9110 scheme works; the conn layer sends what it is
+///   handed without reformatting.
+/// - `"xxx"` (a bare token with no whitespace) → `"Bearer xxx"`.
+///   Preserves the historic UX where operators wrote just the token
+///   for Bearer-auth WS servers.
+///
+/// This lives in `siphon-ai-bridge` — the crate that owns the
+/// wire-header behavior — so `siphon-ai-config` (which reads the
+/// `ws_auth_header` TOML key) and `siphon-ai-core` (which merges
+/// route overrides onto the default) produce identical bytes from a
+/// single implementation rather than two copies kept in sync by hand.
+pub fn normalize_auth_header(value: &str) -> String {
+    let trimmed = value.trim();
+    // A bare token has no inner whitespace; an `Authorization`
+    // header always has a scheme keyword followed by a space.
+    if trimmed.contains(char::is_whitespace) {
+        trimmed.to_string()
+    } else {
+        format!("Bearer {trimmed}")
+    }
 }
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -522,5 +549,40 @@ mod tests {
         ] {
             assert!(!bridge_in_call_id(&msg).is_empty());
         }
+    }
+
+    // ─── normalize_auth_header ─────────────────────────────────────
+
+    #[test]
+    fn normalize_auth_header_passes_bearer_through() {
+        assert_eq!(normalize_auth_header("Bearer abc"), "Bearer abc");
+    }
+
+    #[test]
+    fn normalize_auth_header_passes_basic_through() {
+        assert_eq!(
+            normalize_auth_header("Basic dXNlcjpwYXNz"),
+            "Basic dXNlcjpwYXNz"
+        );
+    }
+
+    #[test]
+    fn normalize_auth_header_passes_digest_through() {
+        assert_eq!(
+            normalize_auth_header("Digest username=\"foo\""),
+            "Digest username=\"foo\""
+        );
+    }
+
+    #[test]
+    fn normalize_auth_header_promotes_bare_token_to_bearer() {
+        // Historic UX: operators wrote just the token for Bearer auth.
+        assert_eq!(normalize_auth_header("xyz123"), "Bearer xyz123");
+    }
+
+    #[test]
+    fn normalize_auth_header_trims_outer_whitespace() {
+        assert_eq!(normalize_auth_header("  Bearer abc  "), "Bearer abc");
+        assert_eq!(normalize_auth_header("  xyz123  "), "Bearer xyz123");
     }
 }

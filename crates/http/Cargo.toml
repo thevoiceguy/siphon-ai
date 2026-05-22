@@ -1,0 +1,22 @@
+[package]
+name        = "siphon-ai-http"
+description = "Retrying JSON-over-HTTP POST delivery shared by SiphonAI's CDR and lifecycle webhook sinks."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+tokio.workspace     = true
+reqwest.workspace   = true
+serde.workspace     = true
+thiserror.workspace = true
+tracing.workspace   = true
+
+[dev-dependencies]
+serde_json.workspace     = true
+hyper.workspace          = true
+hyper-util.workspace     = true
+http-body-util.workspace = true

@@ -8,98 +8,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use forge_engine::{MediaBridgeManager, SessionManager, SessionManagerConfig};
 use forge_rtp::PortPoolConfig;
-use futures::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use serde_json::Value;
-use sip_core::{Headers as SipHeaders, Method, Request, RequestLine, SipUri};
 use siphon_ai_bridge::CallId as BridgeCallId;
 use siphon_ai_core::{BridgeDefaults, BridgingAcceptor, CallRegistry};
 use siphon_ai_media_glue::MediaSetup;
-use siphon_ai_routes::{load_from_toml, RouteSet};
 use siphon_ai_sip_glue::InviteFacts;
 use siphon_ai_webhooks::{WebhookEvent, WebhookSink};
-use tokio::net::TcpListener;
-use tokio_tungstenite::tungstenite::handshake::server::{
-    ErrorResponse as HsErrorResponse, Request as HsRequest, Response as HsResponse,
-};
-use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::tungstenite::Message;
 
-const LINPHONE_PCMU_OFFER: &str = "v=0\r\n\
-o=alice 1234 5678 IN IP4 10.0.0.5\r\n\
-s=Talk\r\n\
-c=IN IP4 10.0.0.5\r\n\
-t=0 0\r\n\
-m=audio 7078 RTP/AVP 0\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-a=sendrecv\r\n";
-
-#[allow(clippy::result_large_err)]
-fn echo_subprotocol(req: &HsRequest, mut resp: HsResponse) -> Result<HsResponse, HsErrorResponse> {
-    if let Some(offered) = req.headers().get("Sec-WebSocket-Protocol") {
-        resp.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            HeaderValue::from_bytes(offered.as_bytes()).unwrap(),
-        );
-    }
-    Ok(resp)
-}
-
-async fn server_acks_start_then_idles(port_tx: tokio::sync::oneshot::Sender<u16>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let port = listener.local_addr().unwrap().port();
-    let _ = port_tx.send(port);
-    let (stream, _) = listener.accept().await.expect("accept");
-    let mut ws = tokio_tungstenite::accept_hdr_async(stream, echo_subprotocol)
-        .await
-        .expect("ws accept");
-    while let Some(msg) = ws.next().await {
-        match msg {
-            Ok(Message::Text(t)) => {
-                let v: Value = serde_json::from_str(&t).unwrap();
-                if v["type"] == "stop" {
-                    let _ = ws.send(Message::Close(None)).await;
-                    break;
-                }
-            }
-            Ok(Message::Close(_)) | Err(_) => break,
-            _ => {}
-        }
-    }
-}
-
-fn invite(body: &str, request_uri: &str, call_id: &str) -> Request {
-    let uri = SipUri::parse(request_uri).expect("uri");
-    let line = RequestLine::new(Method::Invite, uri);
-    let mut h = SipHeaders::new();
-    h.push("Via", "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-w")
-        .unwrap();
-    h.push("From", "<sip:+13125551234@carrier.example.net>;tag=abc")
-        .unwrap();
-    h.push("To", "<sip:5000@siphon.example.com>").unwrap();
-    h.push("Call-ID", call_id).unwrap();
-    h.push("CSeq", "1 INVITE").unwrap();
-    h.push("Content-Type", "application/sdp").unwrap();
-    h.push("Content-Length", body.len().to_string()).unwrap();
-    Request::new(line, h, Bytes::from(body.as_bytes().to_vec())).unwrap()
-}
-
-fn one_route(ws_url: &str) -> RouteSet {
-    load_from_toml(&format!(
-        r#"
-        [[route]]
-        name = "webhook_route"
-        [route.match]
-        any = true
-        [route.bridge]
-        ws_url = "{ws_url}"
-        "#,
-    ))
-    .expect("compile routes")
-}
+mod common;
+use common::{invite, one_route, server_acks_start_then_idles, LINPHONE_PCMU_OFFER};
 
 #[derive(Default)]
 struct Recorder {
@@ -141,7 +60,7 @@ async fn run_call_emits_call_start_then_call_end() {
         .with_call_id_factory(Arc::new(|| BridgeCallId::new("siphon-webhook-test")))
         .with_webhook_sink(Arc::clone(&recorder) as Arc<dyn WebhookSink>);
 
-    let routes = one_route(&ws_url);
+    let routes = one_route("webhook_route", &ws_url);
     let route = routes.iter().next().unwrap();
     let req = invite(
         LINPHONE_PCMU_OFFER,
@@ -223,7 +142,7 @@ async fn null_webhook_sink_is_the_default() {
     let acceptor = BridgingAcceptor::new(media, BridgeDefaults::default(), registry.clone())
         .with_call_id_factory(Arc::new(|| BridgeCallId::new("siphon-null-webhook")));
 
-    let routes = one_route(&ws_url);
+    let routes = one_route("webhook_route", &ws_url);
     let route = routes.iter().next().unwrap();
     let req = invite(
         LINPHONE_PCMU_OFFER,

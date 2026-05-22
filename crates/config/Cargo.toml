@@ -17,6 +17,9 @@ tracing.workspace    = true
 
 # Internal — config compiles raw TOML into the same types core/routes
 # already use, so consumers (the daemon binary) get ready-to-pass values.
+# `siphon-ai-bridge` is a direct dep for `normalize_auth_header`, the
+# shared `ws_auth_header` normalizer that owns the wire-header behavior.
+siphon-ai-bridge.workspace     = true
 siphon-ai-core.workspace       = true
 siphon-ai-media-glue.workspace = true
 siphon-ai-routes.workspace     = true

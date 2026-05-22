@@ -28,50 +28,10 @@ use siphon_ai_core::{CallController, CallControllerConfig, CallRegistry, CallTer
 use siphon_ai_media_glue::MediaTap;
 use siphon_ai_sip_glue::{dispatch_bye, DialogAction};
 use tokio::net::TcpListener;
-use tokio_tungstenite::tungstenite::handshake::server::{
-    ErrorResponse as HsErrorResponse, Request as HsRequest, Response as HsResponse,
-};
-use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
-/// Handshake callback that echoes the siphon-ai.v1 subprotocol so
-/// tungstenite's stricter-than-spec client accepts the upgrade.
-#[allow(clippy::result_large_err)]
-fn echo_subprotocol(req: &HsRequest, mut resp: HsResponse) -> Result<HsResponse, HsErrorResponse> {
-    if let Some(offered) = req.headers().get("Sec-WebSocket-Protocol") {
-        resp.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            HeaderValue::from_bytes(offered.as_bytes()).unwrap(),
-        );
-    }
-    Ok(resp)
-}
-
-async fn server_acks_start_then_idles(port_tx: tokio::sync::oneshot::Sender<u16>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let port = listener.local_addr().unwrap().port();
-    let _ = port_tx.send(port);
-    let (stream, _) = listener.accept().await.expect("accept");
-    let mut ws = tokio_tungstenite::accept_hdr_async(stream, echo_subprotocol)
-        .await
-        .expect("ws accept");
-
-    // Drain the start message and wait quietly for the controller's
-    // stop on shutdown.
-    while let Some(msg) = ws.next().await {
-        match msg {
-            Ok(Message::Text(t)) => {
-                let v: Value = serde_json::from_str(&t).unwrap();
-                if v["type"] == "stop" {
-                    let _ = ws.send(Message::Close(None)).await;
-                    break;
-                }
-            }
-            Ok(Message::Close(_)) | Err(_) => break,
-            _ => {}
-        }
-    }
-}
+mod common;
+use common::{echo_subprotocol, server_acks_start_then_idles};
 
 /// Same as [`server_acks_start_then_idles`] but captures the `reason`
 /// field of the controller's `stop` event and reports it back. Used

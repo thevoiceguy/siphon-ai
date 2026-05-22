@@ -16,26 +16,8 @@ use siphon_ai_bridge::{pack_pcm16_le, unpack_pcm16_le};
 use siphon_ai_media_glue::{Codec, InboundCall, MediaSetup, SdpError, SetupError};
 use tokio::sync::mpsc;
 
-const LINPHONE_PCMU_OFFER: &str = "v=0\r\n\
-o=alice 1234 5678 IN IP4 10.0.0.5\r\n\
-s=Talk\r\n\
-c=IN IP4 10.0.0.5\r\n\
-t=0 0\r\n\
-m=audio 7078 RTP/AVP 0 8 101\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-a=rtpmap:8 PCMA/8000\r\n\
-a=rtpmap:101 telephone-event/8000\r\n\
-a=fmtp:101 0-15\r\n\
-a=sendrecv\r\n";
-
-const G729_ONLY_OFFER: &str = "v=0\r\n\
-o=- 1 1 IN IP4 10.0.0.5\r\n\
-s=Talk\r\n\
-c=IN IP4 10.0.0.5\r\n\
-t=0 0\r\n\
-m=audio 7000 RTP/AVP 18\r\n\
-a=rtpmap:18 G729/8000\r\n\
-a=sendrecv\r\n";
+mod common;
+use common::{G729_ONLY_OFFER, LINPHONE_PCMU_OFFER};
 
 fn small_session_manager(min: u16, max: u16) -> Arc<SessionManager> {
     let config = SessionManagerConfig {

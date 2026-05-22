@@ -22,22 +22,10 @@ use siphon_ai_bridge::{
 use siphon_ai_core::{CallController, CallControllerConfig};
 use siphon_ai_media_glue::MediaTap;
 use tokio::net::TcpListener;
-use tokio_tungstenite::tungstenite::handshake::server::{
-    ErrorResponse as HsErrorResponse, Request as HsRequest, Response as HsResponse,
-};
-use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
-#[allow(clippy::result_large_err)]
-fn echo_subprotocol(req: &HsRequest, mut resp: HsResponse) -> Result<HsResponse, HsErrorResponse> {
-    if let Some(offered) = req.headers().get("Sec-WebSocket-Protocol") {
-        resp.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            HeaderValue::from_bytes(offered.as_bytes()).unwrap(),
-        );
-    }
-    Ok(resp)
-}
+mod common;
+use common::echo_subprotocol;
 
 /// WS server that captures every text frame's `type` + relevant
 /// payload fields, reports them back over a channel, and closes

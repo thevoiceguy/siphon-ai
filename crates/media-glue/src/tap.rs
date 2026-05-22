@@ -472,9 +472,24 @@ impl MediaTap {
                                     frames_sent_to_forge = 0;
                                     first_audio_pushed_at = None;
                                 }
-                                if events_tx.send(out).await.is_err() {
-                                    debug!("events_tx closed; ending tap");
-                                    return Ok(TapDisconnect::ControllerHungUp);
+                                // Best-effort, mirroring
+                                // `CallHandle::push_bridge_event`: a
+                                // backed-up or closed bridge channel
+                                // must NOT stall the audio arms of
+                                // this `select!` loop, so `try_send`
+                                // rather than `send().await`. Tap
+                                // events (DTMF / speech / mark) are
+                                // informational; a dropped one isn't
+                                // fatal. Genuine controller teardown
+                                // is still caught by the
+                                // `caller_audio_tx` / `playout_audio_rx`
+                                // arms above.
+                                if let Err(e) = events_tx.try_send(out) {
+                                    warn!(
+                                        call_id = %self.call_id,
+                                        error = %e,
+                                        "events_tx full or closed; dropping tap event"
+                                    );
                                 }
                             }
                         }

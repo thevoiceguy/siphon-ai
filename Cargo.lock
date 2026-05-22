@@ -2787,15 +2787,11 @@ name = "siphon-ai-cdr"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "bytes",
  "chrono",
  "hep-rs",
- "http-body-util",
- "hyper",
- "hyper-util",
- "reqwest",
  "serde",
  "serde_json",
+ "siphon-ai-http",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -2809,6 +2805,7 @@ version = "0.0.0"
 dependencies = [
  "regex",
  "serde",
+ "siphon-ai-bridge",
  "siphon-ai-core",
  "siphon-ai-media-glue",
  "siphon-ai-routes",
@@ -2851,6 +2848,21 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "siphon-ai-http"
+version = "0.0.0"
+dependencies = [
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2933,15 +2945,11 @@ name = "siphon-ai-webhooks"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "bytes",
  "chrono",
- "http-body-util",
- "hyper",
- "hyper-util",
  "parking_lot",
- "reqwest",
  "serde",
  "serde_json",
+ "siphon-ai-http",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

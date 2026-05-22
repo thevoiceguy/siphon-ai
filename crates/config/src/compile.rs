@@ -27,6 +27,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use siphon_ai_bridge::normalize_auth_header;
 use siphon_ai_core::BridgeDefaults;
 use siphon_ai_media_glue::Codec;
 use siphon_ai_routes::{compile as compile_routes, RawRouteFile, RouteSet};
@@ -703,23 +704,6 @@ fn is_ws_compatible(codec: Codec) -> bool {
 
 fn default_codecs() -> Vec<Codec> {
     vec![Codec::Pcmu, Codec::Pcma]
-}
-
-/// Normalize a configured WS auth header into the full
-/// `Authorization` value the bridge emits verbatim. See the
-/// matching helper in `core::acceptor::normalize_auth_header` for
-/// the full rationale — both crates accept input via the same
-/// `ws_auth_header` TOML key and must produce the same wire bytes.
-///
-/// - `"Bearer xxx"`, `"Basic abc"`, `"Digest …"` → returned as-is.
-/// - `"xxx"` (a bare token with no whitespace) → `"Bearer xxx"`.
-fn normalize_auth_header(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.contains(char::is_whitespace) {
-        trimmed.to_string()
-    } else {
-        format!("Bearer {trimmed}")
-    }
 }
 
 fn compile_dialplan(routes: Vec<siphon_ai_routes::RawRoute>) -> Result<RouteSet, CompileError> {

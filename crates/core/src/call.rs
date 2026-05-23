@@ -433,6 +433,23 @@ impl CallController {
                                 warn!(error = %e, "tap command channel full or closed; dropping Clear");
                             }
                         }
+                        Some(BridgeIn::Mute { call_id: cid }) => {
+                            debug!(ws_call_id = %cid, "forwarding Mute to tap");
+                            // Same try_send policy: a dropped Mute is
+                            // recoverable — the WS server can re-send.
+                            // The alternative (await on a full channel)
+                            // would back-pressure the WS receive loop
+                            // and stall every other control message.
+                            if let Err(e) = tap_cmd_tx.try_send(TapCommand::Mute) {
+                                warn!(error = %e, "tap command channel full or closed; dropping Mute");
+                            }
+                        }
+                        Some(BridgeIn::Unmute { call_id: cid }) => {
+                            debug!(ws_call_id = %cid, "forwarding Unmute to tap");
+                            if let Err(e) = tap_cmd_tx.try_send(TapCommand::Unmute) {
+                                warn!(error = %e, "tap command channel full or closed; dropping Unmute");
+                            }
+                        }
                         Some(BridgeIn::Mark { call_id: cid, name }) => {
                             debug!(ws_call_id = %cid, %name, "forwarding Mark to tap");
                             // Mark is a notification request — the

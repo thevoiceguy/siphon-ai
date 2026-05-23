@@ -152,6 +152,17 @@ pub enum TapCommand {
     /// signalling; tighter sync needs a forge upstream PR exposing a
     /// per-frame playout-completion hook.
     Mark { name: String },
+
+    /// Suspend AI-side playout. Backed by a sustained `muted` flag
+    /// on the tap: incoming bytes from the controller→tap channel
+    /// are drained and dropped, and forge's queue is flushed so the
+    /// caller hears silence immediately rather than after the
+    /// already-queued tail. Pairs with [`TapCommand::Unmute`].
+    Mute,
+
+    /// Resume AI-side playout after [`TapCommand::Mute`]. A no-op
+    /// if the tap is not currently muted.
+    Unmute,
 }
 
 /// How the tap reacts to forge-vad `SpeechStarted` events. Mirrors
@@ -223,6 +234,12 @@ pub struct MediaTap {
     /// fully-built tap via [`Self::with_inactivity_timeout`] so the
     /// 4-arg `attach()` form in tests stays terse.
     inactivity_timeout: Option<Duration>,
+    /// AI-side playout gate. Set by [`TapCommand::Mute`], cleared by
+    /// [`TapCommand::Unmute`]. While `true`, the playout arm drains
+    /// the controller→tap audio channel but drops the bytes instead
+    /// of pushing them into forge — the caller hears silence and
+    /// the WS server isn't back-pressured.
+    muted: bool,
 }
 
 impl std::fmt::Debug for MediaTap {
@@ -284,6 +301,7 @@ impl MediaTap {
             events_keepalive: None,
             barge_in_action,
             inactivity_timeout: None,
+            muted: false,
         })
     }
 
@@ -375,6 +393,16 @@ impl MediaTap {
                         debug!("playout_audio_rx closed; ending tap");
                         return Ok(TapDisconnect::ControllerHungUp);
                     };
+                    // `TapCommand::Mute` gates AI-side playout. We
+                    // still recv (draining the channel keeps WS
+                    // backpressure away) but skip unpack + forge so
+                    // the caller hears silence. Mark bookkeeping
+                    // intentionally untouched — frames we drop never
+                    // play, so they don't move the "audio queued so
+                    // far" clock.
+                    if self.muted {
+                        continue;
+                    }
                     let samples = unpack_pcm16_le(&bytes)?;
                     let frame = OutboundMediaFrame {
                         target: MediaTarget::A,
@@ -530,6 +558,50 @@ impl MediaTap {
                         continue;
                     };
                     match cmd {
+                        TapCommand::Mute => {
+                            // Sustained AI-side gate. Same drain +
+                            // forge-flush combo as Clear so the
+                            // caller hears silence immediately; the
+                            // `muted` flag then drops all subsequent
+                            // bytes in the playout arm until Unmute.
+                            self.muted = true;
+                            let mut drained = 0usize;
+                            while let Ok(_bytes) = playout_audio_rx.try_recv() {
+                                drained += 1;
+                            }
+                            if let Err(e) = self
+                                .handle
+                                .flush(Some(MediaTarget::A), None)
+                                .await
+                            {
+                                warn!(
+                                    call_id = %self.call_id,
+                                    error = %e,
+                                    "forge flush failed during Mute",
+                                );
+                            } else {
+                                debug!(
+                                    call_id = %self.call_id,
+                                    drained,
+                                    "muted; flushed pending outbound playout",
+                                );
+                            }
+                            // Mark bookkeeping reset — anything queued
+                            // before the mute is gone and cannot
+                            // satisfy a pending Mark estimate.
+                            frames_sent_to_forge = 0;
+                            first_audio_pushed_at = None;
+                        }
+                        TapCommand::Unmute => {
+                            // Just lift the gate. No flush — there's
+                            // nothing queued because the playout arm
+                            // has been dropping bytes since Mute.
+                            self.muted = false;
+                            debug!(
+                                call_id = %self.call_id,
+                                "unmuted; AI playout resumes",
+                            );
+                        }
                         TapCommand::Clear => {
                             // Drain any bytes queued in the
                             // controller→tap audio channel before

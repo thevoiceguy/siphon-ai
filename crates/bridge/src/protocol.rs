@@ -261,6 +261,21 @@ pub enum BridgeIn {
         /// Clamped to `[40, 2000]` ms by SiphonAI.
         duration_ms: u32,
     },
+
+    /// Suspend AI-side playout to the caller until a matching
+    /// [`BridgeIn::Unmute`] arrives. SiphonAI drops audio bytes the
+    /// WS server keeps streaming during the mute, AND flushes audio
+    /// already queued into the media engine — so the caller hears
+    /// silence immediately, not after the queued tail plays out.
+    ///
+    /// Distinct from [`BridgeIn::Clear`], which is a one-shot
+    /// barge-in flush. `Mute` is sustained and `Unmute` is required
+    /// to resume.
+    Mute { call_id: CallId },
+
+    /// Resume AI-side playout after a [`BridgeIn::Mute`]. A no-op
+    /// if the call is not muted.
+    Unmute { call_id: CallId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -549,6 +564,20 @@ mod tests {
         };
         assert_eq!(digit, '1');
         assert_eq!(duration_ms, 200);
+    }
+
+    #[test]
+    fn bridge_in_mute() {
+        let raw = r#"{ "type": "mute", "call_id": "c" }"#;
+        let msg: BridgeIn = assert_round_trip(raw);
+        assert!(matches!(msg, BridgeIn::Mute { ref call_id } if call_id.as_str() == "c"));
+    }
+
+    #[test]
+    fn bridge_in_unmute() {
+        let raw = r#"{ "type": "unmute", "call_id": "c" }"#;
+        let msg: BridgeIn = assert_round_trip(raw);
+        assert!(matches!(msg, BridgeIn::Unmute { ref call_id } if call_id.as_str() == "c"));
     }
 
     // ─── Negative cases ─────────────────────────────────────────────────

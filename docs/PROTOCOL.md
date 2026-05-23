@@ -299,6 +299,31 @@ and the call continues.
 `digit` is one of `0-9 * # A B C D`. SiphonAI generates an RFC 2833
 event of `duration_ms` (clamped to `[40, 2000]`).
 
+### 4.6 `mute` / `unmute` — sustained AI-side mute
+
+```json
+{ "type": "mute",   "call_id": "..." }
+{ "type": "unmute", "call_id": "..." }
+```
+
+`mute` suspends AI-side playout to the caller until `unmute` arrives.
+On receipt of `mute`, SiphonAI:
+
+1. Sets a per-call gate that drops audio bytes the WS server continues
+   to stream (the channel is still drained — the WS server is *not*
+   back-pressured — so other control messages keep flowing).
+2. Flushes audio already queued into the media engine so the caller
+   hears silence immediately, not after the queued tail plays out.
+
+`unmute` clears the gate; subsequent audio frames flow into the call.
+`unmute` while not muted is a no-op.
+
+**Distinct from `clear`.** `clear` is a one-shot flush — typically
+fired in response to caller barge-in — that drains pending playout
+once and then accepts new audio. `mute` is sustained, requires an
+explicit `unmute` to release, and is the right primitive for "put
+this call on hold from the AI side."
+
 ---
 
 ## 5. Protocol rules

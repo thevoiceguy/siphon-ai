@@ -490,6 +490,8 @@ fn bridge_in_call_id(msg: &BridgeIn) -> &str {
         BridgeIn::Hangup { call_id, .. } => call_id.as_str(),
         BridgeIn::Transfer { call_id, .. } => call_id.as_str(),
         BridgeIn::SendDtmf { call_id, .. } => call_id.as_str(),
+        BridgeIn::Mute { call_id } => call_id.as_str(),
+        BridgeIn::Unmute { call_id } => call_id.as_str(),
     }
 }
 
@@ -545,6 +547,12 @@ mod tests {
                 call_id: CallId::new("e"),
                 digit: '1',
                 duration_ms: 80,
+            },
+            BridgeIn::Mute {
+                call_id: CallId::new("f"),
+            },
+            BridgeIn::Unmute {
+                call_id: CallId::new("g"),
             },
         ] {
             assert!(!bridge_in_call_id(&msg).is_empty());

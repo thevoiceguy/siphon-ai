@@ -1,6 +1,6 @@
 # SiphonAI 0.2.0 Development Plan
 
-**Status:** working draft. Pending the decisions in §9 before Sprint 1.
+**Status:** working draft. 1 / 6 decisions in §9 resolved (call-progress / early-media — see §9.1); the remaining five gate Sprint 1.
 
 This is the incremental plan from `v0.1.0` (see `docs/DEV_PLAN.md` for the original product definition and locked decisions). It picks up the 0.2.0 roadmap brief and re-organises it around what actually fits siphon-ai's "thin orchestration bridge" mission per `CLAUDE.md` §4.1.
 
@@ -129,7 +129,10 @@ Therefore: **protocol stays at `version: "1"` for 0.2.0.** A v2 bump would only 
 
 These are the gates worth resolving before any code lands. The recommendations are opinions, not facts:
 
-1. **Early media in `session_progress` mode** — does forge support sending RTP before 200 OK? If not, that mode degrades to "send 183 then 200 OK with no real early media." Either limit scope or open a forge PR.
+1. ✅ **Early media in `session_progress` mode** — **resolved**.
+   - **Forge**: investigated — supports it today, no changes needed. The acceptor already calls `start_session()` *before* `accept_invite` (see `crates/core/src/acceptor.rs:1331`, with an explicit "Start forge's RTP forwarding loop BEFORE the 200 OK" comment), and `send_rtp_to` has no "answered" gate, only requiring the remote address (already seeded from the offer).
+   - **siphon-rs**: was missing one RFC 3262 correctness fix — `create_reliable_provisional` ignored the dialog's local tag and stamped a random one, so PRACK matching would never work end-to-end. Fixed upstream in [siphon-rs#47](https://github.com/thevoiceguy/siphon-rs/pull/47); siphon-ai bumped to that rev.
+   - **Decision**: 0.2.0 ships **Flavour B (best-effort 183 with negotiated SDP)**. Peers that include `Require: 100rel` in the INVITE are detected at INVITE time and the call falls through to `instant_answer` with a `warn!` log (so they still get bridged, just without reliable provisionals). The reliable / 100rel-honouring variant — and the "AI plays a prompt during the 183 phase" *Flavour C* — are deferred to **0.2.1 / 0.3.0**, when `on_prack` wiring in `RoutingHandler` and a `BridgeIn::Answer` control message are tackled together.
 2. **`silence_detected` / `dead_air_detected` default thresholds** — proposal: `silence_threshold_ms = 1500`, `dead_air_threshold_ms = 5000`. Survey against actual call traffic before locking.
 3. **RTP stats cadence** — default emit interval? Proposal: `5000 ms`. Configurable per-call via a control message?
 4. **Twilio example scope** — inbound-trunk config + pointer to echo-ws-server, or a fuller "Twilio sends webhook, siphon-ai handles the SIP" loop? The former is much smaller.

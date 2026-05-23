@@ -135,6 +135,22 @@ pub enum OutgoingEvent {
     },
     /// Direction returned to `sendrecv` after a [`Self::Hold`].
     Resume,
+    /// Caller has been silent (no VAD speech) for at least
+    /// `duration_ms`. Configurable via `[bridge].silence_threshold_ms`;
+    /// `0` disables. Fires once per silence stretch — the next event
+    /// only after a speech-then-silence cycle.
+    SilenceDetected {
+        duration_ms: u64,
+    },
+    /// No audio in EITHER direction (no caller VAD speech AND no
+    /// outbound playout from the WS server) for at least
+    /// `duration_ms`. Suspect connectivity / hung call. Configurable
+    /// via `[bridge].dead_air_threshold_ms`; `0` disables. Fires
+    /// every time the threshold is crossed without either side
+    /// producing audio.
+    DeadAirDetected {
+        duration_ms: u64,
+    },
     Stop {
         reason: StopReason,
     },
@@ -469,6 +485,16 @@ fn build_bridge_out(event: OutgoingEvent, call_id: CallId, seq: Seq) -> BridgeOu
             direction,
         },
         OutgoingEvent::Resume => BridgeOut::Resume { call_id, seq },
+        OutgoingEvent::SilenceDetected { duration_ms } => BridgeOut::SilenceDetected {
+            call_id,
+            seq,
+            duration_ms,
+        },
+        OutgoingEvent::DeadAirDetected { duration_ms } => BridgeOut::DeadAirDetected {
+            call_id,
+            seq,
+            duration_ms,
+        },
         OutgoingEvent::Stop { reason } => BridgeOut::Stop {
             call_id,
             seq,

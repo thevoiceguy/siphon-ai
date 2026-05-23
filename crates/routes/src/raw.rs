@@ -89,6 +89,14 @@ pub struct BridgeOverride {
 
     #[serde(default)]
     pub barge_in: BargeInOverride,
+
+    /// Per-route override of `[bridge].silence_threshold_ms`. Same
+    /// shape as the global: `None` = inherit, `Some(0)` = disable,
+    /// `Some(n)` = `n` ms.
+    pub silence_threshold_ms: Option<u64>,
+    /// Per-route override of `[bridge].dead_air_threshold_ms`. Same
+    /// shape as `silence_threshold_ms`.
+    pub dead_air_threshold_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

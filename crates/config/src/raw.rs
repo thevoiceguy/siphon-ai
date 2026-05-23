@@ -395,6 +395,18 @@ pub struct RawBridge {
     /// (`enabled = true`, `mode = "auto_clear"`).
     #[serde(default)]
     pub barge_in: RawBargeIn,
+    /// One-sided silence threshold: fire `silence_detected` when the
+    /// caller has been silent (no forge-vad speech) for this many
+    /// milliseconds. `None` (unset) = use the 3000 ms default; `0` =
+    /// disable the event entirely.
+    #[serde(default)]
+    pub silence_threshold_ms: Option<u64>,
+    /// Two-sided dead-air threshold: fire `dead_air_detected` when
+    /// NEITHER side has produced audio (no caller speech AND no
+    /// outbound playout from the WS server) for this many ms.
+    /// `None` (unset) = use the 10000 ms default; `0` = disable.
+    #[serde(default)]
+    pub dead_air_threshold_ms: Option<u64>,
 }
 
 /// `[bridge.barge_in]` — global default barge-in policy.

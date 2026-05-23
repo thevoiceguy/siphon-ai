@@ -187,7 +187,40 @@ been fully played out into the call.
 { "type": "mark", "call_id": "...", "seq": 91, "name": "greeting_done" }
 ```
 
-### 3.6 `stop` — call ended
+### 3.6 `silence_detected` — caller has been silent
+
+```json
+{ "type": "silence_detected", "call_id": "...", "seq": 102, "duration_ms": 3000 }
+```
+
+Fired when the caller has produced no VAD speech for at least
+`[bridge].silence_threshold_ms` (default 3 s; configurable, per-route
+override; `0` disables the event). The `duration_ms` reports actual
+elapsed time at fire, which may exceed the threshold by up to one
+poll cadence (500 ms). The event fires **once per silence stretch** —
+the next `silence_detected` only after a speech → silence cycle.
+
+Typical use: prompt the caller ("are you still there?") or escalate
+to a human after a configurable wait.
+
+### 3.7 `dead_air_detected` — no audio in either direction
+
+```json
+{ "type": "dead_air_detected", "call_id": "...", "seq": 103, "duration_ms": 10000 }
+```
+
+Fired when **neither** caller VAD speech **nor** outbound playout from
+the WS server has been observed for at least
+`[bridge].dead_air_threshold_ms` (default 10 s; configurable,
+per-route override; `0` disables). Re-fires every time the threshold
+elapses without either side producing audio — a still-dead call
+generates a steady drumbeat of these events.
+
+Distinct from `silence_detected`, which is one-sided (caller silent
+but the AI may still be talking). `dead_air_detected` suggests a
+hung call or connectivity issue; typical reaction is to hang up.
+
+### 3.8 `stop` — call ended
 
 ```json
 { "type": "stop", "call_id": "...", "seq": 200, "reason": "caller_hangup" }
@@ -206,7 +239,7 @@ been fully played out into the call.
 `stop` is the last message SiphonAI sends on the connection. SiphonAI
 then closes the WebSocket cleanly (close code 1000).
 
-### 3.7 `error` — fatal error
+### 3.9 `error` — fatal error
 
 ```json
 { "type": "error", "call_id": "...", "seq": 201, "code": "rtp_timeout", "message": "no RTP for 30s on leg A" }

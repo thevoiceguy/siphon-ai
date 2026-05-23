@@ -661,6 +661,20 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         Some(n) => Some(Duration::from_secs(n)),
     };
 
+    // Silence / dead-air primitives — §9.2 defaults. Same shape as
+    // inactivity_timeout: `None` = use default, `Some(0)` = disable,
+    // `Some(n)` = `n` ms.
+    let silence_threshold = match raw.silence_threshold_ms {
+        None => Some(Duration::from_millis(3000)),
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+    };
+    let dead_air_threshold = match raw.dead_air_threshold_ms {
+        None => Some(Duration::from_millis(10000)),
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+    };
+
     Ok(BridgeDefaults {
         ws_url: raw.ws_url.filter(|s| !s.is_empty()),
         auth_header,
@@ -670,6 +684,8 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         forward_headers: raw.forward_headers.unwrap_or_default(),
         barge_in,
         inactivity_timeout,
+        silence_threshold,
+        dead_air_threshold,
     })
 }
 

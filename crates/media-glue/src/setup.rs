@@ -100,6 +100,16 @@ pub struct InboundCall<'a> {
     /// `None` disables the watchdog. Resolved by the acceptor from
     /// `[media].inactivity_timeout_secs` and the route's override.
     pub inactivity_timeout: Option<std::time::Duration>,
+    /// One-sided silence threshold for the idle detector — emit
+    /// `silence_detected` when the caller has been VAD-silent for
+    /// this long. `None` disables the event. Resolved by the
+    /// acceptor from `[bridge].silence_threshold_ms` plus any
+    /// per-route override.
+    pub silence_threshold: Option<std::time::Duration>,
+    /// Two-sided dead-air threshold — emit `dead_air_detected` when
+    /// neither caller speech nor outbound WS audio has been
+    /// observed for this long. `None` disables.
+    pub dead_air_threshold: Option<std::time::Duration>,
 }
 
 /// What [`MediaSetup::accept_inbound`] hands back on success.
@@ -268,7 +278,8 @@ impl MediaSetup {
             answer.negotiated_audio_sample_rate,
             call.barge_in_action,
         )?
-        .with_inactivity_timeout(call.inactivity_timeout);
+        .with_inactivity_timeout(call.inactivity_timeout)
+        .with_idle_thresholds(call.silence_threshold, call.dead_air_threshold);
 
         guard.disarm();
 
@@ -390,6 +401,8 @@ mod tests {
                 to_tag: None,
                 barge_in_action: BargeInAction::Notify,
                 inactivity_timeout: None,
+                silence_threshold: None,
+                dead_air_threshold: None,
             })
             .await;
 

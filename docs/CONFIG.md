@@ -55,6 +55,35 @@ before TOML parsing. Unset variables without a default fail the load.
 > (UAC mode) is not supported and will return a clear error to the
 > transaction manager rather than silently downgrading to UDP.
 
+### `[sip.call_progress]`
+
+What — if any — provisional response the UAS layers on top of
+`IntegratedUAS`'s `100 Trying` before the 2xx. Defaults to
+`instant_answer` (v0.1.0 behaviour).
+
+| Field  | Type   | Default          | Notes |
+|--------|--------|------------------|-------|
+| `mode` | string | `instant_answer` | One of `"instant_answer"`, `"ringing"`, `"session_progress"`. Anything else is rejected at load. |
+
+```toml
+[sip.call_progress]
+mode = "session_progress"
+```
+
+| Mode                | Wire behaviour                                                                     | Use case                                                            |
+|---------------------|------------------------------------------------------------------------------------|---------------------------------------------------------------------|
+| `instant_answer`    | No extra provisional; `100 Trying` then straight to `200 OK`.                       | AI receptionists, voice bots, demos.                                |
+| `ringing`           | `180 Ringing` (no body) before `200 OK`.                                            | PBX-style call flows that expect ringback signalling.               |
+| `session_progress`  | `183 Session Progress` carrying the negotiated answer SDP, then `200 OK`.           | Carrier-style integrations that route or bill on early-media SDP.   |
+
+> **`session_progress` and `100rel`.** SiphonAI 0.2.0 sends 183
+> best-effort (no `Require: 100rel`). When the inbound INVITE
+> *requires* `100rel`, the call falls back to `instant_answer` for
+> that call with a `warn!` log, rather than sending a non-compliant
+> unreliable 183 to a peer that demanded reliable provisionals. The
+> reliable-provisional path is targeted at 0.2.1 / 0.3.0 alongside
+> `BridgeIn::Answer` (the "AI plays during 183 phase" flow).
+
 ## `[media]`
 
 | Field                       | Type             | Default                | Notes |

@@ -56,7 +56,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
-use sip_core::Request;
+use sip_core::{Request, Response};
 use sip_dialog::session_timer_manager::{SessionTimerEvent, SessionTimerManager};
 use sip_dialog::{DialogId, DialogManager};
 use sip_uac::integrated::IntegratedUAC;
@@ -163,6 +163,33 @@ impl Default for BargeInConfig {
             mode: BargeInMode::AutoClear,
         }
     }
+}
+
+/// How the UAS responds to inbound INVITEs before the 200 OK
+/// (per `docs/DEV_PLAN_0.2.0.md` §4.1). All three modes still emit
+/// `100 Trying` from `IntegratedUAS`; this enum picks what — if
+/// anything — siphon-ai layers on top before the 2xx.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CallProgressMode {
+    /// Skip any extra provisional and let `IntegratedUAS` go
+    /// straight from 100 Trying to the 2xx. Default; matches v0.1.0
+    /// behaviour.
+    #[default]
+    InstantAnswer,
+    /// Send `180 Ringing` (no body) before the 2xx. Useful when an
+    /// upstream PBX wants a ringback-style progress signal.
+    Ringing,
+    /// Send `183 Session Progress` carrying the negotiated answer
+    /// SDP before the 2xx, so a peer that needs the answer for
+    /// carrier-style early-media routing / billing has it before
+    /// the call is technically answered.
+    ///
+    /// "Flavour B" per the §9.1 decision: the provisional is
+    /// best-effort (no `100rel`). Peers that include `Require:
+    /// 100rel` in the INVITE fall back to `InstantAnswer` with a
+    /// `warn!` — the reliable / Flavour-C path is deferred until
+    /// `on_prack` wiring lands.
+    SessionProgress,
 }
 
 impl Default for BridgeDefaults {
@@ -437,6 +464,42 @@ pub fn resolve_inactivity_timeout(
 /// `BargeInConfig.enabled = false` flip — which today degrades
 /// `AutoClear` to `Notify` — can grow knobs without leaking into
 /// every call site.
+/// True when the INVITE's `Require` header lists `100rel`
+/// (case-insensitive per RFC 3261 §27.1). siphon-ai 0.2.0 ships
+/// best-effort provisionals only — peers that *require* reliable
+/// provisionals fall back to `InstantAnswer` mode rather than risk
+/// sending a non-compliant unreliable 1xx.
+fn requires_100rel(request: &Request) -> bool {
+    request
+        .headers()
+        .get("Require")
+        .map(|v| {
+            v.split(',')
+                .any(|tok| tok.trim().eq_ignore_ascii_case("100rel"))
+        })
+        .unwrap_or(false)
+}
+
+/// Attach an SDP body to a `Response` (typically a freshly-built
+/// `183 Session Progress`), updating `Content-Type` and
+/// `Content-Length` to match. Returns a new `Response` — the
+/// underlying type sets the body at construction, not by mutation.
+fn attach_sdp_body(response: Response, sdp: &str) -> Response {
+    let bytes = sdp.as_bytes().to_vec();
+    let content_length = bytes.len().to_string();
+    let mut response = response;
+    response
+        .headers_mut()
+        .set_or_push("Content-Type", "application/sdp")
+        .expect("content-type header valid");
+    response
+        .headers_mut()
+        .set_or_push("Content-Length", &content_length)
+        .expect("content-length header valid");
+    let (start, headers, _) = response.into_parts();
+    Response::new(start, headers, bytes.into()).expect("valid response with SDP body")
+}
+
 fn barge_in_to_tap_action(cfg: &BargeInConfig) -> siphon_ai_media_glue::BargeInAction {
     if !cfg.enabled {
         return siphon_ai_media_glue::BargeInAction::Notify;
@@ -567,6 +630,11 @@ pub struct BridgingAcceptor {
     /// with timers and drained when it ends. Read by the fan-out
     /// task; written by `on_matched` and `run_call`'s cleanup arm.
     dialog_handles: Arc<RwLock<HashMap<DialogId, crate::call::CallHandle>>>,
+    /// What — if any — provisional response `on_matched` sends
+    /// before the 2xx. Defaults to [`CallProgressMode::InstantAnswer`]
+    /// (v0.1.0 behaviour); operators opt in to `Ringing` or
+    /// `SessionProgress` via `[sip.call_progress]`.
+    call_progress: CallProgressMode,
 }
 
 /// Daemon-wide REFER plumbing (shared across every accepted call).
@@ -703,7 +771,16 @@ impl BridgingAcceptor {
             session_timer_policy: SessionTimerPolicy::default(),
             session_timer_manager,
             dialog_handles,
+            call_progress: CallProgressMode::default(),
         }
+    }
+
+    /// Override the call-progress mode used by [`Self::on_matched`]
+    /// when responding to inbound INVITEs. Defaults to
+    /// [`CallProgressMode::InstantAnswer`] (the v0.1.0 behaviour).
+    pub fn with_call_progress(mut self, mode: CallProgressMode) -> Self {
+        self.call_progress = mode;
+        self
     }
 
     /// Install the [`IntegratedUAS`] handle the acceptor uses to send
@@ -1363,6 +1440,50 @@ impl CallAcceptor for BridgingAcceptor {
                     call.handle.send_final(response).await;
                     metrics::counter!(INVITES_TOTAL, "result" => "rejected").increment(1);
                     return Ok(());
+                }
+
+                // ─── Configurable call progress (§4 / §9.1) ──────
+                // Send the operator-selected provisional response —
+                // 180 Ringing or 183 Session Progress with the
+                // negotiated answer SDP — between the forge-active
+                // step above and the 2xx below. `InstantAnswer`
+                // (default, v0.1.0 behaviour) skips this entirely
+                // and lets `accept_invite_with_session_timer` send
+                // the 2xx straight after `100 Trying`.
+                match self.call_progress {
+                    CallProgressMode::InstantAnswer => {}
+                    CallProgressMode::Ringing => {
+                        let r180 = UserAgentServer::create_response(call.request, 180, "Ringing");
+                        call.handle.send_provisional(r180).await;
+                    }
+                    CallProgressMode::SessionProgress => {
+                        // Flavour B (§9.1): best-effort 183 with the
+                        // negotiated answer SDP. A peer that requires
+                        // 100rel needs reliable provisionals, which
+                        // siphon-ai 0.2.0 does not ship — sending an
+                        // unreliable 183 to such a peer is
+                        // non-compliant. Fall through to InstantAnswer
+                        // with a warn so the call still completes.
+                        if requires_100rel(call.request) {
+                            warn!(
+                                call_id = %prepared.bridge_call_id,
+                                "INVITE has `Require: 100rel` but reliable \
+                                 provisionals are not supported yet \
+                                 (deferred to 0.2.1 / 0.3.0); falling back \
+                                 to instant_answer for this call"
+                            );
+                        } else {
+                            let r183 = attach_sdp_body(
+                                UserAgentServer::create_response(
+                                    call.request,
+                                    183,
+                                    "Session Progress",
+                                ),
+                                &prepared.answer.answer_text,
+                            );
+                            call.handle.send_provisional(r183).await;
+                        }
+                    }
                 }
 
                 // 200 OK with the negotiated SDP via the canonical
@@ -2613,6 +2734,45 @@ a=sendrecv\r\n",
         assert_eq!(outcome.answer_direction, None);
         assert_eq!(outcome.answer_sdp, cached_answer_pcmu());
         assert_eq!(outcome.remote_addr, None);
+    }
+
+    // ─── requires_100rel ───────────────────────────────────────────
+
+    #[test]
+    fn requires_100rel_false_when_no_require_header() {
+        let req = invite_with(Some("application/sdp"), "v=0\r\n");
+        assert!(!super::requires_100rel(&req));
+    }
+
+    #[test]
+    fn requires_100rel_true_when_present_alone() {
+        let req = invite_with_require("100rel");
+        assert!(super::requires_100rel(&req));
+    }
+
+    #[test]
+    fn requires_100rel_true_when_in_token_list() {
+        // RFC 3261 §27.1 — `Require` is a comma-separated option-tag list.
+        let req = invite_with_require("timer, 100rel, replaces");
+        assert!(super::requires_100rel(&req));
+    }
+
+    #[test]
+    fn requires_100rel_is_case_insensitive() {
+        let req = invite_with_require("100REL");
+        assert!(super::requires_100rel(&req));
+    }
+
+    #[test]
+    fn requires_100rel_false_for_unrelated_tokens() {
+        let req = invite_with_require("timer, replaces");
+        assert!(!super::requires_100rel(&req));
+    }
+
+    fn invite_with_require(value: &str) -> Request {
+        let mut req = invite_with(Some("application/sdp"), "v=0\r\n");
+        req.headers_mut().push("Require", value).unwrap();
+        req
     }
 
     // ─── sdp_audio_remote_addr ─────────────────────────────────────

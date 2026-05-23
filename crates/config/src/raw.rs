@@ -104,6 +104,11 @@ pub struct RawSip {
     /// for UDP-only deployments.
     #[serde(default)]
     pub tls: RawSipTls,
+    /// Call-progress sub-block — how the UAS responds to inbound
+    /// INVITEs before the 2xx. Unset = `mode = "instant_answer"`
+    /// (v0.1.0 behaviour).
+    #[serde(default)]
+    pub call_progress: RawCallProgress,
     /// RFC 4028 Min-SE we'll enforce on inbound INVITEs. Defaults
     /// to 90 (RFC minimum). Smaller values are rejected with 422.
     #[serde(default)]
@@ -113,6 +118,22 @@ pub struct RawSip {
     /// here. Unset = honour the peer's value uncapped.
     #[serde(default)]
     pub preferred_session_expires_secs: Option<u32>,
+}
+
+/// `[sip.call_progress]` — what — if any — provisional response
+/// `siphon-ai` layers on top of `IntegratedUAS`'s `100 Trying`
+/// before the 2xx. See `docs/DEV_PLAN_0.2.0.md` §4.1.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawCallProgress {
+    /// `"instant_answer"` (default) | `"ringing"` | `"session_progress"`.
+    /// `instant_answer` matches v0.1.0 behaviour (skip extra
+    /// provisional). `ringing` sends `180 Ringing`. `session_progress`
+    /// sends `183 Session Progress` with the negotiated answer SDP
+    /// (best-effort; peers requiring `100rel` fall back to
+    /// `instant_answer` per the §9.1 decision).
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 /// `[sip.tls]` — TLS server configuration. Required when

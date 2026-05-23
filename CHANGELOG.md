@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Configurable SIP call progress** (`[sip.call_progress]`). New `mode` field selects what — if any — provisional response the UAS sends before the `200 OK`:
+  - `instant_answer` (default; v0.1.0 behaviour): skip extra provisionals.
+  - `ringing`: send `180 Ringing` (no body) before the 2xx.
+  - `session_progress`: send `183 Session Progress` with the negotiated answer SDP before the 2xx (Flavour B per `docs/DEV_PLAN_0.2.0.md` §9.1 — best-effort, no `100rel`). Peers that include `Require: 100rel` in the INVITE fall back to `instant_answer` with a `warn!` log; reliable provisionals are deferred to 0.2.1 / 0.3.0.
+
+  Backwards-compatible: existing configs without the `[sip.call_progress]` block keep v0.1.0 behaviour.
+
 ## [0.1.0] - 2026-05-22
 
 First public release. SiphonAI is a provider-neutral SIP-to-WebSocket

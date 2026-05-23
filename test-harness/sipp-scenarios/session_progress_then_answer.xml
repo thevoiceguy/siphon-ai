@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  session_progress_then_answer — Verifies `[sip.call_progress] mode =
+  "session_progress"`. SIPp acts as the caller (UAC); SiphonAI is the
+  UAS. We expect a `183 Session Progress` carrying the negotiated
+  answer SDP BEFORE the `200 OK`, then normal ACK / BYE.
+
+  The 183 recv is required (not optional) — that's the point of the
+  scenario. The 100 and 180 recv lines are optional because the
+  transaction layer may or may not retransmit a 100, and 180 is
+  exclusive to `mode = "ringing"`.
+
+  Run this scenario against a daemon configured with:
+      [sip.call_progress]
+      mode = "session_progress"
+-->
+<scenario name="session_progress_then_answer">
+  <send>
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+
+  <!-- The 183 is mandatory. Required-by-default; rtd captures the
+       round-trip time so a slow path shows up in the SIPp report. -->
+  <recv response="183" rtd="true">
+    <action>
+      <!-- Assert the 183 carries an SDP body — the whole point of
+           session_progress mode. The scenario fails if Content-Type
+           is anything other than application/sdp. -->
+      <ereg regexp="application/sdp"
+            search_in="hdr"
+            header="Content-Type:"
+            check_it="true"
+            assign_to="183_sdp_present"/>
+    </action>
+  </recv>
+
+  <recv response="200" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="300"/>
+
+  <send>
+<![CDATA[
+BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-bye
+Max-Forwards: 70
+From: <sip:sipp@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 BYE
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="200" rtd="true"/>
+</scenario>

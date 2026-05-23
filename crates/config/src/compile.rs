@@ -276,6 +276,10 @@ pub struct SipConfig {
     pub transports: Vec<SipTransport>,
     pub user_agent: Option<String>,
     pub contact: Option<String>,
+    /// What — if any — provisional response the UAS layers on top of
+    /// `100 Trying` before the 2xx. From `[sip.call_progress].mode`;
+    /// default is `InstantAnswer` (v0.1.0 behaviour).
+    pub call_progress: siphon_ai_core::CallProgressMode,
     /// `Some` when `[sip.tls]` is supplied AND `tls` is in the
     /// transports list. `None` when TLS isn't enabled. Daemon
     /// loads cert/key from these paths at startup.
@@ -351,6 +355,12 @@ pub enum CompileError {
 
     #[error("[media].dtmf is {0:?}; expected \"rfc2833\" or \"off\"")]
     UnknownDtmfMode(String),
+
+    #[error(
+        "[sip.call_progress].mode is {0:?}; expected \"instant_answer\", \"ringing\", \
+         or \"session_progress\""
+    )]
+    UnknownCallProgressMode(String),
 
     #[error("[bridge.barge_in].mode is {0:?}; expected \"auto_clear\" or \"notify_only\"")]
     UnknownBargeInMode(String),
@@ -509,6 +519,8 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
     let tls_enabled = transports.contains(&SipTransport::Tls);
     let tls = compile_sip_tls(raw.tls, tls_enabled, &listen_addr)?;
 
+    let call_progress = compile_call_progress(raw.call_progress)?;
+
     // RFC 4028: 90 s is the floor (Min-SE). An operator setting
     // something smaller is asking for trouble; reject at load.
     let min_session_expires = match raw.min_session_expires_secs {
@@ -526,9 +538,21 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
         user_agent: raw.user_agent,
         contact: raw.contact,
         tls,
+        call_progress,
         min_session_expires,
         preferred_session_expires,
     })
+}
+
+fn compile_call_progress(
+    raw: crate::raw::RawCallProgress,
+) -> Result<siphon_ai_core::CallProgressMode, CompileError> {
+    match raw.mode.as_deref() {
+        None | Some("instant_answer") => Ok(siphon_ai_core::CallProgressMode::InstantAnswer),
+        Some("ringing") => Ok(siphon_ai_core::CallProgressMode::Ringing),
+        Some("session_progress") => Ok(siphon_ai_core::CallProgressMode::SessionProgress),
+        Some(other) => Err(CompileError::UnknownCallProgressMode(other.to_string())),
+    }
 }
 
 fn compile_sip_tls(
@@ -1063,6 +1087,52 @@ fn compile_cdr(raw: RawCdr) -> Result<CdrConfig, CompileError> {
         file,
         webhook,
     })
+}
+
+#[cfg(test)]
+mod call_progress_tests {
+    use super::{compile_call_progress, CompileError};
+    use crate::raw::RawCallProgress;
+    use siphon_ai_core::CallProgressMode;
+
+    fn raw(mode: Option<&str>) -> RawCallProgress {
+        RawCallProgress {
+            mode: mode.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn missing_block_defaults_to_instant_answer() {
+        assert_eq!(
+            compile_call_progress(raw(None)).unwrap(),
+            CallProgressMode::InstantAnswer
+        );
+    }
+
+    #[test]
+    fn explicit_modes_parse() {
+        assert_eq!(
+            compile_call_progress(raw(Some("instant_answer"))).unwrap(),
+            CallProgressMode::InstantAnswer
+        );
+        assert_eq!(
+            compile_call_progress(raw(Some("ringing"))).unwrap(),
+            CallProgressMode::Ringing
+        );
+        assert_eq!(
+            compile_call_progress(raw(Some("session_progress"))).unwrap(),
+            CallProgressMode::SessionProgress
+        );
+    }
+
+    #[test]
+    fn unknown_mode_errors() {
+        let err = compile_call_progress(raw(Some("instant-answer"))).unwrap_err();
+        match err {
+            CompileError::UnknownCallProgressMode(s) => assert_eq!(s, "instant-answer"),
+            other => panic!("expected UnknownCallProgressMode, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]

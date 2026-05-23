@@ -220,7 +220,34 @@ Distinct from `silence_detected`, which is one-sided (caller silent
 but the AI may still be talking). `dead_air_detected` suggests a
 hung call or connectivity issue; typical reaction is to hang up.
 
-### 3.8 `stop` — call ended
+### 3.8 `rtp_stats` — periodic RTP/RTCP snapshot
+
+```json
+{ "type": "rtp_stats", "call_id": "...", "seq": 50, "jitter_ms": 12.5, "packet_loss_ratio": 0.004 }
+```
+
+Fired every `[bridge].rtp_stats_interval_ms` (default 5 s; configurable,
+per-route override; `0` disables). The cadence mirrors RTCP's compound-
+report interval (RFC 3550 §6.2) so values track the underlying RTCP
+arrivals.
+
+Fields are JSON `null` (omitted) until forge has reported its first
+quality assessment for the call:
+
+| Field                | Type            | Notes |
+|----------------------|-----------------|-------|
+| `jitter_ms`          | float \| null   | Estimated inter-arrival jitter. `null` if forge hasn't reported. After a `QualityRestored` event in forge, this resets to `0.0` — distinct from `null`. |
+| `packet_loss_ratio`  | float \| null   | Loss as a ratio in `[0.0, 1.0]` (NOT a percent). Same `null` / `0.0` distinction. |
+
+Codec and sample-rate are constant for a call — consumers should
+correlate to the `start` message (§3.1) rather than expecting them
+on every snapshot.
+
+`rtcp_rtt_ms` is not yet available in 0.2.0 (forge upstream gap).
+Planned for 0.2.1 / 0.3.0 once forge exposes a session-level
+snapshot accessor.
+
+### 3.9 `stop` — call ended
 
 ```json
 { "type": "stop", "call_id": "...", "seq": 200, "reason": "caller_hangup" }
@@ -239,7 +266,7 @@ hung call or connectivity issue; typical reaction is to hang up.
 `stop` is the last message SiphonAI sends on the connection. SiphonAI
 then closes the WebSocket cleanly (close code 1000).
 
-### 3.9 `error` — fatal error
+### 3.10 `error` — fatal error
 
 ```json
 { "type": "error", "call_id": "...", "seq": 201, "code": "rtp_timeout", "message": "no RTP for 30s on leg A" }

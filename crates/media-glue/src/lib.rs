@@ -8,6 +8,7 @@
 //! mandate, no `unwrap`/`panic`, no `std::sync::Mutex`, no blocking I/O.
 
 pub(crate) mod idle;
+pub(crate) mod rtp_stats;
 pub mod sdp;
 pub mod setup;
 pub mod tap;

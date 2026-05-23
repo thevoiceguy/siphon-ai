@@ -151,6 +151,18 @@ pub enum OutgoingEvent {
     DeadAirDetected {
         duration_ms: u64,
     },
+    /// Periodic snapshot of RTP / RTCP quality, emitted every
+    /// `[bridge].rtp_stats_interval_ms` (default 5 s). Fields are
+    /// `None` when forge has not yet reported a value (e.g. early
+    /// in the call before the first RTCP report arrives).
+    RtpStats {
+        /// Estimated inter-arrival jitter in milliseconds. `None`
+        /// until forge has reported its first quality assessment.
+        jitter_ms: Option<f32>,
+        /// Packet loss as a ratio in `[0.0, 1.0]`. `None` until
+        /// forge has reported its first quality assessment.
+        packet_loss_ratio: Option<f32>,
+    },
     Stop {
         reason: StopReason,
     },
@@ -494,6 +506,15 @@ fn build_bridge_out(event: OutgoingEvent, call_id: CallId, seq: Seq) -> BridgeOu
             call_id,
             seq,
             duration_ms,
+        },
+        OutgoingEvent::RtpStats {
+            jitter_ms,
+            packet_loss_ratio,
+        } => BridgeOut::RtpStats {
+            call_id,
+            seq,
+            jitter_ms,
+            packet_loss_ratio,
         },
         OutgoingEvent::Stop { reason } => BridgeOut::Stop {
             call_id,

@@ -59,6 +59,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::idle::{IdleDetector, IdleEvent};
+use crate::rtp_stats::RtpStatsTracker;
 
 use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, EventBus, ForgeError, ForgeEvent};
 use forge_dtmf::DtmfDigit;
@@ -251,6 +252,12 @@ pub struct MediaTap {
     /// [`Self::with_idle_thresholds`] before `run()` to install the
     /// resolved per-call values.
     idle_detector: IdleDetector,
+    /// Cached most-recent RTP-quality assessment from forge,
+    /// emitted as periodic `rtp_stats` WS events. Disabled by
+    /// default; the acceptor calls
+    /// [`Self::with_rtp_stats_interval`] before `run()`. See
+    /// `crates/media-glue/src/rtp_stats.rs` for the rationale.
+    rtp_stats: RtpStatsTracker,
 }
 
 impl std::fmt::Debug for MediaTap {
@@ -314,6 +321,7 @@ impl MediaTap {
             inactivity_timeout: None,
             muted: false,
             idle_detector: IdleDetector::new(None, None, Instant::now()),
+            rtp_stats: RtpStatsTracker::new(None),
         })
     }
 
@@ -336,6 +344,14 @@ impl MediaTap {
         dead_air: Option<Duration>,
     ) -> Self {
         self.idle_detector = IdleDetector::new(silence, dead_air, Instant::now());
+        self
+    }
+
+    /// Install the periodic `rtp_stats` emission cadence resolved
+    /// from `[bridge].rtp_stats_interval_ms` (and any per-route
+    /// override). `None` disables the event for this call.
+    pub fn with_rtp_stats_interval(mut self, interval: Option<Duration>) -> Self {
+        self.rtp_stats = RtpStatsTracker::new(interval);
         self
     }
 
@@ -397,6 +413,18 @@ impl MediaTap {
         // Consume the immediate first tick that `interval` emits, so
         // the arm doesn't fire at t=0 against a fresh detector.
         idle_check.tick().await;
+
+        // Periodic `rtp_stats` emission. When the tracker is
+        // disabled (`with_rtp_stats_interval(None)`) the arm guard
+        // suppresses ticks; we still need a placeholder interval so
+        // the future type unifies — pick 1h, which never fires.
+        let rtp_stats_period = self
+            .rtp_stats
+            .interval()
+            .unwrap_or(Duration::from_secs(3600));
+        let mut rtp_stats_tick = tokio::time::interval(rtp_stats_period);
+        rtp_stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        rtp_stats_tick.tick().await;
 
         loop {
             tokio::select! {
@@ -505,6 +533,31 @@ impl MediaTap {
                 event = self.events_rx.recv() => {
                     match event {
                         Ok(ev) => {
+                            // Capture quality assessments into the
+                            // rtp_stats tracker BEFORE the move into
+                            // derive_outgoing_event (which doesn't
+                            // forward Quality events to the WS — they
+                            // surface via the periodic rtp_stats arm).
+                            match &ev {
+                                ForgeEvent::QualityDegraded {
+                                    call_id: cid,
+                                    packet_loss_percent,
+                                    jitter_ms,
+                                    ..
+                                } if cid == &self.call_id => {
+                                    self.rtp_stats.note_quality_degraded(
+                                        *packet_loss_percent,
+                                        *jitter_ms,
+                                    );
+                                }
+                                ForgeEvent::QualityRestored {
+                                    call_id: cid,
+                                    ..
+                                } if cid == &self.call_id => {
+                                    self.rtp_stats.note_quality_restored();
+                                }
+                                _ => {}
+                            }
                             if let Some(out) = derive_outgoing_event(&self.call_id, ev) {
                                 // Hook the idle detector on every
                                 // SpeechStarted — regardless of
@@ -724,6 +777,33 @@ impl MediaTap {
                                 "events_tx full or closed; dropping idle event"
                             );
                         }
+                    }
+                }
+
+                // Periodic `rtp_stats` emission. Cadence comes from
+                // `[bridge].rtp_stats_interval_ms` (default 5 s,
+                // mirrors RTCP §6.2). Arm guard suppresses ticks
+                // when the tracker is disabled (`interval = None`).
+                // Snapshot values default to `null` until forge has
+                // reported its first QualityDegraded event.
+                _ = rtp_stats_tick.tick(), if self.rtp_stats.is_active() => {
+                    let snap = self.rtp_stats.snapshot();
+                    if let Some(j) = snap.jitter_ms {
+                        metrics::histogram!("siphon_ai_rtp_jitter_ms").record(j as f64);
+                    }
+                    if let Some(l) = snap.packet_loss_ratio {
+                        metrics::histogram!("siphon_ai_rtp_packet_loss_ratio").record(l as f64);
+                    }
+                    let out = OutgoingEvent::RtpStats {
+                        jitter_ms: snap.jitter_ms,
+                        packet_loss_ratio: snap.packet_loss_ratio,
+                    };
+                    if let Err(e) = events_tx.try_send(out) {
+                        warn!(
+                            call_id = %self.call_id,
+                            error = %e,
+                            "events_tx full or closed; dropping rtp_stats event"
+                        );
                     }
                 }
             }

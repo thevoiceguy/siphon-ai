@@ -674,6 +674,12 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         Some(0) => None,
         Some(ms) => Some(Duration::from_millis(ms)),
     };
+    // §9.3 default 5000 ms mirrors RTCP §6.2 compound-report cadence.
+    let rtp_stats_interval = match raw.rtp_stats_interval_ms {
+        None => Some(Duration::from_millis(5000)),
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+    };
 
     Ok(BridgeDefaults {
         ws_url: raw.ws_url.filter(|s| !s.is_empty()),
@@ -686,6 +692,7 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         inactivity_timeout,
         silence_threshold,
         dead_air_threshold,
+        rtp_stats_interval,
     })
 }
 

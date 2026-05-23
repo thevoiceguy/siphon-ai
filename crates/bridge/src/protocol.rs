@@ -121,6 +121,23 @@ pub enum BridgeOut {
         duration_ms: u64,
     },
 
+    /// Periodic snapshot of RTP / RTCP quality, emitted every
+    /// `[bridge].rtp_stats_interval_ms` (default 5 s, configurable
+    /// per-route; `0` disables). Fields are JSON `null` until forge
+    /// has reported its first quality assessment for the call.
+    /// Codec / sample rate are constant for the call — consumers
+    /// should correlate to the `start` message.
+    RtpStats {
+        call_id: CallId,
+        seq: Seq,
+        /// Estimated inter-arrival jitter in milliseconds, or `null`.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        jitter_ms: Option<f32>,
+        /// Packet loss as a ratio in `[0.0, 1.0]`, or `null`.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        packet_loss_ratio: Option<f32>,
+    },
+
     /// The caller pressed a DTMF key.
     Dtmf {
         call_id: CallId,
@@ -451,6 +468,41 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn bridge_out_rtp_stats_with_values() {
+        let raw = r#"{ "type": "rtp_stats", "call_id": "c", "seq": 50, "jitter_ms": 12.5, "packet_loss_ratio": 0.004 }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        let BridgeOut::RtpStats {
+            jitter_ms,
+            packet_loss_ratio,
+            ..
+        } = msg
+        else {
+            panic!("expected RtpStats");
+        };
+        assert_eq!(jitter_ms, Some(12.5));
+        assert_eq!(packet_loss_ratio, Some(0.004));
+    }
+
+    #[test]
+    fn bridge_out_rtp_stats_with_nulls() {
+        // First snapshot before any RTCP report has arrived: both
+        // fields are absent / null. Test deserialize-only because
+        // skip_serializing_if drops them on the way back out.
+        let raw = r#"{ "type": "rtp_stats", "call_id": "c", "seq": 1 }"#;
+        let msg: BridgeOut = serde_json::from_str(raw).expect("deserialize");
+        let BridgeOut::RtpStats {
+            jitter_ms,
+            packet_loss_ratio,
+            ..
+        } = msg
+        else {
+            panic!("expected RtpStats");
+        };
+        assert!(jitter_ms.is_none());
+        assert!(packet_loss_ratio.is_none());
     }
 
     #[test]

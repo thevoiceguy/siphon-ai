@@ -110,6 +110,10 @@ pub struct InboundCall<'a> {
     /// neither caller speech nor outbound WS audio has been
     /// observed for this long. `None` disables.
     pub dead_air_threshold: Option<std::time::Duration>,
+    /// Cadence of periodic `rtp_stats` events. `None` disables.
+    /// Resolved by the acceptor from `[bridge].rtp_stats_interval_ms`
+    /// plus any per-route override.
+    pub rtp_stats_interval: Option<std::time::Duration>,
 }
 
 /// What [`MediaSetup::accept_inbound`] hands back on success.
@@ -279,7 +283,8 @@ impl MediaSetup {
             call.barge_in_action,
         )?
         .with_inactivity_timeout(call.inactivity_timeout)
-        .with_idle_thresholds(call.silence_threshold, call.dead_air_threshold);
+        .with_idle_thresholds(call.silence_threshold, call.dead_air_threshold)
+        .with_rtp_stats_interval(call.rtp_stats_interval);
 
         guard.disarm();
 
@@ -403,6 +408,7 @@ mod tests {
                 inactivity_timeout: None,
                 silence_threshold: None,
                 dead_air_threshold: None,
+                rtp_stats_interval: None,
             })
             .await;
 

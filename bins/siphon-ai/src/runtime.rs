@@ -219,7 +219,8 @@ impl Runtime {
             BridgingAcceptor::new(media_setup, bridge_defaults, registry.clone())
                 .with_cdr_sink(cdr_sink)
                 .with_webhook_sink(webhook_sink)
-                .with_session_timer_policy(session_timer_policy),
+                .with_session_timer_policy(session_timer_policy)
+                .with_call_progress(sip.call_progress),
         );
 
         // ─── Registration manager ──────────────────────────────────

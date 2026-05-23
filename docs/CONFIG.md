@@ -103,12 +103,15 @@ mode = "session_progress"
 | `forward_headers`          | string[]  | `[]`     | SIP header names (case-insensitive) to copy onto `start.sip.headers`. |
 | `silence_threshold_ms`     | integer   | `3000`   | One-sided: emit `silence_detected` (PROTOCOL §3.6) when the caller has been VAD-silent for this long. `0` disables. Per-route override via `[route.bridge].silence_threshold_ms`. |
 | `dead_air_threshold_ms`    | integer   | `10000`  | Two-sided: emit `dead_air_detected` (PROTOCOL §3.7) when neither caller speech nor outbound WS audio has been observed for this long. `0` disables. Per-route override via `[route.bridge].dead_air_threshold_ms`. |
+| `rtp_stats_interval_ms`    | integer   | `5000`   | Cadence of periodic `rtp_stats` events (PROTOCOL §3.8). Default mirrors RTCP §6.2's compound-report cadence so emissions align with the underlying RTCP arrivals. `0` disables the event entirely. Per-route override via `[route.bridge].rtp_stats_interval_ms`. |
 
-> **Detection cadence.** Both events are polled every 500 ms, so the
-> `duration_ms` on the wire may overshoot the configured threshold by
-> up to that amount. Acceptable for the "are you still there?" /
-> "hang up the dead call" use cases these primitives target;
-> sub-second accuracy needs a different design.
+> **Detection cadence.** Silence / dead-air events are polled every
+> 500 ms, so the `duration_ms` on the wire may overshoot the
+> configured threshold by up to that amount. Acceptable for the
+> "are you still there?" / "hang up the dead call" use cases these
+> primitives target; sub-second accuracy needs a different design.
+> `rtp_stats` emissions hit the configured interval exactly (no
+> coarsening).
 
 ### `[bridge.barge_in]`
 

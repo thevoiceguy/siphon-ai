@@ -407,6 +407,11 @@ pub struct RawBridge {
     /// `None` (unset) = use the 10000 ms default; `0` = disable.
     #[serde(default)]
     pub dead_air_threshold_ms: Option<u64>,
+    /// Periodic emission cadence for `rtp_stats` events. `None`
+    /// (unset) = use the 5000 ms default (mirrors RTCP §6.2); `0`
+    /// = disable the event entirely.
+    #[serde(default)]
+    pub rtp_stats_interval_ms: Option<u64>,
 }
 
 /// `[bridge.barge_in]` — global default barge-in policy.

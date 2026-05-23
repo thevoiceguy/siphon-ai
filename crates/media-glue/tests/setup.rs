@@ -56,6 +56,7 @@ fn pcmu_call(call_id: &str, offer: &'static str) -> InboundCall<'static> {
         inactivity_timeout: None,
         silence_threshold: None,
         dead_air_threshold: None,
+        rtp_stats_interval: None,
     }
 }
 
@@ -224,6 +225,7 @@ async fn no_common_codec_rolls_back_session() {
             inactivity_timeout: None,
             silence_threshold: None,
             dead_air_threshold: None,
+            rtp_stats_interval: None,
         })
         .await;
     assert!(matches!(
@@ -262,6 +264,7 @@ async fn malformed_offer_does_not_allocate_ports() {
             inactivity_timeout: None,
             silence_threshold: None,
             dead_air_threshold: None,
+            rtp_stats_interval: None,
         })
         .await
         .unwrap_err();

@@ -140,6 +140,10 @@ pub struct BridgeDefaults {
     /// observed for this long. `None` disables. Default
     /// `Some(10000ms)` per `docs/DEV_PLAN_0.2.0.md` §9.2.
     pub dead_air_threshold: Option<Duration>,
+    /// Default cadence for `rtp_stats` events. `None` disables.
+    /// Default `Some(5000ms)` per `docs/DEV_PLAN_0.2.0.md` §9.3,
+    /// mirroring RTCP §6.2's compound-report cadence.
+    pub rtp_stats_interval: Option<Duration>,
 }
 
 /// What the daemon does when forge-vad reports speech-started.
@@ -215,6 +219,7 @@ impl Default for BridgeDefaults {
             inactivity_timeout: Some(Duration::from_secs(60)),
             silence_threshold: Some(Duration::from_millis(3000)),
             dead_air_threshold: Some(Duration::from_millis(10000)),
+            rtp_stats_interval: Some(Duration::from_millis(5000)),
         }
     }
 }
@@ -480,6 +485,19 @@ pub fn resolve_silence_threshold(
 ) -> Option<Duration> {
     match route.bridge.silence_threshold_ms {
         None => defaults.silence_threshold,
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+    }
+}
+
+/// Resolve the per-call `rtp_stats` emission cadence (same shape as
+/// [`resolve_silence_threshold`]).
+pub fn resolve_rtp_stats_interval(
+    defaults: &BridgeDefaults,
+    route: &CompiledRoute,
+) -> Option<Duration> {
+    match route.bridge.rtp_stats_interval_ms {
+        None => defaults.rtp_stats_interval,
         Some(0) => None,
         Some(ms) => Some(Duration::from_millis(ms)),
     }
@@ -1926,6 +1944,7 @@ impl BridgingAcceptor {
                 inactivity_timeout: resolve_inactivity_timeout(&self.defaults, route),
                 silence_threshold: resolve_silence_threshold(&self.defaults, route),
                 dead_air_threshold: resolve_dead_air_threshold(&self.defaults, route),
+                rtp_stats_interval: resolve_rtp_stats_interval(&self.defaults, route),
             })
             .await?;
 

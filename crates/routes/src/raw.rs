@@ -97,6 +97,9 @@ pub struct BridgeOverride {
     /// Per-route override of `[bridge].dead_air_threshold_ms`. Same
     /// shape as `silence_threshold_ms`.
     pub dead_air_threshold_ms: Option<u64>,
+    /// Per-route override of `[bridge].rtp_stats_interval_ms`. Same
+    /// shape: `None` = inherit, `Some(0)` = disable, `Some(n)` = ms.
+    pub rtp_stats_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

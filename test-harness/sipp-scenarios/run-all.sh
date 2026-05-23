@@ -26,7 +26,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 SIPP_PORT=5080       # SIPp's listen port (any free port works)
 DAEMON_PORT=5070     # SiphonAI's listen port (matches local-dev.toml)
-DAEMON_BIN="$REPO_ROOT/target/debug/siphon-ai"
+DAEMON_BIN="${DAEMON_BIN:-$REPO_ROOT/target/debug/siphon-ai}"
 DAEMON_CONFIG="${SIPHON_AI_CONFIG:-$REPO_ROOT/configs/local-dev.toml}"
 
 WITH_TRANSFER=0

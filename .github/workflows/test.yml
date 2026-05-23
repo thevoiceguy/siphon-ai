@@ -1,0 +1,115 @@
+name: test
+
+# Gates every PR and every push to main on:
+#   1. fmt + clippy + cargo test --workspace
+#   2. the SIPp signaling regression suite
+#
+# Both jobs run on ubuntu-latest. The SIPp job only runs after
+# lint-and-test passes so a broken build doesn't burn a full SIPp
+# spin-up.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Cancel an in-flight workflow run on the same ref when a new commit
+# arrives — saves CI time on PRs that get amended frequently. Pushes
+# to main don't cancel because the group changes per ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Show full test backtraces on failure.
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint-and-test:
+    name: fmt + clippy + cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins to stable. `rustup show` activates
+      # it and installs the listed components (rustfmt, clippy).
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test --workspace --locked
+        run: cargo test --workspace --locked
+
+  sipp:
+    name: SIPp signaling regression
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install sip-tester + python venv
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sip-tester python3-venv
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build siphon-ai (debug)
+        # run-all.sh expects the binary at target/debug/siphon-ai
+        # by default; --release would also work via DAEMON_BIN env
+        # but debug builds faster on a cold CI cache.
+        run: cargo build -p siphon-ai
+
+      - name: Prep echo-ws-server venv
+        run: |
+          python3 -m venv examples/echo-ws-server-python/.venv
+          examples/echo-ws-server-python/.venv/bin/pip install --no-input -r examples/echo-ws-server-python/requirements.txt
+
+      - name: Start echo-ws-server in background
+        run: |
+          examples/echo-ws-server-python/.venv/bin/python \
+              examples/echo-ws-server-python/server.py \
+              --bind 127.0.0.1:8765 \
+              > /tmp/echo-ws.log 2>&1 &
+          echo $! > /tmp/echo-ws.pid
+          # Give the listener a beat before SIPp / siphon-ai try to
+          # connect. Failure here surfaces as a connection-refused
+          # in the daemon log, which is much harder to debug than
+          # a step that explicitly waits.
+          for _ in 1 2 3 4 5; do
+            if ss -ltn 'sport = :8765' | grep -q LISTEN; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "echo-ws-server failed to bind :8765 within 5s"
+          cat /tmp/echo-ws.log || true
+          exit 1
+
+      - name: Run SIPp scenarios
+        run: test-harness/sipp-scenarios/run-all.sh
+
+      - name: Stop echo-ws-server
+        if: always()
+        run: kill "$(cat /tmp/echo-ws.pid)" || true
+
+      - name: Echo-ws log on failure
+        if: failure()
+        run: cat /tmp/echo-ws.log || true

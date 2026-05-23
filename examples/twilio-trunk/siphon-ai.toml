@@ -1,0 +1,70 @@
+# Twilio Elastic SIP Trunking — minimal config for siphon-ai.
+#
+# Drop your real values into `[node].public_address`, the `listen`
+# host, and the `[[trunk]].sources` IP ranges (see
+# docs/INTEGRATIONS_TWILIO.md for the current Twilio signaling IPs
+# by region). Pair with the echo-ws-server example on :8765.
+
+[node]
+id = "siphon-ai-twilio"
+# Public IP or DNS name that Twilio dials. Must be reachable from
+# Twilio's signalling IPs and is what gets stamped on `Contact` and
+# the SDP `c=` line for the audio reply.
+public_address = "203.0.113.10"
+
+[sip]
+# Bind 0.0.0.0 so the kernel routes from Twilio's source IP. The
+# `Contact` URI is synthesized from `[node].public_address` + this
+# port automatically.
+listen = "0.0.0.0:5060"
+transports = ["udp"]
+user_agent = "SiphonAI/twilio"
+
+[media]
+# PCMU is Twilio's default for Elastic SIP Trunking; PCMA covers
+# European routes. Order matters — first match wins.
+codecs = ["pcmu", "pcma"]
+dtmf = "rfc2833"
+# RTP port range. Must be open in your firewall for Twilio's media
+# IPs (different set from the signalling IPs — see Twilio's docs).
+rtp_port_range = [40000, 40100]
+
+[bridge]
+# WebSocket server that receives the audio and decides what to say.
+# Replace with your own; the echo-ws-server-python example is a
+# good first-call test.
+ws_url = "ws://127.0.0.1:8765/"
+ws_connect_timeout_ms = 3000
+
+# Trim AI-side mute / silence / dead-air defaults if your call mix
+# wants different windows. The 0.2.0 defaults are sensible for
+# voice agents.
+
+[observability]
+enabled = true
+http_listen = "127.0.0.1:9091"
+
+# Pin inbound traffic to Twilio. Without this, anyone on the
+# internet who learns your public IP can send you INVITEs and get
+# bridged to your WS server.
+#
+# The `sources` list below uses RFC-5737 documentation ranges as
+# placeholders. Replace with the actual Twilio signalling IPs for
+# the regions you accept calls from — see Twilio's "SIP signaling
+# IP addresses" page (linked from docs/INTEGRATIONS_TWILIO.md).
+[[trunk]]
+name = "twilio"
+sources = [
+  "192.0.2.0/24",   # placeholder — replace with Twilio NA Virginia
+  "198.51.100.0/24", # placeholder — replace with Twilio Ireland
+]
+
+# Single default route — every accepted INVITE bridges to the
+# bridge ws_url above. For multi-tenant fan-out, replace `any =
+# true` with `to_user` / `request_uri` / custom-header matches
+# (see docs/DIALPLAN.md).
+[[route]]
+name = "twilio_inbound"
+register_source = "twilio"
+[route.match]
+any = true

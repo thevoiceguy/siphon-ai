@@ -130,6 +130,16 @@ pub struct BridgeDefaults {
     /// enough to weather a flap, short enough that an abandoned call
     /// after PBX network failure releases its forge session quickly.
     pub inactivity_timeout: Option<Duration>,
+    /// Default one-sided silence threshold: emit `silence_detected`
+    /// when the caller has been silent for this long (forge-vad
+    /// drives the underlying "speech" signal). `None` disables.
+    /// Default `Some(3000ms)` per `docs/DEV_PLAN_0.2.0.md` §9.2.
+    pub silence_threshold: Option<Duration>,
+    /// Default two-sided dead-air threshold: emit `dead_air_detected`
+    /// when neither caller speech nor outbound WS audio has been
+    /// observed for this long. `None` disables. Default
+    /// `Some(10000ms)` per `docs/DEV_PLAN_0.2.0.md` §9.2.
+    pub dead_air_threshold: Option<Duration>,
 }
 
 /// What the daemon does when forge-vad reports speech-started.
@@ -203,6 +213,8 @@ impl Default for BridgeDefaults {
             forward_headers: Vec::new(),
             barge_in: BargeInConfig::default(),
             inactivity_timeout: Some(Duration::from_secs(60)),
+            silence_threshold: Some(Duration::from_millis(3000)),
+            dead_air_threshold: Some(Duration::from_millis(10000)),
         }
     }
 }
@@ -456,6 +468,33 @@ pub fn resolve_inactivity_timeout(
         None => defaults.inactivity_timeout,
         Some(0) => None,
         Some(n) => Some(Duration::from_secs(n)),
+    }
+}
+
+/// Resolve the per-call silence threshold by merging the daemon
+/// default with the per-route override (`[route.bridge].silence_threshold_ms`).
+/// `None` returned = the event is disabled for this call.
+pub fn resolve_silence_threshold(
+    defaults: &BridgeDefaults,
+    route: &CompiledRoute,
+) -> Option<Duration> {
+    match route.bridge.silence_threshold_ms {
+        None => defaults.silence_threshold,
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+    }
+}
+
+/// Resolve the per-call dead-air threshold (same shape as
+/// [`resolve_silence_threshold`]).
+pub fn resolve_dead_air_threshold(
+    defaults: &BridgeDefaults,
+    route: &CompiledRoute,
+) -> Option<Duration> {
+    match route.bridge.dead_air_threshold_ms {
+        None => defaults.dead_air_threshold,
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
     }
 }
 
@@ -1885,6 +1924,8 @@ impl BridgingAcceptor {
                 to_tag: None,
                 barge_in_action: barge_in_to_tap_action(&resolve_barge_in(&self.defaults, route)),
                 inactivity_timeout: resolve_inactivity_timeout(&self.defaults, route),
+                silence_threshold: resolve_silence_threshold(&self.defaults, route),
+                dead_air_threshold: resolve_dead_air_threshold(&self.defaults, route),
             })
             .await?;
 

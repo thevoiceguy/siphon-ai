@@ -98,6 +98,29 @@ pub enum BridgeOut {
     /// The server may resume sending audio.
     Resume { call_id: CallId, seq: Seq },
 
+    /// Caller has been silent (no VAD speech) for at least
+    /// `duration_ms`. Configurable via `[bridge].silence_threshold_ms`;
+    /// `0` disables emission. Fires once per silence stretch (the
+    /// next event only after a speech → silence cycle); a long
+    /// silence does not generate a stream of these.
+    SilenceDetected {
+        call_id: CallId,
+        seq: Seq,
+        duration_ms: u64,
+    },
+
+    /// No audio observed in EITHER direction (no caller VAD speech
+    /// AND no outbound playout from the WS server) for at least
+    /// `duration_ms`. Suspect connectivity or a hung call.
+    /// Configurable via `[bridge].dead_air_threshold_ms`; `0`
+    /// disables emission. Fires every time the threshold elapses
+    /// without either side producing audio.
+    DeadAirDetected {
+        call_id: CallId,
+        seq: Seq,
+        duration_ms: u64,
+    },
+
     /// The caller pressed a DTMF key.
     Dtmf {
         call_id: CallId,
@@ -410,6 +433,36 @@ mod tests {
                 seq: 67,
                 ts_ms: 1890,
                 duration_ms: 656,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bridge_out_silence_detected() {
+        let raw =
+            r#"{ "type": "silence_detected", "call_id": "c", "seq": 12, "duration_ms": 3000 }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        assert!(matches!(
+            msg,
+            BridgeOut::SilenceDetected {
+                seq: 12,
+                duration_ms: 3000,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bridge_out_dead_air_detected() {
+        let raw =
+            r#"{ "type": "dead_air_detected", "call_id": "c", "seq": 13, "duration_ms": 10000 }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        assert!(matches!(
+            msg,
+            BridgeOut::DeadAirDetected {
+                seq: 13,
+                duration_ms: 10000,
                 ..
             }
         ));

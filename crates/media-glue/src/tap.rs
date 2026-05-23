@@ -58,6 +58,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::idle::{IdleDetector, IdleEvent};
+
 use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, EventBus, ForgeError, ForgeEvent};
 use forge_dtmf::DtmfDigit;
 use forge_engine::{
@@ -240,6 +242,15 @@ pub struct MediaTap {
     /// of pushing them into forge — the caller hears silence and
     /// the WS server isn't back-pressured.
     muted: bool,
+    /// Timer-based derivation of `silence_detected` / `dead_air_detected`
+    /// events. Polled on a 500 ms tick in `run()` when at least one
+    /// threshold is configured; receives `note_speech_started` on
+    /// every forge-vad speech-started, and `note_ws_audio` on every
+    /// playout byte arriving from the WS server. Initialized with
+    /// both thresholds `None` (disabled); the acceptor calls
+    /// [`Self::with_idle_thresholds`] before `run()` to install the
+    /// resolved per-call values.
+    idle_detector: IdleDetector,
 }
 
 impl std::fmt::Debug for MediaTap {
@@ -302,6 +313,7 @@ impl MediaTap {
             barge_in_action,
             inactivity_timeout: None,
             muted: false,
+            idle_detector: IdleDetector::new(None, None, Instant::now()),
         })
     }
 
@@ -310,6 +322,20 @@ impl MediaTap {
     /// `inactivity_timeout_secs` lands on the tap before `run` starts.
     pub fn with_inactivity_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.inactivity_timeout = timeout;
+        self
+    }
+
+    /// Install the silence / dead-air thresholds resolved from
+    /// `[bridge].silence_threshold_ms` + `[bridge].dead_air_threshold_ms`
+    /// (and any per-route override). `None` disables that event for
+    /// this call. Acceptor calls this after `attach_with_barge_in`
+    /// before `run()`.
+    pub fn with_idle_thresholds(
+        mut self,
+        silence: Option<Duration>,
+        dead_air: Option<Duration>,
+    ) -> Self {
+        self.idle_detector = IdleDetector::new(silence, dead_air, Instant::now());
         self
     }
 
@@ -361,6 +387,17 @@ impl MediaTap {
         let watchdog = tokio::time::sleep(watchdog_initial);
         tokio::pin!(watchdog);
 
+        // Silence / dead-air poll tick. 500 ms cadence gives ±500 ms
+        // detection accuracy against thresholds of 3 s / 10 s — fine
+        // for the WS-server "are you still there?" use case. The
+        // first tick fires after the period (not immediately) so we
+        // don't spam events on a freshly-connected call.
+        let mut idle_check = tokio::time::interval(Duration::from_millis(500));
+        idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Consume the immediate first tick that `interval` emits, so
+        // the arm doesn't fire at t=0 against a fresh detector.
+        idle_check.tick().await;
+
         loop {
             tokio::select! {
                 biased;
@@ -393,6 +430,12 @@ impl MediaTap {
                         debug!("playout_audio_rx closed; ending tap");
                         return Ok(TapDisconnect::ControllerHungUp);
                     };
+                    // Idle-detector: any WS-side push counts as
+                    // "audio activity" for dead-air detection,
+                    // regardless of mute state — a muted call where
+                    // the WS server keeps streaming is NOT dead air,
+                    // it's intentional silence.
+                    self.idle_detector.note_ws_audio(Instant::now());
                     // `TapCommand::Mute` gates AI-side playout. We
                     // still recv (draining the channel keeps WS
                     // backpressure away) but skip unpack + forge so
@@ -463,6 +506,16 @@ impl MediaTap {
                     match event {
                         Ok(ev) => {
                             if let Some(out) = derive_outgoing_event(&self.call_id, ev) {
+                                // Hook the idle detector on every
+                                // SpeechStarted — regardless of
+                                // barge-in policy. Resets silence +
+                                // dead-air timers and clears the
+                                // silence-fired suppression flag so
+                                // the next silence stretch can fire
+                                // a fresh event.
+                                if matches!(out, OutgoingEvent::SpeechStarted { .. }) {
+                                    self.idle_detector.note_speech_started(Instant::now());
+                                }
                                 // Barge-in `auto_clear`: when forge-vad
                                 // reports speech-started AND this call's
                                 // policy is AutoClear, drop pending
@@ -641,6 +694,34 @@ impl MediaTap {
                                 name,
                                 frames_sent_to_forge,
                                 first_audio_pushed_at,
+                            );
+                        }
+                    }
+                }
+
+                // Idle-detector poll. Fires every 500 ms when at
+                // least one threshold is configured; emits derived
+                // `SilenceDetected` / `DeadAirDetected` events as
+                // best-effort (same try_send policy as DTMF and
+                // Mark).
+                _ = idle_check.tick(), if self.idle_detector.is_active() => {
+                    let now = Instant::now();
+                    for ev in self.idle_detector.poll(now) {
+                        let out = match ev {
+                            IdleEvent::SilenceDetected { duration_ms } => {
+                                metrics::counter!("siphon_ai_silence_events_total").increment(1);
+                                OutgoingEvent::SilenceDetected { duration_ms }
+                            }
+                            IdleEvent::DeadAirDetected { duration_ms } => {
+                                metrics::counter!("siphon_ai_dead_air_events_total").increment(1);
+                                OutgoingEvent::DeadAirDetected { duration_ms }
+                            }
+                        };
+                        if let Err(e) = events_tx.try_send(out) {
+                            warn!(
+                                call_id = %self.call_id,
+                                error = %e,
+                                "events_tx full or closed; dropping idle event"
                             );
                         }
                     }

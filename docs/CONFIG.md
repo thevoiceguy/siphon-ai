@@ -95,12 +95,20 @@ mode = "session_progress"
 
 ## `[bridge]`
 
-| Field                    | Type      | Default | Notes |
-|--------------------------|-----------|---------|-------|
-| `ws_url`                 | URL       | unset   | If unset, every route MUST set its own `ws_url` or the call rejects with 503. |
-| `ws_auth_header`         | string    | unset   | Sent verbatim as the `Authorization` header. `${VAR}` expansion works. |
-| `ws_connect_timeout_ms`  | integer   | `5000`  | WS handshake budget. |
-| `forward_headers`        | string[]  | `[]`    | SIP header names (case-insensitive) to copy onto `start.sip.headers`. |
+| Field                      | Type      | Default  | Notes |
+|----------------------------|-----------|----------|-------|
+| `ws_url`                   | URL       | unset    | If unset, every route MUST set its own `ws_url` or the call rejects with 503. |
+| `ws_auth_header`           | string    | unset    | Sent verbatim as the `Authorization` header. `${VAR}` expansion works. |
+| `ws_connect_timeout_ms`    | integer   | `5000`   | WS handshake budget. |
+| `forward_headers`          | string[]  | `[]`     | SIP header names (case-insensitive) to copy onto `start.sip.headers`. |
+| `silence_threshold_ms`     | integer   | `3000`   | One-sided: emit `silence_detected` (PROTOCOL §3.6) when the caller has been VAD-silent for this long. `0` disables. Per-route override via `[route.bridge].silence_threshold_ms`. |
+| `dead_air_threshold_ms`    | integer   | `10000`  | Two-sided: emit `dead_air_detected` (PROTOCOL §3.7) when neither caller speech nor outbound WS audio has been observed for this long. `0` disables. Per-route override via `[route.bridge].dead_air_threshold_ms`. |
+
+> **Detection cadence.** Both events are polled every 500 ms, so the
+> `duration_ms` on the wire may overshoot the configured threshold by
+> up to that amount. Acceptable for the "are you still there?" /
+> "hang up the dead call" use cases these primitives target;
+> sub-second accuracy needs a different design.
 
 ### `[bridge.barge_in]`
 

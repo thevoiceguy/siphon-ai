@@ -1,6 +1,6 @@
 # SiphonAI 0.2.0 Development Plan
 
-**Status:** working draft. 1 / 6 decisions in §9 resolved (call-progress / early-media — see §9.1); the remaining five gate Sprint 1.
+**Status:** working draft — all 6 decisions in §9 resolved; ready to start Sprint 1.
 
 This is the incremental plan from `v0.1.0` (see `docs/DEV_PLAN.md` for the original product definition and locked decisions). It picks up the 0.2.0 roadmap brief and re-organises it around what actually fits siphon-ai's "thin orchestration bridge" mission per `CLAUDE.md` §4.1.
 
@@ -133,11 +133,23 @@ These are the gates worth resolving before any code lands. The recommendations a
    - **Forge**: investigated — supports it today, no changes needed. The acceptor already calls `start_session()` *before* `accept_invite` (see `crates/core/src/acceptor.rs:1331`, with an explicit "Start forge's RTP forwarding loop BEFORE the 200 OK" comment), and `send_rtp_to` has no "answered" gate, only requiring the remote address (already seeded from the offer).
    - **siphon-rs**: was missing one RFC 3262 correctness fix — `create_reliable_provisional` ignored the dialog's local tag and stamped a random one, so PRACK matching would never work end-to-end. Fixed upstream in [siphon-rs#47](https://github.com/thevoiceguy/siphon-rs/pull/47); siphon-ai bumped to that rev.
    - **Decision**: 0.2.0 ships **Flavour B (best-effort 183 with negotiated SDP)**. Peers that include `Require: 100rel` in the INVITE are detected at INVITE time and the call falls through to `instant_answer` with a `warn!` log (so they still get bridged, just without reliable provisionals). The reliable / 100rel-honouring variant — and the "AI plays a prompt during the 183 phase" *Flavour C* — are deferred to **0.2.1 / 0.3.0**, when `on_prack` wiring in `RoutingHandler` and a `BridgeIn::Answer` control message are tackled together.
-2. **`silence_detected` / `dead_air_detected` default thresholds** — proposal: `silence_threshold_ms = 1500`, `dead_air_threshold_ms = 5000`. Survey against actual call traffic before locking.
-3. **RTP stats cadence** — default emit interval? Proposal: `5000 ms`. Configurable per-call via a control message?
-4. **Twilio example scope** — inbound-trunk config + pointer to echo-ws-server, or a fuller "Twilio sends webhook, siphon-ai handles the SIP" loop? The former is much smaller.
-5. **Transcription example STT provider** — Deepgram only (faster) or Deepgram + AssemblyAI + Whisper (toolkit pattern)? The latter doubles as a partial answer to "provider abstraction" without putting it in the bridge.
-6. **Park semantics** — pure docs ("model as REFER to parking orbit") or a thin `BridgeIn::Park { orbit }` helper that wraps `Transfer` with the right URI? Recommendation: doc route — park is a PBX feature.
+2. ✅ **`silence_detected` / `dead_air_detected` thresholds** — **resolved**.
+   - **Defaults**: `silence_threshold_ms = 3000`, `dead_air_threshold_ms = 10000`. Both configurable in `[bridge].silence_threshold_ms` / `[bridge].dead_air_threshold_ms` (per-route inherits; `0` disables that event entirely).
+   - **Rationale**: silence (one-sided — caller paused) and dead-air (two-sided — suspect connectivity) want different defaults. The earlier 1500 ms proposal sits below a normal conversational pause and would fire on every breath; 3000 ms is closer to the typical "are you still there?" attention-check threshold. 10000 ms for dead-air gives the network a chance to recover from a brief blip before flagging the call as broken.
+   - Both events are *primitives* — the WS server decides what to do with them (prompt, escalate, hang up).
+3. ✅ **RTP stats cadence** — **resolved**.
+   - **Default**: `[bridge].rtp_stats_interval_ms = 5000`. Per-route override; `0` disables `BridgeOut::RtpStats` emission entirely.
+   - **Rationale**: 5 s mirrors RTCP's default compound-report cadence (RFC 3550 §6.2), so siphon-ai's stats events line up with the RTCP arrivals they're derived from — no aliasing. Per-call dynamic adjustment via a control message is overengineering for 0.2.0; config-only is enough. Revisit if a real consumer (e.g. a contact-center QoE dashboard) needs sub-second cadence.
+4. ✅ **Twilio example scope** — **resolved**.
+   - **Decision**: ship the Elastic-SIP-Trunking example only (`examples/twilio-trunk/` + `docs/INTEGRATIONS_TWILIO.md`). Twilio sends inbound INVITEs straight to siphon-ai's public address; siphon-ai answers and bridges to the echo-ws server. No webhook server needed.
+   - The Programmable-Voice `<Dial><Sip>` flow (TwiML webhook + `<Dial><Sip>` pointing at siphon-ai) gets a one-section pointer in the integration doc with a TwiML snippet, but not a full runnable example.
+   - **Rationale**: Elastic SIP Trunking is the "siphon-ai *is* the SIP endpoint" model — the most natural shape for the bridge. Adding a TwiML-webhook example doubles the maintenance surface for a thinner adoption gain (it's mostly Twilio-side configuration, not siphon-ai behaviour).
+5. ✅ **Transcription example STT provider** — **resolved**.
+   - **Decision**: Deepgram only in `examples/transcription-server-py/`. The README ends with a "Using a different STT provider" section sketching the swap (replace the Deepgram WS connection with the equivalent AssemblyAI / Whisper streaming client) and points at `examples/openai-realtime-bridge-py/` (the 0.1.0 reference) for a worked multi-provider abstraction.
+   - **Rationale**: the example's job is to demonstrate *the bridge*, not a provider taxonomy. One concrete provider keeps the example readable in a single sitting. The multi-provider "toolkit" pattern is the topic of the stretch §5.3 example if it lands, and provider neutrality is already implicit in siphon-ai's architecture.
+6. ✅ **Park semantics** — **resolved**.
+   - **Decision**: docs-only. No new `BridgeIn` variant. Park = existing `BridgeIn::Transfer { call_id, target: "sip:<orbit>@<pbx-host>" }`.
+   - **Rationale**: park is a PBX-side feature — the parking orbit, slot allocation, and retrieval flow all live on the PBX, not in the bridge. Adding a `BridgeIn::Park` wrapper would imply siphon-ai *owns* the orbit, which it doesn't, and would mislead the protocol surface. A short "Parking calls" section in `docs/CALL_HANDLING.md` (added in Week 1 of Sprint 1) covers the pattern with a concrete REFER-target example.
 
 ## 10. Definition of Done — v0.2.0
 

@@ -329,8 +329,7 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                         peer = %ctx.peer(),
                         "INVITE rejected: no trunk matched (403 Forbidden)"
                     );
-                    let mut response =
-                        UserAgentServer::create_response(request, 403, "Forbidden");
+                    let mut response = UserAgentServer::create_response(request, 403, "Forbidden");
                     self.fill_response(&mut response, ctx).await;
                     handle.send_final(response).await;
                     return Ok(());

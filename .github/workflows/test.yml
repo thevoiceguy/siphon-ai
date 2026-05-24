@@ -113,3 +113,30 @@ jobs:
       - name: Echo-ws log on failure
         if: failure()
         run: cat /tmp/echo-ws.log || true
+
+      # SIPp writes <scenario>_<pid>_errors.log to the runner's CWD
+      # (`-trace_err` in run-all.sh; the runner pins CWD to its own
+      # directory). Dump them on failure so a version-skew or
+      # message-mismatch is visible without having to download an
+      # artifact.
+      - name: SIPp errors logs on failure
+        if: failure()
+        run: |
+          shopt -s nullglob
+          for f in test-harness/sipp-scenarios/*_errors.log; do
+            echo "─── $f ───"
+            cat "$f"
+            echo
+          done
+
+      # The daemon log tells us whether siphon-ai saw / answered the
+      # INVITE — critical when the SIPp side reports nothing.
+      - name: siphon-ai daemon log on failure
+        if: failure()
+        run: |
+          shopt -s nullglob
+          for f in /tmp/siphon-ai-sipp.*.log; do
+            echo "─── $f ───"
+            cat "$f"
+            echo
+          done

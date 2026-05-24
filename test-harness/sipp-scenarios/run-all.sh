@@ -24,6 +24,13 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# sipp's `-trace_err` writes <scenario>_<pid>_errors.log to the CWD,
+# with no flag to redirect. Pin the CWD to the scenarios directory
+# so the path the "(see ${label}_*errors.log)" hint refers to is
+# stable regardless of where the script was invoked from — and so
+# the CI workflow's failure-dump step has a predictable glob target.
+cd "$SCRIPT_DIR"
+
 SIPP_PORT=5080       # SIPp's listen port (any free port works)
 DAEMON_PORT=5070     # SiphonAI's listen port (matches local-dev.toml)
 DAEMON_BIN="${DAEMON_BIN:-$REPO_ROOT/target/debug/siphon-ai}"

@@ -89,6 +89,12 @@ async fn spawn_server(opts: ServerOpts) -> ServerHandle {
         let require_auth = opts.require_auth.clone();
         let captured_for_callback = Arc::clone(&captured_clone);
 
+        // `ErrorResponse` (the tungstenite handshake-rejection type) is
+        // ~136 bytes; rust-1.95 clippy's `result_large_err` flags
+        // closures returning it. The shape is dictated by the
+        // tungstenite handshake-callback signature, so just allow
+        // here (same pattern as crates/core/tests/common/mod.rs).
+        #[allow(clippy::result_large_err)]
         let callback =
             move |req: &HsRequest, mut resp: HsResponse| -> Result<HsResponse, ErrorResponse> {
                 // Capture interesting headers for assertion.

@@ -141,8 +141,11 @@ Twilio terminates TLS at the trunk — they validate your certificate
 against the public CA chain. Use Let's Encrypt or your existing
 internal PKI.
 
-The deeper "rotate certs, mTLS, cert pinning" story is in
-[`docs/DEPLOY.md`](DEPLOY.md) (forthcoming for 0.3.0).
+The deeper "cert provisioning, file permissions under the systemd
+`siphon` user, Let's Encrypt deploy-hook for renewal, openssl + SIPp
+smoke test" recipe is in [`docs/DEPLOY.md`](DEPLOY.md) § TLS
+deployment (landed in 0.2.0). mTLS for the bridge WS leg and SRTP
+for the media leg are still 0.2.1 / 0.3.0 — see CHANGELOG.
 
 ---
 

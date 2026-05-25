@@ -47,12 +47,19 @@ a=rtpmap:0 PCMU/8000
     <action>
       <!-- Assert the 183 carries an SDP body — the whole point of
            session_progress mode. The scenario fails if Content-Type
-           is anything other than application/sdp. -->
+           is anything other than application/sdp.
+           The `<log>` line below isn't decorative: SIPp's
+           `-trace_err` flags `assign_to` variables that are captured
+           but never referenced ("is referenced 1 times"), and the
+           bash runner treats any errors.log content as a scenario
+           failure. Naming the variable starts-with-a-letter avoids
+           the `[$183_…]` substitution-parse ambiguity. -->
       <ereg regexp="application/sdp"
             search_in="hdr"
             header="Content-Type:"
             check_it="true"
-            assign_to="183_sdp_present"/>
+            assign_to="sdp_content_type"/>
+      <log message="183 Content-Type=[$sdp_content_type]"/>
     </action>
   </recv>
 

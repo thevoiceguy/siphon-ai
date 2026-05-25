@@ -58,6 +58,14 @@ These are documented because they're DoD adjacent and worth setting expectation 
 - **Reliable provisionals (RFC 3262 `100rel`) for `session_progress` mode** are not implemented. INVITEs that include `Require: 100rel` fall back to `instant_answer` for that call with a `warn!` log rather than sending a non-compliant unreliable 183. The reliable path is paired with `BridgeIn::Answer` (the "AI plays during the 183 phase" flow) for 0.2.1 / 0.3.0.
 - **Hot reload of the SIP/TLS cert is not implemented.** Cert rotation requires a daemon restart; pair with an L4 load balancer if your traffic pattern can't tolerate that. The renewal recipe in `docs/DEPLOY.md` § TLS deployment uses a Let's Encrypt deploy-hook + `systemctl restart`.
 
+### Deferred to 0.2.1 (Sprint 1 §5 stretch slip)
+
+`docs/DEV_PLAN_0.2.0.md` §5 listed three stretch items that slip to 0.2.1 per the plan's own policy ("Stretch items slot into spare time, in §5 order. If stretch eats more than Week 5, bump them to 0.2.1."). For clarity:
+
+- **mTLS for the bridge WebSocket connection** and wire-format validation against the WS server's cert. The 0.2.0 TLS recipe in `docs/DEPLOY.md` covers SIP/TLS + server-auth WSS + cert rotation; client-cert auth on the WS leg would need a `[bridge.tls.client_cert]` / `[bridge.tls.client_key]` config surface and the matching rustls connector wiring — not in 0.2.0.
+- **Attended transfer (REFER with Replaces)** — depends on siphon-rs UAC capability that wasn't ready in time.
+- **`examples/provider-toolkit-py/`** — a pluggable Deepgram/Whisper STT + OpenAI/Anthropic/Groq LLM + ElevenLabs/Cartesia TTS reference example. The 0.2.0 reference servers (`echo-ws-server-python`, `openai-realtime-bridge-py`, `transcription-server-py`) cover the canonical shapes; the multi-provider toolkit is a 0.2.1 cleanup item.
+
 ## [0.1.0] - 2026-05-22
 
 First public release. SiphonAI is a provider-neutral SIP-to-WebSocket

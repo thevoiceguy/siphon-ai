@@ -39,6 +39,130 @@ operator's network, and the daemon container.
 | Outbound 9060     | UDP    | `[hep].collector` | outbound | HEP3 to Homer. UDP only in v1. |
 | Outbound 5060/5061 | UDP/TCP | `[[register]].server` | bidirectional | Per `[[register]]` block. |
 
+## TLS deployment (SIP/TLS + WSS)
+
+A production deployment encrypts both legs: SIP/TLS for signaling
+to the carrier or PBX, and WSS for the bridge to the WS server.
+The mechanics already ship in v0.1.0; this is the recipe.
+
+### 1. Obtain a certificate
+
+`siphon-ai` reads a PEM cert chain + PEM private key from disk —
+any provisioning path works. Common options:
+
+| Source | When to use | Notes |
+|--------|-------------|-------|
+| **Let's Encrypt (DNS-01)** | Public SIP-on-Internet, the carrier accepts a public CA. | Use DNS-01 so the daemon doesn't need port 80; renewals are unattended via certbot's deploy-hook. |
+| **Carrier-issued / pinned** | The carrier signs your cert or expects a specific intermediate. | Drop the carrier's chain in as `cert`. The private-CA bundle goes in your OS trust store if you also need to *verify* the carrier's leaf. |
+| **Internal PKI** | Site-to-site to your own PBX (e.g. Asterisk, CUCM). | Both sides trust an internal root. Put the root in `/etc/ssl/certs/` so rustls picks it up via the system store path you've configured. |
+
+The cert's CommonName / SubjectAltName must include the hostname
+the carrier or PBX resolves for your trunk — usually the same name
+you put in `[node].public_address`.
+
+### 2. Configure `[sip.tls]`
+
+```toml
+[sip]
+listen     = "0.0.0.0:5060"
+transports = ["udp", "tcp", "tls"]   # `"tls"` requires the block below
+
+[sip.tls]
+listen = "0.0.0.0:5061"              # standard SIP/TLS port
+cert   = "/etc/siphon-ai/tls/fullchain.pem"
+key    = "/etc/siphon-ai/tls/privkey.pem"
+```
+
+Both `cert` and `key` are paths on disk; the daemon loads them at
+startup via `sip_transport::load_rustls_server_config` and binds
+the listener before answering `/ready`. A missing or unreadable
+file fails fast at startup with a clear error — no silent fallback
+to UDP.
+
+> **Inbound UAS only in v0.1.0/0.2.0.** Outbound TLS connections
+> (UAC originating a new TLS dialog) are not implemented and
+> return a clear error rather than silently downgrading. Inbound
+> `INVITE sips:…` from the carrier works.
+
+### 3. WSS to the WebSocket server
+
+Just set `wss://` in `[bridge].ws_url` (or `[route.bridge].ws_url`):
+
+```toml
+[bridge]
+ws_url = "wss://reception.example.com/sip-bridge"
+```
+
+No client cert or extra config is needed. The daemon's
+`tokio-tungstenite` client is built with `rustls-tls-webpki-roots`
+— the Mozilla CA bundle is baked into the binary, so trust works
+out-of-the-box for any publicly-signed cert without depending on
+the host's CA store. For an internal CA, the simpler path is to
+terminate WSS at a reverse proxy with a publicly-trusted cert in
+front of your WS server.
+
+`[bridge].ws_auth_header` works identically over WSS — use it for
+the bearer token your WS server expects:
+
+```toml
+ws_auth_header = "Bearer ${BRIDGE_TOKEN}"
+```
+
+### 4. File permissions for cert/key
+
+The systemd unit runs as the unprivileged `siphon` user; that user
+must be able to *read* the cert and key but should not own them.
+
+```sh
+sudo install -d -m 0750 -o root -g siphon /etc/siphon-ai/tls
+sudo install -m 0640 -o root -g siphon fullchain.pem /etc/siphon-ai/tls/
+sudo install -m 0640 -o root -g siphon privkey.pem   /etc/siphon-ai/tls/
+```
+
+`ProtectSystem=strict` in the unit blocks writes outside
+`/etc/siphon-ai/`, which is fine because renewal tools write to
+the cert directory directly.
+
+### 5. Renewal
+
+`siphon-ai` re-reads cert + key on startup, not at runtime. The
+simplest reliable pattern is to restart on renewal:
+
+```sh
+# Let's Encrypt deploy-hook (drop into /etc/letsencrypt/renewal-hooks/deploy/)
+#!/bin/sh
+set -e
+install -m 0640 -o root -g siphon \
+    "$RENEWED_LINEAGE/fullchain.pem" /etc/siphon-ai/tls/
+install -m 0640 -o root -g siphon \
+    "$RENEWED_LINEAGE/privkey.pem"   /etc/siphon-ai/tls/
+systemctl restart siphon-ai
+```
+
+A restart drops in-flight calls. If your traffic pattern can't
+tolerate that, run two instances behind an L4 load balancer and
+restart them one at a time. Hot cert reload is on the roadmap for
+a later release.
+
+### 6. Smoke test
+
+```sh
+# From outside the daemon: confirm the TLS listener answers and
+# presents the expected cert.
+openssl s_client -connect siphon.example.com:5061 -servername siphon.example.com \
+    -showcerts < /dev/null 2>&1 | head -20
+
+# Verify your trunk peer can route a SIPS INVITE end-to-end.
+# SIPp's `-t l1` enables TLS:
+sipp -sn uac -t l1 -tls_cert client.pem -tls_key client.pem \
+     siphon.example.com:5061 -m 1 -s 1000
+```
+
+If the listener answers but the carrier sees handshake failures,
+the usual cause is a missing intermediate in `fullchain.pem` —
+verify with `openssl s_client -showcerts` that the full chain is
+present, not just the leaf.
+
 ## systemd unit (sketch)
 
 A minimal unit file. Put the config under `/etc/siphon-ai/`, the binary

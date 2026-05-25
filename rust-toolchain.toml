@@ -1,4 +1,10 @@
+# Pinned to a specific patch version (not "stable") so the toolchain
+# clippy / rustfmt run against is identical on every dev box, every
+# branch, and every CI runner — eliminating the cross-version drift
+# that produced PR #78 (CI's clippy was 1.95.0 and tripped
+# `result_large_err`; my local clippy was older and didn't). Bump
+# this explicitly when a newer stable is desired.
 [toolchain]
-channel    = "stable"
+channel    = "1.95.0"
 components = ["rustfmt", "clippy"]
 profile    = "minimal"

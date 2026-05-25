@@ -42,6 +42,17 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
+**v0.2.0** — second release. Adds the operator-primitive event surface
+(`silence_detected`, `dead_air_detected`, `rtp_stats`), sustained-mute
+control (`BridgeIn::Mute` / `Unmute` — distinct from one-shot `clear`),
+three configurable call-progress modes (`instant_answer` / `ringing` /
+`session_progress`), an end-to-end Twilio Elastic SIP Trunk recipe, a
+Deepgram transcription reference WS server, a CI gate on every PR
+(fmt + clippy + cargo test + SIPp regression), and the operator-facing
+TLS deployment recipe. Protocol stays at `version: "1"` — every new
+variant is additive, so v1 WS servers built against 0.1.0 keep working
+unchanged. Full notes: [`CHANGELOG.md`](CHANGELOG.md).
+
 **v0.1.0** — first public release. The audio path, WS protocol, SIP signaling,
 HEP capture, CDR/webhook sinks, and trunk-allowlist gate are in. Real-world
 FreeSWITCH-bridged calls work with sub-second user-to-audio latency on a

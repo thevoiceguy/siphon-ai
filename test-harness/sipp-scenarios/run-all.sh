@@ -116,7 +116,56 @@ for s in "${scenarios[@]}"; do
     run_scenario "$s" || failures=$((failures + 1))
 done
 
-# ─── Optional second phase: blind_transfer ────────────────────────
+# ─── Always-on auxiliary phase: session_progress ─────────────────
+# Verifies `[sip.call_progress] mode = "session_progress"` produces a
+# 183 with the negotiated answer SDP before the 200 OK (the §4.1
+# deliverable from the 0.2.0 plan). The main scenarios run against
+# the default config (`instant_answer` in `configs/local-dev.toml`),
+# so this phase stops that daemon and brings up a fresh one with a
+# session_progress config on the same port.
+echo
+echo "─── auxiliary phase: session_progress ────────────────"
+cleanup
+trap - EXIT
+
+SP_DAEMON_LOG=$(mktemp -t siphon-ai-sp.XXXXXX.log)
+SP_CONFIG=$(mktemp -t siphon-ai-sp.XXXXXX.toml)
+cat >"$SP_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-sp"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[sip.call_progress]
+mode = "session_progress"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:8765/"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$SP_CONFIG" \
+    >"$SP_DAEMON_LOG" 2>&1 &
+SP_DAEMON_PID=$!
+sp_cleanup() {
+    if kill -0 "$SP_DAEMON_PID" 2>/dev/null; then
+        kill "$SP_DAEMON_PID" 2>/dev/null || true
+        wait "$SP_DAEMON_PID" 2>/dev/null || true
+    fi
+}
+trap sp_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+run_scenario session_progress_then_answer.xml || failures=$((failures + 1))
+
+sp_cleanup
+trap - EXIT
+
+# ─── Optional third phase: blind_transfer ─────────────────────────
 # Needs a WS server that proactively emits BridgeIn::Transfer. The
 # runner stops the daemon, brings up an echo-ws that auto-emits
 # transfer pointing back at the SIPp port, then restarts the daemon

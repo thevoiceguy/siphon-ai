@@ -588,6 +588,49 @@ fn is_srtp_protocol(p: &forge_sdp::Protocol) -> bool {
     )
 }
 
+/// Whether the offer's audio m-line uses the DTLS-SRTP profile
+/// (`UDP/TLS/RTP/SAVPF`, or its rarer `TCP/TLS/RTP/SAVPF` cousin).
+/// `RTP/SAVP` and `RTP/SAVPF` are SDES (or plain-RTP SAVPF) — DTLS
+/// only fires on the explicit `UDP/TLS/...` profiles.
+pub fn is_dtls_srtp_protocol(p: &forge_sdp::Protocol) -> bool {
+    use forge_sdp::Protocol;
+    matches!(p, Protocol::UdpTlsRtpSavpf | Protocol::TcpTlsRtpSavpf)
+}
+
+/// Extract the remote peer's DTLS fingerprint from an offer's audio
+/// media block. Returns `Some((algorithm, hash))` when the offer
+/// carries a media-level `a=fingerprint:` (RFC 8122 / 4572). Looks
+/// at the session level as a fallback per RFC 8122 §5: a session-
+/// level fingerprint applies to every media block that doesn't carry
+/// its own.
+///
+/// `algorithm` is typically `"sha-256"`; siphon-ai only supports
+/// `sha-256` for 0.3.0 — callers should reject other algorithms.
+pub fn extract_remote_dtls_fingerprint(
+    offer: &forge_sdp::SessionDescription,
+) -> Option<(String, String)> {
+    use forge_sdp::{dtls::DtlsAttributesExt, dtls::MediaDtlsAttributesExt, MediaType};
+    let audio = offer.find_media(MediaType::Audio)?;
+    audio
+        .get_media_dtls_fingerprint()
+        .or_else(|| offer.get_dtls_fingerprint())
+}
+
+/// Extract the remote peer's DTLS setup role from an offer's audio
+/// media block. Same media-level-then-session-level lookup pattern as
+/// [`extract_remote_dtls_fingerprint`]. Returns `None` when the
+/// offer carries no `a=setup:` line; RFC 5763 §5 says the default is
+/// `active`, so callers should default to that.
+pub fn extract_remote_dtls_setup(
+    offer: &forge_sdp::SessionDescription,
+) -> Option<forge_sdp::dtls::DtlsSetup> {
+    use forge_sdp::{dtls::DtlsAttributesExt, dtls::MediaDtlsAttributesExt, MediaType};
+    let audio = offer.find_media(MediaType::Audio)?;
+    audio
+        .get_media_dtls_setup()
+        .or_else(|| offer.get_dtls_setup())
+}
+
 /// Reject offers whose audio m-line protocol is incompatible with the
 /// effective [`SrtpMode`] for this call, per DEV_PLAN_0.3.0.md §4.1.
 ///
@@ -2730,6 +2773,94 @@ a=sendrecv\r\n";
         let (code, reason) = err.sip_status();
         assert_eq!(code, 488);
         assert_eq!(reason, "Not Acceptable Here");
+    }
+
+    // ─── DTLS-SRTP offer parsing helpers ─────────────────────────────
+
+    #[test]
+    fn is_dtls_srtp_protocol_matches_udp_tls() {
+        use forge_sdp::Protocol;
+        assert!(is_dtls_srtp_protocol(&Protocol::UdpTlsRtpSavpf));
+        assert!(is_dtls_srtp_protocol(&Protocol::TcpTlsRtpSavpf));
+        // SDES profiles aren't DTLS-SRTP.
+        assert!(!is_dtls_srtp_protocol(&Protocol::RtpSavp));
+        assert!(!is_dtls_srtp_protocol(&Protocol::RtpSavpf));
+        // Plaintext.
+        assert!(!is_dtls_srtp_protocol(&Protocol::RtpAvp));
+    }
+
+    const DTLS_OFFER_MEDIA_LEVEL: &str = "v=0\r\n\
+        o=- 1 1 IN IP4 192.0.2.1\r\n\
+        s=-\r\n\
+        c=IN IP4 192.0.2.1\r\n\
+        t=0 0\r\n\
+        m=audio 10000 UDP/TLS/RTP/SAVPF 0\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=fingerprint:sha-256 AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67\r\n\
+        a=setup:actpass\r\n";
+
+    const DTLS_OFFER_SESSION_LEVEL: &str = "v=0\r\n\
+        o=- 1 1 IN IP4 192.0.2.1\r\n\
+        s=-\r\n\
+        c=IN IP4 192.0.2.1\r\n\
+        t=0 0\r\n\
+        a=fingerprint:sha-256 FE:DC:BA:98:76:54:32:10:FE:DC:BA:98:76:54:32:10:FE:DC:BA:98:76:54:32:10:FE:DC:BA:98:76:54:32:10\r\n\
+        a=setup:active\r\n\
+        m=audio 10000 UDP/TLS/RTP/SAVPF 0\r\n\
+        a=rtpmap:0 PCMU/8000\r\n";
+
+    #[test]
+    fn extract_fingerprint_prefers_media_level() {
+        // Per RFC 8122 §5: media-level overrides session-level.
+        // Build an SDP with both and assert media wins.
+        let sdp = "v=0\r\n\
+            o=- 1 1 IN IP4 192.0.2.1\r\n\
+            s=-\r\n\
+            c=IN IP4 192.0.2.1\r\n\
+            t=0 0\r\n\
+            a=fingerprint:sha-256 11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11:11\r\n\
+            m=audio 10000 UDP/TLS/RTP/SAVPF 0\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=fingerprint:sha-256 22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22:22\r\n";
+        let offer = parse_sdp(sdp);
+        let (alg, hash) = extract_remote_dtls_fingerprint(&offer).unwrap();
+        assert_eq!(alg, "sha-256");
+        // The media-level (22:...) wins.
+        assert!(hash.starts_with("22:22"));
+    }
+
+    #[test]
+    fn extract_fingerprint_falls_back_to_session_level() {
+        let offer = parse_sdp(DTLS_OFFER_SESSION_LEVEL);
+        let (alg, hash) = extract_remote_dtls_fingerprint(&offer).unwrap();
+        assert_eq!(alg, "sha-256");
+        assert!(hash.starts_with("FE:DC"));
+    }
+
+    #[test]
+    fn extract_fingerprint_returns_none_when_absent() {
+        let offer = parse_sdp(AVP_OFFER);
+        assert!(extract_remote_dtls_fingerprint(&offer).is_none());
+    }
+
+    #[test]
+    fn extract_setup_reads_media_level() {
+        use forge_sdp::dtls::DtlsSetup;
+        let offer = parse_sdp(DTLS_OFFER_MEDIA_LEVEL);
+        assert_eq!(extract_remote_dtls_setup(&offer), Some(DtlsSetup::Actpass));
+    }
+
+    #[test]
+    fn extract_setup_falls_back_to_session_level() {
+        use forge_sdp::dtls::DtlsSetup;
+        let offer = parse_sdp(DTLS_OFFER_SESSION_LEVEL);
+        assert_eq!(extract_remote_dtls_setup(&offer), Some(DtlsSetup::Active));
+    }
+
+    #[test]
+    fn extract_setup_returns_none_when_absent() {
+        let offer = parse_sdp(AVP_OFFER);
+        assert!(extract_remote_dtls_setup(&offer).is_none());
     }
 
     #[test]

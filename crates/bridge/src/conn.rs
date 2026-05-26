@@ -162,6 +162,9 @@ pub enum OutgoingEvent {
         /// Packet loss as a ratio in `[0.0, 1.0]`. `None` until
         /// forge has reported its first quality assessment.
         packet_loss_ratio: Option<f32>,
+        /// Mean RTT in milliseconds. `None` until forge originates
+        /// its own SRs (0.3.1 follow-up).
+        rtcp_rtt_ms: Option<f32>,
     },
     Stop {
         reason: StopReason,
@@ -510,11 +513,13 @@ fn build_bridge_out(event: OutgoingEvent, call_id: CallId, seq: Seq) -> BridgeOu
         OutgoingEvent::RtpStats {
             jitter_ms,
             packet_loss_ratio,
+            rtcp_rtt_ms,
         } => BridgeOut::RtpStats {
             call_id,
             seq,
             jitter_ms,
             packet_loss_ratio,
+            rtcp_rtt_ms,
         },
         OutgoingEvent::Stop { reason } => BridgeOut::Stop {
             call_id,

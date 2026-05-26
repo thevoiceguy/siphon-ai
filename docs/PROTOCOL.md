@@ -247,16 +247,13 @@ quality assessment for the call:
 
 | Field                | Type            | Notes |
 |----------------------|-----------------|-------|
-| `jitter_ms`          | float \| null   | Estimated inter-arrival jitter. `null` if forge hasn't reported. After a `QualityRestored` event in forge, this resets to `0.0` — distinct from `null`. |
+| `jitter_ms`          | float \| null   | Estimated inter-arrival jitter. `null` if no RTCP RR has arrived yet. After a `QualityRestored` event in forge, this resets to `0.0` — distinct from `null`. |
 | `packet_loss_ratio`  | float \| null   | Loss as a ratio in `[0.0, 1.0]` (NOT a percent). Same `null` / `0.0` distinction. |
+| `rtcp_rtt_ms`        | float \| null   | Mean round-trip time over the reporting window. `null` until forge originates its own RTCP SRs (deferred to 0.3.1). Distinct from `0.0`, which is degenerate; once populated, the field is sticky — a window with no fresh RTT sample preserves the last measurement rather than reverting to `null`. |
 
 Codec and sample-rate are constant for a call — consumers should
 correlate to the `start` message (§3.1) rather than expecting them
 on every snapshot.
-
-`rtcp_rtt_ms` is not yet available in 0.2.0 (forge upstream gap).
-Planned for 0.2.1 / 0.3.0 once forge exposes a session-level
-snapshot accessor.
 
 ### 3.9 `stop` — call ended
 

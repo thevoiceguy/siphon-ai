@@ -2,24 +2,28 @@
 //! reported by forge and exposes it as a snapshot for periodic
 //! emission of `rtp_stats` WS events.
 //!
-//! ## Why a tracker, not a poller
+//! ## Wiring
 //!
-//! forge-engine does not (in 0.2.0) expose a session-level
-//! `rtp_stats_snapshot()` API. What it does emit is the
-//! [`forge_core::ForgeEvent::QualityDegraded`] / `QualityRestored`
-//! events whenever its quality assessment changes. We subscribe to
-//! those, cache the last-known values, and emit periodic snapshots
-//! at `[bridge].rtp_stats_interval_ms` cadence using the cache.
+//! forge-engine emits a [`forge_core::ForgeEvent::RtcpReportReceived`]
+//! event on every incoming RTCP RR block, carrying `jitter_ms`,
+//! `packet_loss_ratio`, and (when forge is also originating its own
+//! SRs) `rtt_ms`. The tap subscribes, caches the last-known values
+//! via [`RtpStatsTracker::note_rtcp_report`], and emits periodic
+//! snapshots at `[bridge].rtp_stats_interval_ms` cadence using the
+//! cache.
 //!
-//! This means the emitted values reflect forge's most-recent state,
-//! not the literal current measurement. For a healthy call that
-//! never degraded, both fields are `None` (no data yet). After a
-//! `QualityDegraded` arrives, both are `Some(value)`. After a
-//! `QualityRestored`, both are `Some(0.0)` — explicitly "back to
-//! healthy" rather than ambiguous `None`. A future forge upstream
-//! PR exposing a snapshot accessor would let us replace the tracker
-//! with a poller and get true periodic measurements; the WS event
-//! shape stays the same either way.
+//! The legacy [`forge_core::ForgeEvent::QualityDegraded`] /
+//! `QualityRestored` events were the 0.2.0 plan but never had a
+//! producer in forge — see siphon-ai DEV_PLAN_0.3.0.md §9 decision
+//! 8 for the resolution. The threshold-based `QualityDegraded` arm
+//! is kept for forward-compatibility but is currently a no-op in
+//! production because nothing emits it.
+//!
+//! For a healthy call that never received an RR (e.g., short call),
+//! all snapshot fields are `None` (no data yet). Once at least one
+//! RR has arrived, they are `Some(value)`. `rtt_ms` may stay `None`
+//! even when jitter/loss are populated — RTT requires forge to
+//! originate its own SRs (deferred to 0.3.1 per §9 decision 10).
 
 use std::time::Duration;
 
@@ -29,6 +33,11 @@ use std::time::Duration;
 pub struct RtpStatsSnapshot {
     pub jitter_ms: Option<f32>,
     pub packet_loss_ratio: Option<f32>,
+    /// Mean round-trip time over the reporting window in milliseconds.
+    /// `None` until forge-engine originates its own RTCP SRs (deferred
+    /// to 0.3.1 per DEV_PLAN_0.3.0.md §9 decision 10) — distinct from
+    /// `Some(0.0)`, which is degenerate.
+    pub rtt_ms: Option<f32>,
 }
 
 /// Per-call RTP-stats state. Owned by the tap; updated from forge
@@ -38,6 +47,7 @@ pub struct RtpStatsTracker {
     interval: Option<Duration>,
     last_jitter_ms: Option<f32>,
     last_packet_loss_ratio: Option<f32>,
+    last_rtt_ms: Option<f32>,
 }
 
 impl RtpStatsTracker {
@@ -47,6 +57,7 @@ impl RtpStatsTracker {
             interval,
             last_jitter_ms: None,
             last_packet_loss_ratio: None,
+            last_rtt_ms: None,
         }
     }
 
@@ -60,17 +71,40 @@ impl RtpStatsTracker {
         self.interval
     }
 
+    /// forge reported a `RtcpReportReceived` — cache the three RR-derived
+    /// fields. `rtt_ms = None` is preserved as-is (we don't want the
+    /// snapshot's `rtt_ms` to flip to `Some(0.0)` when forge can't yet
+    /// compute RTT).
+    pub fn note_rtcp_report(
+        &mut self,
+        jitter_ms: f32,
+        packet_loss_ratio: f32,
+        rtt_ms: Option<f32>,
+    ) {
+        self.last_jitter_ms = Some(jitter_ms);
+        self.last_packet_loss_ratio = Some(packet_loss_ratio);
+        if rtt_ms.is_some() {
+            self.last_rtt_ms = rtt_ms;
+        }
+    }
+
     /// forge reported a `QualityDegraded` — cache the values.
     /// `packet_loss_percent` is in [0.0, 100.0] (forge's convention);
     /// we convert to ratio [0.0, 1.0] for the wire event.
+    ///
+    /// Kept for backwards compatibility with the threshold-based event.
+    /// `RtcpReportReceived` is the per-RR cadence event the
+    /// 0.3.0 producer emits; this method handles the (currently unused)
+    /// threshold path.
     pub fn note_quality_degraded(&mut self, packet_loss_percent: f32, jitter_ms: f32) {
         self.last_jitter_ms = Some(jitter_ms);
         self.last_packet_loss_ratio = Some(packet_loss_percent / 100.0);
     }
 
-    /// forge reported a `QualityRestored` — mark both fields as
-    /// "explicitly healthy" (`Some(0.0)`), not `None`. Consumers
-    /// distinguish "no data yet" (`None`) from "healthy" (`0.0`).
+    /// forge reported a `QualityRestored` — mark jitter and loss as
+    /// "explicitly healthy" (`Some(0.0)`), not `None`. `rtt_ms` is
+    /// left untouched: it's an absolute measurement, not a threshold,
+    /// so "healthy" doesn't imply zero RTT.
     pub fn note_quality_restored(&mut self) {
         self.last_jitter_ms = Some(0.0);
         self.last_packet_loss_ratio = Some(0.0);
@@ -81,6 +115,7 @@ impl RtpStatsTracker {
         RtpStatsSnapshot {
             jitter_ms: self.last_jitter_ms,
             packet_loss_ratio: self.last_packet_loss_ratio,
+            rtt_ms: self.last_rtt_ms,
         }
     }
 }
@@ -95,6 +130,48 @@ mod tests {
         let snap = t.snapshot();
         assert!(snap.jitter_ms.is_none());
         assert!(snap.packet_loss_ratio.is_none());
+        assert!(snap.rtt_ms.is_none());
+    }
+
+    #[test]
+    fn rtcp_report_populates_all_three_fields() {
+        let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        t.note_rtcp_report(
+            17.2,  /* jitter ms */
+            0.025, /* 2.5% loss */
+            Some(42.0),
+        );
+        let snap = t.snapshot();
+        assert_eq!(snap.jitter_ms, Some(17.2));
+        assert!((snap.packet_loss_ratio.unwrap() - 0.025).abs() < 1e-6);
+        assert_eq!(snap.rtt_ms, Some(42.0));
+    }
+
+    #[test]
+    fn rtcp_report_with_none_rtt_keeps_prior_rtt() {
+        // Once a real RTT measurement lands, later RRs with rtt=None
+        // (e.g., a window with no matching SR) shouldn't wipe it.
+        // This matches the §A.7 reality: RTT is sparse.
+        let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        t.note_rtcp_report(10.0, 0.01, Some(35.0));
+        t.note_rtcp_report(11.0, 0.02, None);
+        let snap = t.snapshot();
+        assert_eq!(snap.rtt_ms, Some(35.0));
+        // …but jitter and loss DO update on every RR.
+        assert_eq!(snap.jitter_ms, Some(11.0));
+    }
+
+    #[test]
+    fn restored_does_not_clear_rtt() {
+        // QualityRestored is a threshold event for jitter/loss only.
+        // rtt_ms is an absolute measurement and shouldn't be reset.
+        let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        t.note_rtcp_report(50.0, 0.1, Some(80.0));
+        t.note_quality_restored();
+        let snap = t.snapshot();
+        assert_eq!(snap.jitter_ms, Some(0.0));
+        assert_eq!(snap.packet_loss_ratio, Some(0.0));
+        assert_eq!(snap.rtt_ms, Some(80.0));
     }
 
     #[test]

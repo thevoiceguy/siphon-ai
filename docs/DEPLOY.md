@@ -328,6 +328,7 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_dead_air_events_total`       | counter   | —                                     | Times `dead_air_detected` fired on the WS bridge. Configurable via `[bridge].dead_air_threshold_ms`. |
 | `siphon_ai_rtp_jitter_ms`               | histogram | —                                     | RTP jitter snapshot recorded on every `rtp_stats` emission (when forge has reported a value). |
 | `siphon_ai_rtp_packet_loss_ratio`       | histogram | —                                     | Packet-loss ratio (0.0-1.0) recorded on every `rtp_stats` emission. |
+| `siphon_ai_rtp_rtt_ms`                  | histogram | —                                     | Mean RTCP round-trip time recorded on every `rtp_stats` emission. Stays empty until forge originates its own SRs (0.3.1 follow-up). |
 | `forge_rtcp_*`                          | various   | per-call (forge-side)                 | RTP/RTCP quality. See forge-media's own metric inventory. |
 | `heplify_*`                             | various   | from the HEP collector                | Only visible if you scrape heplify too. |
 

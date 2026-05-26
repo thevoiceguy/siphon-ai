@@ -581,7 +581,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -667,9 +667,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "foreign-types"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
+dependencies = [
+ "foreign-types-shared",
+]
+
+[[package]]
+name = "foreign-types-shared"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
+
+[[package]]
 name = "forge-codecs"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=5f04df57a39b#5f04df57a39bafbb9b6541d90732cd37d2f84a0c"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=f7cd7f074d7c#f7cd7f074d7c60ef0c8604f44fd5bfcd5061fa94"
 dependencies = [
  "ezk-g722",
  "lazy_static",
@@ -680,7 +695,7 @@ dependencies = [
 [[package]]
 name = "forge-core"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=5f04df57a39b#5f04df57a39bafbb9b6541d90732cd37d2f84a0c"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=f7cd7f074d7c#f7cd7f074d7c60ef0c8604f44fd5bfcd5061fa94"
 dependencies = [
  "chrono",
  "serde",
@@ -695,7 +710,7 @@ dependencies = [
 [[package]]
 name = "forge-dtmf"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=5f04df57a39b#5f04df57a39bafbb9b6541d90732cd37d2f84a0c"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=f7cd7f074d7c#f7cd7f074d7c60ef0c8604f44fd5bfcd5061fa94"
 dependencies = [
  "chrono",
  "forge-core",
@@ -707,7 +722,7 @@ dependencies = [
 [[package]]
 name = "forge-engine"
 version = "0.4.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=5f04df57a39b#5f04df57a39bafbb9b6541d90732cd37d2f84a0c"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=f7cd7f074d7c#f7cd7f074d7c60ef0c8604f44fd5bfcd5061fa94"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -737,7 +752,7 @@ dependencies = [
 [[package]]
 name = "forge-hep"
 version = "0.0.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=5f04df57a39b#5f04df57a39bafbb9b6541d90732cd37d2f84a0c"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=f7cd7f074d7c#f7cd7f074d7c60ef0c8604f44fd5bfcd5061fa94"
 dependencies = [
  "bytes",
  "hep-rs",
@@ -750,7 +765,7 @@ dependencies = [
 [[package]]
 name = "forge-injection"
 version = "0.1.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=5f04df57a39b#5f04df57a39bafbb9b6541d90732cd37d2f84a0c"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=f7cd7f074d7c#f7cd7f074d7c60ef0c8604f44fd5bfcd5061fa94"
 dependencies = [
  "forge-core",
  "rubato",
@@ -763,7 +778,7 @@ dependencies = [
 [[package]]
 name = "forge-recorder"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=5f04df57a39b#5f04df57a39bafbb9b6541d90732cd37d2f84a0c"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=f7cd7f074d7c#f7cd7f074d7c60ef0c8604f44fd5bfcd5061fa94"
 dependencies = [
  "bytes",
  "forge-core",
@@ -777,7 +792,7 @@ dependencies = [
 [[package]]
 name = "forge-resampler"
 version = "0.1.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=5f04df57a39b#5f04df57a39bafbb9b6541d90732cd37d2f84a0c"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=f7cd7f074d7c#f7cd7f074d7c60ef0c8604f44fd5bfcd5061fa94"
 dependencies = [
  "thiserror 2.0.18",
  "tracing",
@@ -786,15 +801,18 @@ dependencies = [
 [[package]]
 name = "forge-rtp"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=5f04df57a39b#5f04df57a39bafbb9b6541d90732cd37d2f84a0c"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=f7cd7f074d7c#f7cd7f074d7c60ef0c8604f44fd5bfcd5061fa94"
 dependencies = [
  "aes",
  "aes-gcm",
  "bytes",
+ "foreign-types",
  "forge-core",
  "hmac",
  "libc",
  "metrics 0.21.1",
+ "openssl",
+ "openssl-sys",
  "rand 0.9.4",
  "sha1",
  "sha2",
@@ -808,14 +826,14 @@ dependencies = [
 [[package]]
 name = "forge-sdp"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=5f04df57a39b#5f04df57a39bafbb9b6541d90732cd37d2f84a0c"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=f7cd7f074d7c#f7cd7f074d7c60ef0c8604f44fd5bfcd5061fa94"
 dependencies = [
  "base64",
  "chrono",
  "forge-core",
  "forge-rtp",
  "rand 0.9.4",
- "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/forge-media?rev=5f04df57a39b)",
+ "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/forge-media?rev=f7cd7f074d7c)",
  "smol_str",
  "thiserror 2.0.18",
 ]
@@ -823,7 +841,7 @@ dependencies = [
 [[package]]
 name = "forge-transcoder"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=5f04df57a39b#5f04df57a39bafbb9b6541d90732cd37d2f84a0c"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=f7cd7f074d7c#f7cd7f074d7c60ef0c8604f44fd5bfcd5061fa94"
 dependencies = [
  "bytes",
  "forge-codecs",
@@ -836,7 +854,7 @@ dependencies = [
 [[package]]
 name = "forge-vad"
 version = "0.1.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=5f04df57a39b#5f04df57a39bafbb9b6541d90732cd37d2f84a0c"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=f7cd7f074d7c#f7cd7f074d7c60ef0c8604f44fd5bfcd5061fa94"
 dependencies = [
  "thiserror 2.0.18",
 ]
@@ -1264,7 +1282,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -1804,10 +1822,57 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
+name = "openssl"
+version = "0.10.80"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a45fa2aa886c42762255da344f0a0d313e254066c46aad76f300c3d3da62d967"
+dependencies = [
+ "bitflags 2.11.1",
+ "cfg-if",
+ "foreign-types",
+ "libc",
+ "openssl-macros",
+ "openssl-sys",
+]
+
+[[package]]
+name = "openssl-macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
+name = "openssl-src"
+version = "300.6.0+3.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8e8cbfd3a4a8c8f089147fd7aaa33cf8c7450c4d09f8f80698a0cf093abeff4"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.116"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f28a22dc7140cda5f096e5e7724a6962ca81a7f8bfd2979f9b18c11af56318c4"
+dependencies = [
+ "cc",
+ "libc",
+ "openssl-src",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "parking_lot"
@@ -1843,6 +1908,12 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "pkg-config"
+version = "0.3.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "polyval"
@@ -1953,7 +2024,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1990,7 +2061,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.52.0",
 ]
@@ -2282,7 +2353,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2643,7 +2714,7 @@ dependencies = [
 [[package]]
 name = "sip-sdp"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=5f04df57a39b#5f04df57a39bafbb9b6541d90732cd37d2f84a0c"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=d0d3691244de#d0d3691244de5c0769853a62111f56ac3a0f7f83"
 dependencies = [
  "nom",
  "smol_str",
@@ -2652,7 +2723,7 @@ dependencies = [
 [[package]]
 name = "sip-sdp"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=d0d3691244de#d0d3691244de5c0769853a62111f56ac3a0f7f83"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=f7cd7f074d7c#f7cd7f074d7c60ef0c8604f44fd5bfcd5061fa94"
 dependencies = [
  "nom",
  "smol_str",
@@ -3313,7 +3384,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3761,6 +3832,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3964,7 +4041,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

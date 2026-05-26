@@ -49,11 +49,12 @@ before TOML parsing. Unset variables without a default fail the load.
 | `cert`   | path        | required when TLS on | PEM cert chain on disk. |
 | `key`    | path        | required when TLS on | PEM private key on disk. |
 
-> **Inbound UAS only.** SiphonAI v0.1.0 is a UAS — it terminates
-> inbound TLS connections and writes responses back over the
-> established socket. Originating a new outbound TLS connection
-> (UAC mode) is not supported and will return a clear error to the
-> transaction manager rather than silently downgrading to UDP.
+> **Inbound UAS + outbound UAC for REGISTER.** SiphonAI terminates
+> inbound TLS for SIP signaling at this listener (v0.1.0). Outbound
+> TLS is supported for the UAC's `[[register]]` path as of 0.3.0 —
+> registrations with `transport = "tls"` actually go out over TLS
+> (see [`docs/REGISTRATION.md`](REGISTRATION.md)). Outbound TLS for
+> originated INVITEs is post-v1 per CLAUDE.md §8.
 
 ### `[sip.call_progress]`
 

@@ -57,17 +57,64 @@ drive task. Names must be unique.
 - Lifecycle webhook (`registration_state_changed`) on every transition.
 - Prometheus metrics (`siphon_ai_register_state`, `siphon_ai_register_attempts_total`).
 
-## What v1 does NOT support (yet)
+## TLS registration (0.3.0+)
 
-- DNS-resolved registrar hostnames. v1 accepts literal IPv4 addresses only;
-  hostnames produce a clear error at config-load time. SRV/NAPTR-driven
-  failover lives in v1.1.
-- SIGHUP reload of registrations. The set is static for the daemon's
+To register over `sips:` (RFC 3261 §26.2.1), set `transport = "tls"`:
+
+```toml
+[[register]]
+name      = "carrier-secure"
+server    = "203.0.113.42"   # literal IP (hostnames are 0.3.1, see below)
+port      = 5061              # default for TLS
+transport = "tls"
+username  = "siphon"
+password  = "${REGISTRAR_PASSWORD}"
+```
+
+What this gets you:
+
+- The daemon's `IntegratedUAC` builds a `sips:` URI from `server`/`port`
+  and dispatches the REGISTER over the TLS transport that siphon-rs's
+  `sip-transport` (W1 PR siphon-rs#49) negotiates. **No fallback to UDP.**
+- Trust uses the daemon-wide TLS client roots — currently the
+  `webpki-roots` Mozilla CA bundle baked into the binary. Same trust
+  store the bridge WS leg uses by default (see
+  [`docs/DEPLOY.md`](DEPLOY.md) §3a).
+- mTLS: if your carrier requires a client cert for SIP-side TLS, the
+  daemon presents the same `[sip.tls]` cert it uses for inbound — there
+  is no separate `[[register]].tls` client cert in 0.3.0.
+
+### Twilio Elastic SIP Trunk example
+
+Twilio's secure SIP runs on `:5061` over TLS; bind via the regional
+edge IP returned by their portal (the public hostname uses anycast,
+so picking one IP at config time keeps the registrar stable):
+
+```toml
+[[register]]
+name      = "twilio-secure"
+server    = "54.172.60.0"
+port      = 5061
+transport = "tls"
+username  = "your-trunk-username"
+password  = "${TWILIO_TRUNK_PASSWORD}"
+```
+
+## What 0.3.0 still does NOT support
+
+- **DNS-resolved registrar hostnames.** Configs still accept literal
+  IPv4 / IPv6 addresses only; hostnames produce a clear error at
+  config-load time. The runtime resolver in `sip-dns` exists but the
+  static IP requirement keeps config validation simple and
+  startup-deterministic. SRV/NAPTR-driven failover (RFC 3263
+  `_sips._tcp`) and hostname registrars are 0.3.1+.
+- **SIGHUP reload of registrations.** The set is static for the daemon's
   lifetime; restart to add/remove/edit a `[[register]]` block.
-- Per-registration TLS client roots. The daemon's webpki trust store applies
-  to all TLS registrations.
-- Outbound TCP/TLS connect from the UAC for registrations on those
-  transports. v1 sends REGISTER over UDP regardless of `transport = "tcp"|"tls"`.
+- **Per-registration cert pinning.** All TLS registrations share the
+  daemon-wide webpki trust store. SPKI pinning on a per-`[[register]]`
+  basis (the `[[register]].tls.pinned_sha256` shape the dev plan
+  sketches) needs an siphon-rs API to install a per-target
+  `ClientConfig` and isn't done. 0.3.1+ follow-up.
 
 ## Observability
 

@@ -136,6 +136,11 @@ pub enum BridgeOut {
         /// Packet loss as a ratio in `[0.0, 1.0]`, or `null`.
         #[serde(skip_serializing_if = "Option::is_none", default)]
         packet_loss_ratio: Option<f32>,
+        /// Mean round-trip time over the reporting window in milliseconds,
+        /// or `null` until forge-engine originates its own RTCP SRs
+        /// (deferred to 0.3.1 per DEV_PLAN_0.3.0.md §9 decision 10).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        rtcp_rtt_ms: Option<f32>,
     },
 
     /// The caller pressed a DTMF key.
@@ -521,11 +526,12 @@ mod tests {
 
     #[test]
     fn bridge_out_rtp_stats_with_values() {
-        let raw = r#"{ "type": "rtp_stats", "call_id": "c", "seq": 50, "jitter_ms": 12.5, "packet_loss_ratio": 0.004 }"#;
+        let raw = r#"{ "type": "rtp_stats", "call_id": "c", "seq": 50, "jitter_ms": 12.5, "packet_loss_ratio": 0.004, "rtcp_rtt_ms": 42.0 }"#;
         let msg: BridgeOut = assert_round_trip(raw);
         let BridgeOut::RtpStats {
             jitter_ms,
             packet_loss_ratio,
+            rtcp_rtt_ms,
             ..
         } = msg
         else {
@@ -533,11 +539,12 @@ mod tests {
         };
         assert_eq!(jitter_ms, Some(12.5));
         assert_eq!(packet_loss_ratio, Some(0.004));
+        assert_eq!(rtcp_rtt_ms, Some(42.0));
     }
 
     #[test]
     fn bridge_out_rtp_stats_with_nulls() {
-        // First snapshot before any RTCP report has arrived: both
+        // First snapshot before any RTCP report has arrived: all three
         // fields are absent / null. Test deserialize-only because
         // skip_serializing_if drops them on the way back out.
         let raw = r#"{ "type": "rtp_stats", "call_id": "c", "seq": 1 }"#;
@@ -545,6 +552,7 @@ mod tests {
         let BridgeOut::RtpStats {
             jitter_ms,
             packet_loss_ratio,
+            rtcp_rtt_ms,
             ..
         } = msg
         else {
@@ -552,6 +560,31 @@ mod tests {
         };
         assert!(jitter_ms.is_none());
         assert!(packet_loss_ratio.is_none());
+        assert!(rtcp_rtt_ms.is_none());
+    }
+
+    #[test]
+    fn bridge_out_rtp_stats_jitter_loss_without_rtt() {
+        // Common shape pre-0.3.1: jitter and loss populate from
+        // RtcpReportReceived, but rtt_ms stays None until forge
+        // originates its own SRs. Verify the field is *omitted*
+        // (not present as JSON null) to match skip_serializing_if.
+        let msg = BridgeOut::RtpStats {
+            call_id: CallId("c".to_string()),
+            seq: 7,
+            jitter_ms: Some(11.2),
+            packet_loss_ratio: Some(0.012),
+            rtcp_rtt_ms: None,
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(obj.contains_key("jitter_ms"));
+        assert!(obj.contains_key("packet_loss_ratio"));
+        assert!(
+            !obj.contains_key("rtcp_rtt_ms"),
+            "rtcp_rtt_ms must be absent (not null) when None"
+        );
     }
 
     #[test]

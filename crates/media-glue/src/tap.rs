@@ -539,6 +539,19 @@ impl MediaTap {
                             // forward Quality events to the WS — they
                             // surface via the periodic rtp_stats arm).
                             match &ev {
+                                ForgeEvent::RtcpReportReceived {
+                                    call_id: cid,
+                                    jitter_ms,
+                                    packet_loss_ratio,
+                                    rtt_ms,
+                                    ..
+                                } if cid == &self.call_id => {
+                                    self.rtp_stats.note_rtcp_report(
+                                        *jitter_ms,
+                                        *packet_loss_ratio,
+                                        *rtt_ms,
+                                    );
+                                }
                                 ForgeEvent::QualityDegraded {
                                     call_id: cid,
                                     packet_loss_percent,
@@ -794,9 +807,13 @@ impl MediaTap {
                     if let Some(l) = snap.packet_loss_ratio {
                         metrics::histogram!("siphon_ai_rtp_packet_loss_ratio").record(l as f64);
                     }
+                    if let Some(r) = snap.rtt_ms {
+                        metrics::histogram!("siphon_ai_rtp_rtt_ms").record(r as f64);
+                    }
                     let out = OutgoingEvent::RtpStats {
                         jitter_ms: snap.jitter_ms,
                         packet_loss_ratio: snap.packet_loss_ratio,
+                        rtcp_rtt_ms: snap.rtt_ms,
                     };
                     if let Err(e) = events_tx.try_send(out) {
                         warn!(

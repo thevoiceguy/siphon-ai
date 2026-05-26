@@ -737,6 +737,11 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         Some(ms) => Some(Duration::from_millis(ms)),
     };
 
+    // `[media].srtp` resolved to the typed enum form via the same
+    // strict-matching path the route-level override uses
+    // (`compile_srtp_mode`). Default — and any unset value — is `Off`.
+    let srtp_mode = compile_srtp_mode(media.srtp.as_deref())?;
+
     Ok(BridgeDefaults {
         ws_url: raw.ws_url.filter(|s| !s.is_empty()),
         auth_header,
@@ -749,6 +754,7 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         silence_threshold,
         dead_air_threshold,
         rtp_stats_interval,
+        srtp_mode,
     })
 }
 

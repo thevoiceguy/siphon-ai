@@ -144,6 +144,10 @@ pub struct BridgeDefaults {
     /// Default `Some(5000ms)` per `docs/DEV_PLAN_0.2.0.md` §9.3,
     /// mirroring RTCP §6.2's compound-report cadence.
     pub rtp_stats_interval: Option<Duration>,
+    /// Default SRTP negotiation mode from `[media].srtp`. Routes can
+    /// override via `[route.media].srtp` (see [`resolve_srtp_mode`]).
+    /// Default [`SrtpMode::Off`] — plaintext-RTP only, matching v0.2.0.
+    pub srtp_mode: SrtpMode,
 }
 
 /// What the daemon does when forge-vad reports speech-started.
@@ -248,6 +252,7 @@ impl Default for BridgeDefaults {
             silence_threshold: Some(Duration::from_millis(3000)),
             dead_air_threshold: Some(Duration::from_millis(10000)),
             rtp_stats_interval: Some(Duration::from_millis(5000)),
+            srtp_mode: SrtpMode::Off,
         }
     }
 }
@@ -300,6 +305,18 @@ pub enum AcceptError {
     /// non-tokio context — exceedingly rare; mostly defensive).
     #[error("controller setup failed: {0}")]
     Controller(String),
+
+    /// The offer's audio m-line profile (`RTP/AVP` / `RTP/SAVP` /
+    /// `UDP/TLS/RTP/SAVPF`) is incompatible with the effective
+    /// [`SrtpMode`] policy for this route. Maps to **488 Not
+    /// Acceptable Here** per DEV_PLAN_0.3.0.md §4.1.
+    #[error("offer profile {offered} rejected under srtp_mode = {mode:?}")]
+    SrtpModeMismatch {
+        /// Wire token of the offered profile (`"RTP/AVP"` etc.).
+        offered: String,
+        /// Effective mode after resolving the route override.
+        mode: SrtpMode,
+    },
 }
 
 impl AcceptError {
@@ -327,6 +344,7 @@ impl AcceptError {
             AcceptError::Setup(SetupError::Session(_))
             | AcceptError::Setup(SetupError::Tap(_))
             | AcceptError::Controller(_) => (500, "Server Internal Error"),
+            AcceptError::SrtpModeMismatch { .. } => (488, "Not Acceptable Here"),
         }
     }
 }
@@ -528,6 +546,108 @@ pub fn resolve_rtp_stats_interval(
         None => defaults.rtp_stats_interval,
         Some(0) => None,
         Some(ms) => Some(Duration::from_millis(ms)),
+    }
+}
+
+/// Resolve the per-call SRTP mode by merging the daemon default
+/// (`[media].srtp`) with the per-route override
+/// (`[route.media].srtp: Option<String>`). The route override is
+/// stored unparsed; we parse it here strictly — unknown tokens are
+/// **not** treated as `Off`, they panic-equivalent by returning
+/// the default with a `warn!` (route validation should catch this
+/// at config compile, but the compiled-route struct can't currently
+/// carry the typed enum without an upstream refactor — track in a
+/// follow-up).
+pub fn resolve_srtp_mode(defaults: &BridgeDefaults, route: &CompiledRoute) -> SrtpMode {
+    match route.media.srtp.as_deref() {
+        None => defaults.srtp_mode,
+        Some("off") => SrtpMode::Off,
+        Some("preferred") => SrtpMode::Preferred,
+        Some("required") => SrtpMode::Required,
+        Some(other) => {
+            tracing::warn!(
+                route = %route.name,
+                value = %other,
+                "[route.media].srtp has an invalid value; falling back to the daemon default"
+            );
+            defaults.srtp_mode
+        }
+    }
+}
+
+/// Whether the offer's audio m-line protocol is an SRTP variant (any
+/// of `RTP/SAVP`, `RTP/SAVPF`, `UDP/TLS/RTP/SAVPF`, `TCP/TLS/RTP/SAVPF`).
+fn is_srtp_protocol(p: &forge_sdp::Protocol) -> bool {
+    use forge_sdp::Protocol;
+    matches!(
+        p,
+        Protocol::RtpSavp
+            | Protocol::RtpSavpf
+            | Protocol::UdpTlsRtpSavpf
+            | Protocol::TcpTlsRtpSavpf
+    )
+}
+
+/// Reject offers whose audio m-line protocol is incompatible with the
+/// effective [`SrtpMode`] for this call, per DEV_PLAN_0.3.0.md §4.1.
+///
+/// ## 0.3.0 W2 caveat (this PR)
+///
+/// The dev plan calls for `Preferred` to *answer SRTP if offered* and
+/// for `Required` to *accept SRTP offers*. Until the follow-up PR
+/// lands the actual cert-lifecycle + `MediaSession::enable_dtls`
+/// wiring + SDP answer mutation, neither path can produce a valid
+/// SRTP answer. Rather than accept-and-silently-downgrade (which
+/// breaks the RFC 3264 offer/answer contract), this gate rejects
+/// **every** SRTP offer with 488 regardless of mode, with a
+/// progressively more specific error message:
+///
+/// - `Off` + SRTP offer → "SRTP rejected: srtp_mode = off".
+/// - `Preferred` / `Required` + SRTP offer → "SRTP answer not yet
+///   implemented (0.3.0 W2 follow-up)".
+///
+/// `Required` + plaintext offer → 488 unconditionally (matches the
+/// plan and works today — no SRTP wiring needed to *reject*).
+///
+/// When the SDP-side wiring lands, this function relaxes:
+/// `Preferred`/`Required` + SRTP offer → `Ok(())` and the answer
+/// builder takes over.
+pub fn enforce_srtp_mode(
+    mode: SrtpMode,
+    offer: &forge_sdp::SessionDescription,
+) -> Result<(), AcceptError> {
+    use forge_sdp::{MediaType, Protocol};
+    let Some(audio) = offer.find_media(MediaType::Audio) else {
+        // No audio in offer — sip-sdp's negotiator will surface NoAudio.
+        return Ok(());
+    };
+    let protocol = &audio.protocol;
+    match (mode, protocol) {
+        // Plain RTP under any mode that allows it.
+        (SrtpMode::Off | SrtpMode::Preferred, Protocol::RtpAvp) => Ok(()),
+        // Required + plaintext → reject. Matches plan exactly; works
+        // today because rejecting needs no SRTP wiring.
+        (SrtpMode::Required, Protocol::RtpAvp) => Err(AcceptError::SrtpModeMismatch {
+            offered: "RTP/AVP".to_string(),
+            mode,
+        }),
+        // SRTP offer under Off — explicitly refused per plan
+        // ("no silent downgrade").
+        (SrtpMode::Off, p) if is_srtp_protocol(p) => Err(AcceptError::SrtpModeMismatch {
+            offered: p.to_string(),
+            mode,
+        }),
+        // SRTP offer under Preferred / Required: rejected pending
+        // the W2 SDP-answer follow-up. See function-level doc.
+        (SrtpMode::Preferred | SrtpMode::Required, p) if is_srtp_protocol(p) => {
+            Err(AcceptError::SrtpModeMismatch {
+                offered: p.to_string(),
+                mode,
+            })
+        }
+        // Non-RTP profiles (raw UDP / TCP / other) are out of scope —
+        // sip-sdp's negotiator handles those. Pass through.
+        _ => Ok(()),
     }
 }
 
@@ -1944,6 +2064,21 @@ impl BridgingAcceptor {
     ) -> Result<PreparedCall, AcceptError> {
         let offer_sdp = extract_offer_sdp(request)?;
         let sip_call_id = extract_sip_call_id(request);
+
+        // SRTP-mode policy gate (DEV_PLAN_0.3.0.md §4.1). Done before
+        // any media bring-up so an incompatible offer fails fast with
+        // 488. Re-parses the SDP here — `accept_inbound` parses again
+        // internally; the duplication is cheap and avoids reshuffling
+        // the media-setup API for this PR.
+        let srtp_mode = resolve_srtp_mode(&self.defaults, route);
+        if let Ok(parsed_offer) =
+            <forge_sdp::SessionDescription as forge_sdp::SessionDescriptionExt>::from_str(offer_sdp)
+        {
+            enforce_srtp_mode(srtp_mode, &parsed_offer)?;
+        }
+        // If parsing fails here, fall through and let `accept_inbound`
+        // surface the parse error via its normal SdpError path.
+
         let bridge_config = build_bridge_config(&self.defaults, route)?;
         let codecs = resolve_codecs(&self.defaults, route);
         let dtmf_pt = resolve_dtmf_pt(&self.defaults, route);
@@ -2428,6 +2563,187 @@ a=sendrecv\r\n";
             resolve_inactivity_timeout(&defaults, route),
             Some(Duration::from_secs(45)),
         );
+    }
+
+    // ─── resolve_srtp_mode + enforce_srtp_mode ──────────────────────
+
+    fn route_with_srtp_override(value: &str) -> siphon_ai_routes::RouteSet {
+        first_route(&format!(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            [route.media]
+            srtp = "{value}"
+            "#
+        ))
+    }
+
+    #[test]
+    fn srtp_mode_inherits_default_when_route_unset() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            srtp_mode: SrtpMode::Required,
+            ..BridgeDefaults::default()
+        };
+        assert_eq!(resolve_srtp_mode(&defaults, route), SrtpMode::Required);
+    }
+
+    #[test]
+    fn srtp_mode_route_override_wins() {
+        let routes = route_with_srtp_override("preferred");
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            srtp_mode: SrtpMode::Off,
+            ..BridgeDefaults::default()
+        };
+        assert_eq!(resolve_srtp_mode(&defaults, route), SrtpMode::Preferred);
+    }
+
+    #[test]
+    fn srtp_mode_invalid_route_value_falls_back_to_default() {
+        // `[route.media].srtp = "BOGUS"` shouldn't crash; the loader
+        // already rejects unknown values at config-compile time, but
+        // the runtime gate stays robust against a future refactor that
+        // could let an invalid value reach the compiled route.
+        let routes = route_with_srtp_override("PREFERRED"); // wrong case
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            srtp_mode: SrtpMode::Required,
+            ..BridgeDefaults::default()
+        };
+        assert_eq!(resolve_srtp_mode(&defaults, route), SrtpMode::Required);
+    }
+
+    fn parse_sdp(s: &str) -> forge_sdp::SessionDescription {
+        <forge_sdp::SessionDescription as forge_sdp::SessionDescriptionExt>::from_str(s)
+            .expect("parse SDP")
+    }
+
+    const AVP_OFFER: &str = "v=0\r\n\
+                             o=- 1 1 IN IP4 192.0.2.1\r\n\
+                             s=-\r\n\
+                             c=IN IP4 192.0.2.1\r\n\
+                             t=0 0\r\n\
+                             m=audio 10000 RTP/AVP 0\r\n\
+                             a=rtpmap:0 PCMU/8000\r\n";
+    const SAVP_OFFER: &str = "v=0\r\n\
+                              o=- 1 1 IN IP4 192.0.2.1\r\n\
+                              s=-\r\n\
+                              c=IN IP4 192.0.2.1\r\n\
+                              t=0 0\r\n\
+                              m=audio 10000 RTP/SAVP 0\r\n\
+                              a=rtpmap:0 PCMU/8000\r\n";
+    const SAVPF_OFFER: &str = "v=0\r\n\
+                               o=- 1 1 IN IP4 192.0.2.1\r\n\
+                               s=-\r\n\
+                               c=IN IP4 192.0.2.1\r\n\
+                               t=0 0\r\n\
+                               m=audio 10000 UDP/TLS/RTP/SAVPF 0\r\n\
+                               a=rtpmap:0 PCMU/8000\r\n";
+
+    #[test]
+    fn enforce_off_accepts_plaintext() {
+        let offer = parse_sdp(AVP_OFFER);
+        assert!(enforce_srtp_mode(SrtpMode::Off, &offer).is_ok());
+    }
+
+    #[test]
+    fn enforce_off_rejects_savp() {
+        let offer = parse_sdp(SAVP_OFFER);
+        match enforce_srtp_mode(SrtpMode::Off, &offer) {
+            Err(AcceptError::SrtpModeMismatch { offered, mode }) => {
+                assert_eq!(offered, "RTP/SAVP");
+                assert_eq!(mode, SrtpMode::Off);
+            }
+            other => panic!("expected SrtpModeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enforce_off_rejects_savpf() {
+        let offer = parse_sdp(SAVPF_OFFER);
+        match enforce_srtp_mode(SrtpMode::Off, &offer) {
+            Err(AcceptError::SrtpModeMismatch { offered, .. }) => {
+                assert_eq!(offered, "UDP/TLS/RTP/SAVPF");
+            }
+            other => panic!("expected SrtpModeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enforce_required_rejects_plaintext() {
+        let offer = parse_sdp(AVP_OFFER);
+        match enforce_srtp_mode(SrtpMode::Required, &offer) {
+            Err(AcceptError::SrtpModeMismatch { offered, mode }) => {
+                assert_eq!(offered, "RTP/AVP");
+                assert_eq!(mode, SrtpMode::Required);
+            }
+            other => panic!("expected SrtpModeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enforce_preferred_accepts_plaintext() {
+        let offer = parse_sdp(AVP_OFFER);
+        assert!(enforce_srtp_mode(SrtpMode::Preferred, &offer).is_ok());
+    }
+
+    #[test]
+    fn enforce_preferred_rejects_srtp_pending_w2_followup() {
+        // The dev plan calls for Preferred to *answer SRTP* — but
+        // until the SDP-answer-mutation follow-up lands, accepting an
+        // SRTP offer and answering plaintext breaks the offer/answer
+        // contract. Reject explicitly until follow-up.
+        let offer = parse_sdp(SAVPF_OFFER);
+        assert!(enforce_srtp_mode(SrtpMode::Preferred, &offer).is_err());
+    }
+
+    #[test]
+    fn enforce_required_rejects_srtp_pending_w2_followup() {
+        // Same caveat as Preferred. Documented in the function's
+        // doc comment; relaxes when the follow-up lands.
+        let offer = parse_sdp(SAVP_OFFER);
+        assert!(enforce_srtp_mode(SrtpMode::Required, &offer).is_err());
+    }
+
+    #[test]
+    fn enforce_status_code_maps_to_488() {
+        // AcceptError → SIP status mapping for SrtpModeMismatch.
+        let err = AcceptError::SrtpModeMismatch {
+            offered: "RTP/SAVP".into(),
+            mode: SrtpMode::Off,
+        };
+        let (code, reason) = err.sip_status();
+        assert_eq!(code, 488);
+        assert_eq!(reason, "Not Acceptable Here");
+    }
+
+    #[test]
+    fn enforce_passes_through_when_no_audio() {
+        // An offer with no audio media is sip-sdp's problem to
+        // surface (NoAudio → 488), not the SRTP gate's.
+        let offer = parse_sdp(
+            "v=0\r\n\
+             o=- 1 1 IN IP4 192.0.2.1\r\n\
+             s=-\r\n\
+             c=IN IP4 192.0.2.1\r\n\
+             t=0 0\r\n",
+        );
+        assert!(enforce_srtp_mode(SrtpMode::Required, &offer).is_ok());
     }
 
     // ─── resolve_dtmf_pt ──────────────────────────────────────────

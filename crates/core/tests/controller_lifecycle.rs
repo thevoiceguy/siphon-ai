@@ -110,6 +110,7 @@ fn make_controller(port: u16, call_id: &str) -> (CallController, siphon_ai_core:
             ws_url: format!("ws://127.0.0.1:{port}/"),
             auth_header: None,
             connect_timeout: Duration::from_secs(2),
+            tls: None,
         },
         start: start_msg(call_id),
         media_tap: tap,

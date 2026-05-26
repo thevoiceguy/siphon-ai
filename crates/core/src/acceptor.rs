@@ -148,6 +148,11 @@ pub struct BridgeDefaults {
     /// override via `[route.media].srtp` (see [`resolve_srtp_mode`]).
     /// Default [`SrtpMode::Off`] — plaintext-RTP only, matching v0.2.0.
     pub srtp_mode: SrtpMode,
+    /// mTLS settings for the bridge WS leg, sourced from
+    /// `[bridge.tls]`. `None` when the operator hasn't configured a
+    /// client cert — bridge uses the existing plaintext or webpki
+    /// path. Per-route override is a follow-up.
+    pub bridge_tls: Option<siphon_ai_bridge::tls::BridgeTlsConfig>,
 }
 
 /// What the daemon does when forge-vad reports speech-started.
@@ -253,6 +258,7 @@ impl Default for BridgeDefaults {
             dead_air_threshold: Some(Duration::from_millis(10000)),
             rtp_stats_interval: Some(Duration::from_millis(5000)),
             srtp_mode: SrtpMode::Off,
+            bridge_tls: None,
         }
     }
 }
@@ -430,6 +436,11 @@ pub fn build_bridge_config(
         ws_url,
         auth_header,
         connect_timeout,
+        // mTLS for the WS leg comes from the daemon-wide
+        // `[bridge.tls]` block (W4 Part A). Per-route override
+        // (`[route.bridge.tls]`) is a follow-up — for now every call
+        // shares the global config.
+        tls: defaults.bridge_tls.clone(),
     })
 }
 

@@ -6,6 +6,7 @@
 pub mod audio;
 pub mod conn;
 pub mod protocol;
+pub mod tls;
 
 pub use audio::{
     pack_pcm16_le, samples_per_frame, unpack_pcm16_le, AudioError, Reframer, BYTES_PER_SAMPLE,

@@ -108,6 +108,50 @@ the bearer token your WS server expects:
 ws_auth_header = "Bearer ${BRIDGE_TOKEN}"
 ```
 
+#### 3a. mTLS to the WebSocket server (0.3.0+)
+
+When the WS server requires a client certificate (carrier-pinned
+deployments, internal-only services with a private CA), configure
+the client cert + key via `[bridge.tls]`:
+
+```toml
+[bridge]
+ws_url = "wss://reception.example.com/sip-bridge"
+
+[bridge.tls]
+client_cert = "/etc/siphon-ai/bridge/client.pem"  # PEM chain, leaf first
+client_key  = "/etc/siphon-ai/bridge/client.key"  # PEM private key
+# Optional: pin a single server cert by SHA-256 of its
+# SubjectPublicKeyInfo. When set, replaces the default Mozilla CA
+# verification — the connection only succeeds against this exact
+# cert. Survives cert rotation as long as the operator keeps the
+# same key pair (RFC 7469 §3).
+# pinned_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+```
+
+Field semantics:
+
+- `client_cert` — PEM-encoded chain. Must contain at least the leaf
+  cert that authenticates this siphon-ai instance to the WS server.
+  Intermediates allowed.
+- `client_key` — PEM-encoded private key matching `client_cert`'s
+  leaf. PKCS#8 / RSA / SEC1 all supported (whatever `rustls-pemfile`
+  recognises).
+- `pinned_sha256` — optional 64-hex-char SHA-256 of the server's
+  SubjectPublicKeyInfo DER. To compute from a server cert:
+  ```
+  openssl x509 -in server.pem -pubkey -noout | \
+    openssl pkey -pubin -outform der | sha256sum
+  ```
+  Lowercase or uppercase hex, no `:` separators, no `sha256/` prefix.
+
+Validation happens at daemon startup — bad PEM, mismatched key, or
+malformed pin all fail the config-compile step with a clear error
+before any inbound INVITE is accepted.
+
+`[bridge.tls]` is global only in 0.3.0; per-route override
+(`[route.bridge.tls]`) is a 0.3.1 follow-up.
+
 ### 4. File permissions for cert/key
 
 The systemd unit runs as the unprivileged `siphon` user; that user

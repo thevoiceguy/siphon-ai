@@ -130,6 +130,25 @@ mode = "session_progress"
 | `mode`        | `"auto_clear" \| "notify_only"` | `"auto_clear"` | `auto_clear` drops pending playout the moment forge-vad reports speech. |
 | `debounce_ms` | integer | `100`        | Reserved for the VAD config — currently informational. |
 
+### `[bridge.tls]` (0.3.0+)
+
+mTLS authentication for the bridge WS leg. Present means the daemon
+hands a custom rustls `ClientConfig` to `tokio-tungstenite`'s
+`Connector::Rustls`, carrying the configured client cert and
+(optionally) an SPKI pin replacing the default Mozilla CA bundle.
+Absent means the existing plaintext / webpki path. See
+[`docs/DEPLOY.md`](DEPLOY.md) §3a for the operational recipe.
+
+| Field          | Type   | Default | Notes |
+|----------------|--------|---------|-------|
+| `client_cert`  | string | —       | Required. Path to a PEM file containing the client cert chain (leaf first). |
+| `client_key`   | string | —       | Required. Path to a PEM file containing the private key matching `client_cert`'s leaf. PKCS#8 / RSA / SEC1 all accepted. |
+| `pinned_sha256`| string | unset   | Optional. 64-hex-char SHA-256 of the **server's** SubjectPublicKeyInfo. When set, replaces default CA verification with exact-match. Survives cert rotation as long as the key pair stays stable (RFC 7469 §3). |
+
+Per-route override (`[route.bridge.tls]`) is deferred to a 0.3.1
+follow-up — every accepted call shares the daemon-wide config in
+0.3.0.
+
 ## `[[route]]`
 
 Routes are ORDERED. The first one whose `match` block evaluates true wins.

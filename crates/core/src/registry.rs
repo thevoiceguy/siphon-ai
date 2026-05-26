@@ -253,6 +253,7 @@ mod tests {
                     call_id: "x@y".into(),
                     headers: StdHashMap::new(),
                 },
+                srtp: None,
             },
             media_tap: tap,
             transfer: None,

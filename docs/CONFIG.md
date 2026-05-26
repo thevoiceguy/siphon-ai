@@ -92,6 +92,15 @@ mode = "session_progress"
 | `dtmf`                      | `"rfc2833" \| "off"` | `"rfc2833"`      | `"off"` disables the `telephone-event` payload type. |
 | `rtp_port_range`            | `[min, max]`     | forge default          | Both ports must be even; min < max. |
 | `inactivity_timeout_secs`   | integer          | `60`                   | Tear the call down after this many seconds with no inbound RTP. `0` disables the watchdog. |
+| `srtp`                      | `"off" \| "preferred" \| "required"` | `"off"` | SRTP negotiation mode. `"off"` answers plaintext-only and rejects SRTP offers with 488. `"preferred"` answers SRTP when offered, plaintext otherwise. `"required"` rejects plaintext-RTP offers with 488. Per-route override via `[route.media].srtp`. **Wire behaviour ships across Sprint 1 Weeks 2 / 3 of the 0.3.0 plan; the config surface exists from W1 so per-route merge logic and the `start.srtp` event field have stable types to bind to. Setting any value other than `"off"` before W3 has no effect.** |
+
+> **SRTP over plaintext SIP is a footgun.** SDES exchanges the
+> SRTP master key over the signalling plane — if `[sip]` is plain
+> UDP, the key travels in cleartext and SRTP gives you nothing.
+> Pair `[media].srtp = "preferred"` or `"required"` with
+> `[sip.tls]`. The config-load step warns when SRTP is enabled
+> but no TLS listener is bound (Sprint 1 Week 1 of the 0.3.0
+> plan adds the warning).
 
 ## `[bridge]`
 

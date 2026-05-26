@@ -51,6 +51,7 @@ fn start_msg(call_id: &str) -> StartMsg {
             call_id: "abc@pbx.example.com".into(),
             headers: HashMap::new(),
         },
+        srtp: None,
     }
 }
 

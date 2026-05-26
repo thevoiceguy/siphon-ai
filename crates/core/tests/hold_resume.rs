@@ -101,6 +101,7 @@ async fn push_bridge_event_emits_hold_and_resume_on_ws() {
                 call_id: "hold-resume@pbx".into(),
                 headers: HashMap::new(),
             },
+            srtp: None,
         },
         media_tap: tap,
         transfer: None,

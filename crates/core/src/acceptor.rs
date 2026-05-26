@@ -206,6 +206,34 @@ pub enum CallProgressMode {
     SessionProgress,
 }
 
+/// SRTP negotiation mode for the inbound INVITE answer path
+/// (per `docs/DEV_PLAN_0.3.0.md` §4.1). The mode picks how the
+/// daemon reacts to the offer's `m=` profile:
+///
+///   * [`Off`][SrtpMode::Off] — only plaintext (`RTP/AVP`) is
+///     acceptable. SRTP offers get 488 Not Acceptable Here. Default,
+///     and matches v0.2.0 behaviour.
+///   * [`Preferred`][SrtpMode::Preferred] — answer SRTP when the
+///     offer carries `RTP/SAVP` or `UDP/TLS/RTP/SAVPF`; fall back
+///     to plaintext when it doesn't.
+///   * [`Required`][SrtpMode::Required] — refuse plaintext-RTP
+///     offers with 488.
+///
+/// **Wire behaviour for these modes lands in Sprint 1 Week 2/3.**
+/// W1 only ships the config surface so the type contracts the
+/// upstream forge-media SDES PR will need to honour are pinned
+/// down here, in the repo, before any answer-path code is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SrtpMode {
+    /// Plaintext-RTP only. SRTP offers get 488. **Default.**
+    #[default]
+    Off,
+    /// Answer SRTP when offered; fall back to plaintext otherwise.
+    Preferred,
+    /// Answer SRTP if offered; reject plaintext-RTP offers with 488.
+    Required,
+}
+
 impl Default for BridgeDefaults {
     fn default() -> Self {
         Self {
@@ -605,6 +633,10 @@ pub fn build_start_msg(
             call_id: sip_call_id.to_string(),
             headers,
         },
+        // SRTP wire-behaviour ships in Sprint 1 W2 / W3 of the
+        // 0.3.0 plan; the production path stays `None` (plaintext
+        // RTP) for W1 builds.
+        srtp: None,
     }
 }
 

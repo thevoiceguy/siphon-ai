@@ -14,6 +14,7 @@ pub use acceptor::{
     build_bridge_config, build_start_msg, extract_offer_sdp, extract_sip_call_id, resolve_barge_in,
     resolve_codecs, resolve_dtmf_pt, AcceptError, BargeInConfig, BargeInMode, BridgeBuildError,
     BridgeDefaults, BridgingAcceptor, CallIdFactory, CallProgressMode, OfferError, PreparedCall,
+    SrtpMode,
 };
 pub use call::{
     CallController, CallControllerConfig, CallError, CallHandle, CallOutcome, CallState,

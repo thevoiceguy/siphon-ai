@@ -312,6 +312,12 @@ pub struct MediaConfig {
     /// `[media].rtp_port_range`, when set; the daemon hands this to
     /// forge's `PortPool`. `None` = use forge's default.
     pub rtp_port_range: Option<(u16, u16)>,
+    /// `[media].srtp` resolved to its enum form. Default is
+    /// [`SrtpMode::Off`] — plaintext-RTP only, matching v0.2.0.
+    /// Wire behaviour is wired up in Sprint 1 Week 2 / 3; the
+    /// field exists in W1 so per-route override merging and the
+    /// `start.srtp` event field have a stable type to bind to.
+    pub srtp: siphon_ai_core::SrtpMode,
 }
 
 #[derive(Debug, Error)]
@@ -364,6 +370,9 @@ pub enum CompileError {
 
     #[error("[bridge.barge_in].mode is {0:?}; expected \"auto_clear\" or \"notify_only\"")]
     UnknownBargeInMode(String),
+
+    #[error("[media].srtp is {0:?}; expected \"off\", \"preferred\", or \"required\"")]
+    UnknownSrtpMode(String),
 
     #[error("[media].rtp_port_range {min}-{max} is invalid (min must be < max and even)")]
     BadRtpPortRange { min: u16, max: u16 },
@@ -478,6 +487,35 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         warn!(
             route_count = routes.len(),
             "no default `any = true` route configured — non-matching INVITEs will be 404'd"
+        );
+    }
+
+    // SRTP-without-SIP/TLS footgun warning (DEV_PLAN_0.3.0.md §11).
+    // SDES exchanges the master key over the signalling plane; if
+    // SIP is plaintext UDP, the key is in the clear and SRTP gives
+    // no actual confidentiality. Warn at load (not at every call)
+    // so the operator notices once when they boot the misconfigured
+    // daemon. Per-route SRTP overrides matter too — a default-Off /
+    // route-Preferred config has the same hazard.
+    let any_route_uses_srtp = routes.iter().any(|r| {
+        r.media
+            .srtp
+            .as_deref()
+            .is_some_and(|m| m == "preferred" || m == "required")
+    });
+    let srtp_active = media.srtp != siphon_ai_core::SrtpMode::Off || any_route_uses_srtp;
+    let tls_listener_bound = sip
+        .transports
+        .iter()
+        .any(|t| matches!(t, SipTransport::Tls));
+    if srtp_active && !tls_listener_bound {
+        warn!(
+            target: "siphon_ai_config",
+            "[media].srtp (or a route override) is not \"off\" but no SIP/TLS listener \
+             is configured ([sip].transports does not include \"tls\"). \
+             SDES keys would travel in plaintext on the SIP signalling plane — \
+             SRTP gives no confidentiality in this configuration. Pair [media].srtp \
+             with [sip.tls] for end-to-end protection."
         );
     }
     Ok(Config {
@@ -625,9 +663,27 @@ fn compile_media(raw: &RawMedia) -> Result<MediaConfig, CompileError> {
             return Err(CompileError::BadRtpPortRange { min, max });
         }
     }
+    let srtp = compile_srtp_mode(raw.srtp.as_deref())?;
     Ok(MediaConfig {
         rtp_port_range: raw.rtp_port_range,
+        srtp,
     })
+}
+
+/// Translate the raw `[media].srtp` string into a typed
+/// [`SrtpMode`][siphon_ai_core::SrtpMode]. `None` (unset) → `Off`,
+/// matching v0.2.0 behaviour. Unknown values fail loud per
+/// CLAUDE.md §4.6 — no silent fallback that would surprise an
+/// operator after a typo.
+pub(crate) fn compile_srtp_mode(
+    raw: Option<&str>,
+) -> Result<siphon_ai_core::SrtpMode, CompileError> {
+    match raw {
+        None | Some("off") => Ok(siphon_ai_core::SrtpMode::Off),
+        Some("preferred") => Ok(siphon_ai_core::SrtpMode::Preferred),
+        Some("required") => Ok(siphon_ai_core::SrtpMode::Required),
+        Some(other) => Err(CompileError::UnknownSrtpMode(other.to_string())),
+    }
 }
 
 fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, CompileError> {
@@ -1155,6 +1211,59 @@ mod call_progress_tests {
             CompileError::UnknownCallProgressMode(s) => assert_eq!(s, "instant-answer"),
             other => panic!("expected UnknownCallProgressMode, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod srtp_mode_tests {
+    use super::{compile_srtp_mode, CompileError};
+    use siphon_ai_core::SrtpMode;
+
+    #[test]
+    fn missing_defaults_to_off() {
+        // Critical for backwards-compat: a 0.2.0 config without
+        // [media].srtp must keep producing plaintext-only behaviour
+        // after upgrade.
+        assert_eq!(compile_srtp_mode(None).unwrap(), SrtpMode::Off);
+    }
+
+    #[test]
+    fn explicit_modes_parse() {
+        assert_eq!(compile_srtp_mode(Some("off")).unwrap(), SrtpMode::Off);
+        assert_eq!(
+            compile_srtp_mode(Some("preferred")).unwrap(),
+            SrtpMode::Preferred
+        );
+        assert_eq!(
+            compile_srtp_mode(Some("required")).unwrap(),
+            SrtpMode::Required
+        );
+    }
+
+    #[test]
+    fn unknown_mode_errors() {
+        // Typos must fail loud at config load (CLAUDE.md §4.6) —
+        // silently treating "ON" as "off" would surprise an
+        // operator who thought they'd turned encryption on.
+        let err = compile_srtp_mode(Some("ON")).unwrap_err();
+        match err {
+            CompileError::UnknownSrtpMode(s) => assert_eq!(s, "ON"),
+            other => panic!("expected UnknownSrtpMode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn case_is_significant() {
+        // We document the modes as lowercase; "Off" / "OFF" / "PrEfErReD"
+        // are typos, not aliases. Lock that in.
+        assert!(matches!(
+            compile_srtp_mode(Some("Off")),
+            Err(CompileError::UnknownSrtpMode(_))
+        ));
+        assert!(matches!(
+            compile_srtp_mode(Some("PREFERRED")),
+            Err(CompileError::UnknownSrtpMode(_))
+        ));
     }
 }
 

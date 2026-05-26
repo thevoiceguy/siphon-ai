@@ -132,6 +132,17 @@ MAY use it to detect dropped frames in their own logs.
 | `audio.frame_ms` | int | `20` only in v1. |
 | `sip.call_id` | string | The SIP `Call-ID` from the inbound INVITE. |
 | `sip.headers` | object | Selected SIP headers, by name. The set is config-driven (`bridge.forward_headers` allowlist) — never assume any specific header is present. |
+| `srtp` | object \| absent | Present when the call's media leg was negotiated as SRTP; **absent** when the leg is plaintext `RTP/AVP` (the v0.1.0 / v0.2.0 default). Servers MUST treat absence and the v1 shape (no `srtp` key) as identical — this field was added in 0.3.0 and the protocol version stays `"1"`. |
+| `srtp.exchange` | string | `"sdes"` (RFC 4568, master key exchanged via `a=crypto:` on the SIP signalling plane) or `"dtls"` (RFC 5764 DTLS-SRTP, key derived from a DTLS handshake over the media path). |
+| `srtp.profile` | string | The negotiated SRTP crypto suite identifier, exactly as it appears on the wire — for SDES, the `a=crypto:` `crypto-suite` token; for DTLS-SRTP, the negotiated profile name. Examples: `"AES_CM_128_HMAC_SHA1_80"`, `"AES_256_CM_HMAC_SHA1_80"`, `"AEAD_AES_256_GCM"`, `"SRTP_AES128_CM_SHA1_80"`. String rather than enum because new suites land at the IANA registry independent of this release. |
+
+The `srtp` field is omitted from the JSON when SRTP is off; a v1
+WS server that doesn't know about it sees exactly the v0.2.0 shape.
+**Wire behaviour for `srtp` ships across Sprint 1 Weeks 2 / 3 of
+the 0.3.0 plan; the field shape is pinned in W1 so the WS-server
+contract is stable before any code path can produce a non-absent
+value.** See [`docs/CONFIG.md`](CONFIG.md) `[media].srtp` for the
+operator-facing mode switch.
 
 A server MUST begin sending audio (or send a `hangup`) within 5 seconds
 of receiving `start`, otherwise SiphonAI emits

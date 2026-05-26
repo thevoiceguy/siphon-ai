@@ -43,6 +43,10 @@ forge-engine.workspace = true
 # direction attribute. forge-sdp re-exports the sip-sdp types we
 # need (`SessionDescription`, `MediaType`, `Direction`).
 forge-sdp.workspace    = true
+# DtlsCertificate for DTLS-SRTP. The `dtls` feature on forge-rtp
+# rides in transitively via forge-engine's `dtls` feature (cargo
+# unifies — we don't need to spell it out here).
+forge-rtp.workspace    = true
 
 [dev-dependencies]
 bytes.workspace                       = true

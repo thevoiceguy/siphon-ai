@@ -631,6 +631,145 @@ pub fn extract_remote_dtls_setup(
         .or_else(|| offer.get_dtls_setup())
 }
 
+/// What [`maybe_tweak_dtls_srtp_offer`] returns when a SAVPF offer
+/// needs the offer-side rewrite for sip-sdp's negotiator.
+///
+/// Keeps the bits we'll need later in the acceptor flow — the
+/// fingerprint to install via `MediaSession::enable_dtls`, the
+/// remote's `a=setup:` to derive our own role from, and the rewritten
+/// SDP string to feed into `accept_inbound`.
+#[derive(Debug)]
+pub struct TweakedDtlsOffer {
+    /// Offer string with audio m-line protocol swapped to `RTP/AVP`
+    /// so sip-sdp's `negotiate_answer` can do codec matching (it
+    /// otherwise returns `NoCommonCodec` when offer/local protocols
+    /// differ — see external/siphon-rs/crates/sip-sdp/src/negotiate.rs).
+    pub tweaked_sdp: String,
+    /// `(algorithm, hash)` from the offer's `a=fingerprint:`.
+    /// Algorithm is `"sha-256"` in practice; siphon-ai 0.3.0 doesn't
+    /// validate the algorithm string — the post-handshake fingerprint
+    /// check in forge does.
+    pub remote_fingerprint: (String, String),
+    /// The remote's `a=setup:` role; RFC 5763 §5 default is `active`
+    /// when the attribute is absent.
+    pub remote_setup: forge_sdp::dtls::DtlsSetup,
+    /// Original (pre-tweak) audio m-line protocol, so the post-
+    /// processing step knows what to set the answer's profile back to.
+    pub original_protocol: forge_sdp::Protocol,
+}
+
+/// If the offer wants DTLS-SRTP and the policy allows, rewrite it as
+/// `RTP/AVP` so sip-sdp's negotiator can do codec matching. Returns
+/// `Ok(None)` when the offer isn't DTLS-SRTP — caller proceeds with
+/// the plaintext path unchanged. `Ok(Some(_))` carries the rewritten
+/// SDP plus the DTLS metadata the answer needs.
+///
+/// **Caller contract:** [`enforce_srtp_mode`] must have already run
+/// and accepted the offer (i.e., the policy allows DTLS-SRTP).
+/// Malformed DTLS offers (missing `a=fingerprint:`) get the same 488
+/// surface as a policy mismatch.
+pub fn maybe_tweak_dtls_srtp_offer(
+    offer_sdp: &str,
+) -> Result<Option<TweakedDtlsOffer>, AcceptError> {
+    use forge_sdp::{dtls::DtlsSetup, MediaType, Protocol};
+    let mut parsed =
+        match <forge_sdp::SessionDescription as forge_sdp::SessionDescriptionExt>::from_str(
+            offer_sdp,
+        ) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+
+    let original_protocol = {
+        let audio = match parsed.find_media(MediaType::Audio) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+        if !is_dtls_srtp_protocol(&audio.protocol) {
+            return Ok(None);
+        }
+        audio.protocol.clone()
+    };
+
+    // DTLS-SRTP without a fingerprint is malformed — reject with the
+    // same 488 surface as a policy mismatch. The shared error variant
+    // keeps the SIP status mapping simple; we don't introduce a new
+    // variant for a corner-case rejection.
+    let remote_fingerprint =
+        extract_remote_dtls_fingerprint(&parsed).ok_or_else(|| AcceptError::SrtpModeMismatch {
+            offered: original_protocol.to_string(),
+            mode: SrtpMode::Preferred,
+        })?;
+    let remote_setup = extract_remote_dtls_setup(&parsed).unwrap_or(DtlsSetup::Active);
+
+    // Swap the audio m-line protocol to RTP/AVP so sip-sdp's
+    // negotiator does codec matching. The post-processing step puts
+    // the original SAVPF profile back on the *answer*.
+    use forge_sdp::SessionDescriptionExt as _;
+    if let Some(audio_mut) =
+        <forge_sdp::SessionDescription>::find_media_mut(&mut parsed, MediaType::Audio)
+    {
+        audio_mut.protocol = Protocol::RtpAvp;
+    }
+
+    Ok(Some(TweakedDtlsOffer {
+        tweaked_sdp: parsed.serialize(),
+        remote_fingerprint,
+        remote_setup,
+        original_protocol,
+    }))
+}
+
+/// Take the AVP answer that sip-sdp's negotiator produced and turn it
+/// back into a DTLS-SRTP answer: set the audio m-line protocol to
+/// match the offer's original profile (`UDP/TLS/RTP/SAVPF` or
+/// `TCP/TLS/RTP/SAVPF`), add `a=fingerprint:sha-256 <local_fp>`, and
+/// add `a=setup:passive` (we're the answerer per RFC 5763 §5 — if
+/// the remote offered `actpass` we choose passive; if it offered
+/// `active`, we must be passive; if it offered `passive`, this is
+/// a configuration error and we reject).
+///
+/// Returns the re-serialized SDP text and mutates the answer in place
+/// so `AnswerOutcome.answer` reflects the wire shape too.
+pub fn post_process_dtls_srtp_answer(
+    answer: &mut forge_sdp::SessionDescription,
+    tweak: &TweakedDtlsOffer,
+    local_fingerprint_sha256: &str,
+) -> Result<String, AcceptError> {
+    use forge_sdp::{dtls::DtlsSetup, dtls::MediaDtlsAttributesExt, MediaType};
+
+    // Pick our role from the remote's. RFC 5763 §5: answerer chooses
+    // `passive` when offer is `actpass`; must be opposite of the
+    // remote's explicit role.
+    let local_setup = match tweak.remote_setup {
+        DtlsSetup::Actpass => DtlsSetup::Passive,
+        DtlsSetup::Active => DtlsSetup::Passive,
+        DtlsSetup::Passive => {
+            // Both sides can't be passive — neither would initiate.
+            // This is a misconfigured offer; 488.
+            return Err(AcceptError::SrtpModeMismatch {
+                offered: format!("{} (remote setup:passive)", tweak.original_protocol),
+                mode: SrtpMode::Preferred,
+            });
+        }
+        DtlsSetup::Holdconn => DtlsSetup::Passive, // graceful fallback
+    };
+
+    // Find the audio media and patch protocol + attributes in place.
+    use forge_sdp::SessionDescriptionExt as _;
+    let audio_mut = <forge_sdp::SessionDescription>::find_media_mut(answer, MediaType::Audio)
+        .ok_or_else(|| AcceptError::SrtpModeMismatch {
+            offered: tweak.original_protocol.to_string(),
+            mode: SrtpMode::Preferred,
+        })?;
+
+    audio_mut.protocol = tweak.original_protocol.clone();
+    audio_mut.set_media_dtls_fingerprint("sha-256", local_fingerprint_sha256);
+    audio_mut.set_media_dtls_setup(local_setup);
+
+    Ok(answer.serialize())
+}
+
 /// Reject offers whose audio m-line protocol is incompatible with the
 /// effective [`SrtpMode`] for this call, per DEV_PLAN_0.3.0.md §4.1.
 ///
@@ -638,23 +777,23 @@ pub fn extract_remote_dtls_setup(
 ///
 /// The dev plan calls for `Preferred` to *answer SRTP if offered* and
 /// for `Required` to *accept SRTP offers*. Until the follow-up PR
-/// lands the actual cert-lifecycle + `MediaSession::enable_dtls`
-/// wiring + SDP answer mutation, neither path can produce a valid
-/// SRTP answer. Rather than accept-and-silently-downgrade (which
-/// breaks the RFC 3264 offer/answer contract), this gate rejects
-/// **every** SRTP offer with 488 regardless of mode, with a
-/// progressively more specific error message:
+/// lands.
 ///
-/// - `Off` + SRTP offer → "SRTP rejected: srtp_mode = off".
-/// - `Preferred` / `Required` + SRTP offer → "SRTP answer not yet
-///   implemented (0.3.0 W2 follow-up)".
+/// The matrix:
 ///
-/// `Required` + plaintext offer → 488 unconditionally (matches the
-/// plan and works today — no SRTP wiring needed to *reject*).
+/// - `Off` + plaintext (`RTP/AVP`) → ✓
+/// - `Off` + any SRTP variant → **488** ("no silent downgrade")
+/// - `Preferred` + plaintext → ✓
+/// - `Preferred` + DTLS-SRTP (`UDP/TLS/RTP/SAVPF`) → ✓
+/// - `Preferred` + SDES (`RTP/SAVP[F]`) → **488** (SDES support is
+///   forge-engine W3+ work; SDES offers are rejected for 0.3.0)
+/// - `Required` + plaintext → **488**
+/// - `Required` + DTLS-SRTP → ✓
+/// - `Required` + SDES → **488** (same as Preferred)
 ///
-/// When the SDP-side wiring lands, this function relaxes:
-/// `Preferred`/`Required` + SRTP offer → `Ok(())` and the answer
-/// builder takes over.
+/// The DTLS-SRTP answer path is wired in [`prepare_call_inner`] via
+/// [`maybe_tweak_dtls_srtp_offer`] + [`post_process_dtls_srtp_answer`]
+/// + `MediaSession::enable_dtls`.
 pub fn enforce_srtp_mode(
     mode: SrtpMode,
     offer: &forge_sdp::SessionDescription,
@@ -668,8 +807,7 @@ pub fn enforce_srtp_mode(
     match (mode, protocol) {
         // Plain RTP under any mode that allows it.
         (SrtpMode::Off | SrtpMode::Preferred, Protocol::RtpAvp) => Ok(()),
-        // Required + plaintext → reject. Matches plan exactly; works
-        // today because rejecting needs no SRTP wiring.
+        // Required + plaintext → reject.
         (SrtpMode::Required, Protocol::RtpAvp) => Err(AcceptError::SrtpModeMismatch {
             offered: "RTP/AVP".to_string(),
             mode,
@@ -680,8 +818,14 @@ pub fn enforce_srtp_mode(
             offered: p.to_string(),
             mode,
         }),
-        // SRTP offer under Preferred / Required: rejected pending
-        // the W2 SDP-answer follow-up. See function-level doc.
+        // DTLS-SRTP under Preferred / Required: accepted. The
+        // answer-side wiring in `prepare_call_inner` handles the
+        // rest (offer tweak, answer mutation, enable_dtls).
+        (SrtpMode::Preferred | SrtpMode::Required, p) if is_dtls_srtp_protocol(p) => Ok(()),
+        // SDES offer (`RTP/SAVP` / `RTP/SAVPF`) under any non-Off mode:
+        // rejected. SDES support requires forge-engine producer
+        // wiring on top of the forge-sdp parser primitives (PR #56).
+        // Out of scope for 0.3.0 — DEV_PLAN_0.3.0.md §11 slip mitigation.
         (SrtpMode::Preferred | SrtpMode::Required, p) if is_srtp_protocol(p) => {
             Err(AcceptError::SrtpModeMismatch {
                 offered: p.to_string(),
@@ -771,6 +915,7 @@ pub fn build_start_msg(
     sip_call_id: &str,
     answer: &AnswerOutcome,
     forward_headers: &[String],
+    srtp: Option<siphon_ai_bridge::protocol::SrtpInfo>,
 ) -> StartMsg {
     let mut headers = std::collections::HashMap::with_capacity(forward_headers.len());
     for name in forward_headers {
@@ -796,10 +941,10 @@ pub fn build_start_msg(
             call_id: sip_call_id.to_string(),
             headers,
         },
-        // SRTP wire-behaviour ships in Sprint 1 W2 / W3 of the
-        // 0.3.0 plan; the production path stays `None` (plaintext
-        // RTP) for W1 builds.
-        srtp: None,
+        // `Some(SrtpInfo { ... })` when DTLS-SRTP was negotiated; the
+        // plaintext-RTP path stays `None`. SDES (W3) populates this
+        // too once its producer wiring lands.
+        srtp,
     }
 }
 
@@ -887,6 +1032,14 @@ pub struct BridgingAcceptor {
     /// (v0.1.0 behaviour); operators opt in to `Ringing` or
     /// `SessionProgress` via `[sip.call_progress]`.
     call_progress: CallProgressMode,
+    /// Long-lived DTLS certificate generated once at acceptor
+    /// startup (per-process, matches WebRTC practice). The same
+    /// cert is presented to every DTLS-SRTP handshake; its SHA-256
+    /// fingerprint goes into every answer SDP's `a=fingerprint:`.
+    /// `systemctl reload` triggers daemon restart which rolls the
+    /// cert — there's no mid-process cert rotation (rotating
+    /// would invalidate in-flight handshakes).
+    dtls_cert: Arc<forge_rtp::dtls::DtlsCertificate>,
 }
 
 /// Daemon-wide REFER plumbing (shared across every accepted call).
@@ -1011,6 +1164,15 @@ impl BridgingAcceptor {
             }
         });
 
+        // Per-process DTLS cert, generated eagerly so the first
+        // SAVPF call doesn't pay the rcgen cost during INVITE
+        // handling. Failure here is fatal — without a cert we
+        // can't honour `srtp_mode = preferred`/`required` policies.
+        let dtls_cert = Arc::new(
+            forge_rtp::dtls::DtlsCertificate::generate()
+                .expect("DTLS cert generation failed at acceptor startup"),
+        );
+
         Self {
             media,
             defaults,
@@ -1024,6 +1186,7 @@ impl BridgingAcceptor {
             session_timer_manager,
             dialog_handles,
             call_progress: CallProgressMode::default(),
+            dtls_cert,
         }
     }
 
@@ -2122,6 +2285,16 @@ impl BridgingAcceptor {
         // If parsing fails here, fall through and let `accept_inbound`
         // surface the parse error via its normal SdpError path.
 
+        // If the offer wants DTLS-SRTP, rewrite it to RTP/AVP so
+        // sip-sdp's negotiator (which doesn't know about SAVPF) can
+        // do codec matching. We'll patch the answer back to SAVPF
+        // post-negotiation and install the DTLS keys on the session.
+        let dtls_tweak = maybe_tweak_dtls_srtp_offer(offer_sdp)?;
+        let offer_sdp_for_negotiator: String = dtls_tweak
+            .as_ref()
+            .map(|t| t.tweaked_sdp.clone())
+            .unwrap_or_else(|| offer_sdp.to_string());
+
         let bridge_config = build_bridge_config(&self.defaults, route)?;
         let codecs = resolve_codecs(&self.defaults, route);
         let dtmf_pt = resolve_dtmf_pt(&self.defaults, route);
@@ -2132,18 +2305,19 @@ impl BridgingAcceptor {
         debug!(
             ws_url = %bridge_config.ws_url,
             codec_count = codecs.len(),
+            dtls_srtp = dtls_tweak.is_some(),
             "media setup starting"
         );
 
         let InboundAccepted {
-            answer,
-            session: _session,
+            mut answer,
+            session,
             tap,
         } = self
             .media
             .accept_inbound(InboundCall {
                 call_id: forge_call_id.clone(),
-                offer_sdp,
+                offer_sdp: &offer_sdp_for_negotiator,
                 codecs,
                 dtmf_payload_type: dtmf_pt,
                 participant_a: forge_core::ParticipantId::new(format!("sip-{}", forge_call_id.0)),
@@ -2158,12 +2332,37 @@ impl BridgingAcceptor {
             })
             .await?;
 
+        // DTLS-SRTP post-negotiation: patch the answer back to SAVPF
+        // with our fingerprint + setup, install the DTLS leg on the
+        // media session, and remember to populate `start.srtp`.
+        let srtp_info = if let Some(tweak) = &dtls_tweak {
+            let local_fp = self.dtls_cert.fingerprint_sha256().to_string();
+            let new_text = post_process_dtls_srtp_answer(&mut answer.answer, tweak, &local_fp)?;
+            answer.answer_text = new_text;
+            session
+                .enable_dtls(
+                    forge_engine::ParticipantLabel::A,
+                    Arc::clone(&self.dtls_cert),
+                    forge_rtp::dtls::DtlsRole::Server,
+                    tweak.remote_fingerprint.1.clone(),
+                )
+                .await
+                .map_err(|e| AcceptError::Controller(format!("enable_dtls failed: {e}")))?;
+            Some(siphon_ai_bridge::protocol::SrtpInfo {
+                exchange: siphon_ai_bridge::protocol::SrtpExchange::Dtls,
+                profile: "AES_CM_128_HMAC_SHA1_80".to_string(),
+            })
+        } else {
+            None
+        };
+
         let start = build_start_msg(
             bridge_call_id.clone(),
             facts,
             &sip_call_id,
             &answer,
             &self.defaults.forward_headers,
+            srtp_info,
         );
 
         let transfer = self.transfer.get().map(|installed| TransferContext {
@@ -2746,19 +2945,31 @@ a=sendrecv\r\n";
     }
 
     #[test]
-    fn enforce_preferred_rejects_srtp_pending_w2_followup() {
-        // The dev plan calls for Preferred to *answer SRTP* — but
-        // until the SDP-answer-mutation follow-up lands, accepting an
-        // SRTP offer and answering plaintext breaks the offer/answer
-        // contract. Reject explicitly until follow-up.
+    fn enforce_preferred_accepts_dtls_srtp() {
+        // DTLS-SRTP path is now wired end-to-end (W2 incr 2b). The
+        // gate lets the offer through; the answer builder + enable_dtls
+        // call in prepare_call_inner do the rest.
         let offer = parse_sdp(SAVPF_OFFER);
+        assert!(enforce_srtp_mode(SrtpMode::Preferred, &offer).is_ok());
+    }
+
+    #[test]
+    fn enforce_required_accepts_dtls_srtp() {
+        let offer = parse_sdp(SAVPF_OFFER);
+        assert!(enforce_srtp_mode(SrtpMode::Required, &offer).is_ok());
+    }
+
+    #[test]
+    fn enforce_preferred_rejects_sdes_pending_w3_forge_wiring() {
+        // SDES (RTP/SAVP) requires forge-engine producer wiring on
+        // top of PR #56's parser primitives; that path isn't done.
+        // Reject until then; documented in enforce_srtp_mode's doc.
+        let offer = parse_sdp(SAVP_OFFER);
         assert!(enforce_srtp_mode(SrtpMode::Preferred, &offer).is_err());
     }
 
     #[test]
-    fn enforce_required_rejects_srtp_pending_w2_followup() {
-        // Same caveat as Preferred. Documented in the function's
-        // doc comment; relaxes when the follow-up lands.
+    fn enforce_required_rejects_sdes_pending_w3_forge_wiring() {
         let offer = parse_sdp(SAVP_OFFER);
         assert!(enforce_srtp_mode(SrtpMode::Required, &offer).is_err());
     }
@@ -2877,6 +3088,85 @@ a=sendrecv\r\n";
         assert!(enforce_srtp_mode(SrtpMode::Required, &offer).is_ok());
     }
 
+    // ─── maybe_tweak_dtls_srtp_offer ─────────────────────────────────
+
+    #[test]
+    fn tweak_passes_through_avp_offer_unchanged() {
+        // Non-DTLS-SRTP offers shouldn't be tweaked.
+        let res = maybe_tweak_dtls_srtp_offer(AVP_OFFER).unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn tweak_rewrites_savpf_to_avp() {
+        let res = maybe_tweak_dtls_srtp_offer(DTLS_OFFER_MEDIA_LEVEL)
+            .unwrap()
+            .expect("DTLS offer must produce a tweak");
+        // The rewritten offer's audio profile is now RTP/AVP.
+        assert!(res.tweaked_sdp.contains("m=audio 10000 RTP/AVP"));
+        // Original profile preserved for the post-processor.
+        assert_eq!(res.original_protocol, forge_sdp::Protocol::UdpTlsRtpSavpf);
+        // Fingerprint extracted.
+        assert_eq!(res.remote_fingerprint.0, "sha-256");
+        assert!(res.remote_fingerprint.1.starts_with("AB:CD"));
+    }
+
+    #[test]
+    fn tweak_returns_488_on_savpf_without_fingerprint() {
+        // Malformed DTLS-SRTP offer — should 488.
+        let no_fp = "v=0\r\n\
+            o=- 1 1 IN IP4 192.0.2.1\r\n\
+            s=-\r\n\
+            c=IN IP4 192.0.2.1\r\n\
+            t=0 0\r\n\
+            m=audio 10000 UDP/TLS/RTP/SAVPF 0\r\n\
+            a=rtpmap:0 PCMU/8000\r\n";
+        let err = maybe_tweak_dtls_srtp_offer(no_fp).unwrap_err();
+        let (code, _) = err.sip_status();
+        assert_eq!(code, 488);
+    }
+
+    // ─── post_process_dtls_srtp_answer ───────────────────────────────
+
+    #[test]
+    fn post_process_sets_savpf_and_adds_fingerprint_and_setup() {
+        use forge_sdp::dtls::DtlsSetup;
+        // First build a plain AVP answer the way sip-sdp would.
+        let mut answer = parse_sdp(AVP_OFFER);
+        let tweak = TweakedDtlsOffer {
+            tweaked_sdp: String::new(), // not consumed by post_process
+            remote_fingerprint: ("sha-256".into(), "AB:CD".into()),
+            remote_setup: DtlsSetup::Actpass,
+            original_protocol: forge_sdp::Protocol::UdpTlsRtpSavpf,
+        };
+        let local_fp = "01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:\
+                        01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF";
+
+        let out = post_process_dtls_srtp_answer(&mut answer, &tweak, local_fp).unwrap();
+
+        // Wire shape: SAVPF profile, our fingerprint, setup:passive.
+        assert!(out.contains("UDP/TLS/RTP/SAVPF"));
+        assert!(out.contains(&format!("a=fingerprint:sha-256 {local_fp}")));
+        assert!(out.contains("a=setup:passive"));
+    }
+
+    #[test]
+    fn post_process_rejects_when_remote_is_passive() {
+        // Both sides can't be passive — RFC 5763 violation.
+        use forge_sdp::dtls::DtlsSetup;
+        let mut answer = parse_sdp(AVP_OFFER);
+        let tweak = TweakedDtlsOffer {
+            tweaked_sdp: String::new(),
+            remote_fingerprint: ("sha-256".into(), "AB:CD".into()),
+            remote_setup: DtlsSetup::Passive,
+            original_protocol: forge_sdp::Protocol::UdpTlsRtpSavpf,
+        };
+        let res = post_process_dtls_srtp_answer(&mut answer, &tweak, "AA:BB");
+        assert!(res.is_err());
+        let (code, _) = res.unwrap_err().sip_status();
+        assert_eq!(code, 488);
+    }
+
     // ─── resolve_dtmf_pt ──────────────────────────────────────────
 
     #[test]
@@ -2934,6 +3224,7 @@ a=sendrecv\r\n";
             "abc-123@pbx",
             &answer,
             &[],
+            None,
         );
         assert_eq!(start.version, PROTOCOL_VERSION);
         assert_eq!(start.call_id.as_str(), "siphon-1");
@@ -2975,6 +3266,7 @@ a=sendrecv\r\n";
             "x@y",
             &answer,
             &["User-Agent".into(), "X-Tenant-Id".into()],
+            None,
         );
 
         // Forwarded headers come back canonical-cased.
@@ -3012,6 +3304,7 @@ a=sendrecv\r\n";
             "x@y",
             &answer,
             &["USER-AGENT".into()],
+            None,
         );
         assert_eq!(
             start.sip.headers.get("User-Agent").map(String::as_str),

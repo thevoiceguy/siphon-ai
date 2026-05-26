@@ -138,10 +138,25 @@ MAY use it to detect dropped frames in their own logs.
 
 The `srtp` field is omitted from the JSON when SRTP is off; a v1
 WS server that doesn't know about it sees exactly the v0.2.0 shape.
-**Wire behaviour for `srtp` ships across Sprint 1 Weeks 2 / 3 of
-the 0.3.0 plan; the field shape is pinned in W1 so the WS-server
-contract is stable before any code path can produce a non-absent
-value.** See [`docs/CONFIG.md`](CONFIG.md) `[media].srtp` for the
+
+**DTLS-SRTP (0.3.0 W2): produced.** When an inbound `UDP/TLS/RTP/SAVPF`
+offer is accepted under `srtp = "preferred"` or `"required"`, the
+field is populated with `{ exchange: "dtls", profile:
+"AES_CM_128_HMAC_SHA1_80" }`. The profile is best-guess pre-handshake
+— RFC 5764 mandates that suite as the baseline; the actual
+negotiated profile may be stronger (AEAD-GCM) when both sides
+support it, but `start` fires before the DTLS handshake completes
+so we can't carry the post-handshake choice. Servers that need the
+true negotiated profile should wait for a quality assessment event
+rather than trusting `start.srtp.profile` exactly.
+
+**SDES (`exchange: "sdes"`): not yet produced.** The forge-sdp
+parser primitives shipped in forge-media#56, but the producer
+wiring isn't in forge-engine. SAVP / SAVPF (non-DTLS) offers under
+any non-`off` mode are 488'd; see DEV_PLAN_0.3.0.md §11 slip
+mitigation.
+
+See [`docs/CONFIG.md`](CONFIG.md) `[media].srtp` for the
 operator-facing mode switch.
 
 A server MUST begin sending audio (or send a `hangup`) within 5 seconds

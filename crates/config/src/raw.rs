@@ -180,6 +180,24 @@ pub struct RawMedia {
     /// overrides this value.
     #[serde(default)]
     pub inactivity_timeout_secs: Option<u64>,
+    /// SRTP negotiation mode — `"off"` | `"preferred"` | `"required"`.
+    /// `None` (unset) → defaults to `"off"` at compile time, preserving
+    /// v0.2.0 behaviour (plaintext-RTP only). Per-route
+    /// `[route.media].srtp` overrides this value.
+    ///
+    /// Behaviour by mode:
+    ///   * `"off"` — answer plaintext only. An offer with an `RTP/SAVP`
+    ///     or `UDP/TLS/RTP/SAVPF` profile is rejected with 488 (no
+    ///     silent downgrade to plaintext).
+    ///   * `"preferred"` — answer SRTP when the offer carries it;
+    ///     fall back to plaintext otherwise.
+    ///   * `"required"` — refuse plaintext-RTP offers with 488.
+    ///
+    /// The mode names + semantics are enforced at config-load time
+    /// via [`compile::compile_srtp_mode`]; unknown strings are a
+    /// fail-loud error per CLAUDE.md §4.6.
+    #[serde(default)]
+    pub srtp: Option<String>,
 }
 
 /// `[cdr]` — call detail record sinks. v1 supports a JSONL file

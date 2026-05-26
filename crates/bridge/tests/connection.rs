@@ -219,6 +219,7 @@ fn fixture_start(call_id: &str) -> StartMsg {
             call_id: "x@y".into(),
             headers: Default::default(),
         },
+        srtp: None,
     }
 }
 

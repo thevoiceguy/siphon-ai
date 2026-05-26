@@ -188,6 +188,55 @@ pub struct StartMsg {
     pub direction: Direction,
     pub audio: AudioFormat,
     pub sip: SipMeta,
+    /// SRTP profile / key-exchange in use for this call's media leg,
+    /// when SRTP was negotiated. `None` means the media is plaintext
+    /// `RTP/AVP` (the v0.1.0 / v0.2.0 behaviour, and the default
+    /// when `[media].srtp = "off"`).
+    ///
+    /// The protocol stays at `version = "1"` — `srtp` is `#[serde]`
+    /// `skip_serializing_if = "Option::is_none"`, so a 0.1.x / 0.2.x
+    /// WS server's parser sees the same `start` shape it always
+    /// saw. Servers that *want* to know whether the leg is encrypted
+    /// just check whether the field is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srtp: Option<SrtpInfo>,
+}
+
+/// SRTP details surfaced on [`StartMsg::srtp`].
+///
+/// W1 ships the type; the field stays `None` on real calls until
+/// the Sprint 1 Week 2 / 3 wiring lands. Defined now so the WS
+/// protocol shape is pinned before any code path produces a
+/// non-`None` value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SrtpInfo {
+    /// How the SRTP master key was negotiated.
+    pub exchange: SrtpExchange,
+    /// The negotiated SRTP crypto suite identifier, exactly as it
+    /// appears on the wire (`a=crypto:` `crypto-suite` token for
+    /// SDES; the DTLS-SRTP profile name for DTLS-SRTP). Examples:
+    /// `"AES_CM_128_HMAC_SHA1_80"`, `"AES_256_CM_HMAC_SHA1_80"`,
+    /// `"AEAD_AES_256_GCM"`.
+    ///
+    /// String rather than enum because new suites land at the IANA
+    /// registry independent of our release cadence — we'd rather
+    /// pass through an unrecognised suite name than block negotiation
+    /// on a missing variant.
+    pub profile: String,
+}
+
+/// Key-exchange family that produced [`SrtpInfo::profile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SrtpExchange {
+    /// RFC 4568 SDES — master key exchanged via `a=crypto:` on the
+    /// SIP signalling plane. Used by classic SIP carriers
+    /// (Twilio Elastic SIP Trunk Secure Media etc).
+    Sdes,
+    /// RFC 5764 DTLS-SRTP — master key derived from a DTLS handshake
+    /// over the media path, with fingerprint authenticated via SIP
+    /// `a=fingerprint:`. Used by WebRTC-side peers.
+    Dtls,
 }
 
 /// Audio format declaration. Fixed for the lifetime of the call.
@@ -781,6 +830,7 @@ mod tests {
                 call_id: "x@y".into(),
                 headers: HashMap::new(),
             },
+            srtp: None,
         });
         let v: Value = serde_json::to_value(&start).unwrap();
         let obj = v.as_object().unwrap();
@@ -802,5 +852,70 @@ mod tests {
         }
         assert_eq!(obj["type"], json!("start"));
         assert_eq!(obj["version"], json!("1"));
+    }
+
+    /// Two contracts in one test:
+    /// 1. When `srtp` is `None` the field is **absent** from the
+    ///    JSON, not present-as-null. A 0.1.x / 0.2.x WS server
+    ///    parsing the message must see exactly the same shape it
+    ///    always saw — otherwise we've made the "protocol stays
+    ///    at v1" claim a lie.
+    /// 2. When `srtp` is `Some(SrtpInfo)`, the wire format is
+    ///    `{ "exchange": "sdes" | "dtls", "profile": "<string>" }`
+    ///    and round-trips cleanly.
+    #[test]
+    fn start_srtp_field_serialization() {
+        // Skeleton reused for both cases.
+        let mk = |srtp: Option<SrtpInfo>| {
+            BridgeOut::Start(StartMsg {
+                version: PROTOCOL_VERSION.to_string(),
+                call_id: CallId::new("c"),
+                seq: 0,
+                from: "+1".into(),
+                to: "5000".into(),
+                direction: Direction::Inbound,
+                audio: AudioFormat {
+                    encoding: AudioEncoding::Pcm16le,
+                    sample_rate: 8000,
+                    channels: 1,
+                    frame_ms: 20,
+                },
+                sip: SipMeta {
+                    call_id: "x@y".into(),
+                    headers: HashMap::new(),
+                },
+                srtp,
+            })
+        };
+
+        // (1) None ⇒ field absent. The v1 contract.
+        let v: Value = serde_json::to_value(mk(None)).unwrap();
+        assert!(
+            !v.as_object().unwrap().contains_key("srtp"),
+            "srtp must be absent from JSON when None (skip_serializing_if), \
+             got payload: {v}"
+        );
+
+        // (2) Some ⇒ field present + round-trips.
+        let info = SrtpInfo {
+            exchange: SrtpExchange::Sdes,
+            profile: "AES_CM_128_HMAC_SHA1_80".into(),
+        };
+        let v: Value = serde_json::to_value(mk(Some(info.clone()))).unwrap();
+        assert_eq!(v["srtp"]["exchange"], json!("sdes"));
+        assert_eq!(v["srtp"]["profile"], json!("AES_CM_128_HMAC_SHA1_80"));
+        let round: BridgeOut = serde_json::from_value(v).unwrap();
+        match round {
+            BridgeOut::Start(s) => assert_eq!(s.srtp, Some(info)),
+            other => panic!("expected Start, got {other:?}"),
+        }
+
+        // (3) DTLS exchange serialises to "dtls" (rename_all = snake_case).
+        let info = SrtpInfo {
+            exchange: SrtpExchange::Dtls,
+            profile: "SRTP_AES128_CM_SHA1_80".into(),
+        };
+        let v: Value = serde_json::to_value(mk(Some(info))).unwrap();
+        assert_eq!(v["srtp"]["exchange"], json!("dtls"));
     }
 }

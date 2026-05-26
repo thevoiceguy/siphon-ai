@@ -116,4 +116,9 @@ pub struct MediaOverride {
     pub dtmf: Option<String>,
     pub inactivity_timeout_secs: Option<u64>,
     pub rtp_port_range: Option<(u16, u16)>,
+    /// `[route.media].srtp` — per-route override of the global
+    /// `[media].srtp` mode. `None` means "inherit"; any of `"off"`,
+    /// `"preferred"`, `"required"` overrides. Validated at config
+    /// load via the same path as the global field.
+    pub srtp: Option<String>,
 }

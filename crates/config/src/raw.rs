@@ -430,6 +430,29 @@ pub struct RawBridge {
     /// = disable the event entirely.
     #[serde(default)]
     pub rtp_stats_interval_ms: Option<u64>,
+    /// `[bridge.tls]` — mTLS for the WS bridge connection (W4 Part A).
+    /// Absent = use the existing plaintext / webpki path. Present =
+    /// build a custom rustls ClientConfig carrying the client cert
+    /// and optional SPKI pin.
+    #[serde(default)]
+    pub tls: Option<RawBridgeTls>,
+}
+
+/// `[bridge.tls]` — mTLS settings for the bridge WS leg.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawBridgeTls {
+    /// PEM-encoded client certificate chain. Must contain at least
+    /// the leaf cert; intermediates allowed.
+    pub client_cert: String,
+    /// PEM-encoded client private key. Must match the leaf in
+    /// `client_cert`.
+    pub client_key: String,
+    /// Optional SHA-256 SPKI pin (64 hex chars, no separators).
+    /// When set, replaces default CA chain verification with
+    /// exact-match against this single pin.
+    #[serde(default)]
+    pub pinned_sha256: Option<String>,
 }
 
 /// `[bridge.barge_in]` — global default barge-in policy.

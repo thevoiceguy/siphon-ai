@@ -75,6 +75,12 @@ pub struct BridgeConfig {
     pub auth_header: Option<String>,
     /// How long to wait for the WS handshake before giving up.
     pub connect_timeout: Duration,
+    /// mTLS settings for the bridge connection. `None` = use the
+    /// existing plaintext / webpki-validated path. `Some(_)` = a
+    /// rustls `ClientConfig` is built carrying the operator's client
+    /// cert + optional SPKI pin and handed to tokio-tungstenite's
+    /// `Connector::Rustls`. See [`crate::tls`] for the verifier shape.
+    pub tls: Option<crate::tls::BridgeTlsConfig>,
 }
 
 impl Default for BridgeConfig {
@@ -83,6 +89,7 @@ impl Default for BridgeConfig {
             ws_url: String::new(),
             auth_header: None,
             connect_timeout: Duration::from_secs(5),
+            tls: None,
         }
     }
 }
@@ -242,10 +249,29 @@ pub async fn connect_and_run(
         ..Default::default()
     };
 
-    let connect_fut = connect_async_with_config(request, Some(ws_config), false);
-    let (ws, response) = match tokio::time::timeout(config.connect_timeout, connect_fut).await {
-        Ok(result) => result?,
-        Err(_) => return Err(BridgeError::ConnectTimeout(config.connect_timeout)),
+    // Pick the connector based on whether [bridge.tls] is configured.
+    // No `tls` field → existing plaintext / webpki path
+    // (`connect_async_with_config` uses tokio-tungstenite's default
+    // connector, which itself does webpki validation for `wss://`).
+    // `tls` set → custom `Connector::Rustls` carrying the operator's
+    // client cert + optional SPKI pin.
+    let (ws, response) = if let Some(tls_cfg) = &config.tls {
+        use tokio_tungstenite::{connect_async_tls_with_config, Connector};
+        let client_config = tls_cfg
+            .to_rustls_config()
+            .map_err(|e| BridgeError::InvalidConfig(format!("rustls config: {e}")))?;
+        let connector = Some(Connector::Rustls(std::sync::Arc::new(client_config)));
+        let connect_fut = connect_async_tls_with_config(request, Some(ws_config), false, connector);
+        match tokio::time::timeout(config.connect_timeout, connect_fut).await {
+            Ok(result) => result?,
+            Err(_) => return Err(BridgeError::ConnectTimeout(config.connect_timeout)),
+        }
+    } else {
+        let connect_fut = connect_async_with_config(request, Some(ws_config), false);
+        match tokio::time::timeout(config.connect_timeout, connect_fut).await {
+            Ok(result) => result?,
+            Err(_) => return Err(BridgeError::ConnectTimeout(config.connect_timeout)),
+        }
     };
 
     if let Some(echoed) = response.headers().get("sec-websocket-protocol") {

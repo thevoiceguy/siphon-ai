@@ -255,6 +255,7 @@ fn fixture_config(url: String) -> BridgeConfig {
         ws_url: url,
         auth_header: None,
         connect_timeout: Duration::from_secs(2),
+        tls: None,
     }
 }
 
@@ -623,6 +624,7 @@ async fn unsupported_url_returns_invalid_config_or_ws_error() {
         ws_url: "not-a-url".into(),
         auth_header: None,
         connect_timeout: Duration::from_millis(500),
+        tls: None,
     };
     let result = connect_and_run(cfg, fixture_start("c"), chans).await;
     assert!(

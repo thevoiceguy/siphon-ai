@@ -19,5 +19,17 @@ base64.workspace            = true
 thiserror.workspace         = true
 tracing.workspace           = true
 
+# mTLS for the WS bridge leg (W4 Part A). `rustls` is the
+# `ClientConfig` we hand to `Connector::Rustls`; `rustls-pemfile`
+# parses the operator-supplied PEM cert + key; `webpki-roots` is
+# the default CA bundle used when no SPKI pin is configured.
+rustls          = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
+rustls-pemfile  = "2"
+webpki-roots    = "0.26"
+# Used by the custom SPKI ServerCertVerifier to hash the peer's
+# Subject Public Key Info — matches the `rustls::CertificateDer`
+# parsing surface so we don't pull in an extra X.509 crate.
+sha2            = "0.10"
+
 [dev-dependencies]
 parking_lot.workspace = true

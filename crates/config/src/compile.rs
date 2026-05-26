@@ -374,6 +374,9 @@ pub enum CompileError {
     #[error("[media].srtp is {0:?}; expected \"off\", \"preferred\", or \"required\"")]
     UnknownSrtpMode(String),
 
+    #[error("[bridge.tls] is malformed: {0}")]
+    BadBridgeTls(#[from] siphon_ai_bridge::tls::TlsConfigError),
+
     #[error("[media].rtp_port_range {min}-{max} is invalid (min must be < max and even)")]
     BadRtpPortRange { min: u16, max: u16 },
 
@@ -742,6 +745,18 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
     // (`compile_srtp_mode`). Default — and any unset value — is `Off`.
     let srtp_mode = compile_srtp_mode(media.srtp.as_deref())?;
 
+    // `[bridge.tls]` — mTLS for the WS leg. Validation at compile
+    // time so cert/key issues surface at daemon startup, not on the
+    // first call that tries to use them.
+    let bridge_tls = match raw.tls.as_ref() {
+        None => None,
+        Some(raw_tls) => Some(siphon_ai_bridge::tls::BridgeTlsConfig::from_paths(
+            std::path::Path::new(&raw_tls.client_cert),
+            std::path::Path::new(&raw_tls.client_key),
+            raw_tls.pinned_sha256.as_deref(),
+        )?),
+    };
+
     Ok(BridgeDefaults {
         ws_url: raw.ws_url.filter(|s| !s.is_empty()),
         auth_header,
@@ -755,6 +770,7 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         dead_air_threshold,
         rtp_stats_interval,
         srtp_mode,
+        bridge_tls,
     })
 }
 

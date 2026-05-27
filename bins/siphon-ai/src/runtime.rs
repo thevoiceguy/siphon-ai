@@ -306,9 +306,14 @@ impl Runtime {
         // semantics match: same cert/key paths, same key-pair
         // validation, just performed on every SIGHUP rather than only
         // at startup.
-        if let (Some(swap), Some(tls)) = (tls_server_config.as_ref(), sip.tls.as_ref()) {
-            spawn_sighup_reloader(tls.clone(), Arc::clone(swap));
-        }
+        // Always install a SIGHUP handler at startup. The default
+        // Unix disposition for SIGHUP is *terminate the process* —
+        // if we don't claim the signal, `systemctl reload
+        // siphon-ai` on a non-TLS deployment would kill the daemon.
+        // When TLS is configured the handler does the cert reload;
+        // when it isn't, the handler is a no-op (just consumes the
+        // signal so it doesn't fire the default action).
+        spawn_sighup_handler(sip.tls.clone(), tls_server_config.clone());
 
         // ─── Integrated UAS ────────────────────────────────────────
         let local_uri = sip_local_uri(&node, &sip);
@@ -738,6 +743,56 @@ fn load_sip_tls_server_config(
         "TLS server config loaded"
     );
     Ok(cfg)
+}
+
+/// Install the daemon's SIGHUP handler. Always installed —
+/// claiming the signal prevents the default Unix disposition
+/// (process termination) from firing when an operator runs
+/// `systemctl reload siphon-ai` against a deployment that doesn't
+/// enable TLS.
+///
+/// `tls` + `swappable` are `Some` together (both required for hot
+/// reload to do anything) or `None` together (handler is a no-op
+/// signal consumer). Mixed states fall back to no-op with a `warn!`
+/// — they shouldn't happen, but the daemon doesn't crash if they do.
+fn spawn_sighup_handler(
+    tls: Option<SipTlsConfig>,
+    swappable: Option<Arc<arc_swap::ArcSwap<tokio_rustls::rustls::ServerConfig>>>,
+) {
+    match (tls, swappable) {
+        (Some(tls), Some(swap)) => spawn_sighup_reloader(tls, swap),
+        (None, None) => spawn_sighup_noop(),
+        _ => {
+            warn!(
+                "inconsistent SIGHUP wiring (one of tls/swappable is set, the other isn't); \
+                 falling back to no-op handler"
+            );
+            spawn_sighup_noop();
+        }
+    }
+}
+
+/// No-op SIGHUP consumer for deployments without TLS. Just claims
+/// the signal so the default "terminate" disposition doesn't fire.
+fn spawn_sighup_noop() {
+    use tokio::signal::unix::{signal, SignalKind};
+    tokio::spawn(async move {
+        let mut stream = match signal(SignalKind::hangup()) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "failed to install no-op SIGHUP handler; daemon may terminate on \
+                     `systemctl reload` until TLS is configured",
+                );
+                return;
+            }
+        };
+        info!("SIGHUP handler installed (no TLS configured; signal is a no-op)");
+        while stream.recv().await.is_some() {
+            info!("SIGHUP received but no TLS configured; ignoring");
+        }
+    });
 }
 
 /// Install a SIGHUP handler that hot-reloads the SIP/TLS cert.

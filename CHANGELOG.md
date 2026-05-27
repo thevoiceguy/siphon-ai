@@ -7,6 +7,207 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-26
+
+Third release. Theme: **trust and encryption** — every transport
+the daemon touches can now run encrypted. SIP/TLS gets hot cert
+reload (no in-flight call drops on renewal). The WebSocket bridge
+gets mTLS with optional SPKI cert pinning. Inbound calls offering
+DTLS-SRTP get a SAVPF answer end-to-end (forge handles the
+handshake, derives SRTP keys, decrypts media). RTP-quality events
+(`jitter_ms`, `packet_loss_ratio`, and an `rtcp_rtt_ms` field
+reserved for 0.3.1) now actually populate.
+
+Protocol stays at `version: "1"` — every new variant is additive,
+so v1 WS servers built against 0.1.0 / 0.2.0 keep working
+unchanged. The wire-shape additions land *behind* the new config
+defaults: out of the box, 0.3.0 behaves like 0.2.0.
+
+### Added
+
+#### Encryption
+
+- **DTLS-SRTP for inbound calls** (PROTOCOL §3.1 `start.srtp`,
+  DEV_PLAN_0.3.0.md §4.1). When the offer's audio m-line is
+  `UDP/TLS/RTP/SAVPF` and `[media].srtp` is `"preferred"` or
+  `"required"`, the daemon:
+  1. extracts the remote `a=fingerprint:` + `a=setup:` from the
+     offer,
+  2. answers `UDP/TLS/RTP/SAVPF` with our own SHA-256 fingerprint
+     and `a=setup:passive` (RFC 5763 §5),
+  3. provisions the DTLS leg on the per-call `MediaSession`,
+     forge-engine's recv loop demuxes the inbound DTLS handshake
+     (RFC 5764 §5.1.2 first-byte demux),
+  4. on handshake completion, the derived SRTP master keys
+     install into the existing `SrtpContext` and subsequent SRTP
+     packets decode through the ordinary unprotect path.
+
+  `start.srtp` is populated with `{exchange: "dtls", profile:
+  "AES_CM_128_HMAC_SHA1_80"}` — the profile is best-guess
+  pre-handshake (RFC 5764 mandates that suite as baseline; the
+  actual negotiation may select a stronger AES-GCM suite).
+
+  Long-lived per-process DTLS cert generated at daemon startup
+  (rcgen). Same cert presented to every DTLS handshake; rotation
+  is via daemon restart (or `systemctl reload` on the SIP/TLS
+  side — DTLS-SRTP cert rotation is intentionally NOT exposed,
+  since rotating it mid-call would invalidate in-flight handshakes).
+
+  SDES (`RTP/SAVP` / `RTP/SAVPF`) offers are rejected with 488 —
+  forge-sdp ships the `a=crypto:` parser but the forge-engine
+  producer wiring isn't done. 0.3.1.
+
+- **`[media].srtp` config + policy gate**. New
+  `[media].srtp = "off" | "preferred" | "required"` (default
+  `"off"`, matches 0.2.0). Per-route override via
+  `[route.media].srtp`. The policy matrix is enforced before any
+  media bring-up — incompatible offers fail fast with 488:
+
+  | Mode | Plaintext (`RTP/AVP`) | DTLS-SRTP | SDES |
+  |---|---|---|---|
+  | `off` | ✓ | 488 | 488 |
+  | `preferred` | ✓ | ✓ | 488 |
+  | `required` | 488 | ✓ | 488 |
+
+  Resolution via `resolve_srtp_mode(defaults, route)` mirrors the
+  other `resolve_*` helpers; unknown route-level values warn and
+  fall back to defaults.
+
+- **mTLS for the bridge WebSocket leg** (`[bridge.tls]` block,
+  DEV_PLAN_0.3.0.md §4.2 Part A, `docs/DEPLOY.md` §3a). New
+  config:
+
+  ```toml
+  [bridge.tls]
+  client_cert    = "/etc/siphon-ai/bridge/client.pem"
+  client_key     = "/etc/siphon-ai/bridge/client.key"
+  pinned_sha256  = "..."   # optional 64-hex-char SPKI SHA-256
+  ```
+
+  Builds a custom `rustls::ClientConfig` and hands it to
+  `tokio-tungstenite`'s `Connector::Rustls`. The optional SPKI
+  pin (SHA-256 of the server's `SubjectPublicKeyInfo` per
+  RFC 7469 §3) replaces default CA verification with exact-match,
+  appropriate for carrier-pinned PBX deployments. Cert / key /
+  pin validation happens at config compile so issues surface at
+  daemon startup, not at first call.
+
+- **Outbound TLS UAC for REGISTER** (DEV_PLAN_0.3.0.md §4.5,
+  `docs/REGISTRATION.md` "TLS registration"). `transport = "tls"`
+  on a `[[register]]` block now actually goes out over TLS — no
+  silent fallback to UDP. Uses the daemon-wide webpki trust
+  store (Mozilla CA bundle). Twilio Elastic SIP Trunk recipe in
+  `REGISTRATION.md`. The stale "Inbound UAS only" disclaimer in
+  `CONFIG.md` is removed.
+
+- **SIGHUP hot cert reload for SIP/TLS** (DEV_PLAN_0.3.0.md
+  §4.3). `systemctl reload siphon-ai` rotates `[sip.tls].cert` +
+  `.key` without dropping in-flight TLS sessions. In-flight
+  dialogs keep using the cert they handshook with
+  (RFC 5746-compliant); new connections pick up the fresh cert.
+  Broken PEM on reload doesn't kill the daemon — `error!`
+  logged, previous cert keeps serving. New metric
+  `siphon_ai_sip_tls_reload_attempts_total{outcome}`. systemd
+  `ExecReload=/bin/kill -HUP $MAINPID`. Builds on siphon-rs's
+  `run_tls_with_swappable_config` (#49).
+
+#### Observability
+
+- **`rtp_stats` event fields populate** (PROTOCOL §3.8,
+  DEV_PLAN_0.3.0.md §4.4). `jitter_ms` and `packet_loss_ratio`
+  are now driven by a new `ForgeEvent::RtcpReportReceived` event
+  forge-engine emits on every received RR (forge-media#57 +
+  #60). Closes the pre-existing 0.2.0 gap where both fields were
+  always `null`. New `siphon_ai_rtp_rtt_ms` histogram alongside
+  the existing jitter / loss histograms.
+
+- **`rtcp_rtt_ms` field reserved + sticky semantics** in
+  PROTOCOL §3.8. The field is documented and the wire shape is
+  pinned, but stays `null` in 0.3.0 — populating it needs
+  forge-engine to originate its own RTCP SRs (the
+  `forge_rtp::RttTracker` primitive is ready and tested in
+  forge-media#57). When a real value does arrive in a future
+  release, it'll be "sticky": once populated, a later window
+  with no fresh RR doesn't wipe it.
+
+### Changed
+
+- **`forge-media` rev pinned to `f7cd7f0`**, picking up DTLS-SRTP
+  scaffolding (#61), recv-loop demux (#62), RtcpReportReceived
+  event + emitter (#57 + #60), SDES primitives (#56), tarpaulin
+  coverage fix (#59).
+
+- **`siphon-rs` rev pinned to `d0d3691`**, picking up swappable
+  TLS `ServerConfig` (#49) and CI-on-PR gating (#50).
+
+- **`[sip.tls]` callout in `docs/CONFIG.md`** — old "Inbound UAS
+  only" warning replaced with a precise statement: inbound UAS
+  still terminates TLS here; outbound TLS works for
+  `[[register]]` as of 0.3.0; originated INVITEs are still
+  post-v1.
+
+### Fixed
+
+- **forge-rtp DTLS verify-callback** (forge-media#61). The
+  existing `DtlsContext::new` installed OpenSSL's default
+  chain-verify mode, which fails closed on self-signed certs —
+  which is what every DTLS-SRTP peer presents (RFC 5763 §5).
+  Replaced with a `set_verify_callback` that accepts any chain;
+  fingerprint verification runs post-handshake as before. Makes
+  the entire DTLS path actually usable for the first time.
+
+- **forge-media Code Coverage** (forge-media#59). Tarpaulin
+  failures on every PR since 2026-05-11 fixed: one missing
+  feature gate (`test_codec_config_stored` needed
+  `#[cfg(feature = "opus")]`) + one timing-tight assertion in
+  `test_jitter_buffer_timing` that fell over under ptrace
+  instrumentation. Three pre-existing dead-code `opus` tests in
+  `forge-api` now actually run thanks to a new
+  `forge-api/opus` feature.
+
+### Known limitations (0.3.1 carry-forwards)
+
+These are documented in `DEV_PLAN_0.3.0.md` §11 slip-mitigation,
+`PROTOCOL.md`, and `REGISTRATION.md`:
+
+- **`rtcp_rtt_ms` not populated end-to-end.** The field is
+  reserved and the consumer wiring works, but forge-engine
+  doesn't yet originate its own RTCP SRs. The `RttTracker`
+  primitive is ready upstream; what's missing is the periodic
+  SR send loop with RFC 3550 §6.2 bandwidth budget tracking.
+
+- **SDES (`RTP/SAVP`) not produced.** forge-sdp ships the
+  `a=crypto:` parser (forge-media#56); forge-engine doesn't
+  consume it yet. SAVP / non-DTLS SAVPF offers are 488'd under
+  any `srtp_mode`.
+
+- **Per-route `[route.bridge.tls]` override.** mTLS for the
+  bridge is global only in 0.3.0; every accepted call shares
+  the same client cert.
+
+- **Hostname `[[register]].server`.** Static-IP validation in
+  `compile_registers` still rejects hostnames; lifting it needs
+  a `RegisterConfig.server_addr: SocketAddr` refactor.
+
+- **Per-registration cert pinning** (`[[register]].tls.pinned_sha256`).
+  siphon-rs's UAC takes a daemon-wide TLS client config and
+  doesn't yet expose a per-target `ClientConfig` API.
+
+- **Attended transfer (REFER with Replaces)** carried over from
+  0.2.0 — depends on a siphon-rs UAC capability that's still
+  pending.
+
+### Stats
+
+- 8 PRs merged on siphon-ai for 0.3.0: #83, #85, #86, #87, #88,
+  #89, #90, #91, #92.
+- 6 upstream PRs merged on forge-media: #56, #57, #59, #60, #61,
+  #62.
+- 2 upstream PRs merged on siphon-rs: #49, #50.
+- Workspace test count: 429 → 466 (+37 new tests across the
+  sprint; every PR landed with `fmt --check` + `clippy
+  --workspace --all-targets -- -D warnings` clean).
+
 ## [0.2.0] - 2026-05-25
 
 Second release. Theme: **operator primitives** — the WS server can

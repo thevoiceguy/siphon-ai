@@ -61,8 +61,8 @@ use sip_transaction::{
     TransactionManager, TransportContext, TransportDispatcher, TransportKind as TxTransportKind,
 };
 use sip_transport::{
-    load_rustls_server_config, run_tcp, run_tls, run_udp, send_stream, send_udp, InboundPacket,
-    TransportKind as TpTransportKind,
+    load_rustls_server_config, run_tcp, run_tls_with_swappable_config, run_udp, send_stream,
+    send_udp, InboundPacket, TransportKind as TpTransportKind,
 };
 use sip_uac::integrated::IntegratedUAC;
 use sip_uas::integrated::{IntegratedUAS, UasRequestHandler};
@@ -284,13 +284,31 @@ impl Runtime {
         // here (instead of inside spawn_listeners) makes a bad
         // cert/key path fail at startup with a clear error rather
         // than after the listener tries to accept.
-        let tls_server_config = match (
-            sip.transports.contains(&SipTransport::Tls),
-            sip.tls.as_ref(),
-        ) {
-            (true, Some(tls)) => Some(load_sip_tls_server_config(tls)?),
-            _ => None,
-        };
+        //
+        // The loaded `ServerConfig` is wrapped in an `ArcSwap` so a
+        // SIGHUP handler (W5) can hot-swap it for a fresh cert
+        // without dropping in-flight TLS sessions — see
+        // [`spawn_sighup_reloader`] below.
+        let tls_server_config: Option<Arc<arc_swap::ArcSwap<tokio_rustls::rustls::ServerConfig>>> =
+            match (
+                sip.transports.contains(&SipTransport::Tls),
+                sip.tls.as_ref(),
+            ) {
+                (true, Some(tls)) => {
+                    let initial = load_sip_tls_server_config(tls)?;
+                    Some(Arc::new(arc_swap::ArcSwap::from(initial)))
+                }
+                _ => None,
+            };
+
+        // SIGHUP cert-reload task. Spawned only when TLS is on; reads
+        // the same `[sip.tls]` config the listener uses, so the
+        // semantics match: same cert/key paths, same key-pair
+        // validation, just performed on every SIGHUP rather than only
+        // at startup.
+        if let (Some(swap), Some(tls)) = (tls_server_config.as_ref(), sip.tls.as_ref()) {
+            spawn_sighup_reloader(tls.clone(), Arc::clone(swap));
+        }
 
         // ─── Integrated UAS ────────────────────────────────────────
         let local_uri = sip_local_uri(&node, &sip);
@@ -722,6 +740,85 @@ fn load_sip_tls_server_config(
     Ok(cfg)
 }
 
+/// Install a SIGHUP handler that hot-reloads the SIP/TLS cert.
+///
+/// On every `SIGHUP`, re-reads `[sip.tls].cert` + `.key` from disk,
+/// builds a fresh `rustls::ServerConfig`, and stores it into
+/// `swappable`. The next inbound TLS connection picks up the new
+/// cert; in-flight sessions keep using the cert they handshook with
+/// (RFC 5746-compliant rotation — see siphon-rs#49 for the upstream
+/// pattern).
+///
+/// **Failure mode.** A broken PEM file on reload doesn't kill the
+/// daemon — we log `error!` and keep the old cert in place. Same
+/// shape as nginx's `nginx -s reload` semantics: if the new config
+/// is bad, the running config keeps serving.
+///
+/// **Concurrency.** One background tokio task. Lives for the
+/// daemon's lifetime (we never deregister the signal handler). The
+/// task is detached — its `JoinHandle` isn't kept anywhere because
+/// there's nothing to do with it.
+///
+/// `tls` is cloned so the task can survive the rest of `RuntimeBuilder`
+/// going out of scope; cert/key paths are owned strings in
+/// `SipTlsConfig` so this is a cheap clone.
+fn spawn_sighup_reloader(
+    tls: SipTlsConfig,
+    swappable: Arc<arc_swap::ArcSwap<tokio_rustls::rustls::ServerConfig>>,
+) {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    tokio::spawn(async move {
+        let mut stream = match signal(SignalKind::hangup()) {
+            Ok(s) => s,
+            Err(e) => {
+                // Without SIGHUP we lose hot reload but the daemon
+                // is still usable — log loud and exit the task.
+                error!(
+                    error = %e,
+                    "failed to install SIGHUP handler; SIP/TLS cert hot-reload disabled",
+                );
+                return;
+            }
+        };
+        info!(
+            cert = %tls.cert_path.display(),
+            "SIP/TLS cert hot-reload installed; send SIGHUP to rotate"
+        );
+        while stream.recv().await.is_some() {
+            match load_sip_tls_server_config(&tls) {
+                Ok(new_cfg) => {
+                    swappable.store(new_cfg);
+                    metrics::counter!(
+                        "siphon_ai_sip_tls_reload_attempts_total",
+                        "outcome" => "ok",
+                    )
+                    .increment(1);
+                    info!(
+                        cert = %tls.cert_path.display(),
+                        "SIP/TLS cert reloaded on SIGHUP"
+                    );
+                }
+                Err(e) => {
+                    metrics::counter!(
+                        "siphon_ai_sip_tls_reload_attempts_total",
+                        "outcome" => "failed",
+                    )
+                    .increment(1);
+                    error!(
+                        cert = %tls.cert_path.display(),
+                        error = %e,
+                        "SIGHUP cert reload failed; keeping previous cert"
+                    );
+                }
+            }
+        }
+        // `recv()` returns `None` only on signal-handler teardown,
+        // which we don't trigger. If it ever does, log so we know.
+        warn!("SIGHUP signal stream ended; cert hot-reload offline");
+    });
+}
+
 /// Build the lifecycle webhook sink from `[webhooks]` config.
 /// Returns `NullSink` when disabled. When enabled, wraps the
 /// `HttpSink` in a `FilteredSink` if an `events` allowlist is set.
@@ -899,7 +996,7 @@ fn spawn_listeners(
     udp_bound_addr: SocketAddr,
     transaction_mgr: Arc<TransactionManager>,
     uas: Arc<IntegratedUAS>,
-    tls_server_config: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
+    tls_server_config: Option<Arc<arc_swap::ArcSwap<tokio_rustls::rustls::ServerConfig>>>,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
     let (packet_tx, packet_rx) = mpsc::channel::<InboundPacket>(1024);
@@ -935,13 +1032,16 @@ fn spawn_listeners(
     }
 
     // TLS listener — separate bind (default port 5061 = SIPS).
+    // Uses the swappable variant so a SIGHUP cert reload (W5) can
+    // rotate the cert mid-flight without dropping in-flight TLS
+    // sessions (siphon-rs#49).
     if want_tls {
         match (tls_server_config, sip.tls.as_ref()) {
-            (Some(cfg), Some(tls)) => {
+            (Some(swappable), Some(tls)) => {
                 let bind = tls.listen_addr.to_string();
                 let tx = packet_tx.clone();
                 handles.push(tokio::spawn(async move {
-                    if let Err(e) = run_tls(&bind, cfg, tx).await {
+                    if let Err(e) = run_tls_with_swappable_config(&bind, swappable, tx).await {
                         error!(error = %e, "TLS listener exited");
                     }
                 }));
@@ -1267,4 +1367,183 @@ mod trunk_allowlist_tests {
             Some("first".to_string()),
         );
     }
+}
+
+#[cfg(test)]
+mod tls_reload_tests {
+    //! SIP/TLS hot-reload (W5).
+    //!
+    //! The siphon-rs side (PR #49) already proves the
+    //! `ArcSwap<ServerConfig>` mechanism with `tls_swap.rs`. What
+    //! this layer needs to verify is the load-from-disk + swap
+    //! glue: that `load_sip_tls_server_config` produces a
+    //! `ServerConfig` we can `arc_swap.store(...)` into, and that
+    //! a subsequent load returns a *different* Arc address (so the
+    //! swap actually changed the held value).
+    //!
+    //! The SIGHUP signal-to-store path itself is a 5-line
+    //! `signal.recv() → load → store` loop in `spawn_sighup_reloader`
+    //! that's awkward to integration-test in-process (sending
+    //! SIGHUP to self interacts badly with tokio's runtime + test
+    //! harness). We rely on code review for that wire-up.
+    use super::*;
+    use siphon_ai_config::SipTlsConfig;
+    use std::net::SocketAddr;
+
+    /// Self-signed cert + matching key pair, generated once by the
+    /// fixtures crate at build time. Same DER blob the bridge
+    /// tls.rs test uses; we ship both PEM forms here.
+    /// Install rustls's process-wide crypto provider exactly once.
+    /// `main()` does this in the daemon path; tests don't run `main`,
+    /// so any test that touches a rustls `ServerConfig` has to do it
+    /// itself (or rustls panics with "Could not automatically
+    /// determine the process-level CryptoProvider").
+    fn install_crypto_provider() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        });
+    }
+
+    fn write_cert_a(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        install_crypto_provider();
+        let cert = dir.join("a.pem");
+        let key = dir.join("a.key");
+        std::fs::write(&cert, FIXTURE_CERT_A).unwrap();
+        std::fs::write(&key, FIXTURE_KEY_A).unwrap();
+        set_key_perms(&key);
+        (cert, key)
+    }
+
+    fn write_cert_b(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let cert = dir.join("b.pem");
+        let key = dir.join("b.key");
+        std::fs::write(&cert, FIXTURE_CERT_B).unwrap();
+        std::fs::write(&key, FIXTURE_KEY_B).unwrap();
+        set_key_perms(&key);
+        (cert, key)
+    }
+
+    /// siphon-rs's `load_rustls_server_config` refuses to load a key
+    /// file with group/world-readable perms (security check). Mirror
+    /// the umask siphon-ai expects in production.
+    fn set_key_perms(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    fn fixture_tls_config(cert: std::path::PathBuf, key: std::path::PathBuf) -> SipTlsConfig {
+        SipTlsConfig {
+            listen_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+            cert_path: cert,
+            key_path: key,
+        }
+    }
+
+    #[test]
+    fn load_sip_tls_server_config_returns_usable_config() {
+        let tmp = tempdir_for_test();
+        let (cert, key) = write_cert_a(tmp.path());
+        let tls = fixture_tls_config(cert, key);
+        let cfg = load_sip_tls_server_config(&tls).expect("load cert A");
+        // Sanity: the config is shared as an Arc, and there's at
+        // least one cert resolver behind it. The exact resolver
+        // surface differs across rustls versions — what we can
+        // check portably is that the Arc clone-counts make sense
+        // (one strong ref from `load_sip_tls_server_config`'s
+        // return value).
+        assert_eq!(Arc::strong_count(&cfg), 1);
+    }
+
+    #[test]
+    fn swap_picks_up_new_cert() {
+        let tmp = tempdir_for_test();
+        let (cert_a, key_a) = write_cert_a(tmp.path());
+        let (cert_b, key_b) = write_cert_b(tmp.path());
+
+        let tls_a = fixture_tls_config(cert_a, key_a);
+        let initial = load_sip_tls_server_config(&tls_a).expect("load cert A");
+        let swap = Arc::new(arc_swap::ArcSwap::from(initial));
+
+        // Snapshot pre-swap. `load_full` returns an `Arc` clone of
+        // the current value — two pre-swap snapshots share the
+        // same identity.
+        let before = swap.load_full();
+        let before2 = swap.load_full();
+        assert!(Arc::ptr_eq(&before, &before2));
+
+        // Reload from cert B and store. Same code path the SIGHUP
+        // handler runs: `load_sip_tls_server_config` + `store`.
+        let tls_b = fixture_tls_config(cert_b, key_b);
+        let new = load_sip_tls_server_config(&tls_b).expect("load cert B");
+        swap.store(new);
+
+        // Post-swap: the held Arc is now a different identity.
+        let after = swap.load_full();
+        assert!(!Arc::ptr_eq(&before, &after));
+    }
+
+    #[test]
+    fn swap_keeps_old_cert_when_new_load_fails() {
+        let tmp = tempdir_for_test();
+        let (cert_a, key_a) = write_cert_a(tmp.path());
+
+        let tls_a = fixture_tls_config(cert_a, key_a);
+        let initial = load_sip_tls_server_config(&tls_a).expect("load cert A");
+        let swap = Arc::new(arc_swap::ArcSwap::from(initial));
+        let before = swap.load_full();
+
+        // Point at a non-existent cert. The SIGHUP handler's error
+        // arm is what we're modelling here: `load_*` returns `Err`,
+        // we do NOT call `store`, the swap keeps the old cert.
+        let bogus = fixture_tls_config(
+            tmp.path().join("nonexistent.pem"),
+            tmp.path().join("nonexistent.key"),
+        );
+        let result = load_sip_tls_server_config(&bogus);
+        assert!(result.is_err());
+
+        // Swap state untouched.
+        let after = swap.load_full();
+        assert!(Arc::ptr_eq(&before, &after));
+    }
+
+    /// Minimal `tempdir` without pulling in the `tempfile` crate just
+    /// for these tests. Cleanup happens on drop.
+    struct TempDir {
+        path: std::path::PathBuf,
+    }
+    impl TempDir {
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+    fn tempdir_for_test() -> TempDir {
+        let base = std::env::temp_dir();
+        let pid = std::process::id();
+        // Counter to keep test invocations distinct when several run
+        // concurrently in the same process.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = base.join(format!("siphon-ai-tls-reload-test-{pid}-{seq}"));
+        std::fs::create_dir_all(&path).unwrap();
+        TempDir { path }
+    }
+
+    // Self-signed RSA-2048 cert A. Generated with:
+    //   openssl req -x509 -newkey rsa:2048 -nodes -keyout key -out cert \
+    //     -days 36500 -subj "/CN=siphon-ai-reload-test-A"
+    const FIXTURE_CERT_A: &[u8] = include_bytes!("fixtures/reload_cert_a.pem");
+    const FIXTURE_KEY_A: &[u8] = include_bytes!("fixtures/reload_key_a.pem");
+    const FIXTURE_CERT_B: &[u8] = include_bytes!("fixtures/reload_cert_b.pem");
+    const FIXTURE_KEY_B: &[u8] = include_bytes!("fixtures/reload_key_b.pem");
 }

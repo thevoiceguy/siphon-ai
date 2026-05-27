@@ -61,6 +61,13 @@ tokio-rustls.workspace = true
 # graph (they do, transitively).
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
 
+# SIGHUP cert reload state (W5): the daemon holds an
+# `Arc<ArcSwap<ServerConfig>>` shared between the listener accept
+# loop and the SIGHUP handler. `arc-swap` rides in transitively via
+# siphon-rs's sip-transport, but we declare it explicitly here so we
+# can name the type.
+arc-swap = "1"
+
 # Upstream — forge-media (session manager, media bridge).
 forge-core.workspace   = true
 forge-engine.workspace = true

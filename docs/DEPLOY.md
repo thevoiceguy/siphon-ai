@@ -169,24 +169,53 @@ the cert directory directly.
 
 ### 5. Renewal
 
-`siphon-ai` re-reads cert + key on startup, not at runtime. The
-simplest reliable pattern is to restart on renewal:
+`siphon-ai` 0.3.0+ supports **hot cert reload** via `SIGHUP`: the
+daemon re-reads `[sip.tls].cert` + `.key` from disk and rotates
+the listener's `ServerConfig` without dropping in-flight TLS
+sessions (RFC 5746-compliant rotation — existing dialogs keep
+using the cert they handshook with; new dialogs pick up the
+fresh cert). The systemd unit's `ExecReload=` wires `systemctl
+reload siphon-ai` to the SIGHUP.
 
 ```sh
-# Let's Encrypt deploy-hook (drop into /etc/letsencrypt/renewal-hooks/deploy/)
+# Let's Encrypt deploy-hook (/etc/letsencrypt/renewal-hooks/deploy/)
 #!/bin/sh
 set -e
 install -m 0640 -o root -g siphon \
     "$RENEWED_LINEAGE/fullchain.pem" /etc/siphon-ai/tls/
 install -m 0640 -o root -g siphon \
     "$RENEWED_LINEAGE/privkey.pem"   /etc/siphon-ai/tls/
-systemctl restart siphon-ai
+systemctl reload siphon-ai
 ```
 
-A restart drops in-flight calls. If your traffic pattern can't
-tolerate that, run two instances behind an L4 load balancer and
-restart them one at a time. Hot cert reload is on the roadmap for
-a later release.
+#### What survives, what doesn't
+
+| | In-flight TLS dialogs | New TLS connections |
+|---|---|---|
+| Before reload | Use cert at process start | (n/a) |
+| **During reload** | Keep using cert at process start — *no renegotiation, no drop* | Picked from the new cert on accept |
+| After reload   | Same as before — handshook with the old cert, life-of-the-call | Use the new cert |
+
+The `siphon_ai` unit increments
+`siphon_ai_sip_tls_reload_attempts_total` on each SIGHUP (with
+`outcome="ok"` / `"failed"` label) so you can alert on a stuck
+renewal.
+
+#### Failure handling
+
+A broken PEM file on reload does **not** kill the daemon: the
+new-config load fails, an `error!` is logged with the parser
+diagnostic, and the previous `ServerConfig` keeps serving. Same
+shape as `nginx -s reload`: if the new config is bad, the
+running config keeps going.
+
+#### Restart-on-renewal fallback
+
+If you need to roll the cert older-school (e.g., a deployment
+pipeline that always restarts services on config change), the
+0.2.0 recipe still works — replace `systemctl reload` with
+`systemctl restart`. A restart drops in-flight calls; SIGHUP
+doesn't.
 
 ### 6. Smoke test
 
@@ -225,6 +254,9 @@ User=siphon
 Group=siphon
 EnvironmentFile=-/etc/siphon-ai/env
 ExecStart=/usr/local/bin/siphon-ai --config /etc/siphon-ai/siphon-ai.toml
+# SIGHUP triggers SIP/TLS cert hot-reload (0.3.0+). `systemctl
+# reload siphon-ai` invokes this — see §5 above for renewal flow.
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
@@ -373,6 +405,7 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_rtp_jitter_ms`               | histogram | —                                     | RTP jitter snapshot recorded on every `rtp_stats` emission (when forge has reported a value). |
 | `siphon_ai_rtp_packet_loss_ratio`       | histogram | —                                     | Packet-loss ratio (0.0-1.0) recorded on every `rtp_stats` emission. |
 | `siphon_ai_rtp_rtt_ms`                  | histogram | —                                     | Mean RTCP round-trip time recorded on every `rtp_stats` emission. Stays empty until forge originates its own SRs (0.3.1 follow-up). |
+| `siphon_ai_sip_tls_reload_attempts_total` | counter | `outcome=ok\|failed`                  | One tick per SIGHUP cert-reload attempt. `failed` means a broken cert/key on disk; the listener keeps serving the previous cert. |
 | `forge_rtcp_*`                          | various   | per-call (forge-side)                 | RTP/RTCP quality. See forge-media's own metric inventory. |
 | `heplify_*`                             | various   | from the HEP collector                | Only visible if you scrape heplify too. |
 

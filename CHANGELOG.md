@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`200 OK` to INVITE now carries the request's `Record-Route` headers** — picked up via a siphon-rs bump (`d0d3691244de` → `47cd5d39c7d6`, [thevoiceguy/siphon-rs#51](https://github.com/thevoiceguy/siphon-rs/pull/51)). The UAS response builder previously dropped every `Record-Route` from the INVITE, in violation of RFC 3261 §12.1.1. Subsequent in-dialog requests (ACK / BYE / re-INVITE / REFER) routed straight to the UAS's `Contact` instead of traversing the proxy chain — silent under carriers like Twilio (whose edge tolerates direct-to-Contact in-dialog routing), but a latent dialog-killer behind stricter SBCs or multi-proxy topologies. No SiphonAI-side code change; the fix is entirely in the upstream UAS builder.
+
 ## [0.3.0] - 2026-05-26
 
 Third release. Theme: **trust and encryption** — every transport

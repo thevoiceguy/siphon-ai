@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Responses now emit `Server:` instead of `User-Agent:`, advertise `Allow:` on 2xx to INVITE, and omit empty `Supported:` on OPTIONS 200 OK** — picked up via a siphon-rs bump (`47cd5d39c7d6` → `a4f8521561d6`, [thevoiceguy/siphon-rs#52](https://github.com/thevoiceguy/siphon-rs/pull/52)). Three independent RFC 3261 §13/§20 polish items: (1) §20.41 / §20.50 — responses identify the UAS via `Server:`, requests use `User-Agent:` (we were emitting the latter on responses; carriers tolerated it but it confused header-name-strict SIP analysers); (2) §13.2.1 — 2xx to INVITE SHOULD advertise the methods the UAS supports so the peer learns what mid-dialog requests (re-INVITE / UPDATE / REFER / INFO) are legal without an OPTIONS probe; (3) §20.37 — an empty `Supported:` value implies nothing useful and some peers treat the blank as a parse oddity. No SiphonAI-side code change.
+
 - **`200 OK` to INVITE now carries the request's `Record-Route` headers** — picked up via a siphon-rs bump (`d0d3691244de` → `47cd5d39c7d6`, [thevoiceguy/siphon-rs#51](https://github.com/thevoiceguy/siphon-rs/pull/51)). The UAS response builder previously dropped every `Record-Route` from the INVITE, in violation of RFC 3261 §12.1.1. Subsequent in-dialog requests (ACK / BYE / re-INVITE / REFER) routed straight to the UAS's `Contact` instead of traversing the proxy chain — silent under carriers like Twilio (whose edge tolerates direct-to-Contact in-dialog routing), but a latent dialog-killer behind stricter SBCs or multi-proxy topologies. No SiphonAI-side code change; the fix is entirely in the upstream UAS builder.
 
 ## [0.3.0] - 2026-05-26

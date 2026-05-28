@@ -102,16 +102,16 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # main branch and replace the rev hashes here (see CLAUDE.md §7.5).
 
 # siphon-rs — RFC 3261 SIP stack
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "47cd5d39c7d6" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "47cd5d39c7d6" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "47cd5d39c7d6", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "47cd5d39c7d6" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "47cd5d39c7d6" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "47cd5d39c7d6" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "47cd5d39c7d6" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "47cd5d39c7d6" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "47cd5d39c7d6" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "47cd5d39c7d6" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "a4f8521561d6" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "a4f8521561d6" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "a4f8521561d6", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "a4f8521561d6" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "a4f8521561d6" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "a4f8521561d6" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "a4f8521561d6" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "a4f8521561d6" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "a4f8521561d6" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "a4f8521561d6" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #

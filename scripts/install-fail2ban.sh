@@ -111,15 +111,80 @@ backup_if_exists() {
   fi
 }
 
-# ─── 1. Install the fail2ban package ──────────────────────────────────────
+# ─── 1. Install fail2ban and its real-world prerequisites ────────────────
 
-step "Section 1: Install fail2ban"
-if dpkg -s fail2ban >/dev/null 2>&1; then
-  ok "fail2ban already installed."
-else
+step "Section 1: Install packages"
+
+# Three packages, all of which the jails rely on at runtime even
+# though Debian's package metadata only declares one of them hard.
+#
+#   fail2ban           — the daemon itself.
+#   python3-systemd    — required by the journal backend our jails
+#                        use. Already a Depends of fail2ban; listed
+#                        here for explicitness so a future repackage
+#                        wouldn't silently break us.
+#   nftables           — provides `nft` and the kernel module our
+#                        action (`nftables-allports`) writes rules
+#                        through. Debian only marks this as Recommends
+#                        of fail2ban, so a host installed with
+#                        --no-install-recommends would have fail2ban
+#                        but no firewall back-end — and bans would
+#                        log success while doing nothing. Install
+#                        explicitly.
+PKGS_TO_INSTALL=()
+for pkg in fail2ban python3-systemd nftables; do
+  if dpkg -s "$pkg" >/dev/null 2>&1; then
+    ok "$pkg already installed."
+  else
+    PKGS_TO_INSTALL+=("$pkg")
+  fi
+done
+
+if [[ ${#PKGS_TO_INSTALL[@]} -gt 0 ]]; then
   sudo apt update -qq
-  sudo apt install -y fail2ban >/dev/null
-  ok "fail2ban installed."
+  sudo apt install -y "${PKGS_TO_INSTALL[@]}" >/dev/null
+  for pkg in "${PKGS_TO_INSTALL[@]}"; do
+    ok "$pkg installed."
+  done
+fi
+
+# Verify nft actually works. The package can be present while the
+# nf_tables kernel module is missing (older container images,
+# unusual kernels). Bans would silently no-op in that case.
+if ! sudo nft list tables >/dev/null 2>&1; then
+  fail "nft list tables failed. The nftables kernel module isn't loaded — \
+in a VM, run \`sudo modprobe nf_tables\` and retry; in a container, the \
+host has to expose the netfilter modules."
+fi
+ok "nftables kernel back-end reachable (nft list tables OK)."
+
+# Warn about other firewall managers that also touch nftables. ufw
+# and firewalld each maintain their own tables; they don't conflict
+# with f2b's `f2b-table` directly, but operators who mix them often
+# end up with confusing rule precedence. Better to flag than to
+# silently coexist.
+if systemctl is-active --quiet ufw 2>/dev/null; then
+  warn "ufw is active. fail2ban's nftables action coexists with ufw, but \
+the two manage separate rule chains — verify your ban policy after the \
+first ban with: sudo nft list ruleset | grep -A5 f2b-"
+fi
+if systemctl is-active --quiet firewalld 2>/dev/null; then
+  warn "firewalld is active. Same caveat as ufw — consider committing \
+to one firewall manager. fail2ban will add its rules in parallel."
+fi
+
+# If iptables-legacy is the alternatives target (rare on Debian 13,
+# possible if someone manually rolled back), our `nftables-allports`
+# action would create rules in the wrong place and the offender
+# wouldn't actually be blocked. Detect and warn loudly.
+if command -v update-alternatives >/dev/null \
+   && update-alternatives --query iptables 2>/dev/null \
+   | grep -q "Value: /usr/sbin/iptables-legacy"; then
+  warn "iptables alternative is set to iptables-legacy. The \
+nftables-allports action in this jail won't actually drop traffic — \
+either switch to iptables-nft via \`sudo update-alternatives --set iptables \
+/usr/sbin/iptables-nft\` or edit jail.d/siphon-ai.local to use \
+\`iptables-allports[name=siphon-ai]\` instead."
 fi
 
 # ─── 2. Drop the filter + jail files ──────────────────────────────────────
@@ -232,6 +297,26 @@ step "Section 6: Verify"
 if status=$(sudo fail2ban-client status siphon-ai 2>&1); then
   ok "siphon-ai jail active."
   printf '%s\n' "$status" | sed 's/^/    /'
+
+  # The systemd backend can fail to read the journal silently —
+  # python3-systemd present but the journal namespace mismatched,
+  # or fail2ban running with a journal cursor before our service.
+  # `Journal matches:` showing the right unit name proves the
+  # backend connected and is filtering for the right source.
+  if ! printf '%s\n' "$status" | grep -q "Journal matches:.*siphon-ai.service"; then
+    warn "siphon-ai jail is up but 'Journal matches: ... siphon-ai.service' \
+is missing from status. The systemd backend may not be reading our log. \
+Check: sudo journalctl -u fail2ban -n 50"
+  fi
+
+  # Empty `Banned IP list:` is normal on a fresh install; the line
+  # itself must exist (proves the action loaded) — its absence
+  # means the nftables-allports action failed to wire up.
+  if ! printf '%s\n' "$status" | grep -q "Banned IP list:"; then
+    warn "'Banned IP list:' line missing — the nftables-allports action \
+may not have initialised. Check: sudo nft list tables and sudo journalctl \
+-u fail2ban -n 50"
+  fi
 else
   fail "siphon-ai jail not active. fail2ban-client status output:\n$status"
 fi

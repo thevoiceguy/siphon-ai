@@ -2,9 +2,10 @@
 #
 # install-debian13.sh — automated walk-through of docs/INSTALL_DEBIAN13.md
 #
-# Runs sections 1-6 of the install guide on a fresh Debian 13 host and
-# leaves you with a running siphon-ai systemd service. Mirrors the
-# guide step-for-step so any divergence is easy to spot.
+# Runs sections 1-8 of the install guide on a fresh Debian 13 host and
+# leaves you with a running siphon-ai systemd service (with CDR file
+# sink enabled and daily log rotation). Mirrors the guide step-for-step
+# so any divergence is easy to spot.
 #
 #   Required (script will prompt if missing):
 #     TRUNK_PEER_IP   The peer (FreeSWITCH, ITSP) allowed to send INVITEs.
@@ -259,6 +260,16 @@ ws_connect_timeout_ms = 3000
 enabled     = true
 http_listen = "$OBS_LISTEN"
 
+# Call Detail Records — one JSON object per completed call appended
+# to cdr.jsonl. Directory + permissions are set up below; rotation
+# is handled by /etc/logrotate.d/siphon-ai-cdr.
+[cdr]
+enabled = true
+
+[cdr.file]
+enabled = true
+path    = "/var/log/siphon-ai/cdr.jsonl"
+
 # Trunk allowlist — INVITEs from any other peer get 403.
 [[trunk]]
 name       = "freeswitch-main"
@@ -329,6 +340,41 @@ ok "siphon-ai.service enabled and started"
 # Give the daemon a beat to bind its sockets before we probe it.
 sleep 2
 
+# ─── 7. Log rotation ──────────────────────────────────────────────────────
+
+step "Section 7: Log rotation for CDR JSONL"
+
+# `copytruncate` is the correct choice for our append-only CDR file:
+# the daemon keeps the file open, so we want logrotate to copy then
+# truncate in place rather than rename-and-signal. Worst-case loss
+# window is one write between the copy and the truncate — acceptable
+# for CDRs.
+backup_if_exists /etc/logrotate.d/siphon-ai-cdr
+sudo tee /etc/logrotate.d/siphon-ai-cdr >/dev/null <<EOF
+/var/log/siphon-ai/cdr.jsonl {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su $SERVICE_USER $SERVICE_USER
+    create 0640 $SERVICE_USER $SERVICE_USER
+}
+EOF
+sudo chown root:root /etc/logrotate.d/siphon-ai-cdr
+sudo chmod 0644 /etc/logrotate.d/siphon-ai-cdr
+
+# Validate the rules file — logrotate's parser is permissive but a
+# bad directive here would silently skip rotation forever. `--debug`
+# parses without acting and exits non-zero on real errors.
+if sudo logrotate --debug /etc/logrotate.d/siphon-ai-cdr >/dev/null 2>&1; then
+  ok "/etc/logrotate.d/siphon-ai-cdr installed and parses cleanly"
+else
+  warn "/etc/logrotate.d/siphon-ai-cdr installed but logrotate --debug reports issues; check manually"
+fi
+
 # ─── 8. Verify ────────────────────────────────────────────────────────────
 
 step "Section 8: Verify"
@@ -369,6 +415,8 @@ $RTP_PORT_MIN-$RTP_PORT_MAX, and Prometheus + admin on $OBS_LISTEN.
 Tail logs:        sudo journalctl -u siphon-ai -f
 Active calls:     curl -s http://$obs_host_port/admin/calls | jq
 Metrics:          curl -s http://$obs_host_port/metrics | grep siphon_ai_
+Recent CDRs:      sudo tail -n 5 /var/log/siphon-ai/cdr.jsonl | jq
+CDR rotation:     /etc/logrotate.d/siphon-ai-cdr (daily, 30 keeps)
 
 Next:
   1. Edit /etc/siphon-ai/env to set real secrets (if you reference

@@ -30,4 +30,9 @@ bantime      = 604800
 
 # All-ports drop, same as the siphon-ai jail. A repeat-offender
 # bot shouldn't get to keep probing other services either.
-action       = nftables-allports[name=recidive]
+#
+# `protocol="tcp,udp"` is REQUIRED — see the comment block on the
+# same line in siphon-ai.local for the why. Without it the rendered
+# rule is TCP-only and the offender's UDP/5060 SIP probes still
+# reach the daemon.
+action       = nftables-allports[name=recidive, protocol="tcp,udp"]

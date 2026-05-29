@@ -298,6 +298,32 @@ if status=$(sudo fail2ban-client status siphon-ai 2>&1); then
   ok "siphon-ai jail active."
   printf '%s\n' "$status" | sed 's/^/    /'
 
+  # Synthetic-ban probe: add a TEST-NET-1 IP (RFC 5737, never
+  # routable, safe to use) to the jail, inspect the rendered
+  # nftables rule, then immediately unban. This catches the class
+  # of bug where the action template renders TCP-only rules even
+  # though our scanners send UDP — the symptom is fail2ban
+  # reporting bans while the kernel never drops the offender's
+  # actual SIP traffic. Observed once in production after a
+  # fail2ban version bump; cheap to detect at install time.
+  TEST_IP="192.0.2.1"
+  if sudo fail2ban-client set siphon-ai banip "$TEST_IP" >/dev/null 2>&1; then
+    sleep 1
+    rendered=$(sudo nft list ruleset 2>/dev/null | grep -A1 'chain f2b-chain' || true)
+    sudo fail2ban-client set siphon-ai unbanip "$TEST_IP" >/dev/null 2>&1 || true
+    if printf '%s' "$rendered" | grep -qE 'meta l4proto \{[^}]*\budp\b[^}]*\}|meta l4proto udp'; then
+      ok "ban action blocks UDP (verified via TEST-NET-1 probe)."
+    else
+      warn "ban action does NOT appear to block UDP! Rendered rule:"
+      printf '%s\n' "$rendered" | sed 's/^/    /'
+      warn "  This is the 'fail2ban shows bans but kernel never drops UDP' bug."
+      warn "  Confirm the action line in jail.d/siphon-ai.local includes"
+      warn "  protocol=\"tcp,udp\" and run: sudo systemctl restart fail2ban"
+    fi
+  else
+    warn "Skipped synthetic-ban verification (could not add TEST-NET-1 ban)."
+  fi
+
   # The systemd backend can fail to read the journal silently —
   # python3-systemd present but the journal namespace mismatched,
   # or fail2ban running with a journal cursor before our service.

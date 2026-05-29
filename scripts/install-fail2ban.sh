@@ -263,10 +263,16 @@ ok "fail2ban-client -t: OK"
 # line shape the daemon emits. Catches mismatches after a future
 # tracing-output change in siphon-ai's handler.rs.
 SAMPLE='2026-01-01T00:00:00.000000Z  WARN on_invite{method="INVITE" peer=1.2.3.4:5060}: siphon_ai_sip_glue::handler: INVITE rejected: no trunk matched (403 Forbidden) peer=1.2.3.4:5060'
-if sudo fail2ban-regex "$SAMPLE" /etc/fail2ban/filter.d/siphon-ai.conf 2>&1 | grep -q "^Success, the total number of match is 1"; then
+# fail2ban-regex's success line changed between 0.x and 1.x. The
+# stable indicator across versions is the `Lines:` summary line:
+#   Lines: N lines, X ignored, Y matched, Z missed
+# We just need Y >= 1.
+regex_out=$(sudo fail2ban-regex "$SAMPLE" /etc/fail2ban/filter.d/siphon-ai.conf 2>&1 || true)
+if printf '%s' "$regex_out" | grep -qE '^Lines:.*[1-9][0-9]* matched'; then
   ok "fail2ban-regex matches the canonical 403 log line."
 else
-  warn "fail2ban-regex did NOT match the canonical log line."
+  warn "fail2ban-regex did NOT match the canonical log line. Full output:"
+  printf '%s\n' "$regex_out" | tail -12 | sed 's/^/    /'
   warn "  The filter regex may be stale relative to siphon-ai's current log format."
   warn "  Run: sudo fail2ban-regex '<your log line>' /etc/fail2ban/filter.d/siphon-ai.conf"
 fi
@@ -276,19 +282,34 @@ fi
 step "Section 5: Enable + start fail2ban"
 
 # `enable --now` is idempotent: enables, then starts if stopped.
-# If it was already running on the OLD config, the reload below
-# picks up our new jails without dropping any active bans.
 sudo systemctl enable --now fail2ban
 ok "fail2ban.service enabled and running."
 
-# Reload (not restart) so existing bans persist across the config
-# change. `reload` re-parses configs and applies diffs in place;
-# `restart` would clear the ban list and force every scanner to
-# re-earn their 5-strikes before they're banned again.
-sudo fail2ban-client reload
-ok "fail2ban-client reload (existing bans preserved)."
+# Restart (not reload) when we've installed/refreshed jail files.
+#
+# `fail2ban-client reload` re-parses config and propagates new
+# DEFAULTs, but it does NOT re-render already-installed nftables
+# chain rules. Concretely: if a jail's `action = nftables-allports[...]`
+# gained a new `protocol=` arg in the version we just installed,
+# the rendered nft rule keeps the pre-reload shape until the
+# action's stop+start path runs — which only happens on a full
+# daemon restart (or by unbanning every IP individually, which
+# triggers the per-IP unban path and the matching reban rebuilds
+# the rule).
+#
+# `restart` is safe even with active bans: fail2ban persists the
+# ban set to /var/lib/fail2ban/fail2ban.sqlite3 and re-applies them
+# on startup through the (now-current) action template. We pay a
+# few-second blip in active enforcement in exchange for ban rules
+# that actually reflect the new jail config.
+sudo systemctl restart fail2ban
+ok "fail2ban.service restarted (action templates re-rendered)."
 
-sleep 1
+# Restart is asynchronous — fail2ban needs to re-initialise its
+# jails and re-apply persisted bans before status queries are
+# meaningful. A second is plenty for that on a normal-sized ban
+# DB; bump if your DB has thousands of entries.
+sleep 2
 
 # ─── 6. Verify the jails are live ─────────────────────────────────────────
 
@@ -309,12 +330,18 @@ if status=$(sudo fail2ban-client status siphon-ai 2>&1); then
   TEST_IP="192.0.2.1"
   if sudo fail2ban-client set siphon-ai banip "$TEST_IP" >/dev/null 2>&1; then
     sleep 1
-    rendered=$(sudo nft list ruleset 2>/dev/null | grep -A1 'chain f2b-chain' || true)
+    # Capture from the `chain f2b-chain {` line through its closing
+    # `}` so we see every rule, not just the first 1-2 lines. The
+    # previous `grep -A1` truncated before the actual saddr rule
+    # and produced a false negative.
+    rendered=$(sudo nft list ruleset 2>/dev/null \
+      | awk '/chain f2b-chain \{/,/^\s*\}/' || true)
     sudo fail2ban-client set siphon-ai unbanip "$TEST_IP" >/dev/null 2>&1 || true
-    if printf '%s' "$rendered" | grep -qE 'meta l4proto \{[^}]*\budp\b[^}]*\}|meta l4proto udp'; then
+    if printf '%s' "$rendered" \
+        | grep -qE 'meta l4proto \{[^}]*\budp\b[^}]*\}.*addr-set-siphon-ai|meta l4proto udp.*addr-set-siphon-ai'; then
       ok "ban action blocks UDP (verified via TEST-NET-1 probe)."
     else
-      warn "ban action does NOT appear to block UDP! Rendered rule:"
+      warn "ban action does NOT appear to block UDP! Rendered chain:"
       printf '%s\n' "$rendered" | sed 's/^/    /'
       warn "  This is the 'fail2ban shows bans but kernel never drops UDP' bug."
       warn "  Confirm the action line in jail.d/siphon-ai.local includes"

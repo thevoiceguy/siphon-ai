@@ -32,6 +32,25 @@ they explain the trade-offs inline.
 Assumes you've followed `docs/INSTALL_DEBIAN13.md` and have
 SiphonAI logging to journald via systemd.
 
+### Scripted (recommended)
+
+```bash
+/opt/siphon-ai-src/scripts/install-fail2ban.sh
+```
+
+The script handles every step on this page — installs the package,
+drops the filter + both jails, optionally enables `bantime.increment`
+escalation (see §"Recidive: long bans for repeat offenders"),
+validates the config with `fail2ban-client -t`, regex-tests the
+filter against a canonical log line, and reports active-jail
+status. Idempotent: re-running backs up existing configs to
+`*.bak.<timestamp>` before overwriting.
+
+Override `CONTRIB_DIR=` if your clone isn't at `/opt/siphon-ai-src`.
+Set `BANTIME_INCREMENT=0` to skip the escalation drop-in.
+
+### Manual (if you'd rather see every step)
+
 ```bash
 sudo apt install -y fail2ban
 sudo cp /opt/siphon-ai-src/contrib/fail2ban/filter.d/siphon-ai.conf  /etc/fail2ban/filter.d/

@@ -374,7 +374,8 @@ Next:
   1. Edit /etc/siphon-ai/env to set real secrets (if you reference
      any \${VAR} in the TOML config).
   2. Open the firewall (docs/INSTALL_DEBIAN13.md §7).
-  3. Optional: set up fail2ban (docs/SECURITY_FAIL2BAN.md).
+  3. Set up fail2ban — run scripts/install-fail2ban.sh, or see
+     docs/SECURITY_FAIL2BAN.md for the manual walk-through.
   4. Wire FreeSWITCH (docs/FREESWITCH_INTEGRATION.md) — note the
      bypass_media=true requirement in that doc.
   5. Stand up the bot (docs/BOT_LOCALHOST_SETUP.md).

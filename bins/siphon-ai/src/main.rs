@@ -94,7 +94,18 @@ fn init_tracing(cli_filter: Option<&str>) -> LogFilterHandle {
     };
 
     let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(env_filter);
-    let fmt_layer = tracing_subscriber::fmt::layer().with_target(true);
+    // `fmt::layer()` defaults to ANSI on regardless of stdout type
+    // — unlike the higher-level `fmt::Subscriber::builder()` which
+    // does tty auto-detection. Without the explicit `with_ansi`
+    // call, every log line under systemd lands in journald with
+    // embedded `\x1b[..m` escape sequences. That's harmless to
+    // human readers (journalctl strips them on display) but breaks
+    // every downstream consumer that does string matching against
+    // the journal — most importantly the fail2ban `<HOST>` extractor
+    // for our trunk-rejection regex, which silently never matches.
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()));
     // `try_init` so tests that initialise the subscriber separately
     // don't crash this process; the second init is a noop. The
     // reload handle works either way because the layer is part of

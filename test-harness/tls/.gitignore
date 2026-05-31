@@ -1,0 +1,6 @@
+.work/
+certs/
+*.pem
+*.key
+*.csr
+*.srl

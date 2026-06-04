@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **SRTCP packets from spec-correct peers now authenticate successfully** — picked up via a forge-media bump (`f599ebd6cd39` → `48ff87be0a85`, [thevoiceguy/forge-media#66](https://github.com/thevoiceguy/forge-media/pull/66)). `forge-rtp`'s `derive_session_keys` always derived with the SRTP labels (`0x00` / `0x01` / `0x02`) regardless of which protocol was calling it; SRTCP requires labels `0x03` / `0x04` / `0x05` per RFC 3711 §4.3.3. Result was that every SRTCP packet from Twilio / FreeSWITCH / any spec-correct peer was discarded with "SRTCP authentication failed" — visible in the journal every ~5 s (the RTCP send interval). Surfaced immediately once SDES SRTP shipped on the siphon-ai side and real carrier RTCP started landing; DTLS-SRTP 0.3.0 coverage was hand-driven and audio-focused, so SRTCP didn't get exercised end-to-end. SRTP path is unchanged. No SiphonAI-side code change.
+
 ### Added
 
 - **SDES SRTP outbound — inbound `RTP/SAVP` offers now negotiate end-to-end** (the 0.3.0 plan §6 carry-forward, brought forward to unblock production deployments where the carrier ships an all-or-nothing "Secure Trunking" toggle that requires TLS signaling AND SRTP — most notably Twilio Elastic SIP Trunk). When `[media].srtp = "preferred"` or `"required"` and the offer's audio m-line is `RTP/SAVP` (or `RTP/SAVPF` without TLS), the daemon now:

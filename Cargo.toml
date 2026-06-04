@@ -127,14 +127,14 @@ sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "a4f
 # forge-ice, Cow/lifetime in forge-recorder), but the subset SiphonAI
 # pulls — forge-core, forge-rtp, forge-engine (g722 only), forge-codecs,
 # forge-sdp, forge-dtmf, forge-vad, forge-hep — all build cleanly.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "f599ebd6cd39" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "f599ebd6cd39" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "f599ebd6cd39", default-features = false, features = ["g722", "dtls"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "f599ebd6cd39" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "f599ebd6cd39" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "f599ebd6cd39" }
-forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "f599ebd6cd39" }
-forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "f599ebd6cd39" }
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "48ff87be0a85" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "48ff87be0a85" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "48ff87be0a85", default-features = false, features = ["g722", "dtls"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "48ff87be0a85" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "48ff87be0a85" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "48ff87be0a85" }
+forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "48ff87be0a85" }
+forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "48ff87be0a85" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.

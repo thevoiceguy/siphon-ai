@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SDES SRTP outbound — inbound `RTP/SAVP` offers now negotiate end-to-end** (the 0.3.0 plan §6 carry-forward, brought forward to unblock production deployments where the carrier ships an all-or-nothing "Secure Trunking" toggle that requires TLS signaling AND SRTP — most notably Twilio Elastic SIP Trunk). When `[media].srtp = "preferred"` or `"required"` and the offer's audio m-line is `RTP/SAVP` (or `RTP/SAVPF` without TLS), the daemon now:
+  1. Parses the offer's `a=crypto:` attributes via `forge_sdp::sdes`,
+  2. Selects the strongest mutually-supported crypto suite (default preference `AES_CM_128_HMAC_SHA1_80`),
+  3. Calls `forge_sdp::sdes::answer_sdes()` to derive the inbound and outbound SRTP master keys plus a freshly-generated local `a=crypto:` line,
+  4. Patches the SDP answer with `RTP/SAVP` profile + the local crypto attribute,
+  5. Installs the derived keys into the per-call `SrtpContext` via the new `forge_engine::srtp_install::install_srtp_keys` (forge-media PR #65), at which point the ordinary `protect_rtp` / `unprotect_rtp` path takes over.
+
+  `start.srtp` on the WS protocol populates as `{exchange: "sdes", profile: "AES_CM_128_HMAC_SHA1_80"}` so the bridge server knows the call is SDES-protected (distinct from the existing `exchange: "dtls"` value for the DTLS-SRTP path).
+
+  Policy matrix is now complete:
+
+  | Mode | Plain RTP | DTLS-SRTP | SDES |
+  |---|---|---|---|
+  | `off` | ✓ | 488 | 488 |
+  | `preferred` | ✓ | ✓ | ✓ |
+  | `required` | 488 | ✓ | ✓ |
+
+  Malformed SDES offers (no `a=crypto:`, no acceptable crypto suite, malformed inline key) surface as 488 the same way DTLS-SRTP fingerprint-mismatches do — no silent downgrade. Seven new unit tests cover the negotiation, profile rewrite, missing-crypto rejection, and SAVP-vs-SAVPF disambiguation against the existing DTLS-SRTP helper.
+
 ### Fixed
 
 - **Log output no longer emits ANSI colour escape sequences when stdout isn't a terminal.** `bins/siphon-ai/src/main.rs` builds the tracing subscriber from a hand-composed `fmt::layer()` rather than the higher-level `fmt::Subscriber::builder()` (to get a reload handle for the EnvFilter). The layer form defaults to ANSI on regardless of tty status — so every line under systemd was landing in journald with embedded `\x1b[..m` sequences. Harmless to human readers (journalctl strips them on display), but it silently broke every downstream consumer that does string matching against the journal — most notably the fail2ban `<HOST>` extractor in our trunk-rejection filter, which saw `peer=\x1b[3m185.9.19.90:61792\x1b[0m` and never matched. The fmt layer now calls `.with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))` so ANSI is enabled for interactive `cargo run` but disabled under systemd. After upgrading, restart fail2ban (`sudo systemctl restart fail2ban`) so its journal cursor advances past the polluted entries; subsequent 403s will match the filter.

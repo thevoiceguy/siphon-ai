@@ -781,14 +781,184 @@ pub fn post_process_dtls_srtp_answer(
     Ok(answer.serialize())
 }
 
+/// Local SDES crypto-suite preference, in priority order. The
+/// negotiator (`forge_sdp::sdes::select_crypto`) walks this list and
+/// returns the first suite the remote also offered. Twilio's Secure
+/// Trunking only ships `AES_CM_128_HMAC_SHA1_80`, so that's a sane
+/// default and only entry until forge-rtp surfaces AES-256 or AEAD
+/// variants on the SDES side.
+const SDES_SUITE_PREFERENCE: &[forge_sdp::sdes::CryptoSuite] =
+    &[forge_sdp::sdes::CryptoSuite::Aes128CmHmacSha1_80];
+
+/// What [`maybe_tweak_sdes_offer`] returns when a `RTP/SAVP` (or
+/// `RTP/SAVPF`) offer needs the offer-side rewrite for sip-sdp's
+/// negotiator.
+///
+/// Mirrors [`TweakedDtlsOffer`] in shape; the carried metadata differs
+/// because SDES negotiates its key material in the SDP body itself
+/// (RFC 4568) rather than out-of-band via a DTLS handshake (RFC 5764).
+/// `sdes_answer` carries both the local `a=crypto:` to write into the
+/// answer AND the pre-derived `SrtpKeyMaterial` pair that the SRTP
+/// context install step consumes.
+pub struct TweakedSdesOffer {
+    /// Offer string with audio m-line protocol rewritten to `RTP/AVP`
+    /// so sip-sdp's `negotiate_answer` can do codec matching (same
+    /// reason as `TweakedDtlsOffer.tweaked_sdp`).
+    pub tweaked_sdp: String,
+    /// Original (pre-tweak) audio m-line protocol so the post-
+    /// processing step knows what to set the answer's profile back
+    /// to (`RTP/SAVP` or `RTP/SAVPF`).
+    pub original_protocol: forge_sdp::Protocol,
+    /// `forge_sdp::sdes::answer_sdes(&selected_offer)` — the local
+    /// crypto attribute to put in the answer plus the derived
+    /// `send_key` (encrypt outbound) and `recv_key` (decrypt
+    /// inbound). Pre-computed so `prepare_call_inner` doesn't have
+    /// to re-parse the offer.
+    pub sdes_answer: forge_sdp::sdes::SdesAnswer,
+}
+
+impl std::fmt::Debug for TweakedSdesOffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Avoid printing the SDP body or any key material in logs.
+        f.debug_struct("TweakedSdesOffer")
+            .field("original_protocol", &self.original_protocol)
+            .field("suite", &self.sdes_answer.local_attribute.suite)
+            .finish_non_exhaustive()
+    }
+}
+
+/// If the offer is SDES SRTP and the policy allows, rewrite it as
+/// `RTP/AVP` so sip-sdp's negotiator can do codec matching, and
+/// pre-compute the SDES answer (local `a=crypto:` + derived
+/// `SrtpKeyMaterial` pair).
+///
+/// Returns `Ok(None)` when the offer isn't SDES — caller proceeds
+/// with the plaintext / DTLS-SRTP paths unchanged.
+///
+/// **Caller contract:** [`enforce_srtp_mode`] must have already
+/// accepted the offer (i.e. the policy allows SDES). Malformed
+/// SDES offers (no `a=crypto:` lines, every offered suite is
+/// unsupported, malformed key material) surface as
+/// [`AcceptError::SrtpModeMismatch`] so they map to the same 488 as
+/// any other "policy can't accept this offer" reject.
+pub fn maybe_tweak_sdes_offer(offer_sdp: &str) -> Result<Option<TweakedSdesOffer>, AcceptError> {
+    use forge_sdp::sdes::{select_crypto, MediaSdesAttributesExt, SdesAttributesExt};
+    use forge_sdp::{MediaType, Protocol};
+    let mut parsed =
+        match <forge_sdp::SessionDescription as forge_sdp::SessionDescriptionExt>::from_str(
+            offer_sdp,
+        ) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+
+    let original_protocol = {
+        let audio = match parsed.find_media(MediaType::Audio) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+        // Only SDES profiles (RTP/SAVP, RTP/SAVPF). DTLS-SRTP
+        // (UDP/TLS/RTP/SAVPF, TCP/TLS/RTP/SAVPF) ALSO matches
+        // `is_srtp_protocol` but is owned by `maybe_tweak_dtls_srtp_offer`
+        // — the two paths must be mutually exclusive on a single
+        // offer or they'd race in `prepare_call_inner`.
+        if !is_srtp_protocol(&audio.protocol) || is_dtls_srtp_protocol(&audio.protocol) {
+            return Ok(None);
+        }
+        audio.protocol.clone()
+    };
+
+    // Per RFC 4568 §9.1, `a=crypto:` is a media-level attribute. Some
+    // peers (rare) put a session-level fallback too — `get_crypto_attributes`
+    // on SessionDescription covers that case if we ever encounter it.
+    let audio_for_crypto =
+        parsed
+            .find_media(MediaType::Audio)
+            .ok_or_else(|| AcceptError::SrtpModeMismatch {
+                offered: original_protocol.to_string(),
+                mode: SrtpMode::Preferred,
+            })?;
+    let offered: Vec<_> = audio_for_crypto.get_media_crypto_attributes();
+    let session_fallback: Vec<_> = if offered.is_empty() {
+        parsed.get_crypto_attributes()
+    } else {
+        Vec::new()
+    };
+    let usable = if offered.is_empty() {
+        &session_fallback
+    } else {
+        &offered
+    };
+
+    let selected = select_crypto(usable, SDES_SUITE_PREFERENCE).ok_or_else(|| {
+        // Either zero `a=crypto:` lines, or every offered suite was
+        // outside our preference list. Either way we can't speak SDES
+        // with this peer — 488 is the right reject.
+        AcceptError::SrtpModeMismatch {
+            offered: format!("{} (no acceptable crypto)", original_protocol),
+            mode: SrtpMode::Preferred,
+        }
+    })?;
+
+    let sdes_answer =
+        forge_sdp::sdes::answer_sdes(selected).map_err(|e| AcceptError::SrtpModeMismatch {
+            offered: format!("{} ({})", original_protocol, e),
+            mode: SrtpMode::Preferred,
+        })?;
+
+    // Swap the audio m-line protocol to RTP/AVP so sip-sdp's
+    // negotiator does codec matching; the post-processing step puts
+    // the original SAVP / SAVPF profile back on the *answer*.
+    use forge_sdp::SessionDescriptionExt as _;
+    if let Some(audio_mut) =
+        <forge_sdp::SessionDescription>::find_media_mut(&mut parsed, MediaType::Audio)
+    {
+        audio_mut.protocol = Protocol::RtpAvp;
+    }
+
+    Ok(Some(TweakedSdesOffer {
+        tweaked_sdp: parsed.serialize(),
+        original_protocol,
+        sdes_answer,
+    }))
+}
+
+/// Take the AVP answer that sip-sdp's negotiator produced and turn it
+/// back into an SDES SRTP answer: set the audio m-line protocol to
+/// match the offer's original profile (`RTP/SAVP` or `RTP/SAVPF`) and
+/// append our locally-minted `a=crypto:` attribute.
+///
+/// The SRTP key material itself is installed elsewhere (in
+/// [`prepare_call_inner`] via `forge_engine::srtp_install::install_srtp_keys`) —
+/// this function only handles the SDP wire shape.
+///
+/// Mirrors [`post_process_dtls_srtp_answer`] in structure; the
+/// difference is that DTLS-SRTP carries a `a=fingerprint:` + `a=setup:`
+/// pair (key material exchanged out-of-band on the handshake), while
+/// SDES carries the key material inline as `a=crypto:` (with the
+/// base64'd master-key+salt visible to anyone who can read the SDP).
+pub fn post_process_sdes_answer(
+    answer: &mut forge_sdp::SessionDescription,
+    tweak: &TweakedSdesOffer,
+) -> Result<String, AcceptError> {
+    use forge_sdp::sdes::MediaSdesAttributesExt;
+    use forge_sdp::MediaType;
+    use forge_sdp::SessionDescriptionExt as _;
+
+    let audio_mut = <forge_sdp::SessionDescription>::find_media_mut(answer, MediaType::Audio)
+        .ok_or_else(|| AcceptError::SrtpModeMismatch {
+            offered: tweak.original_protocol.to_string(),
+            mode: SrtpMode::Preferred,
+        })?;
+
+    audio_mut.protocol = tweak.original_protocol.clone();
+    audio_mut.add_media_crypto(&tweak.sdes_answer.local_attribute);
+
+    Ok(answer.serialize())
+}
+
 /// Reject offers whose audio m-line protocol is incompatible with the
 /// effective [`SrtpMode`] for this call, per DEV_PLAN_0.3.0.md §4.1.
-///
-/// ## 0.3.0 W2 caveat (this PR)
-///
-/// The dev plan calls for `Preferred` to *answer SRTP if offered* and
-/// for `Required` to *accept SRTP offers*. Until the follow-up PR
-/// lands.
 ///
 /// The matrix:
 ///
@@ -796,15 +966,17 @@ pub fn post_process_dtls_srtp_answer(
 /// - `Off` + any SRTP variant → **488** ("no silent downgrade")
 /// - `Preferred` + plaintext → ✓
 /// - `Preferred` + DTLS-SRTP (`UDP/TLS/RTP/SAVPF`) → ✓
-/// - `Preferred` + SDES (`RTP/SAVP[F]`) → **488** (SDES support is
-///   forge-engine W3+ work; SDES offers are rejected for 0.3.0)
+/// - `Preferred` + SDES (`RTP/SAVP[F]`) → ✓
 /// - `Required` + plaintext → **488**
 /// - `Required` + DTLS-SRTP → ✓
-/// - `Required` + SDES → **488** (same as Preferred)
+/// - `Required` + SDES → ✓
 ///
-/// The DTLS-SRTP answer path is wired in [`prepare_call_inner`] via
-/// [`maybe_tweak_dtls_srtp_offer`] + [`post_process_dtls_srtp_answer`]
-/// + `MediaSession::enable_dtls`.
+/// Each accepted SRTP variant has its own post-negotiation wiring in
+/// [`prepare_call_inner`]:
+/// - DTLS-SRTP: [`maybe_tweak_dtls_srtp_offer`] +
+///   [`post_process_dtls_srtp_answer`] + `MediaSession::enable_dtls`.
+/// - SDES: [`maybe_tweak_sdes_offer`] + [`post_process_sdes_answer`] +
+///   `forge_engine::srtp_install::install_srtp_keys`.
 pub fn enforce_srtp_mode(
     mode: SrtpMode,
     offer: &forge_sdp::SessionDescription,
@@ -833,16 +1005,12 @@ pub fn enforce_srtp_mode(
         // answer-side wiring in `prepare_call_inner` handles the
         // rest (offer tweak, answer mutation, enable_dtls).
         (SrtpMode::Preferred | SrtpMode::Required, p) if is_dtls_srtp_protocol(p) => Ok(()),
-        // SDES offer (`RTP/SAVP` / `RTP/SAVPF`) under any non-Off mode:
-        // rejected. SDES support requires forge-engine producer
-        // wiring on top of the forge-sdp parser primitives (PR #56).
-        // Out of scope for 0.3.0 — DEV_PLAN_0.3.0.md §11 slip mitigation.
-        (SrtpMode::Preferred | SrtpMode::Required, p) if is_srtp_protocol(p) => {
-            Err(AcceptError::SrtpModeMismatch {
-                offered: p.to_string(),
-                mode,
-            })
-        }
+        // SDES (`RTP/SAVP` / `RTP/SAVPF`) under Preferred / Required:
+        // accepted. The answer-side wiring in `prepare_call_inner`
+        // calls `maybe_tweak_sdes_offer` to extract the offered
+        // `a=crypto:` and negotiate via forge-sdp's `answer_sdes`,
+        // then installs derived keys into the session's SRTP context.
+        (SrtpMode::Preferred | SrtpMode::Required, p) if is_srtp_protocol(p) => Ok(()),
         // Non-RTP profiles (raw UDP / TCP / other) are out of scope —
         // sip-sdp's negotiator handles those. Pass through.
         _ => Ok(()),
@@ -2296,14 +2464,25 @@ impl BridgingAcceptor {
         // If parsing fails here, fall through and let `accept_inbound`
         // surface the parse error via its normal SdpError path.
 
-        // If the offer wants DTLS-SRTP, rewrite it to RTP/AVP so
-        // sip-sdp's negotiator (which doesn't know about SAVPF) can
-        // do codec matching. We'll patch the answer back to SAVPF
-        // post-negotiation and install the DTLS keys on the session.
+        // If the offer wants DTLS-SRTP or SDES, rewrite the m-line
+        // profile to RTP/AVP so sip-sdp's negotiator (which doesn't
+        // know about SAVP/SAVPF) can do codec matching. We'll patch
+        // the answer back to the original profile post-negotiation
+        // and install the SRTP key material on the session.
+        //
+        // DTLS-SRTP and SDES are mutually exclusive on the same
+        // m-line — the profile string is one or the other. Try
+        // DTLS first; if the offer wasn't DTLS, try SDES.
         let dtls_tweak = maybe_tweak_dtls_srtp_offer(offer_sdp)?;
+        let sdes_tweak = if dtls_tweak.is_none() {
+            maybe_tweak_sdes_offer(offer_sdp)?
+        } else {
+            None
+        };
         let offer_sdp_for_negotiator: String = dtls_tweak
             .as_ref()
             .map(|t| t.tweaked_sdp.clone())
+            .or_else(|| sdes_tweak.as_ref().map(|t| t.tweaked_sdp.clone()))
             .unwrap_or_else(|| offer_sdp.to_string());
 
         let bridge_config = build_bridge_config(&self.defaults, route)?;
@@ -2317,6 +2496,7 @@ impl BridgingAcceptor {
             ws_url = %bridge_config.ws_url,
             codec_count = codecs.len(),
             dtls_srtp = dtls_tweak.is_some(),
+            sdes_srtp = sdes_tweak.is_some(),
             "media setup starting"
         );
 
@@ -2362,6 +2542,28 @@ impl BridgingAcceptor {
             Some(siphon_ai_bridge::protocol::SrtpInfo {
                 exchange: siphon_ai_bridge::protocol::SrtpExchange::Dtls,
                 profile: "AES_CM_128_HMAC_SHA1_80".to_string(),
+            })
+        } else if let Some(tweak) = &sdes_tweak {
+            // SDES post-negotiation: patch the answer back to RTP/SAVP
+            // with our local `a=crypto:` attribute, then push the
+            // pre-derived key material into the session's SRTP
+            // context. Unlike DTLS-SRTP there's no handshake — keys
+            // are exchanged in the SDP body itself (RFC 4568).
+            let new_text = post_process_sdes_answer(&mut answer.answer, tweak)?;
+            answer.answer_text = new_text;
+            // `sdes_answer.send_key` encrypts our outbound RTP;
+            // `recv_key` decrypts inbound. Match the field names on
+            // `SrtpContext` — `set_local_key` is outbound, `set_remote_key`
+            // is inbound. install_srtp_keys takes (local, remote).
+            forge_engine::srtp_install::install_srtp_keys(
+                session.srtp_a(),
+                tweak.sdes_answer.send_key.clone(),
+                tweak.sdes_answer.recv_key.clone(),
+            )
+            .await;
+            Some(siphon_ai_bridge::protocol::SrtpInfo {
+                exchange: siphon_ai_bridge::protocol::SrtpExchange::Sdes,
+                profile: tweak.sdes_answer.local_attribute.suite.as_str().to_string(),
             })
         } else {
             None
@@ -2893,13 +3095,30 @@ a=sendrecv\r\n";
                              t=0 0\r\n\
                              m=audio 10000 RTP/AVP 0\r\n\
                              a=rtpmap:0 PCMU/8000\r\n";
+    /// Synthetic SDES offer. The crypto inline key is the same
+    /// 30-byte fixture forge-sdp's own unit tests use — 16 bytes
+    /// master key + 14 bytes master salt, base64'd to exactly 40
+    /// chars (no padding). Real Twilio offers use a fresh per-call
+    /// key in the same shape.
     const SAVP_OFFER: &str = "v=0\r\n\
                               o=- 1 1 IN IP4 192.0.2.1\r\n\
                               s=-\r\n\
                               c=IN IP4 192.0.2.1\r\n\
                               t=0 0\r\n\
                               m=audio 10000 RTP/SAVP 0\r\n\
-                              a=rtpmap:0 PCMU/8000\r\n";
+                              a=rtpmap:0 PCMU/8000\r\n\
+                              a=crypto:1 AES_CM_128_HMAC_SHA1_80 \
+                              inline:qqqqqqqqqqqqqqqqqqqqqlVVVVVVVVVVVVVVVVVV\r\n";
+    /// SAVP offer with no `a=crypto:` — `maybe_tweak_sdes_offer`
+    /// must 488 these because the gate accepted SAVP but there's
+    /// nothing to negotiate against.
+    const SAVP_OFFER_NO_CRYPTO: &str = "v=0\r\n\
+                                        o=- 1 1 IN IP4 192.0.2.1\r\n\
+                                        s=-\r\n\
+                                        c=IN IP4 192.0.2.1\r\n\
+                                        t=0 0\r\n\
+                                        m=audio 10000 RTP/SAVP 0\r\n\
+                                        a=rtpmap:0 PCMU/8000\r\n";
     const SAVPF_OFFER: &str = "v=0\r\n\
                                o=- 1 1 IN IP4 192.0.2.1\r\n\
                                s=-\r\n\
@@ -2971,18 +3190,110 @@ a=sendrecv\r\n";
     }
 
     #[test]
-    fn enforce_preferred_rejects_sdes_pending_w3_forge_wiring() {
-        // SDES (RTP/SAVP) requires forge-engine producer wiring on
-        // top of PR #56's parser primitives; that path isn't done.
-        // Reject until then; documented in enforce_srtp_mode's doc.
+    fn enforce_preferred_accepts_sdes() {
+        // 0.3.1: SDES path is wired end-to-end. The gate lets the
+        // offer through; the answer builder + key install in
+        // prepare_call_inner do the rest (via maybe_tweak_sdes_offer
+        // → forge_sdp::sdes::answer_sdes → forge_engine::srtp_install).
         let offer = parse_sdp(SAVP_OFFER);
-        assert!(enforce_srtp_mode(SrtpMode::Preferred, &offer).is_err());
+        assert!(enforce_srtp_mode(SrtpMode::Preferred, &offer).is_ok());
     }
 
     #[test]
-    fn enforce_required_rejects_sdes_pending_w3_forge_wiring() {
+    fn enforce_required_accepts_sdes() {
         let offer = parse_sdp(SAVP_OFFER);
-        assert!(enforce_srtp_mode(SrtpMode::Required, &offer).is_err());
+        assert!(enforce_srtp_mode(SrtpMode::Required, &offer).is_ok());
+    }
+
+    // ─── SDES offer-tweak / answer-post-process ──────────────────────
+
+    #[test]
+    fn sdes_offer_tweak_rewrites_profile_and_extracts_keys() {
+        // Happy-path: SAVP offer with a valid a=crypto. Tweak should
+        // return Some(_), the tweaked SDP must be RTP/AVP (so the
+        // negotiator can codec-match), and the carried SdesAnswer
+        // must have both keys derived ready for the SRTP context.
+        let tweak = maybe_tweak_sdes_offer(SAVP_OFFER)
+            .expect("ok")
+            .expect("offer is SDES");
+        assert!(tweak.tweaked_sdp.contains("RTP/AVP"));
+        assert!(!tweak.tweaked_sdp.contains("RTP/SAVP"));
+        assert_eq!(
+            tweak.original_protocol,
+            forge_sdp::Protocol::RtpSavp,
+            "must remember the original profile so the answer can be patched back"
+        );
+        // Both keys are derived from the negotiated crypto suite. The
+        // send_key is generated locally, the recv_key comes from the
+        // offerer's inline material — they shouldn't be identical.
+        assert_ne!(
+            tweak.sdes_answer.send_key.master_key, tweak.sdes_answer.recv_key.master_key,
+            "send/recv keys must be distinct (one is ours, one is theirs)"
+        );
+    }
+
+    #[test]
+    fn sdes_offer_tweak_returns_none_for_plain_rtp() {
+        // Pure AVP offer — caller proceeds with the plaintext path.
+        assert!(maybe_tweak_sdes_offer(AVP_OFFER).unwrap().is_none());
+    }
+
+    #[test]
+    fn sdes_offer_tweak_returns_none_for_dtls_srtp() {
+        // SAVPF offer — that's DTLS-SRTP territory, not SDES.
+        // The other tweak helper (maybe_tweak_dtls_srtp_offer) owns
+        // this path. Both are called in prepare_call_inner in
+        // sequence; if SDES claimed SAVPF it would race the DTLS
+        // helper for the same offer.
+        assert!(maybe_tweak_sdes_offer(SAVPF_OFFER).unwrap().is_none());
+    }
+
+    #[test]
+    fn sdes_offer_tweak_rejects_missing_crypto() {
+        // SAVP m-line with no a=crypto: line — malformed offer.
+        // 488 is the right reject; the gate already let the offer
+        // through on protocol shape, so we need this layer to
+        // surface the absence of usable crypto.
+        match maybe_tweak_sdes_offer(SAVP_OFFER_NO_CRYPTO) {
+            Err(AcceptError::SrtpModeMismatch { offered, .. }) => {
+                assert!(
+                    offered.contains("no acceptable crypto"),
+                    "error should call out the cause; got {offered:?}"
+                );
+            }
+            other => panic!("expected SrtpModeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sdes_answer_post_process_swaps_profile_back_and_adds_crypto() {
+        // Build an AVP answer (what the negotiator would produce),
+        // patch it via post_process_sdes_answer using the tweak's
+        // pre-derived SdesAnswer, and assert the wire shape:
+        //   - m=audio ... RTP/SAVP   (profile back from the tweak)
+        //   - a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:<our key>
+        let tweak = maybe_tweak_sdes_offer(SAVP_OFFER).unwrap().unwrap();
+        let avp_answer = "v=0\r\n\
+                          o=siphon-ai 1 1 IN IP4 192.0.2.99\r\n\
+                          s=siphon-ai\r\n\
+                          c=IN IP4 192.0.2.99\r\n\
+                          t=0 0\r\n\
+                          m=audio 40000 RTP/AVP 0\r\n\
+                          a=rtpmap:0 PCMU/8000\r\n";
+        let mut answer = parse_sdp(avp_answer);
+        let new_text = post_process_sdes_answer(&mut answer, &tweak).expect("post-process ok");
+        assert!(
+            new_text.contains("RTP/SAVP"),
+            "answer must have the SAVP profile after post-process"
+        );
+        assert!(
+            new_text.contains("a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:"),
+            "answer must include our locally-minted crypto attribute"
+        );
+        assert!(
+            !new_text.contains("RTP/AVP\r\n") && !new_text.contains("RTP/AVP "),
+            "answer must not still advertise plain RTP/AVP on the m-line"
+        );
     }
 
     #[test]

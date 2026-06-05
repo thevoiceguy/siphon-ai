@@ -42,6 +42,13 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
+**v0.3.2** — patch release. `rtp_stats.rtcp_rtt_ms` now populates on live
+calls (forge-engine originates RTCP Sender Reports for its generated
+streams, so the carrier's Receiver Reports resolve a round-trip time per
+RFC 3550 §A.7) — closing the last open 0.3.0 item. No protocol or config
+change; the `rtp_stats` WS field and `siphon_ai_rtp_rtt_ms` histogram
+simply start carrying real values. Full notes: [`CHANGELOG.md`](CHANGELOG.md).
+
 **v0.3.1** — third release. Theme: **trust & encryption**, hardened for
 real carriers. Every transport the daemon touches can now run encrypted:
 SRTP media (SDES `a=crypto:` for classic SIP trunks **and** DTLS-SRTP for

@@ -2996,6 +2996,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "siphon-ai-security"
+version = "0.3.2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "siphon-ai-sip-glue"
 version = "0.3.2"
 dependencies = [

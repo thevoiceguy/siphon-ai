@@ -9,6 +9,7 @@ members = [
     "crates/http",
     "crates/media-glue",
     "crates/routes",
+    "crates/security",
     "crates/sip-glue",
     "crates/telemetry",
     "crates/webhooks",
@@ -32,6 +33,7 @@ siphon-ai-core        = { path = "crates/core" }
 siphon-ai-http        = { path = "crates/http" }
 siphon-ai-media-glue  = { path = "crates/media-glue" }
 siphon-ai-routes      = { path = "crates/routes" }
+siphon-ai-security    = { path = "crates/security" }
 siphon-ai-sip-glue    = { path = "crates/sip-glue" }
 siphon-ai-telemetry   = { path = "crates/telemetry" }
 siphon-ai-webhooks    = { path = "crates/webhooks" }

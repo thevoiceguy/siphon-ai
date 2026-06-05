@@ -42,6 +42,19 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
+**v0.3.1** — third release. Theme: **trust & encryption**, hardened for
+real carriers. Every transport the daemon touches can now run encrypted:
+SRTP media (SDES `a=crypto:` for classic SIP trunks **and** DTLS-SRTP for
+WebRTC bridges), mTLS with optional SPKI pinning on the bridge WebSocket
+leg, hot-reloadable SIP/TLS certs (`systemctl reload`, no in-flight call
+drops), and REGISTER over TLS. Validated end-to-end against a Twilio
+Elastic SIP Trunk's Secure Trunking (TLS + SRTP), including a round of
+SRTP/SRTCP/RTCP spec-conformance fixes that only surface against a
+spec-correct carrier. Protocol stays at `version: "1"` — additive only,
+so v1 WS servers built against 0.1.0 / 0.2.0 keep working unchanged.
+(0.3.0 was prepared but never tagged; its features ship here, hardened.)
+Full notes: [`CHANGELOG.md`](CHANGELOG.md).
+
 **v0.2.0** — second release. Adds the operator-primitive event surface
 (`silence_detected`, `dead_air_detected`, `rtp_stats`), sustained-mute
 control (`BridgeIn::Mute` / `Unmute` — distinct from one-shot `clear`),
@@ -61,7 +74,7 @@ RSS growth past the working-set; a 1-hour long-call soak holds RSS within
 ±32 KB.
 
 See `docs/DEV_PLAN.md` for what's deliberately out of scope for v1
-(recording, SRTP, mid-call WS reconnect, multi-tenancy, video).
+(recording, mid-call WS reconnect, multi-tenancy, video).
 
 ## Scope
 

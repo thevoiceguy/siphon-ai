@@ -35,8 +35,8 @@ use thiserror::Error;
 
 pub use compile::{
     compile, CdrConfig, CdrFileConfig, CdrWebhookConfig, CompileError, Config, HepConfig,
-    MediaConfig, NodeConfig, ObservabilityConfig, RegisterConfig, SipConfig, SipTlsConfig,
-    SipTransport, TrunkCidr, TrunkCidrParseError, TrunkConfig, WebhooksConfig,
+    MediaConfig, NodeConfig, ObservabilityConfig, RegisterConfig, SecurityConfig, SipConfig,
+    SipTlsConfig, SipTransport, TrunkCidr, TrunkCidrParseError, TrunkConfig, WebhooksConfig,
 };
 pub use env::{expand, expand_cow, EnvError, EnvSource, ProcessEnv};
 pub use raw::{

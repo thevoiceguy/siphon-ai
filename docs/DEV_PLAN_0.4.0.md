@@ -64,7 +64,9 @@ the parsing primitive lands.
      [security.stir_shaken]
      enabled         = true
      trust_anchors   = "/etc/siphon-ai/sti-pa-roots.pem"
-     cert_cache_ttl  = "1h"
+     cert_cache_ttl_secs = 3600   # seconds, for consistency with the other
+                                  # duration fields; "1h" string form is a
+                                  # possible later ergonomics pass
      # When the Identity header is absent on an inbound INVITE,
      # the resulting verdict is `attest: null, signature_valid: false`.
      # `require_identity = true` rejects unsigned calls with 428

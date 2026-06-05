@@ -2907,6 +2907,7 @@ dependencies = [
  "siphon-ai-core",
  "siphon-ai-media-glue",
  "siphon-ai-routes",
+ "siphon-ai-security",
  "thiserror 1.0.69",
  "toml",
  "tracing",

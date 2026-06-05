@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`siphon_ai_rtp_rtt_ms` now renders as a bucketed Prometheus histogram instead of a summary.** The metric had no explicit buckets registered, so `metrics-exporter-prometheus` fell back to a summary (quantiles) — inconsistent with the other `_seconds` histograms and awkward to aggregate across instances. It now has explicit ms buckets (10 ms–1 s) via `set_buckets_for_metric`, matching the 0.3.0 housekeeping rule ("histograms get sensible buckets defined explicitly"). `/metrics` now emits `siphon_ai_rtp_rtt_ms_bucket{le="…"}` lines; anything scraping the old `{quantile="…"}` series should switch to `histogram_quantile()` over the buckets.
+
 ## [0.3.2] - 2026-06-05
 
 Closes the last open 0.3.0 Definition-of-Done item: `rtcp_rtt_ms` now

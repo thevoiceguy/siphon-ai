@@ -15,7 +15,7 @@
 //!
 //! ## Buckets
 //!
-//! Three histograms get explicit buckets per the CLAUDE.md guidance
+//! Four histograms get explicit buckets per the CLAUDE.md guidance
 //! ("histograms get sensible buckets defined explicitly; don't rely
 //! on defaults"). Buckets target the latencies operators care about:
 //!
@@ -91,6 +91,13 @@ pub const SDP_NEGOTIATE_SECONDS: &str = "siphon_ai_sdp_negotiate_seconds";
 /// End-to-end call duration (started_at → ended_at on the CDR).
 pub const CALL_DURATION_SECONDS: &str = "siphon_ai_call_duration_seconds";
 
+/// RTCP-derived round-trip time, in **milliseconds** (the `_ms` suffix
+/// carries the unit — unlike the `_seconds` histograms above). Recorded
+/// per received Receiver Report from `media-glue` (RFC 3550 §A.7). The
+/// literal name must match the `histogram!` call site in
+/// `siphon-ai-media-glue`; the bucket matcher keys on this string.
+pub const RTP_RTT_MS: &str = "siphon_ai_rtp_rtt_ms";
+
 #[derive(Debug, Error)]
 pub enum InitError {
     #[error("metrics recorder install failed: {0}")]
@@ -117,6 +124,9 @@ pub fn prometheus_builder() -> Result<PrometheusBuilder, InitError> {
                 Matcher::Full(CALL_DURATION_SECONDS.to_string()),
                 &CALL_DURATION_BUCKETS,
             )
+        })
+        .and_then(|b| {
+            b.set_buckets_for_metric(Matcher::Full(RTP_RTT_MS.to_string()), &RTP_RTT_MS_BUCKETS)
         })
         .map_err(|e| InitError::Install(e.to_string()))
 }
@@ -193,6 +203,11 @@ pub fn register_descriptions() {
         Unit::Seconds,
         "End-to-end call duration."
     );
+    describe_histogram!(
+        RTP_RTT_MS,
+        Unit::Milliseconds,
+        "RTCP-derived round-trip time (ms) per received Receiver Report (RFC 3550 §A.7)."
+    );
 }
 
 /// Buckets for `ws_connect_seconds`. The first bucket (25ms) catches
@@ -211,6 +226,14 @@ pub const SDP_NEGOTIATE_BUCKETS: [f64; 8] = [0.0001, 0.0005, 0.001, 0.005, 0.01,
 /// stuck-call long-tail that operators want page-able.
 pub const CALL_DURATION_BUCKETS: [f64; 10] = [
     1.0, 5.0, 15.0, 30.0, 60.0, 180.0, 600.0, 1800.0, 3600.0, 14400.0,
+];
+
+/// Buckets for `rtp_rtt_ms`, in **milliseconds**. Span healthy regional
+/// VoIP (10–100 ms — a Twilio leg measured ~67 ms), elevated
+/// transcontinental / congested paths (100–300 ms), and the pathological
+/// tail (≥500 ms) operators page on.
+pub const RTP_RTT_MS_BUCKETS: [f64; 11] = [
+    10.0, 20.0, 30.0, 50.0, 75.0, 100.0, 150.0, 200.0, 300.0, 500.0, 1000.0,
 ];
 
 #[cfg(test)]
@@ -275,6 +298,23 @@ mod tests {
         assert!(
             !out.contains(&format!("{WS_CONNECT_SECONDS}{{quantile")),
             "histogram unexpectedly rendered as summary"
+        );
+    }
+
+    #[test]
+    fn rtp_rtt_ms_renders_with_explicit_buckets_not_summary() {
+        // Regression for the cosmetic 0.3.2 follow-up: rtcp_rtt_ms was
+        // rendering as a summary (quantiles) because no buckets were set.
+        let out = with_recorder(|| {
+            histogram!(RTP_RTT_MS).record(67.1);
+        });
+        assert!(
+            out.contains(&format!("{RTP_RTT_MS}_bucket")),
+            "expected buckets in:\n{out}"
+        );
+        assert!(
+            !out.contains(&format!("{RTP_RTT_MS}{{quantile")),
+            "rtt histogram unexpectedly rendered as summary"
         );
     }
 

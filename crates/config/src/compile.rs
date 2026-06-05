@@ -35,8 +35,8 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::raw::{
-    RawBridge, RawCdr, RawConfig, RawHep, RawMedia, RawNode, RawObservability, RawRegister, RawSip,
-    RawSipTls, RawWebhooks,
+    RawBridge, RawCdr, RawConfig, RawHep, RawMedia, RawNode, RawObservability, RawRegister,
+    RawSecurity, RawSip, RawSipTls, RawWebhooks,
 };
 
 /// Compiled, ready-to-pass daemon config.
@@ -61,10 +61,34 @@ pub struct Config {
     /// only). Non-empty enables strict-allowlist mode: every
     /// inbound INVITE must match a trunk or it's 403'd.
     pub trunks: Vec<TrunkConfig>,
+    pub security: SecurityConfig,
     pub cdr: CdrConfig,
     pub observability: ObservabilityConfig,
     pub webhooks: WebhooksConfig,
     pub hep: HepConfig,
+}
+
+/// Compiled `[security]` — the call-authentication policy (STIR/SHAKEN).
+/// Default is fully inert: no minimum attestation and verification
+/// disabled, so a 0.3.x config upgrades with zero behaviour change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecurityConfig {
+    /// Global minimum-attestation gate. `None` admits every call.
+    pub min_attestation: siphon_ai_security::MinAttestation,
+    /// SIP status to return when the gate rejects a call (403 / 488 / 606).
+    pub min_attestation_response: u16,
+    /// Compiled STIR/SHAKEN verification settings.
+    pub stir_shaken: siphon_ai_security::StirShakenConfig,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            min_attestation: siphon_ai_security::MinAttestation::None,
+            min_attestation_response: 403,
+            stir_shaken: siphon_ai_security::StirShakenConfig::default(),
+        }
+    }
 }
 
 /// One compiled `[[register]]` block. The daemon's
@@ -377,6 +401,25 @@ pub enum CompileError {
     #[error("[bridge.tls] is malformed: {0}")]
     BadBridgeTls(#[from] siphon_ai_bridge::tls::TlsConfigError),
 
+    #[error("[security].min_attestation is {0:?}; expected \"none\", \"A\", \"B\", or \"C\"")]
+    UnknownMinAttestation(String),
+
+    #[error("[security].min_attestation_response is {0}; expected 403, 488, or 606")]
+    InvalidMinAttestationResponse(u16),
+
+    #[error(
+        "[security].min_attestation is {0:?} but [security.stir_shaken].enabled is false — \
+         without verification no call can produce an attestation, so every call would be \
+         rejected. Enable stir_shaken or set min_attestation = \"none\"."
+    )]
+    MinAttestationWithoutStirShaken(String),
+
+    #[error("[security.stir_shaken].trust_anchors is required when enabled = true")]
+    StirShakenTrustAnchorsRequired,
+
+    #[error("[security.stir_shaken].trust_anchors {path:?} is invalid: {err}")]
+    StirShakenTrustAnchorsInvalid { path: String, err: String },
+
     #[error("[media].rtp_port_range {min}-{max} is invalid (min must be < max and even)")]
     BadRtpPortRange { min: u16, max: u16 },
 
@@ -481,6 +524,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let routes = compile_dialplan(raw.routes)?;
     let registrations = compile_registrations(raw.registrations)?;
     let trunks = compile_trunks(raw.trunks)?;
+    let security = compile_security(raw.security)?;
     let cdr = compile_cdr(raw.cdr)?;
     let observability = compile_observability(raw.observability)?;
     let webhooks = compile_webhooks(raw.webhooks)?;
@@ -529,6 +573,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         routes,
         registrations,
         trunks,
+        security,
         cdr,
         observability,
         webhooks,
@@ -686,6 +731,81 @@ pub(crate) fn compile_srtp_mode(
         Some("preferred") => Ok(siphon_ai_core::SrtpMode::Preferred),
         Some("required") => Ok(siphon_ai_core::SrtpMode::Required),
         Some(other) => Err(CompileError::UnknownSrtpMode(other.to_string())),
+    }
+}
+
+/// Compile and validate `[security]`. Fails loud on contradictory config
+/// (unknown attestation level / response code, a `min_attestation` set with
+/// verification disabled, or a missing/empty trust-anchor file when
+/// verification is enabled).
+fn compile_security(raw: RawSecurity) -> Result<SecurityConfig, CompileError> {
+    use siphon_ai_security::{
+        validate_trust_anchors, MinAttestation, StirShakenConfig, DEFAULT_CERT_CACHE_TTL,
+    };
+
+    let min_attestation = match raw.min_attestation.as_deref() {
+        None | Some("") => MinAttestation::None,
+        Some(s) => MinAttestation::parse(s)
+            .ok_or_else(|| CompileError::UnknownMinAttestation(s.to_string()))?,
+    };
+
+    let min_attestation_response = match raw.min_attestation_response {
+        None => 403,
+        Some(code @ (403 | 488 | 606)) => code,
+        Some(other) => return Err(CompileError::InvalidMinAttestationResponse(other)),
+    };
+
+    let stir = raw.stir_shaken;
+    let enabled = stir.enabled.unwrap_or(false);
+    let trust_anchors = stir.trust_anchors.map(PathBuf::from).unwrap_or_default();
+    let cert_cache_ttl = stir
+        .cert_cache_ttl_secs
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_CERT_CACHE_TTL);
+    let require_identity = stir.require_identity.unwrap_or(false);
+
+    // A minimum-attestation gate is meaningless without verification: with
+    // stir_shaken off, no call yields a trusted attestation, so the gate
+    // would 4xx every call. Fail loud rather than black-hole all traffic.
+    if min_attestation != MinAttestation::None && !enabled {
+        return Err(CompileError::MinAttestationWithoutStirShaken(
+            min_attestation_label(min_attestation).to_string(),
+        ));
+    }
+
+    // Validate the trust-anchor file at load time when verification is on,
+    // so a missing/empty bundle is a startup failure, not a per-call one.
+    if enabled {
+        if trust_anchors.as_os_str().is_empty() {
+            return Err(CompileError::StirShakenTrustAnchorsRequired);
+        }
+        validate_trust_anchors(&trust_anchors).map_err(|err| {
+            CompileError::StirShakenTrustAnchorsInvalid {
+                path: trust_anchors.display().to_string(),
+                err: err.to_string(),
+            }
+        })?;
+    }
+
+    Ok(SecurityConfig {
+        min_attestation,
+        min_attestation_response,
+        stir_shaken: StirShakenConfig {
+            enabled,
+            trust_anchors,
+            cert_cache_ttl,
+            require_identity,
+        },
+    })
+}
+
+fn min_attestation_label(m: siphon_ai_security::MinAttestation) -> &'static str {
+    use siphon_ai_security::MinAttestation::*;
+    match m {
+        None => "none",
+        A => "A",
+        B => "B",
+        C => "C",
     }
 }
 
@@ -1286,6 +1406,126 @@ mod srtp_mode_tests {
             compile_srtp_mode(Some("PREFERRED")),
             Err(CompileError::UnknownSrtpMode(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::{compile_security, CompileError, SecurityConfig};
+    use crate::raw::{RawSecurity, RawStirShaken};
+    use siphon_ai_security::{MinAttestation, DEFAULT_CERT_CACHE_TTL};
+
+    #[test]
+    fn default_is_inert() {
+        let c = compile_security(RawSecurity::default()).unwrap();
+        assert_eq!(c.min_attestation, MinAttestation::None);
+        assert_eq!(c.min_attestation_response, 403);
+        assert!(!c.stir_shaken.enabled);
+        assert_eq!(c.stir_shaken.cert_cache_ttl, DEFAULT_CERT_CACHE_TTL);
+        assert_eq!(c, SecurityConfig::default());
+    }
+
+    #[test]
+    fn unknown_min_attestation_fails_loud() {
+        let raw = RawSecurity {
+            min_attestation: Some("strong".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            compile_security(raw),
+            Err(CompileError::UnknownMinAttestation(s)) if s == "strong"
+        ));
+    }
+
+    #[test]
+    fn invalid_response_code_rejected() {
+        let raw = RawSecurity {
+            min_attestation_response: Some(500),
+            ..Default::default()
+        };
+        assert!(matches!(
+            compile_security(raw),
+            Err(CompileError::InvalidMinAttestationResponse(500))
+        ));
+    }
+
+    #[test]
+    fn min_attestation_without_stir_shaken_rejected() {
+        // A gate with verification off would 4xx every call — fail loud.
+        let raw = RawSecurity {
+            min_attestation: Some("B".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            compile_security(raw),
+            Err(CompileError::MinAttestationWithoutStirShaken(s)) if s == "B"
+        ));
+    }
+
+    #[test]
+    fn enabled_requires_trust_anchors() {
+        let raw = RawSecurity {
+            stir_shaken: RawStirShaken {
+                enabled: Some(true),
+                trust_anchors: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(matches!(
+            compile_security(raw),
+            Err(CompileError::StirShakenTrustAnchorsRequired)
+        ));
+    }
+
+    #[test]
+    fn enabled_with_missing_anchor_file_rejected() {
+        let raw = RawSecurity {
+            stir_shaken: RawStirShaken {
+                enabled: Some(true),
+                trust_anchors: Some("/nonexistent/sti-pa-roots.pem".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(matches!(
+            compile_security(raw),
+            Err(CompileError::StirShakenTrustAnchorsInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn valid_enabled_config_compiles() {
+        // Write a throwaway PEM bundle so the load-time anchor check passes.
+        let path = std::env::temp_dir().join("siphon_security_test_anchors.pem");
+        std::fs::write(
+            &path,
+            "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+
+        let raw = RawSecurity {
+            min_attestation: Some("B".into()),
+            min_attestation_response: Some(606),
+            stir_shaken: RawStirShaken {
+                enabled: Some(true),
+                trust_anchors: Some(path.to_string_lossy().into_owned()),
+                cert_cache_ttl_secs: Some(1800),
+                require_identity: Some(true),
+            },
+        };
+        let c = compile_security(raw).unwrap();
+        assert_eq!(c.min_attestation, MinAttestation::B);
+        assert_eq!(c.min_attestation_response, 606);
+        assert!(c.stir_shaken.enabled);
+        assert!(c.stir_shaken.require_identity);
+        assert_eq!(
+            c.stir_shaken.cert_cache_ttl,
+            std::time::Duration::from_secs(1800)
+        );
+        assert_eq!(c.stir_shaken.trust_anchors, path);
+
+        let _ = std::fs::remove_file(&path);
     }
 }
 

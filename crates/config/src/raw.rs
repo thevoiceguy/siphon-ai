@@ -50,6 +50,9 @@ pub struct RawConfig {
     pub trunks: Vec<RawTrunk>,
 
     #[serde(default)]
+    pub security: RawSecurity,
+
+    #[serde(default)]
     pub cdr: RawCdr,
 
     #[serde(default)]
@@ -198,6 +201,54 @@ pub struct RawMedia {
     /// fail-loud error per CLAUDE.md §4.6.
     #[serde(default)]
     pub srtp: Option<String>,
+}
+
+/// `[security]` — call-authentication policy (STIR/SHAKEN, 0.4.0).
+/// Entirely optional; the feature is inert unless
+/// `[security.stir_shaken].enabled = true`. Compiled and validated via
+/// [`compile::compile_security`].
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawSecurity {
+    /// Minimum attestation a call must carry to be accepted:
+    /// `"none"` (default) | `"A"` | `"B"` | `"C"`. Requires
+    /// `[security.stir_shaken].enabled = true` to have any effect — a
+    /// non-`none` value without verification rejects every call, which is
+    /// a fail-loud config error.
+    #[serde(default)]
+    pub min_attestation: Option<String>,
+    /// SIP status returned when the attestation gate rejects a call:
+    /// `403` (default) | `488` | `606`.
+    #[serde(default)]
+    pub min_attestation_response: Option<u16>,
+    /// `[security.stir_shaken]` verification sub-block.
+    #[serde(default)]
+    pub stir_shaken: RawStirShaken,
+}
+
+/// `[security.stir_shaken]` — STIR/SHAKEN verification settings.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawStirShaken {
+    /// Master switch. `false` (default) → no Identity parsing/verification
+    /// and no `verstat` surfaced (0.3.x behaviour preserved).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Path to the PEM bundle of STI-PA trust anchors (ship
+    /// `contrib/sti-pa-roots.pem`). Required when `enabled = true`;
+    /// validated at load time (must exist and hold ≥1 PEM certificate).
+    #[serde(default)]
+    pub trust_anchors: Option<String>,
+    /// How long a fetched signing certificate is cached, in seconds.
+    /// `None` → 3600 (1 hour). (Seconds, for consistency with the other
+    /// duration fields in this config; the plan's `"1h"` string form is a
+    /// possible later ergonomics pass.)
+    #[serde(default)]
+    pub cert_cache_ttl_secs: Option<u64>,
+    /// Reject INVITEs with no `Identity` header (428 "Use Identity Header")
+    /// instead of admitting them as unsigned. Default `false`.
+    #[serde(default)]
+    pub require_identity: Option<bool>,
 }
 
 /// `[cdr]` — call detail record sinks. v1 supports a JSONL file

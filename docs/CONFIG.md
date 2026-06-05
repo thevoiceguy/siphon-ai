@@ -19,6 +19,8 @@ before TOML parsing. Unset variables without a default fail the load.
 [bridge.barge_in] # speech-detection policy
 [[route]]         # one per dialplan rule, ORDERED (first match wins)
 [[register]]      # zero or more outbound REGISTERs ("registered phone" mode)
+[security]        # STIR/SHAKEN call-authentication policy (0.4.0)
+[security.stir_shaken]  # verification settings
 [cdr]             # call detail records: file + webhook sinks
 [observability]   # /metrics, /health, /ready, /admin
 [webhooks]        # lifecycle events (call_start, call_end, …)
@@ -265,6 +267,58 @@ request_uri_user = "9000"
   with the carrier's cert pinned by the OS trust store).
 - Digest auth on inbound INVITEs (RFC 3261 §22) is the proper
   "no trust in network" answer; it's a post-v1 feature.
+
+## `[security]` — STIR/SHAKEN call authentication
+
+> **Status (0.4.0, in progress):** the configuration surface is wired and
+> validated at load time. The verifier that produces the verdict (Identity-
+> header parsing, ES256 signature check, certificate-chain validation) lands
+> in subsequent chunks. With `[security.stir_shaken].enabled = false` (the
+> default) the feature is entirely inert — a 0.3.x config upgrades with no
+> behaviour change.
+
+Verifies the RFC 8224 `Identity` header (RFC 8225 PASSporT, SHAKEN profile)
+on inbound INVITEs and, optionally, rejects calls whose attestation is below
+a configured minimum.
+
+```toml
+[security]
+min_attestation          = "none"   # "none" | "A" | "B" | "C"
+min_attestation_response = 403       # 403 | 488 | 606
+
+[security.stir_shaken]
+enabled            = false           # master switch
+trust_anchors      = "/etc/siphon-ai/sti-pa-roots.pem"
+cert_cache_ttl_secs = 3600           # signing-cert cache TTL (seconds)
+require_identity   = false           # reject unsigned INVITEs with 428
+```
+
+### `[security]`
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `min_attestation` | string | `"none"` | Minimum **trusted** attestation to admit a call: `A` (full) > `B` (partial) > `C` (gateway). `"none"` admits everything. A non-`none` value **requires** `stir_shaken.enabled = true` (else every call would be rejected — fail-loud config error). |
+| `min_attestation_response` | int | `403` | SIP status when the gate rejects: `403` (Forbidden, recommended), `488`, or `606`. |
+
+The gate admits a call only when verification **fully passed** and the claimed attestation meets the minimum. An unsigned call, a failed signature, or an attestation below the threshold is rejected — see the policy matrix:
+
+| `min_attestation` | A | B | C | unsigned / header absent | invalid signature |
+|---|---|---|---|---|---|
+| `"none"` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `"C"` | ✓ | ✓ | ✓ | reject | reject |
+| `"B"` | ✓ | ✓ | reject | reject | reject |
+| `"A"` | ✓ | reject | reject | reject | reject |
+
+A per-route override (`[route.security].min_attestation`, strict override of the global) is a follow-on chunk.
+
+### `[security.stir_shaken]`
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `false` | Master switch. When off, no Identity parsing/verification runs and no `verstat` is surfaced. |
+| `trust_anchors` | string | — | Path to the PEM bundle of STI-PA trust anchors (ship `contrib/sti-pa-roots.pem`). **Required when `enabled = true`**; validated at load time (must exist and contain ≥1 PEM certificate). |
+| `cert_cache_ttl_secs` | int | `3600` | How long a fetched signing certificate is cached before re-fetch. (Seconds, matching the other duration fields in this config.) |
+| `require_identity` | bool | `false` | Reject inbound INVITEs that carry no `Identity` header with `428 Use Identity Header` (RFC 8224 §6.2.2) instead of admitting them as unsigned. |
 
 ## `[cdr]`
 

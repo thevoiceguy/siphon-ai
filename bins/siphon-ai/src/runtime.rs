@@ -140,6 +140,9 @@ impl Runtime {
             routes,
             registrations,
             trunks,
+            // Parsed + validated at config load; the accept-path / verifier
+            // wiring that consumes it lands in a later 0.4.0 chunk.
+            security: _security,
             cdr,
             observability,
             webhooks,

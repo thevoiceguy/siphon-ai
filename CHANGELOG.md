@@ -7,11 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-05
+
+Carrier-interop hardening for the 0.3.0 encryption stack. 0.3.0 shipped
+TLS, mTLS, and DTLS-SRTP, but its SRTP coverage was self-paired — so a
+cluster of spec-conformance bugs stayed invisible until a spec-correct
+carrier (Twilio Secure Trunking) was on the wire: AES-CM IV byte offsets,
+SRTCP KDF labels, RTCP SR/RR report-count parsing, and an always-set RTP
+marker bit — all fixed here via forge-media bumps. It also brings forward
+the 0.3.0 §6 carry-forward — SDES SRTP outbound (`RTP/SAVP`) — to unblock
+carriers whose all-or-nothing "Secure Trunking" toggle mandates TLS
+signaling and SRTP together. Rounded out with RFC 3261 §12 / §13 / §20
+response polish and journald/observability fixes.
+
+Note: 0.3.0 was prepared (version bump + changelog) but never tagged; its
+encryption features ship to users for the first time here, hardened.
+
+Protocol stays at `version: "1"` — every addition is additive, so v1 WS
+servers built against 0.1.0 / 0.2.0 keep working unchanged.
+
 ### Fixed
 
 - **SRTP audio now decrypts cleanly against spec-correct peers** — picked up via a forge-media bump (`48ff87be0a85` → `33443589ce2e`, [thevoiceguy/forge-media#67](https://github.com/thevoiceguy/forge-media/pull/67)). The four AES-CM IV construction sites in `forge-rtp` placed the packet index in the wrong bytes of the 128-bit IV (RTP 48-bit index at `iv[6..12]` instead of `iv[8..14]`; SRTCP 32-bit index at `iv[8..12]` instead of `iv[10..14]`, both per RFC 3711 §4.1.1 / §4.1.2). Symmetric protect/unprotect round-trip tests passed because both ends used the same wrong offsets and AES-CTR cancelled — bug stayed invisible until a spec-correct peer (Twilio Secure Trunking) was on the wire. Concrete production symptom on the first SDES SRTP Twilio call: caller heard white noise instead of the bot's greeting (our outbound was unrecoverable garbage to Twilio), and the bot's STT received PCMU-shaped bytes that didn't decode to recognisable speech (Twilio's inbound was unrecoverable garbage to us, so no LLM turn ever fired). DTLS-SRTP runs through the same code path; existing DTLS callers were silently affected the same way against any spec-correct peer — the 0.3.0 DTLS-SRTP coverage was self-paired and didn't surface it. No SiphonAI-side code change.
 
 - **SRTCP packets from spec-correct peers now authenticate successfully** — picked up via a forge-media bump (`f599ebd6cd39` → `48ff87be0a85`, [thevoiceguy/forge-media#66](https://github.com/thevoiceguy/forge-media/pull/66)). `forge-rtp`'s `derive_session_keys` always derived with the SRTP labels (`0x00` / `0x01` / `0x02`) regardless of which protocol was calling it; SRTCP requires labels `0x03` / `0x04` / `0x05` per RFC 3711 §4.3.3. Result was that every SRTCP packet from Twilio / FreeSWITCH / any spec-correct peer was discarded with "SRTCP authentication failed" — visible in the journal every ~5 s (the RTCP send interval). Surfaced immediately once SDES SRTP shipped on the siphon-ai side and real carrier RTCP started landing; DTLS-SRTP 0.3.0 coverage was hand-driven and audio-focused, so SRTCP didn't get exercised end-to-end. SRTP path is unchanged. No SiphonAI-side code change.
+
+- **Outbound RTP no longer sets the marker bit on every packet** — picked up via a forge-media bump (`33443589ce2e` → `5c30c03e17f4`, [thevoiceguy/forge-media#68](https://github.com/thevoiceguy/forge-media/pull/68)). `forge-engine`'s playout scheduler set the RTP marker on the first frame of each *append call*, but SiphonAI streams one 20 ms frame per call — so every outbound packet carried `M=1` instead of only the first packet of each talkspurt (RFC 3551 §4.1). Confirmed against Twilio Secure Trunking: 100 % of outbound packets were marked, while Twilio's inbound correctly marked only talkspurt starts. Not audible (the static was the separate AES-CM IV bug above), but an interop wart — stricter jitter buffers can treat every marked packet as a fresh talkspurt and needlessly re-adjust playout. The fix keys the marker off a persistent wall-clock talkspurt detector (audio resuming after a >60 ms silence gap, or a barge-in `Replace`); verified on the wire post-deploy as 2 of 317 outbound packets marked, both at talkspurt starts. No SiphonAI-side code change.
 
 ### Added
 
@@ -372,6 +393,7 @@ the WebSocket server's job.
 - Reference WebSocket servers in `examples/`: echo (Python / Node),
   an OpenAI Realtime bridge, and a Deepgram + LLM voice bot.
 
-[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.2.0...v0.3.1
 [0.2.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/thevoiceguy/siphon-ai/releases/tag/v0.1.0

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-06-05
+
+Closes the last open 0.3.0 Definition-of-Done item: `rtcp_rtt_ms` now
+populates on live calls.
+
+### Fixed
+
+- **`rtp_stats.rtcp_rtt_ms` is now populated instead of always `null`** — picked up via a forge-media bump (`5c30c03e17f4` → `e95a31a959a6`, [thevoiceguy/forge-media#69](https://github.com/thevoiceguy/forge-media/pull/69)). The `rtcp_rtt_ms` field has shipped since 0.3.0 but always emitted `null`: forge-engine's terminator mode generates an RTP stream toward the carrier (its own SSRC) yet never originated RTCP **Sender Reports** for it, so the carrier's Receiver Reports came back with `last_sr = 0` and the `RttTracker` (RFC 3550 §A.7) had nothing to match against. 0.3.0 plan §9 decision 10 deferred the SR emitter as a follow-up; this is it. forge-engine now sends an SR per generated stream every 5 s (RFC 3550 §6.2 minimum), SRTCP-protected, and resolves the echoed `last_sr`/`delay_since_last_sr` from incoming RRs into the RTT sample carried on `RtcpReportReceived`. SiphonAI already consumed the field (`media-glue` populates `rtcp_rtt_ms` on the `rtp_stats` WS event and records the `siphon_ai_rtp_rtt_ms` histogram), so no SiphonAI-side code change — the value simply starts flowing. Expect a sample on each RR (~every 5 s) once both directions of RTCP are live.
+
 ## [0.3.1] - 2026-06-05
 
 Carrier-interop hardening for the 0.3.0 encryption stack. 0.3.0 shipped
@@ -393,7 +402,8 @@ the WebSocket server's job.
 - Reference WebSocket servers in `examples/`: echo (Python / Node),
   an OpenAI Realtime bridge, and a Deepgram + LLM voice bot.
 
-[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/thevoiceguy/siphon-ai/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.2.0...v0.3.1
 [0.2.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/thevoiceguy/siphon-ai/releases/tag/v0.1.0

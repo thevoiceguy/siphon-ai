@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -127,14 +127,14 @@ sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "a4f
 # forge-ice, Cow/lifetime in forge-recorder), but the subset SiphonAI
 # pulls — forge-core, forge-rtp, forge-engine (g722 only), forge-codecs,
 # forge-sdp, forge-dtmf, forge-vad, forge-hep — all build cleanly.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "5c30c03e17f4" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "5c30c03e17f4" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "5c30c03e17f4", default-features = false, features = ["g722", "dtls"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "5c30c03e17f4" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "5c30c03e17f4" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "5c30c03e17f4" }
-forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "5c30c03e17f4" }
-forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "5c30c03e17f4" }
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "e95a31a959a6" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "e95a31a959a6" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "e95a31a959a6", default-features = false, features = ["g722", "dtls"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "e95a31a959a6" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "e95a31a959a6" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "e95a31a959a6" }
+forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "e95a31a959a6" }
+forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "e95a31a959a6" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.

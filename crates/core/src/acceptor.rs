@@ -1095,6 +1095,7 @@ pub fn build_start_msg(
     answer: &AnswerOutcome,
     forward_headers: &[String],
     srtp: Option<siphon_ai_bridge::protocol::SrtpInfo>,
+    verstat: Option<Box<siphon_ai_security::VerificationResult>>,
 ) -> StartMsg {
     let mut headers = std::collections::HashMap::with_capacity(forward_headers.len());
     for name in forward_headers {
@@ -1124,6 +1125,10 @@ pub fn build_start_msg(
         // plaintext-RTP path stays `None`. SDES (W3) populates this
         // too once its producer wiring lands.
         srtp,
+        // STIR/SHAKEN verdict. `None` until the accept-path verifier is
+        // wired (a later 0.4.0 chunk); the surface is in place now so the
+        // WS shape is pinned before any code path produces a value.
+        verstat,
     }
 }
 
@@ -1460,6 +1465,9 @@ struct CallStart {
     route: String,
     ws_url: String,
     audio: CdrAudioInfo,
+    /// STIR/SHAKEN verdict captured at accept time, for the CDR. `None`
+    /// until the accept-path verifier is wired (a later 0.4.0 chunk).
+    verstat: Option<Box<siphon_ai_security::VerificationResult>>,
 }
 
 impl CallStart {
@@ -1483,6 +1491,14 @@ impl CallStart {
                 bridge_disconnect: outcome.bridge_detail.clone(),
                 tap_disconnect: outcome.tap_detail.clone(),
             },
+            // Claimed attestation letter (None when absent); `verstat_passed`
+            // is the composite verify result. Both omitted from the JSON when
+            // there's no verdict (call-auth off), keeping the CDR at v1.
+            verstat_attest: self
+                .verstat
+                .as_ref()
+                .and_then(|v| v.attest.map(|a| a.as_str().to_string())),
+            verstat_passed: self.verstat.as_ref().map(|v| v.passed()),
         }
     }
 }
@@ -2230,6 +2246,8 @@ impl BridgingAcceptor {
                 payload_type: prepared.answer.negotiated_payload_type,
                 sample_rate: prepared.answer.negotiated_audio_sample_rate,
             },
+            // Same verdict the WS `start` carried — single source of truth.
+            verstat: prepared.start.verstat.clone(),
         };
 
         // Clone the handle BEFORE moving it into the registry — the
@@ -2576,6 +2594,8 @@ impl BridgingAcceptor {
             &answer,
             &self.defaults.forward_headers,
             srtp_info,
+            // verstat: the accept-path verifier is a later 0.4.0 chunk.
+            None,
         );
 
         let transfer = self.transfer.get().map(|installed| TransferContext {
@@ -3547,6 +3567,7 @@ a=sendrecv\r\n";
             &answer,
             &[],
             None,
+            None,
         );
         assert_eq!(start.version, PROTOCOL_VERSION);
         assert_eq!(start.call_id.as_str(), "siphon-1");
@@ -3589,6 +3610,7 @@ a=sendrecv\r\n";
             &answer,
             &["User-Agent".into(), "X-Tenant-Id".into()],
             None,
+            None,
         );
 
         // Forwarded headers come back canonical-cased.
@@ -3626,6 +3648,7 @@ a=sendrecv\r\n";
             "x@y",
             &answer,
             &["USER-AGENT".into()],
+            None,
             None,
         );
         assert_eq!(

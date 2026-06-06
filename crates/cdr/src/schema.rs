@@ -62,6 +62,20 @@ pub struct CdrRecord {
 
     pub audio: AudioInfo,
     pub termination: TerminationInfo,
+
+    /// STIR/SHAKEN attestation for this call: `"A"` / `"B"` / `"C"`, or
+    /// absent when call authentication is off or no `Identity` header was
+    /// present. This is the *claimed* level — pair it with
+    /// [`verstat_passed`](Self::verstat_passed) to know whether it verified.
+    /// Additive optional field (emitted only when populated) so the CDR
+    /// schema stays at version 1 (plan §9 decision 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verstat_attest: Option<String>,
+    /// Composite STIR/SHAKEN pass: signature + cert chain + orig/dest all
+    /// verified. Absent when call authentication is off. `Some(false)` means
+    /// an `Identity` header was present but did not fully verify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verstat_passed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +161,8 @@ mod tests {
                 bridge_disconnect: "stop_sent".into(),
                 tap_disconnect: "controller_hung_up".into(),
             },
+            verstat_attest: None,
+            verstat_passed: None,
         }
     }
 
@@ -185,6 +201,32 @@ mod tests {
         assert_eq!(CDR_VERSION, 1);
         let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
         assert_eq!(v["version"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn verstat_fields_are_additive_and_stay_at_v1() {
+        // Absent verdict (call-auth off) → fields omitted, schema still v1.
+        let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(!obj.contains_key("verstat_attest"));
+        assert!(!obj.contains_key("verstat_passed"));
+        assert_eq!(v["version"], serde_json::json!(1));
+
+        // Populated verdict → fields present; version unchanged.
+        let mut rec = sample();
+        rec.verstat_attest = Some("A".into());
+        rec.verstat_passed = Some(true);
+        let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
+        assert_eq!(v["verstat_attest"], serde_json::json!("A"));
+        assert_eq!(v["verstat_passed"], serde_json::json!(true));
+        assert_eq!(v["version"], serde_json::json!(1));
+
+        // Round-trips, and a pre-0.4.0 CDR without the fields still parses.
+        let back: CdrRecord = serde_json::from_value(v).unwrap();
+        assert_eq!(back.verstat_attest.as_deref(), Some("A"));
+        let legacy: CdrRecord = serde_json::from_value(serde_json::to_value(sample()).unwrap())
+            .expect("CDR without verstat fields parses");
+        assert_eq!(legacy.verstat_passed, None);
     }
 
     #[test]

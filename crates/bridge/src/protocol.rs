@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use siphon_ai_security::VerificationResult;
 
 /// The protocol version SiphonAI sends in [`StartMsg::version`]. Bumped only
 /// for breaking changes; additive changes (new optional fields, new enum
@@ -205,6 +206,24 @@ pub struct StartMsg {
     /// just check whether the field is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub srtp: Option<SrtpInfo>,
+    /// STIR/SHAKEN verification verdict (RFC 8224/8225) for this inbound
+    /// call, when `[security.stir_shaken].enabled`. `None` — and omitted
+    /// from the wire — when call authentication is off (the default) or no
+    /// `Identity` header was processed.
+    ///
+    /// The shape is [`siphon_ai_security::VerificationResult`], reused
+    /// verbatim so the wire format and the internal verdict can't drift.
+    /// `attest` is trustworthy only when the booleans all hold; servers
+    /// applying their own policy should treat a present-but-failed verdict
+    /// (e.g. `signature_valid: false`) as untrusted. Like `srtp`, this is
+    /// `skip_serializing_if = "Option::is_none"`, so a v1 server built
+    /// before 0.4.0 sees the exact `start` shape it always saw.
+    ///
+    /// Boxed so the (already large) `Start` variant of [`BridgeOut`] doesn't
+    /// grow by another ~64 bytes for a field that's `None` on most calls.
+    /// `Box<T>` is serde-transparent — the wire JSON is identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verstat: Option<Box<VerificationResult>>,
 }
 
 /// SRTP details surfaced on [`StartMsg::srtp`].
@@ -864,6 +883,7 @@ mod tests {
                 headers: HashMap::new(),
             },
             srtp: None,
+            verstat: None,
         });
         let v: Value = serde_json::to_value(&start).unwrap();
         let obj = v.as_object().unwrap();
@@ -918,6 +938,7 @@ mod tests {
                     headers: HashMap::new(),
                 },
                 srtp,
+                verstat: None,
             })
         };
 
@@ -950,5 +971,72 @@ mod tests {
         };
         let v: Value = serde_json::to_value(mk(Some(info))).unwrap();
         assert_eq!(v["srtp"]["exchange"], json!("dtls"));
+    }
+
+    /// `verstat` mirrors the `srtp` contract: absent when `None`, and a
+    /// stable wire shape (attest letter + the four booleans, optionals
+    /// skipped when empty) when present.
+    #[test]
+    fn start_verstat_field_serialization() {
+        use siphon_ai_security::{AttestationLevel, VerificationResult};
+
+        let mk = |verstat: Option<VerificationResult>| {
+            BridgeOut::Start(StartMsg {
+                version: PROTOCOL_VERSION.to_string(),
+                call_id: CallId::new("c"),
+                seq: 0,
+                from: "+1".into(),
+                to: "5000".into(),
+                direction: Direction::Inbound,
+                audio: AudioFormat {
+                    encoding: AudioEncoding::Pcm16le,
+                    sample_rate: 8000,
+                    channels: 1,
+                    frame_ms: 20,
+                },
+                sip: SipMeta {
+                    call_id: "x@y".into(),
+                    headers: HashMap::new(),
+                },
+                srtp: None,
+                verstat: verstat.map(Box::new),
+            })
+        };
+
+        // (1) None ⇒ field absent. The v1 contract.
+        let v: Value = serde_json::to_value(mk(None)).unwrap();
+        assert!(
+            !v.as_object().unwrap().contains_key("verstat"),
+            "verstat must be absent from JSON when None, got: {v}"
+        );
+
+        // (2) Some ⇒ present, correct shape, round-trips.
+        let verdict = VerificationResult {
+            attest: Some(AttestationLevel::A),
+            orig_tn: Some("+12155551212".into()),
+            orig_passed: true,
+            dest_passed: true,
+            cert_chain_valid: true,
+            signature_valid: true,
+            error: None,
+        };
+        let v: Value = serde_json::to_value(mk(Some(verdict.clone()))).unwrap();
+        assert_eq!(v["verstat"]["attest"], json!("A"));
+        assert_eq!(v["verstat"]["orig_tn"], json!("+12155551212"));
+        assert_eq!(v["verstat"]["signature_valid"], json!(true));
+        // error is None → omitted; attest present → no null.
+        assert!(!v["verstat"].as_object().unwrap().contains_key("error"));
+        let round: BridgeOut = serde_json::from_value(v).unwrap();
+        match round {
+            BridgeOut::Start(s) => assert_eq!(s.verstat, Some(Box::new(verdict))),
+            other => panic!("expected Start, got {other:?}"),
+        }
+
+        // (3) A failed verdict still serialises its booleans (untrusted but
+        //     surfaced) — `attest` omitted when the claim was absent.
+        let failed = VerificationResult::unsigned();
+        let v: Value = serde_json::to_value(mk(Some(failed))).unwrap();
+        assert_eq!(v["verstat"]["signature_valid"], json!(false));
+        assert!(!v["verstat"].as_object().unwrap().contains_key("attest"));
     }
 }

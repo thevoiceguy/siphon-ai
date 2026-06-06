@@ -116,6 +116,8 @@ mod tests {
                 bridge_disconnect: String::new(),
                 tap_disconnect: String::new(),
             },
+            verstat_attest: None,
+            verstat_passed: None,
         }
     }
 

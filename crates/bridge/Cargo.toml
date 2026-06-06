@@ -19,6 +19,12 @@ base64.workspace            = true
 thiserror.workspace         = true
 tracing.workspace           = true
 
+# The STIR/SHAKEN verstat verdict surfaced on `StartMsg.verstat` is the
+# `VerificationResult` type — its serde shape IS the wire format, so we
+# reuse it rather than duplicate a struct + risk drift. `siphon-ai-security`
+# is a pure-types leaf (serde + thiserror only), so this stays acyclic.
+siphon-ai-security.workspace = true
+
 # mTLS for the WS bridge leg (W4 Part A). `rustls` is the
 # `ClientConfig` we hand to `Connector::Rustls`; `rustls-pemfile`
 # parses the operator-supplied PEM cert + key; `webpki-roots` is

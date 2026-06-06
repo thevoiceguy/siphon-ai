@@ -254,6 +254,7 @@ mod tests {
                     headers: StdHashMap::new(),
                 },
                 srtp: None,
+                verstat: None,
             },
             media_tap: tap,
             transfer: None,

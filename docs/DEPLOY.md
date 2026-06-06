@@ -352,6 +352,19 @@ re-opens on `SIGHUP` (in practice — restart is simpler).
 `"inactivity_timeout"` when the RTP watchdog fired. New fields are
 additive; the `version` integer bumps only on breaking changes.
 
+Two optional STIR/SHAKEN fields appear when `[security.stir_shaken]` is
+enabled and an inbound call carried an `Identity` header (added in 0.4.0;
+schema stays at version 1 — they're omitted entirely otherwise):
+
+- `verstat_attest` — claimed attestation, `"A"` / `"B"` / `"C"`.
+- `verstat_passed` — composite verification result (`true` only when the
+  signature, certificate chain, and orig/dest checks all passed).
+
+`verstat_attest` is the *claimed* level; a CDR with `verstat_attest: "A"`
+and `verstat_passed: false` is a call that asserted full attestation but
+failed verification. (Both are absent until the accept-path verifier is
+wired in a later 0.4.0 release.)
+
 The webhook sink delivers the same JSON to `[cdr.webhook].url` with
 `Content-Type: application/json`. Retries on non-2xx up to
 `[cdr.webhook].retry_max` times with exponential backoff.

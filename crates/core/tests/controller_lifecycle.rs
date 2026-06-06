@@ -52,6 +52,7 @@ fn start_msg(call_id: &str) -> StartMsg {
             headers: HashMap::new(),
         },
         srtp: None,
+        verstat: None,
     }
 }
 

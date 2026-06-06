@@ -220,6 +220,7 @@ fn fixture_start(call_id: &str) -> StartMsg {
             headers: Default::default(),
         },
         srtp: None,
+        verstat: None,
     }
 }
 

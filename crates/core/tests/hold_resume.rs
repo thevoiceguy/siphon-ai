@@ -102,6 +102,7 @@ async fn push_bridge_event_emits_hold_and_resume_on_ws() {
                 headers: HashMap::new(),
             },
             srtp: None,
+            verstat: None,
         },
         media_tap: tap,
         transfer: None,

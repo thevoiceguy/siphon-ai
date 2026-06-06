@@ -135,6 +135,14 @@ MAY use it to detect dropped frames in their own logs.
 | `srtp` | object \| absent | Present when the call's media leg was negotiated as SRTP; **absent** when the leg is plaintext `RTP/AVP` (the v0.1.0 / v0.2.0 default). Servers MUST treat absence and the v1 shape (no `srtp` key) as identical — this field was added in 0.3.0 and the protocol version stays `"1"`. |
 | `srtp.exchange` | string | `"sdes"` (RFC 4568, master key exchanged via `a=crypto:` on the SIP signalling plane) or `"dtls"` (RFC 5764 DTLS-SRTP, key derived from a DTLS handshake over the media path). |
 | `srtp.profile` | string | The negotiated SRTP crypto suite identifier, exactly as it appears on the wire — for SDES, the `a=crypto:` `crypto-suite` token; for DTLS-SRTP, the negotiated profile name. Examples: `"AES_CM_128_HMAC_SHA1_80"`, `"AES_256_CM_HMAC_SHA1_80"`, `"AEAD_AES_256_GCM"`, `"SRTP_AES128_CM_SHA1_80"`. String rather than enum because new suites land at the IANA registry independent of this release. |
+| `verstat` | object \| absent | STIR/SHAKEN verification verdict (RFC 8224/8225). **Absent** unless `[security.stir_shaken].enabled`. Added in 0.4.0; the protocol version stays `"1"`, so a server that doesn't know the field ignores it. |
+| `verstat.attest` | string \| absent | Claimed SHAKEN attestation: `"A"` (full) / `"B"` (partial) / `"C"` (gateway). Absent when no valid attestation was present. **Trust it only when the booleans below all hold** — a present `attest` with `signature_valid: false` is an unverified claim. |
+| `verstat.orig_tn` | string \| absent | Originating TN from the PASSporT `orig` claim. |
+| `verstat.orig_passed` | bool | `orig` TN matched the SIP `From`. |
+| `verstat.dest_passed` | bool | A `dest` TN matched the SIP `To` / request URI. |
+| `verstat.cert_chain_valid` | bool | Signing cert chained to a configured STI-PA trust anchor. |
+| `verstat.signature_valid` | bool | ES256 signature over the PASSporT verified against that cert. |
+| `verstat.error` | string \| absent | Human-readable reason when verification did not fully pass; absent on success. |
 
 The `srtp` field is omitted from the JSON when SRTP is off; a v1
 WS server that doesn't know about it sees exactly the v0.2.0 shape.
@@ -158,6 +166,15 @@ mitigation.
 
 See [`docs/CONFIG.md`](CONFIG.md) `[media].srtp` for the
 operator-facing mode switch.
+
+**`verstat` (0.4.0): surface defined, not yet produced.** The field and
+its wire shape are pinned now so servers can build against them, but the
+accept-path verifier that populates it is still being wired — on real
+calls the field is currently always absent. A server that wants to apply
+its own fraud policy reads the booleans (treating a present-but-failed
+verdict as untrusted), not `attest` alone. See
+[`docs/CONFIG.md`](CONFIG.md) `[security]` for the operator switches and
+the attestation-gate policy matrix.
 
 A server MUST begin sending audio (or send a `hangup`) within 5 seconds
 of receiving `start`, otherwise SiphonAI emits

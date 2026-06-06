@@ -170,6 +170,8 @@ mod tests {
                 bridge_disconnect: "stop_sent".into(),
                 tap_disconnect: String::new(),
             },
+            verstat_attest: None,
+            verstat_passed: None,
         }
     }
 

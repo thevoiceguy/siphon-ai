@@ -581,7 +581,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1282,7 +1282,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tokio",
  "tower-service",
  "tracing",
@@ -1898,6 +1898,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64",
+ "serde_core",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2024,7 +2034,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2061,7 +2071,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.52.0",
 ]
@@ -2170,6 +2180,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
 dependencies = [
  "bitflags 2.11.1",
+]
+
+[[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
 ]
 
 [[package]]
@@ -2353,7 +2376,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2610,7 +2633,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 [[package]]
 name = "sip-auth"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6#a4f8521561d60db31103c1cf41d1c4ed14cde114"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631#3dd5fbfc663169795650c42ba25277da5601d2a8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2633,7 +2656,7 @@ dependencies = [
 [[package]]
 name = "sip-core"
 version = "0.7.6"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6#a4f8521561d60db31103c1cf41d1c4ed14cde114"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631#3dd5fbfc663169795650c42ba25277da5601d2a8"
 dependencies = [
  "bytes",
  "httpdate",
@@ -2646,7 +2669,7 @@ dependencies = [
 [[package]]
 name = "sip-dialog"
 version = "0.3.3"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6#a4f8521561d60db31103c1cf41d1c4ed14cde114"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631#3dd5fbfc663169795650c42ba25277da5601d2a8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2664,7 +2687,7 @@ dependencies = [
 [[package]]
 name = "sip-dns"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6#a4f8521561d60db31103c1cf41d1c4ed14cde114"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631#3dd5fbfc663169795650c42ba25277da5601d2a8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2678,7 +2701,7 @@ dependencies = [
 [[package]]
 name = "sip-hep"
 version = "0.0.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6#a4f8521561d60db31103c1cf41d1c4ed14cde114"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631#3dd5fbfc663169795650c42ba25277da5601d2a8"
 dependencies = [
  "bytes",
  "hep-rs",
@@ -2687,9 +2710,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sip-identity"
+version = "0.1.0"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631#3dd5fbfc663169795650c42ba25277da5601d2a8"
+dependencies = [
+ "base64",
+ "ring",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "sip-observe"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6#a4f8521561d60db31103c1cf41d1c4ed14cde114"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631#3dd5fbfc663169795650c42ba25277da5601d2a8"
 dependencies = [
  "once_cell",
  "tracing",
@@ -2698,7 +2734,7 @@ dependencies = [
 [[package]]
 name = "sip-parse"
 version = "0.3.4"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6#a4f8521561d60db31103c1cf41d1c4ed14cde114"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631#3dd5fbfc663169795650c42ba25277da5601d2a8"
 dependencies = [
  "bytes",
  "httpdate",
@@ -2712,7 +2748,7 @@ dependencies = [
 [[package]]
 name = "sip-ratelimit"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6#a4f8521561d60db31103c1cf41d1c4ed14cde114"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631#3dd5fbfc663169795650c42ba25277da5601d2a8"
 dependencies = [
  "dashmap 5.5.3",
  "parking_lot",
@@ -2723,7 +2759,7 @@ dependencies = [
 [[package]]
 name = "sip-sdp"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6#a4f8521561d60db31103c1cf41d1c4ed14cde114"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631#3dd5fbfc663169795650c42ba25277da5601d2a8"
 dependencies = [
  "nom",
  "smol_str",
@@ -2741,7 +2777,7 @@ dependencies = [
 [[package]]
 name = "sip-transaction"
 version = "0.5.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6#a4f8521561d60db31103c1cf41d1c4ed14cde114"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631#3dd5fbfc663169795650c42ba25277da5601d2a8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2760,7 +2796,7 @@ dependencies = [
 [[package]]
 name = "sip-transport"
 version = "0.3.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6#a4f8521561d60db31103c1cf41d1c4ed14cde114"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631#3dd5fbfc663169795650c42ba25277da5601d2a8"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2780,7 +2816,7 @@ dependencies = [
 [[package]]
 name = "sip-uac"
 version = "0.4.2"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6#a4f8521561d60db31103c1cf41d1c4ed14cde114"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631#3dd5fbfc663169795650c42ba25277da5601d2a8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2793,7 +2829,7 @@ dependencies = [
  "sip-dialog",
  "sip-dns",
  "sip-parse",
- "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6)",
+ "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631)",
  "sip-transaction",
  "sip-transport",
  "smol_str",
@@ -2805,7 +2841,7 @@ dependencies = [
 [[package]]
 name = "sip-uas"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6#a4f8521561d60db31103c1cf41d1c4ed14cde114"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631#3dd5fbfc663169795650c42ba25277da5601d2a8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2815,7 +2851,7 @@ dependencies = [
  "sip-core",
  "sip-dialog",
  "sip-parse",
- "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/siphon-rs?rev=a4f8521561d6)",
+ "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/siphon-rs?rev=3dd5fbfc6631)",
  "sip-transaction",
  "sip-transport",
  "smol_str",
@@ -3026,6 +3062,24 @@ dependencies = [
  "sip-uas",
  "siphon-ai-routes",
  "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "siphon-ai-stir-shaken"
+version = "0.3.2"
+dependencies = [
+ "base64",
+ "rcgen",
+ "reqwest",
+ "ring",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "sip-identity",
+ "siphon-ai-security",
+ "thiserror 1.0.69",
+ "time",
  "tokio",
  "tracing",
 ]
@@ -3410,7 +3464,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4067,7 +4121,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4336,6 +4390,15 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
+]
 
 [[package]]
 name = "yoke"

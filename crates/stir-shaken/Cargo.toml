@@ -1,0 +1,25 @@
+[package]
+name        = "siphon-ai-stir-shaken"
+description = "STIR/SHAKEN verifier: x5u cert fetch + cache, chain validation, verdict orchestration."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+sip-identity.workspace        = true
+siphon-ai-security.workspace  = true
+reqwest.workspace             = true
+rustls-pki-types = "1"
+rustls-pemfile   = "2"
+thiserror.workspace = true
+tracing.workspace   = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+rcgen = "0.13"
+time  = "0.3"
+ring  = "0.17"
+base64 = { workspace = true }

@@ -25,6 +25,7 @@ siphon-ai-cdr.workspace        = true
 siphon-ai-media-glue.workspace = true
 siphon-ai-routes.workspace     = true
 siphon-ai-security.workspace   = true
+siphon-ai-stir-shaken.workspace = true
 siphon-ai-sip-glue.workspace   = true
 siphon-ai-telemetry.workspace  = true
 siphon-ai-webhooks.workspace   = true

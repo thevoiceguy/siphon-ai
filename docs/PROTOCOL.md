@@ -167,14 +167,17 @@ mitigation.
 See [`docs/CONFIG.md`](CONFIG.md) `[media].srtp` for the
 operator-facing mode switch.
 
-**`verstat` (0.4.0): surface defined, not yet produced.** The field and
-its wire shape are pinned now so servers can build against them, but the
-accept-path verifier that populates it is still being wired — on real
-calls the field is currently always absent. A server that wants to apply
-its own fraud policy reads the booleans (treating a present-but-failed
-verdict as untrusted), not `attest` alone. See
-[`docs/CONFIG.md`](CONFIG.md) `[security]` for the operator switches and
-the attestation-gate policy matrix.
+**`verstat` (0.4.0): produced when verification is enabled.** With
+`[security.stir_shaken].enabled = true`, the accept path verifies each
+inbound INVITE's `Identity` header and populates this field on `start`
+(an INVITE with no `Identity` header yields an unsigned verdict —
+`signature_valid: false`, `attest` absent — rather than omitting the
+field). When verification is disabled the field is absent entirely. A
+server that wants to apply its own fraud policy reads the booleans
+(treating a present-but-failed verdict as untrusted), not `attest` alone.
+The daemon's own `min_attestation` gate is a separate operator switch —
+see [`docs/CONFIG.md`](CONFIG.md) `[security]` for it and the
+attestation-gate policy matrix.
 
 A server MUST begin sending audio (or send a `hangup`) within 5 seconds
 of receiving `start`, otherwise SiphonAI emits

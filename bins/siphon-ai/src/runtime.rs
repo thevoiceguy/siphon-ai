@@ -140,9 +140,7 @@ impl Runtime {
             routes,
             registrations,
             trunks,
-            // Parsed + validated at config load; the accept-path / verifier
-            // wiring that consumes it lands in a later 0.4.0 chunk.
-            security: _security,
+            security,
             cdr,
             observability,
             webhooks,
@@ -218,12 +216,32 @@ impl Runtime {
             preferred_se: sip.preferred_session_expires,
             force_refresher: Some(sip_core::RefresherRole::Uac),
         };
+        // ─── STIR/SHAKEN verifier ──────────────────────────────────
+        // Built once and shared across every call (it owns a process-wide
+        // signing-cert cache). `None` when verification is disabled, so the
+        // accept path stays exactly as it was for a 0.3.x config. The
+        // trust-anchor file was already existence-checked at config compile;
+        // `from_config` decodes it here and fails startup loud if it can't.
+        let verifier = if security.stir_shaken.enabled {
+            let v = siphon_ai_stir_shaken::Verifier::from_config(&security.stir_shaken)
+                .map_err(|e| anyhow!("build STIR/SHAKEN verifier: {e}"))?;
+            info!(
+                trust_anchors = %security.stir_shaken.trust_anchors.display(),
+                require_identity = security.stir_shaken.require_identity,
+                "STIR/SHAKEN verification enabled"
+            );
+            Some(Arc::new(v))
+        } else {
+            None
+        };
+
         let acceptor = Arc::new(
             BridgingAcceptor::new(media_setup, bridge_defaults, registry.clone())
                 .with_cdr_sink(cdr_sink)
                 .with_webhook_sink(webhook_sink)
                 .with_session_timer_policy(session_timer_policy)
-                .with_call_progress(sip.call_progress),
+                .with_call_progress(sip.call_progress)
+                .with_verifier(verifier),
         );
 
         // ─── Registration manager ──────────────────────────────────

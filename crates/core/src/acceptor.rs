@@ -76,9 +76,10 @@ use siphon_ai_media_glue::{
 };
 use siphon_ai_routes::CompiledRoute;
 use siphon_ai_sip_glue::{CallAcceptor, InviteFacts, MatchedCall};
+use siphon_ai_stir_shaken::Verifier;
 use siphon_ai_telemetry::{
     CALLS_ACTIVE, CALLS_TOTAL, CALL_DURATION_SECONDS, INVITES_TOTAL, ROUTE_MATCH_TOTAL,
-    SDP_NEGOTIATE_SECONDS,
+    SDP_NEGOTIATE_SECONDS, VERSTAT_TOTAL,
 };
 use siphon_ai_webhooks::{
     CallEndEvent, CallStartEvent, NullSink as WebhookNullSink, WebhookEvent, WebhookSinkHandle,
@@ -1132,6 +1133,46 @@ pub fn build_start_msg(
     }
 }
 
+/// Produce the STIR/SHAKEN verdict for an inbound INVITE, or `None` when
+/// verification is disabled (no verifier installed). The `bool` is whether
+/// an `Identity` header was present — the caller needs it to distinguish an
+/// `unsigned` outcome from a `failed` one. Free function (not a method) so
+/// the wiring is unit-testable without standing up a full acceptor; the
+/// metric + log live on the calling method.
+async fn run_identity_verification(
+    verifier: Option<&Verifier>,
+    facts: &InviteFacts,
+) -> Option<(siphon_ai_security::VerificationResult, bool)> {
+    let verifier = verifier?;
+    let identity = facts.headers.get("identity");
+    let verdict = match identity {
+        Some(value) => {
+            verifier
+                .verify(value, &facts.from_user, &facts.request_uri_user)
+                .await
+        }
+        None => siphon_ai_security::VerificationResult::unsigned(),
+    };
+    Some((verdict, identity.is_some()))
+}
+
+/// Classify a verification verdict into the bounded
+/// `siphon_ai_verstat_total` label set: `passed` when every check held,
+/// `unsigned` when no `Identity` header was present, otherwise `failed`
+/// (header present but verification did not fully pass).
+fn verstat_metric_result(
+    verdict: &siphon_ai_security::VerificationResult,
+    had_identity: bool,
+) -> &'static str {
+    if verdict.passed() {
+        "passed"
+    } else if !had_identity {
+        "unsigned"
+    } else {
+        "failed"
+    }
+}
+
 /// Title-case a hyphen-separated SIP header name (`x-foo-bar` →
 /// `X-Foo-Bar`). The bridge protocol doesn't care, but emitting
 /// canonical names keeps WS server logs readable.
@@ -1224,6 +1265,12 @@ pub struct BridgingAcceptor {
     /// cert — there's no mid-process cert rotation (rotating
     /// would invalidate in-flight handshakes).
     dtls_cert: Arc<forge_rtp::dtls::DtlsCertificate>,
+    /// STIR/SHAKEN verifier, present only when
+    /// `[security.stir_shaken].enabled = true`. `None` means no Identity
+    /// parsing or verification runs and no `verstat` is surfaced — a 0.3.x
+    /// deployment upgrades with zero behaviour change. Shared across calls
+    /// (it owns a process-wide cert cache); cheap to clone.
+    verifier: Option<Arc<Verifier>>,
 }
 
 /// Daemon-wide REFER plumbing (shared across every accepted call).
@@ -1371,6 +1418,7 @@ impl BridgingAcceptor {
             dialog_handles,
             call_progress: CallProgressMode::default(),
             dtls_cert,
+            verifier: None,
         }
     }
 
@@ -1442,6 +1490,15 @@ impl BridgingAcceptor {
     /// override it for focused coverage.
     pub fn with_session_timer_policy(mut self, policy: SessionTimerPolicy) -> Self {
         self.session_timer_policy = policy;
+        self
+    }
+
+    /// Install the STIR/SHAKEN verifier. `None` (the default) leaves
+    /// verification off entirely. The daemon passes `Some` only when
+    /// `[security.stir_shaken].enabled = true`, so the inert path costs
+    /// nothing.
+    pub fn with_verifier(mut self, verifier: Option<Arc<Verifier>>) -> Self {
+        self.verifier = verifier;
         self
     }
 
@@ -2442,6 +2499,40 @@ impl std::fmt::Debug for PreparedCall {
 }
 
 impl BridgingAcceptor {
+    /// Verify the inbound INVITE's `Identity` header, when STIR/SHAKEN is
+    /// enabled. Returns the verdict to surface on `start` (and the CDR), or
+    /// `None` when verification is disabled — in which case no `verstat` is
+    /// emitted at all.
+    ///
+    /// A missing `Identity` header yields [`VerificationResult::unsigned`]
+    /// (attestation `null`, nothing verified) rather than `None`: with
+    /// verification on, the absence of a signature is itself a reportable
+    /// outcome. Policy enforcement (reject-on-`require_identity`,
+    /// `min_attestation` gate) is a separate chunk — this only produces and
+    /// records the verdict.
+    async fn verify_identity(
+        &self,
+        facts: &InviteFacts,
+        bridge_call_id: &str,
+    ) -> Option<Box<siphon_ai_security::VerificationResult>> {
+        let (verdict, had_identity) =
+            run_identity_verification(self.verifier.as_deref(), facts).await?;
+
+        let result = verstat_metric_result(&verdict, had_identity);
+        metrics::counter!(VERSTAT_TOTAL, "result" => result).increment(1);
+        info!(
+            call_id = %bridge_call_id,
+            verstat_result = result,
+            verstat_attest = verdict.attest.map(|a| a.as_str()).unwrap_or("none"),
+            verstat_passed = verdict.passed(),
+            orig_tn = verdict.orig_tn.as_deref().unwrap_or(""),
+            error = verdict.error.as_deref().unwrap_or(""),
+            "STIR/SHAKEN verification complete"
+        );
+
+        Some(Box::new(verdict))
+    }
+
     /// Run every step from "matched route" up to "ready-to-run
     /// `CallController`," but stop short of sending the 200 OK or
     /// spawning the controller. The caller composes those steps —
@@ -2587,6 +2678,12 @@ impl BridgingAcceptor {
             None
         };
 
+        // STIR/SHAKEN verification, when enabled. Runs here — after media
+        // bring-up, before the controller is built — so the verdict can ride
+        // the `start` message (and from there the CDR). `None` when
+        // verification is disabled, so the field is omitted from `start`.
+        let verstat = self.verify_identity(facts, bridge_call_id.as_str()).await;
+
         let start = build_start_msg(
             bridge_call_id.clone(),
             facts,
@@ -2594,8 +2691,7 @@ impl BridgingAcceptor {
             &answer,
             &self.defaults.forward_headers,
             srtp_info,
-            // verstat: the accept-path verifier is a later 0.4.0 chunk.
-            None,
+            verstat,
         );
 
         let transfer = self.transfer.get().map(|installed| TransferContext {
@@ -3995,5 +4091,85 @@ a=sendrecv\r\n",
             .expect("re-INVITE should be accepted");
         let addr = outcome.remote_addr.expect("remote_addr present");
         assert_eq!(addr.to_string(), "192.168.42.5:7000");
+    }
+
+    // ─── STIR/SHAKEN accept-path wiring ───────────────────────────
+
+    /// An INVITE with an optional `Identity` header, as route-matchable
+    /// facts. From user is an E.164 caller; R-URI user is the callee.
+    fn facts_with_identity(identity: Option<&str>) -> InviteFacts {
+        let uri = SipUri::parse("sip:5000@siphon.example.com").expect("uri");
+        let line = RequestLine::new(Method::Invite, uri);
+        let mut headers = SipHeaders::new();
+        headers.push("Via", "SIP/2.0/UDP h:5060;branch=z").unwrap();
+        headers
+            .push("From", "<sip:+12155551212@example.net>;tag=t")
+            .unwrap();
+        headers.push("To", "<sip:5000@siphon.example.com>").unwrap();
+        headers.push("Call-ID", "x@y").unwrap();
+        headers.push("CSeq", "1 INVITE").unwrap();
+        if let Some(value) = identity {
+            headers.push("Identity", value).unwrap();
+        }
+        headers.push("Content-Length", "0").unwrap();
+        let req = Request::new(line, headers, Bytes::new()).unwrap();
+        InviteFacts::extract(&req)
+    }
+
+    /// A verifier with a throwaway (never-consulted on these paths) anchor.
+    fn dummy_verifier() -> Verifier {
+        Verifier::new(vec![vec![0u8; 8]], Duration::from_secs(3600)).expect("build verifier")
+    }
+
+    #[tokio::test]
+    async fn disabled_verifier_yields_no_verstat() {
+        // No verifier installed → no verification, no verstat surfaced.
+        let facts = facts_with_identity(Some("anything"));
+        assert!(run_identity_verification(None, &facts).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_identity_header_is_unsigned() {
+        let facts = facts_with_identity(None);
+        let (verdict, had_identity) = run_identity_verification(Some(&dummy_verifier()), &facts)
+            .await
+            .expect("verification ran");
+        assert!(!had_identity);
+        assert!(!verdict.passed());
+        assert_eq!(verdict.attest, None);
+        // unsigned() carries no error (distinct from a malformed header).
+        assert_eq!(verdict.error, None);
+        assert_eq!(verstat_metric_result(&verdict, had_identity), "unsigned");
+    }
+
+    #[tokio::test]
+    async fn malformed_identity_header_is_failed() {
+        // A present-but-garbage header parses-fails inside the verifier — no
+        // network reached — so the verdict is a failure with a reason, and
+        // the metric label is `failed` (header was present).
+        let facts = facts_with_identity(Some("not-a-valid-passport"));
+        let (verdict, had_identity) = run_identity_verification(Some(&dummy_verifier()), &facts)
+            .await
+            .expect("verification ran");
+        assert!(had_identity);
+        assert!(!verdict.passed());
+        assert!(verdict.error.is_some());
+        assert_eq!(verstat_metric_result(&verdict, had_identity), "failed");
+    }
+
+    #[test]
+    fn verstat_metric_result_classifies_outcomes() {
+        let mut v = siphon_ai_security::VerificationResult::unsigned();
+        // No header present → unsigned.
+        assert_eq!(verstat_metric_result(&v, false), "unsigned");
+        // Header present but not passing → failed.
+        assert_eq!(verstat_metric_result(&v, true), "failed");
+        // All checks held → passed (regardless of had_identity).
+        v.signature_valid = true;
+        v.cert_chain_valid = true;
+        v.orig_passed = true;
+        v.dest_passed = true;
+        assert!(v.passed());
+        assert_eq!(verstat_metric_result(&v, true), "passed");
     }
 }

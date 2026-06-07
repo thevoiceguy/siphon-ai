@@ -4329,7 +4329,12 @@ a=sendrecv\r\n",
 
     /// A verifier with a throwaway (never-consulted on these paths) anchor.
     fn dummy_verifier() -> Verifier {
-        Verifier::new(vec![vec![0u8; 8]], Duration::from_secs(3600)).expect("build verifier")
+        Verifier::new(
+            vec![vec![0u8; 8]],
+            Duration::from_secs(3600),
+            Duration::from_secs(60),
+        )
+        .expect("build verifier")
     }
 
     #[tokio::test]
@@ -4380,6 +4385,7 @@ a=sendrecv\r\n",
         v.cert_chain_valid = true;
         v.orig_passed = true;
         v.dest_passed = true;
+        v.iat_passed = true;
         assert!(v.passed());
         assert_eq!(verstat_metric_result(&v, true), "passed");
     }
@@ -4397,6 +4403,7 @@ a=sendrecv\r\n",
             dest_passed: true,
             cert_chain_valid: true,
             signature_valid: true,
+            iat_passed: true,
             error: None,
         }
     }

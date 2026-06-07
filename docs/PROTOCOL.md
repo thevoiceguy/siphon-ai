@@ -142,6 +142,7 @@ MAY use it to detect dropped frames in their own logs.
 | `verstat.dest_passed` | bool | A `dest` TN matched the SIP `To` / request URI. |
 | `verstat.cert_chain_valid` | bool | Signing cert chained to a configured STI-PA trust anchor. |
 | `verstat.signature_valid` | bool | ES256 signature over the PASSporT verified against that cert. |
+| `verstat.iat_passed` | bool | PASSporT `iat` was within the configured freshness window (replay protection). Added in 0.4.1; `false` for a stale/future/missing `iat`. Like the other booleans, it's part of the composite a server should treat as "trusted". |
 | `verstat.error` | string \| absent | Human-readable reason when verification did not fully pass; absent on success. |
 
 The `srtp` field is omitted from the JSON when SRTP is off; a v1

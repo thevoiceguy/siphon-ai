@@ -293,6 +293,7 @@ enabled            = false           # master switch
 trust_anchors      = "/etc/siphon-ai/sti-pa-roots.pem"
 cert_cache_ttl_secs = 3600           # signing-cert cache TTL (seconds)
 require_identity   = false           # reject unsigned INVITEs with 428
+iat_freshness_secs = 60              # PASSporT iat replay window (0 disables)
 ```
 
 ### `[security]`
@@ -339,6 +340,7 @@ min_attestation = "C"   # looser than a stricter global, by design
 | `trust_anchors` | string | — | Path to the PEM bundle of STI-PA trust anchors. `contrib/sti-pa-roots.pem` is a **template** — populate it with the authentic STI-PA root(s) per `contrib/README.md` (we don't vendor a baked-in root; a stale/wrong anchor is a security defect). **Required when `enabled = true`**; validated at load time (must exist and contain ≥1 PEM certificate, so the unpopulated template fails loud by design). |
 | `cert_cache_ttl_secs` | int | `3600` | How long a fetched signing certificate is cached before re-fetch. (Seconds, matching the other duration fields in this config.) |
 | `require_identity` | bool | `false` | Reject inbound INVITEs that carry no `Identity` header with `428 Use Identity Header` (RFC 8224 §6.2.2) instead of admitting them as unsigned. |
+| `iat_freshness_secs` | int | `60` | PASSporT `iat` freshness window, in seconds (replay protection, ATIS-1000074). The verdict's `iat_passed` is `false` when `iat` is more than this far from now (past **or** future), or absent. `0` disables the check (any `iat` passes) — an escape hatch for upstreams with broken clocks. |
 
 ## `[cdr]`
 

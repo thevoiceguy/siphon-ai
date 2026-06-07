@@ -775,6 +775,7 @@ pub(crate) fn compile_srtp_mode(
 fn compile_security(raw: RawSecurity) -> Result<SecurityConfig, CompileError> {
     use siphon_ai_security::{
         validate_trust_anchors, MinAttestation, StirShakenConfig, DEFAULT_CERT_CACHE_TTL,
+        DEFAULT_IAT_FRESHNESS,
     };
 
     let min_attestation = match raw.min_attestation.as_deref() {
@@ -797,6 +798,12 @@ fn compile_security(raw: RawSecurity) -> Result<SecurityConfig, CompileError> {
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_CERT_CACHE_TTL);
     let require_identity = stir.require_identity.unwrap_or(false);
+    // `iat_freshness_secs = 0` is a deliberate "disable the check" value, so
+    // map it straight through (Duration::ZERO); absent → the 60 s default.
+    let iat_freshness = stir
+        .iat_freshness_secs
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_IAT_FRESHNESS);
 
     // A minimum-attestation gate is meaningless without verification: with
     // stir_shaken off, no call yields a trusted attestation, so the gate
@@ -829,6 +836,7 @@ fn compile_security(raw: RawSecurity) -> Result<SecurityConfig, CompileError> {
             trust_anchors,
             cert_cache_ttl,
             require_identity,
+            iat_freshness,
         },
     })
 }
@@ -1558,6 +1566,7 @@ mod security_tests {
                 trust_anchors: Some(path.to_string_lossy().into_owned()),
                 cert_cache_ttl_secs: Some(1800),
                 require_identity: Some(true),
+                iat_freshness_secs: Some(30),
             },
         };
         let c = compile_security(raw).unwrap();
@@ -1569,9 +1578,33 @@ mod security_tests {
             c.stir_shaken.cert_cache_ttl,
             std::time::Duration::from_secs(1800)
         );
+        assert_eq!(
+            c.stir_shaken.iat_freshness,
+            std::time::Duration::from_secs(30)
+        );
         assert_eq!(c.stir_shaken.trust_anchors, path);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn iat_freshness_defaults_and_zero_disables() {
+        // Absent → 60 s default.
+        let c = compile_security(RawSecurity::default()).unwrap();
+        assert_eq!(
+            c.stir_shaken.iat_freshness,
+            std::time::Duration::from_secs(60)
+        );
+        // 0 maps straight through (disables the check), not the default.
+        let raw = RawSecurity {
+            stir_shaken: RawStirShaken {
+                iat_freshness_secs: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let c = compile_security(raw).unwrap();
+        assert_eq!(c.stir_shaken.iat_freshness, std::time::Duration::ZERO);
     }
 
     #[test]

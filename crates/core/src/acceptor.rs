@@ -79,8 +79,8 @@ use siphon_ai_security::MinAttestation;
 use siphon_ai_sip_glue::{CallAcceptor, InviteFacts, MatchedCall};
 use siphon_ai_stir_shaken::Verifier;
 use siphon_ai_telemetry::{
-    CALLS_ACTIVE, CALLS_TOTAL, CALL_DURATION_SECONDS, INVITES_TOTAL, ROUTE_MATCH_TOTAL,
-    SDP_NEGOTIATE_SECONDS, VERSTAT_TOTAL,
+    HepTelemetry, CALLS_ACTIVE, CALLS_TOTAL, CALL_DURATION_SECONDS, INVITES_TOTAL,
+    ROUTE_MATCH_TOTAL, SDP_NEGOTIATE_SECONDS, VERSTAT_TOTAL,
 };
 use siphon_ai_webhooks::{
     CallEndEvent, CallStartEvent, NullSink as WebhookNullSink, WebhookEvent, WebhookSinkHandle,
@@ -1406,6 +1406,11 @@ pub struct BridgingAcceptor {
     /// permissive; only consulted when `verifier` is `Some` (a verdict
     /// exists to gate on).
     security: AcceptSecurityPolicy,
+    /// HEP/Homer telemetry handle, present only when `[hep].enabled`. When
+    /// set and a verstat verdict is produced, the accept path ships it as a
+    /// `HepProtocol::Verstat` chunk correlated by SIP Call-ID. `None` → no
+    /// HEP emission (the rest of the verdict surfacing is unaffected).
+    hep: Option<Arc<HepTelemetry>>,
 }
 
 /// Daemon-wide REFER plumbing (shared across every accepted call).
@@ -1555,6 +1560,7 @@ impl BridgingAcceptor {
             dtls_cert,
             verifier: None,
             security: AcceptSecurityPolicy::default(),
+            hep: None,
         }
     }
 
@@ -1643,6 +1649,15 @@ impl BridgingAcceptor {
     /// permissive; the gate is only consulted when a verifier is installed.
     pub fn with_security_policy(mut self, policy: AcceptSecurityPolicy) -> Self {
         self.security = policy;
+        self
+    }
+
+    /// Install the HEP/Homer telemetry handle. `None` (the default) means
+    /// no verstat chunk is shipped. The daemon passes `Some` when
+    /// `[hep].enabled = true`, sharing the same `UdpHepSink` worker the SIP
+    /// / RTCP / CDR emitters use.
+    pub fn with_hep_telemetry(mut self, hep: Option<Arc<HepTelemetry>>) -> Self {
+        self.hep = hep;
         self
     }
 
@@ -2668,6 +2683,7 @@ impl BridgingAcceptor {
         facts: &InviteFacts,
         route: &CompiledRoute,
         bridge_call_id: &str,
+        sip_call_id: &str,
     ) -> Result<Option<Box<siphon_ai_security::VerificationResult>>, AcceptError> {
         let Some((verdict, had_identity)) =
             run_identity_verification(self.verifier.as_deref(), facts).await
@@ -2691,8 +2707,37 @@ impl BridgingAcceptor {
             "STIR/SHAKEN verification complete"
         );
 
+        // Ship the verdict to Homer as a Verstat chunk, correlated by SIP
+        // Call-ID so it threads onto the same call view as the SIP / RTCP /
+        // CDR chunks. Emitted regardless of the gate outcome below — a
+        // rejected call's verdict is exactly what an operator wants to see.
+        self.emit_verstat_chunk(&verdict, sip_call_id, bridge_call_id);
+
         apply_attestation_gate(&self.security, effective_min, &verdict, had_identity)?;
         Ok(Some(Box::new(verdict)))
+    }
+
+    /// Best-effort HEP emission of a verstat verdict. No-op when HEP is
+    /// disabled. A serialization failure (not expected for our own type) is
+    /// logged and swallowed — HEP is observability, never call control
+    /// (CLAUDE.md §4.7).
+    fn emit_verstat_chunk(
+        &self,
+        verdict: &siphon_ai_security::VerificationResult,
+        sip_call_id: &str,
+        bridge_call_id: &str,
+    ) {
+        let Some(hep) = &self.hep else {
+            return;
+        };
+        match serde_json::to_vec(verdict) {
+            Ok(payload) => hep.emit_verstat(&payload, sip_call_id),
+            Err(e) => warn!(
+                call_id = %bridge_call_id,
+                error = %e,
+                "failed to serialize verstat for HEP; dropping chunk"
+            ),
+        }
     }
 
     /// Run every step from "matched route" up to "ready-to-run
@@ -2768,7 +2813,7 @@ impl BridgingAcceptor {
         // or RTP port. Returns the verdict to ride `start` → CDR; an `Err`
         // here is a gate rejection the async wrapper turns into a 4xx/428.
         let verstat = self
-            .run_security(facts, route, bridge_call_id.as_str())
+            .run_security(facts, route, bridge_call_id.as_str(), &sip_call_id)
             .await?;
 
         debug!(

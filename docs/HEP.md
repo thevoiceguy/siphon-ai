@@ -27,6 +27,8 @@ one queue and one UDP socket through the daemon-wide `HepSink`:
    │ (telemetry)  │     HepProtocol::Log (chunk type 0x64)
    │              │ ──► Full CDR JSON when a call ends
    │              │     HepProtocol::Cdr (chunk type 0x65)
+   │              │ ──► STIR/SHAKEN verdict JSON per inbound call
+   │              │     HepProtocol::Verstat (chunk type 0x66)
    └──────────────┘
                   └────────────► HepSink ──UDP──► heplify-server
                                        (Arc-shared, single worker task)
@@ -96,6 +98,25 @@ When the scenario also exchanges RTP (`uac_with_rtp.xml`, post-v1), the
 QoS panel populates from forge's per-RR `RtpQos` chunks: jitter,
 fractional loss, cumulative loss, the SSRC of each direction.
 
+## STIR/SHAKEN verstat chunk (0x66)
+
+When `[security.stir_shaken].enabled = true`, the accept path ships one
+`HepProtocol::Verstat` (chunk type 0x66) per inbound call, correlated by
+SIP `Call-ID`, so the verdict threads onto the same call view as the SIP
+ladder and the CDR. The payload is the verdict as JSON — the same shape as
+`start.verstat` (PROTOCOL.md) and the `verstat_*` CDR fields:
+
+```json
+{ "attest": "A", "orig_tn": "+12155551212", "orig_passed": true,
+  "dest_passed": true, "cert_chain_valid": true, "signature_valid": true }
+```
+
+The chunk is emitted for **every** inbound call while verification is on —
+including unsigned calls (`signature_valid: false`, `attest` absent) and
+gate-rejected ones (the verdict is exactly what an investigator wants when
+a call was screened). `attest` is the *claimed* level; trust it only when
+the booleans all hold. No chunk is emitted when verification is disabled.
+
 ## Local validation
 
 `examples/homer-stack/` is a full Homer + heplify-server + Postgres compose
@@ -127,7 +148,7 @@ work the diagnostics in order:
 
 ## Adding new emissions
 
-The four chunk types above cover v1. If you have an event Homer should
+The chunk types above cover v1. If you have an event Homer should
 know about that doesn't fit them — say, a `route_match` event with the
 matched route name — the right path is:
 

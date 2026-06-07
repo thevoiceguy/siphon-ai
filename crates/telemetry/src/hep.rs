@@ -158,6 +158,28 @@ impl HepTelemetry {
         });
     }
 
+    /// Emit a STIR/SHAKEN verdict as a HEP3 chunk-type 102
+    /// (`HepProtocol::Verstat`). `payload` is the verdict already
+    /// serialized (siphon-ai serializes the `VerificationResult` as JSON,
+    /// the same shape as `start.verstat`); this crate stays free of the
+    /// security types. `correlation_id` MUST be the SIP `Call-ID` so Homer
+    /// threads the verdict onto the same call view as the SIP + RTCP + CDR
+    /// chunks. Best-effort like every emit here — drops on a full queue.
+    pub fn emit_verstat(&self, payload: &[u8], correlation_id: &str) {
+        let zero = unspecified_addr();
+        self.sink.send(HepPacket {
+            capture_id: self.capture_id,
+            capture_password: self.capture_password.clone(),
+            protocol: HepProtocol::Verstat,
+            transport: IpProto::Udp,
+            src: zero,
+            dst: zero,
+            timestamp: SystemTime::now(),
+            correlation_id: Some(correlation_id.to_string()),
+            payload: payload.to_vec(),
+        });
+    }
+
     /// Node identifier the daemon was configured with (`[node].id`).
     /// Surfaced so loggers can prepend it to their text payloads
     /// without re-reading config.
@@ -206,4 +228,54 @@ pub enum HepBuildError {
     /// collector address surfaces here.
     #[error(transparent)]
     Udp(#[from] UdpHepSinkError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hep_rs::HepSink;
+    use std::sync::Mutex;
+
+    /// In-memory sink that records every packet, so tests can assert on
+    /// the composed HEP3 shape without a real UDP collector.
+    #[derive(Default)]
+    struct Capture {
+        seen: Mutex<Vec<HepPacket>>,
+    }
+    impl HepSink for Capture {
+        fn send(&self, packet: HepPacket) {
+            self.seen.lock().unwrap().push(packet);
+        }
+    }
+
+    fn telemetry_with(sink: HepSinkHandle) -> HepTelemetry {
+        HepTelemetry {
+            sink,
+            capture_id: 2002,
+            capture_password: Some("homer-secret".into()),
+            node_id: "node-a".into(),
+        }
+    }
+
+    #[test]
+    fn emit_verstat_composes_verstat_chunk_with_correlation() {
+        let cap = Arc::new(Capture::default());
+        let tel = telemetry_with(cap.clone() as HepSinkHandle);
+
+        let payload = br#"{"attest":"A","signature_valid":true}"#;
+        tel.emit_verstat(payload, "abc-123@pbx.example.com");
+
+        let seen = cap.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let pkt = &seen[0];
+        assert_eq!(pkt.protocol, HepProtocol::Verstat);
+        assert_eq!(pkt.capture_id, 2002);
+        assert_eq!(pkt.capture_password.as_deref(), Some("homer-secret"));
+        // Correlation is the SIP Call-ID — the stitch into the call view.
+        assert_eq!(
+            pkt.correlation_id.as_deref(),
+            Some("abc-123@pbx.example.com")
+        );
+        assert_eq!(pkt.payload, payload);
+    }
 }

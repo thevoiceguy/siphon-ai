@@ -251,7 +251,10 @@ impl Runtime {
                 .with_session_timer_policy(session_timer_policy)
                 .with_call_progress(sip.call_progress)
                 .with_verifier(verifier)
-                .with_security_policy(security_policy),
+                .with_security_policy(security_policy)
+                // Share the same HEP worker the SIP/RTCP/CDR emitters use so
+                // the verstat chunk lands on the same Homer call view.
+                .with_hep_telemetry(hep_telemetry.clone()),
         );
 
         // ─── Registration manager ──────────────────────────────────

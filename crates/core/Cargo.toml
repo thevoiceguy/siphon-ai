@@ -18,6 +18,8 @@ uuid.workspace        = true
 chrono.workspace      = true
 parking_lot.workspace = true
 metrics.workspace     = true
+# Serialize the verstat verdict to JSON for the HEP3 Verstat chunk.
+serde_json.workspace  = true
 
 # Internal crates
 siphon-ai-bridge.workspace     = true

@@ -15,6 +15,10 @@ use thiserror::Error;
 /// semantics on the `x5u`/`info` cert responses (plan §9 decision 2).
 pub const DEFAULT_CERT_CACHE_TTL: Duration = Duration::from_secs(3600);
 
+/// Default PASSporT `iat` freshness window (60 s) — replay protection per
+/// ATIS-1000074. `0` disables the check.
+pub const DEFAULT_IAT_FRESHNESS: Duration = Duration::from_secs(60);
+
 /// Compiled `[security.stir_shaken]` block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StirShakenConfig {
@@ -32,6 +36,11 @@ pub struct StirShakenConfig {
     /// ("Use Identity Header", RFC 8224 §6.2.2) instead of admitting them
     /// as unsigned.
     pub require_identity: bool,
+    /// How far the PASSporT `iat` may be from now (past or future) before
+    /// the verdict's `iat_passed` is `false` — replay protection per
+    /// ATIS-1000074. `Duration::ZERO` disables the check (any `iat` passes),
+    /// an escape hatch for upstreams with broken clocks.
+    pub iat_freshness: Duration,
 }
 
 impl Default for StirShakenConfig {
@@ -41,6 +50,7 @@ impl Default for StirShakenConfig {
             trust_anchors: PathBuf::new(),
             cert_cache_ttl: DEFAULT_CERT_CACHE_TTL,
             require_identity: false,
+            iat_freshness: DEFAULT_IAT_FRESHNESS,
         }
     }
 }
@@ -97,6 +107,7 @@ mod tests {
         assert!(!c.enabled);
         assert!(!c.require_identity);
         assert_eq!(c.cert_cache_ttl, DEFAULT_CERT_CACHE_TTL);
+        assert_eq!(c.iat_freshness, DEFAULT_IAT_FRESHNESS);
     }
 
     #[test]

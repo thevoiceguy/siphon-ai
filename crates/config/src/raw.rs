@@ -249,6 +249,10 @@ pub struct RawStirShaken {
     /// instead of admitting them as unsigned. Default `false`.
     #[serde(default)]
     pub require_identity: Option<bool>,
+    /// PASSporT `iat` freshness window, in seconds (replay protection,
+    /// ATIS-1000074). `None` → 60. `0` disables the check.
+    #[serde(default)]
+    pub iat_freshness_secs: Option<u64>,
 }
 
 /// `[cdr]` — call detail record sinks. v1 supports a JSONL file

@@ -38,6 +38,7 @@ mod verstat;
 pub use attestation::AttestationLevel;
 pub use config::{
     validate_trust_anchors, StirShakenConfig, TrustAnchorError, DEFAULT_CERT_CACHE_TTL,
+    DEFAULT_IAT_FRESHNESS,
 };
 pub use policy::MinAttestation;
 pub use verstat::VerificationResult;

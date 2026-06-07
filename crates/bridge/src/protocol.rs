@@ -1018,12 +1018,14 @@ mod tests {
             dest_passed: true,
             cert_chain_valid: true,
             signature_valid: true,
+            iat_passed: true,
             error: None,
         };
         let v: Value = serde_json::to_value(mk(Some(verdict.clone()))).unwrap();
         assert_eq!(v["verstat"]["attest"], json!("A"));
         assert_eq!(v["verstat"]["orig_tn"], json!("+12155551212"));
         assert_eq!(v["verstat"]["signature_valid"], json!(true));
+        assert_eq!(v["verstat"]["iat_passed"], json!(true));
         // error is None → omitted; attest present → no null.
         assert!(!v["verstat"].as_object().unwrap().contains_key("error"));
         let round: BridgeOut = serde_json::from_value(v).unwrap();

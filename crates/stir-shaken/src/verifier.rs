@@ -67,13 +67,20 @@ pub struct Verifier {
     cache: Arc<CertCache>,
     http: reqwest::Client,
     cache_ttl: Duration,
+    /// PASSporT `iat` freshness window; `Duration::ZERO` disables the check.
+    iat_freshness: Duration,
 }
 
 impl Verifier {
-    /// Build a verifier from already-decoded trust-anchor DERs and a cache
-    /// TTL. Prefer [`Verifier::from_config`] from daemon code; this is the
+    /// Build a verifier from already-decoded trust-anchor DERs, a cache TTL,
+    /// and an `iat` freshness window (`Duration::ZERO` disables the freshness
+    /// check). Prefer [`Verifier::from_config`] from daemon code; this is the
     /// seam for tests and embedders that hold anchors in memory.
-    pub fn new(trust_anchors: Vec<Vec<u8>>, cache_ttl: Duration) -> Result<Self, BuildError> {
+    pub fn new(
+        trust_anchors: Vec<Vec<u8>>,
+        cache_ttl: Duration,
+        iat_freshness: Duration,
+    ) -> Result<Self, BuildError> {
         let http = reqwest::Client::builder()
             .timeout(FETCH_TIMEOUT)
             // x5u is a direct cert URL; never chase a redirect to an
@@ -86,15 +93,17 @@ impl Verifier {
             cache: Arc::new(CertCache::new()),
             http,
             cache_ttl,
+            iat_freshness,
         })
     }
 
     /// Build a verifier from the compiled `[security.stir_shaken]` config:
     /// load + decode the trust-anchor PEM file and adopt the configured
-    /// cache TTL. Fails loud if the anchor file is unreadable or empty.
+    /// cache TTL and `iat` freshness window. Fails loud if the anchor file is
+    /// unreadable or empty.
     pub fn from_config(cfg: &StirShakenConfig) -> Result<Self, BuildError> {
         let anchors = load_trust_anchors(&cfg.trust_anchors)?;
-        Self::new(anchors, cfg.cert_cache_ttl)
+        Self::new(anchors, cfg.cert_cache_ttl, cfg.iat_freshness)
     }
 
     /// Verify the `Identity` header of an inbound INVITE.
@@ -123,12 +132,20 @@ impl Verifier {
             }
         };
 
+        let now = now_unix();
         let x5u = header.passport.header.x5u.clone();
         let chain = match self.resolve_chain(&x5u).await {
             Ok(chain) => chain,
             Err(e) => {
                 warn!(%x5u, error = %e, "x5u certificate fetch failed");
-                return fetch_failure(&header.passport, from_user, to_user, e);
+                return fetch_failure(
+                    &header.passport,
+                    from_user,
+                    to_user,
+                    e,
+                    now,
+                    self.iat_freshness,
+                );
             }
         };
 
@@ -138,7 +155,8 @@ impl Verifier {
             to_user,
             &chain,
             &self.trust_anchors,
-            now_unix(),
+            now,
+            self.iat_freshness,
         )
     }
 
@@ -181,6 +199,8 @@ fn fetch_failure(
     from_user: &str,
     to_user: &str,
     e: FetchError,
+    now: UnixTime,
+    iat_freshness: Duration,
 ) -> VerificationResult {
     VerificationResult {
         attest: passport.claims.attest.map(map_attest),
@@ -189,6 +209,7 @@ fn fetch_failure(
         dest_passed: dest_matches(passport, to_user),
         cert_chain_valid: false,
         signature_valid: false,
+        iat_passed: iat_fresh(passport.claims.iat, now, iat_freshness),
         error: Some(format!("x5u certificate fetch failed: {e}")),
     }
 }
@@ -204,16 +225,20 @@ fn build_result(
     chain: &[Vec<u8>],
     anchors: &[Vec<u8>],
     now: UnixTime,
+    iat_freshness: Duration,
 ) -> VerificationResult {
     let orig_passed = orig_matches(passport, from_user);
     let dest_passed = dest_matches(passport, to_user);
+    let iat_passed = iat_fresh(passport.claims.iat, now, iat_freshness);
     let (cert_chain_valid, signature_valid, crypto_err) =
         run_chain_verify(passport, chain, anchors, now);
 
-    // The crypto failure (if any) is the headline reason; otherwise surface
-    // a claim mismatch so a fully-cryptographically-valid call that fails
-    // the TN binding still says why it didn't pass.
-    let error = crypto_err.or_else(|| claim_mismatch(orig_passed, dest_passed));
+    // Headline reason, in priority order: a crypto failure, then a TN-claim
+    // mismatch, then a stale `iat` — so a fully-valid call that fails only
+    // freshness still says why it didn't pass.
+    let error = crypto_err
+        .or_else(|| claim_mismatch(orig_passed, dest_passed))
+        .or_else(|| (!iat_passed).then(|| iat_error(passport.claims.iat)));
 
     VerificationResult {
         attest: passport.claims.attest.map(map_attest),
@@ -222,7 +247,31 @@ fn build_result(
         dest_passed,
         cert_chain_valid,
         signature_valid,
+        iat_passed,
         error,
+    }
+}
+
+/// Whether the PASSporT `iat` is within `window` of `now` (past or future).
+/// A zero `window` disables the check (always fresh). A missing `iat` is
+/// never fresh — ATIS-1000074 requires the claim, so its absence is a
+/// verification failure, not a pass.
+fn iat_fresh(iat: Option<i64>, now: UnixTime, window: Duration) -> bool {
+    if window.is_zero() {
+        return true;
+    }
+    let Some(iat) = iat else {
+        return false;
+    };
+    let skew = (now.as_secs() as i64 - iat).unsigned_abs();
+    skew <= window.as_secs()
+}
+
+/// Human-readable reason for an `iat` freshness failure.
+fn iat_error(iat: Option<i64>) -> String {
+    match iat {
+        Some(_) => "PASSporT iat outside the freshness window".to_string(),
+        None => "PASSporT has no iat claim".to_string(),
     }
 }
 
@@ -352,6 +401,13 @@ mod tests {
     const HEADER: &str =
         r#"{"alg":"ES256","typ":"passport","ppt":"shaken","x5u":"https://c.example/c.crt"}"#;
 
+    /// `iat` that matches `make_fixture`'s `mid_validity` (both derive from
+    /// the same not_before/not_after constants), so the default fixture is
+    /// `iat`-fresh when verified at `mid_validity`.
+    const FRESH_IAT: i64 = 1_715_768_000;
+    /// A non-disabling freshness window for the chain/sig/TN tests.
+    const WINDOW: Duration = Duration::from_secs(60);
+
     /// A throwaway STI-PA-style CA + leaf and a PASSporT signed by the leaf,
     /// mirroring the `sip-identity` chain-test fixture so we exercise the
     /// real crypto path through `build_result`.
@@ -363,8 +419,12 @@ mod tests {
     }
 
     fn payload(attest: &str, orig: &str, dest: &str) -> String {
+        payload_with_iat(attest, orig, dest, FRESH_IAT)
+    }
+
+    fn payload_with_iat(attest: &str, orig: &str, dest: &str, iat: i64) -> String {
         format!(
-            r#"{{"attest":"{attest}","dest":{{"tn":["{dest}"]}},"iat":1443208345,"orig":{{"tn":"{orig}"}},"origid":"123e4567-e89b-12d3-a456-426655440000"}}"#
+            r#"{{"attest":"{attest}","dest":{{"tn":["{dest}"]}},"iat":{iat},"orig":{{"tn":"{orig}"}},"origid":"123e4567-e89b-12d3-a456-426655440000"}}"#
         )
     }
 
@@ -416,6 +476,7 @@ mod tests {
             std::slice::from_ref(&f.leaf_der),
             std::slice::from_ref(&f.ca_der),
             f.mid_validity,
+            WINDOW,
         );
         assert!(r.passed(), "expected pass, got {r:?}");
         assert!(r.cert_chain_valid && r.signature_valid && r.orig_passed && r.dest_passed);
@@ -434,6 +495,7 @@ mod tests {
             std::slice::from_ref(&f.leaf_der),
             std::slice::from_ref(&f.ca_der),
             f.mid_validity,
+            WINDOW,
         );
         assert!(r.orig_passed && r.dest_passed && r.passed());
     }
@@ -449,6 +511,7 @@ mod tests {
             std::slice::from_ref(&f.leaf_der),
             std::slice::from_ref(&other.ca_der), // wrong anchor
             f.mid_validity,
+            WINDOW,
         );
         assert!(!r.cert_chain_valid && !r.signature_valid && !r.passed());
         assert!(r.error.unwrap().contains("chain"));
@@ -465,6 +528,7 @@ mod tests {
             std::slice::from_ref(&f.leaf_der),
             std::slice::from_ref(&f.ca_der),
             way_future,
+            WINDOW,
         );
         assert!(!r.cert_chain_valid && !r.passed());
     }
@@ -479,6 +543,7 @@ mod tests {
             std::slice::from_ref(&f.leaf_der),
             std::slice::from_ref(&f.ca_der),
             f.mid_validity,
+            WINDOW,
         );
         // Crypto valid, but the TN binding failed → not passed.
         assert!(r.cert_chain_valid && r.signature_valid);
@@ -498,6 +563,7 @@ mod tests {
             std::slice::from_ref(&f.leaf_der),
             std::slice::from_ref(&f.ca_der),
             f.mid_validity,
+            WINDOW,
         );
         assert!(r.orig_passed && !r.dest_passed && !r.passed());
         assert_eq!(r.error.as_deref(), Some("dest.tn did not match SIP To"));
@@ -527,6 +593,7 @@ mod tests {
             std::slice::from_ref(&f.leaf_der),
             std::slice::from_ref(&f.ca_der),
             f.mid_validity,
+            WINDOW,
         );
         assert!(r.cert_chain_valid && !r.signature_valid && !r.passed());
         assert_eq!(
@@ -545,6 +612,7 @@ mod tests {
             &[],
             std::slice::from_ref(&f.ca_der),
             f.mid_validity,
+            WINDOW,
         );
         assert!(!r.cert_chain_valid && !r.signature_valid);
         assert!(r.error.unwrap().contains("no certificates"));
@@ -573,5 +641,109 @@ mod tests {
             map_attest(sip_identity::AttestationLevel::C),
             AttestationLevel::C
         );
+    }
+
+    // ─── iat freshness ───────────────────────────────────────────
+
+    #[test]
+    fn iat_fresh_helper_window_and_disable() {
+        let now = UnixTime::since_unix_epoch(Duration::from_secs(1000));
+        let w = Duration::from_secs(60);
+        assert!(iat_fresh(Some(1000), now, w)); // exact
+        assert!(iat_fresh(Some(1060), now, w)); // +60 boundary
+        assert!(iat_fresh(Some(940), now, w)); // -60 boundary
+        assert!(!iat_fresh(Some(1061), now, w)); // future skew > window
+        assert!(!iat_fresh(Some(939), now, w)); // past skew > window
+        assert!(!iat_fresh(None, now, w)); // missing iat is never fresh
+        assert!(iat_fresh(None, now, Duration::ZERO)); // window 0 disables
+        assert!(iat_fresh(Some(1), now, Duration::ZERO));
+    }
+
+    /// A fully-valid call whose only failure is a stale `iat`: crypto + TN
+    /// all hold, but `iat_passed` is false → not passed, not trusted, and
+    /// the headline error names the freshness failure.
+    #[test]
+    fn stale_iat_rejected_even_with_valid_crypto() {
+        let f = make_fixture(&payload_with_iat(
+            "A",
+            "+12155551212",
+            "+12155551213",
+            FRESH_IAT - 3600, // an hour stale vs mid_validity
+        ));
+        let r = build_result(
+            &f.passport,
+            "+12155551212",
+            "+12155551213",
+            std::slice::from_ref(&f.leaf_der),
+            std::slice::from_ref(&f.ca_der),
+            f.mid_validity,
+            WINDOW,
+        );
+        assert!(r.cert_chain_valid && r.signature_valid && r.orig_passed && r.dest_passed);
+        assert!(!r.iat_passed && !r.passed());
+        assert_eq!(r.trusted_attestation(), None);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("PASSporT iat outside the freshness window")
+        );
+    }
+
+    #[test]
+    fn future_iat_rejected() {
+        let f = make_fixture(&payload_with_iat(
+            "A",
+            "+12155551212",
+            "+12155551213",
+            FRESH_IAT + 3600, // an hour in the future
+        ));
+        let r = build_result(
+            &f.passport,
+            "+12155551212",
+            "+12155551213",
+            std::slice::from_ref(&f.leaf_der),
+            std::slice::from_ref(&f.ca_der),
+            f.mid_validity,
+            WINDOW,
+        );
+        assert!(!r.iat_passed && !r.passed());
+    }
+
+    #[test]
+    fn missing_iat_rejected() {
+        // PASSporT with no `iat` claim at all.
+        let pl = r#"{"attest":"A","dest":{"tn":["+12155551213"]},"orig":{"tn":"+12155551212"}}"#;
+        let f = make_fixture(pl);
+        let r = build_result(
+            &f.passport,
+            "+12155551212",
+            "+12155551213",
+            std::slice::from_ref(&f.leaf_der),
+            std::slice::from_ref(&f.ca_der),
+            f.mid_validity,
+            WINDOW,
+        );
+        assert!(!r.iat_passed && !r.passed());
+        assert_eq!(r.error.as_deref(), Some("PASSporT has no iat claim"));
+    }
+
+    #[test]
+    fn zero_window_disables_iat_check() {
+        // A wildly stale iat still passes when the window is disabled.
+        let f = make_fixture(&payload_with_iat(
+            "A",
+            "+12155551212",
+            "+12155551213",
+            FRESH_IAT - 100_000,
+        ));
+        let r = build_result(
+            &f.passport,
+            "+12155551212",
+            "+12155551213",
+            std::slice::from_ref(&f.leaf_der),
+            std::slice::from_ref(&f.ca_der),
+            f.mid_validity,
+            Duration::ZERO,
+        );
+        assert!(r.iat_passed && r.passed());
     }
 }

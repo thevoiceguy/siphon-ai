@@ -6,7 +6,7 @@ use crate::attestation::AttestationLevel;
 
 /// Outcome of STIR/SHAKEN verification for one inbound INVITE.
 ///
-/// The five booleans plus the optional error let a downstream consumer
+/// The booleans plus the optional error let a downstream consumer
 /// reconstruct the precise failure mode without re-parsing the Identity
 /// header. This is the shape surfaced on `BridgeOut::Start.verstat`, the
 /// CDR, and the HEP verstat chunk.
@@ -31,6 +31,12 @@ pub struct VerificationResult {
     pub cert_chain_valid: bool,
     /// The ES256 signature over the PASSporT verified against that cert.
     pub signature_valid: bool,
+    /// The PASSporT `iat` is within the configured freshness window (replay
+    /// protection, ATIS-1000074). `#[serde(default)]` so an older verstat
+    /// JSON without the field deserializes to `false` rather than erroring —
+    /// the field is additive (added in 0.4.1).
+    #[serde(default)]
+    pub iat_passed: bool,
     /// Human-readable failure reason when verification did not fully pass.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -48,6 +54,7 @@ impl VerificationResult {
             dest_passed: false,
             cert_chain_valid: false,
             signature_valid: false,
+            iat_passed: false,
             error: None,
         }
     }
@@ -55,7 +62,11 @@ impl VerificationResult {
     /// Composite pass: every check succeeded. This is the `verstat_passed`
     /// CDR field and the precondition for trusting `attest`.
     pub fn passed(&self) -> bool {
-        self.signature_valid && self.cert_chain_valid && self.orig_passed && self.dest_passed
+        self.signature_valid
+            && self.cert_chain_valid
+            && self.orig_passed
+            && self.dest_passed
+            && self.iat_passed
     }
 
     /// The attestation level we are willing to *trust* — the claimed level
@@ -83,6 +94,7 @@ mod tests {
             dest_passed: true,
             cert_chain_valid: true,
             signature_valid: true,
+            iat_passed: true,
             error: None,
         }
     }
@@ -93,6 +105,16 @@ mod tests {
         let mut r = good(AttestationLevel::A);
         r.signature_valid = false;
         assert!(!r.passed());
+    }
+
+    #[test]
+    fn stale_iat_fails_the_composite() {
+        // A cryptographically-valid call with a stale iat is not passed —
+        // and so yields no trusted attestation (replay protection).
+        let mut r = good(AttestationLevel::A);
+        r.iat_passed = false;
+        assert!(!r.passed());
+        assert_eq!(r.trusted_attestation(), None);
     }
 
     #[test]

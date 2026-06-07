@@ -97,6 +97,7 @@ mod tests {
             dest_passed: passed,
             cert_chain_valid: passed,
             signature_valid: passed,
+            iat_passed: passed,
             error: None,
         }
     }

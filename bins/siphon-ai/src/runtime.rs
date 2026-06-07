@@ -235,13 +235,23 @@ impl Runtime {
             None
         };
 
+        // Attestation gate (config already cross-validated: a non-`none`
+        // floor requires stir_shaken enabled). Inert by default — only bites
+        // when a verifier is installed and a floor / require_identity is set.
+        let security_policy = siphon_ai_core::AcceptSecurityPolicy {
+            min_attestation: security.min_attestation,
+            min_attestation_response: security.min_attestation_response,
+            require_identity: security.stir_shaken.require_identity,
+        };
+
         let acceptor = Arc::new(
             BridgingAcceptor::new(media_setup, bridge_defaults, registry.clone())
                 .with_cdr_sink(cdr_sink)
                 .with_webhook_sink(webhook_sink)
                 .with_session_timer_policy(session_timer_policy)
                 .with_call_progress(sip.call_progress)
-                .with_verifier(verifier),
+                .with_verifier(verifier)
+                .with_security_policy(security_policy),
         );
 
         // ─── Registration manager ──────────────────────────────────

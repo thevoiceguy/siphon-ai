@@ -414,6 +414,19 @@ pub enum CompileError {
     )]
     MinAttestationWithoutStirShaken(String),
 
+    #[error(
+        "route {route:?} sets [route.security].min_attestation = {value:?}; \
+         expected \"none\", \"A\", \"B\", or \"C\""
+    )]
+    UnknownRouteMinAttestation { route: String, value: String },
+
+    #[error(
+        "route {route:?} sets [route.security].min_attestation but \
+         [security.stir_shaken].enabled is false — without verification the gate would \
+         reject every call this route matches. Enable stir_shaken or drop the override."
+    )]
+    RouteMinAttestationWithoutStirShaken { route: String },
+
     #[error("[security.stir_shaken].trust_anchors is required when enabled = true")]
     StirShakenTrustAnchorsRequired,
 
@@ -535,6 +548,27 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
             route_count = routes.len(),
             "no default `any = true` route configured — non-matching INVITEs will be 404'd"
         );
+    }
+
+    // A per-route attestation gate, like the global one, is meaningless
+    // without verification: with stir_shaken off no call produces a trusted
+    // attestation, so the route would reject everything it matches. Fail
+    // loud rather than black-hole that route's traffic. (`min_attestation =
+    // "none"` is a no-op override and allowed either way.)
+    if !security.stir_shaken.enabled {
+        for route in routes.iter() {
+            let overrides_gate = route
+                .security
+                .min_attestation
+                .as_deref()
+                .and_then(siphon_ai_security::MinAttestation::parse)
+                .is_some_and(|m| m != siphon_ai_security::MinAttestation::None);
+            if overrides_gate {
+                return Err(CompileError::RouteMinAttestationWithoutStirShaken {
+                    route: route.name.clone(),
+                });
+            }
+        }
     }
 
     // SRTP-without-SIP/TLS footgun warning (DEV_PLAN_0.3.0.md §11).
@@ -964,6 +998,18 @@ fn compile_dialplan(routes: Vec<siphon_ai_routes::RawRoute>) -> Result<RouteSet,
                 return Err(CompileError::UnknownOnWsFailure {
                     route: route.name.clone(),
                     value: mode.to_string(),
+                });
+            }
+        }
+        // Validate the per-route attestation override at load time so a typo
+        // is a startup failure, not a silent runtime fall-back. The
+        // cross-check against stir_shaken.enabled happens in `compile`,
+        // which has the global security config in scope.
+        if let Some(value) = route.security.min_attestation.as_deref() {
+            if siphon_ai_security::MinAttestation::parse(value).is_none() {
+                return Err(CompileError::UnknownRouteMinAttestation {
+                    route: route.name.clone(),
+                    value: value.to_string(),
                 });
             }
         }

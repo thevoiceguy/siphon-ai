@@ -36,6 +36,17 @@ impl MinAttestation {
         }
     }
 
+    /// The config/wire token: `"none"` / `"A"` / `"B"` / `"C"`. The inverse
+    /// of [`parse`](Self::parse), for logs and diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::C => "C",
+            Self::B => "B",
+            Self::A => "A",
+        }
+    }
+
     /// The required rank, or `None` when there is no requirement. Mirrors
     /// [`AttestationLevel::rank`] so the two compare directly.
     fn required_rank(self) -> Option<u8> {
@@ -102,6 +113,19 @@ mod tests {
     #[test]
     fn default_is_none() {
         assert_eq!(MinAttestation::default(), MinAttestation::None);
+    }
+
+    #[test]
+    fn as_str_inverts_parse() {
+        for m in [
+            MinAttestation::None,
+            MinAttestation::A,
+            MinAttestation::B,
+            MinAttestation::C,
+        ] {
+            assert_eq!(MinAttestation::parse(m.as_str()), Some(m));
+        }
+        assert_eq!(MinAttestation::None.as_str(), "none");
     }
 
     #[test]

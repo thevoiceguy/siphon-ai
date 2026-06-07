@@ -102,6 +102,7 @@ fn compile_one(index: usize, route: RawRoute) -> Result<CompiledRoute, RouteErro
         match_,
         bridge,
         media,
+        security,
     } = route;
 
     let compiled_match = compile_match(index, &name, match_)?;
@@ -111,6 +112,7 @@ fn compile_one(index: usize, route: RawRoute) -> Result<CompiledRoute, RouteErro
         match_: compiled_match,
         bridge,
         media,
+        security,
     })
 }
 
@@ -224,7 +226,7 @@ fn build_matcher(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raw::{BridgeOverride, MediaOverride};
+    use crate::raw::{BridgeOverride, MediaOverride, SecurityOverride};
 
     fn raw_with_match(name: &str, m: RawRouteMatch) -> RawRoute {
         RawRoute {
@@ -232,6 +234,7 @@ mod tests {
             match_: m,
             bridge: BridgeOverride::default(),
             media: MediaOverride::default(),
+            security: SecurityOverride::default(),
         }
     }
 

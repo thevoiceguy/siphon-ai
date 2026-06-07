@@ -41,9 +41,11 @@ use thiserror::Error;
 // ─── Counters ───────────────────────────────────────────────────────
 
 /// Total INVITEs the daemon has seen. Labeled by `result`:
-/// `accepted`, `rejected`, `no_match`. `rejected` covers every 4xx/
-/// 5xx final response from the routing layer (see
-/// `siphon_ai_core::AcceptError::sip_status`).
+/// `accepted`, `rejected`, `rejected_attestation`, `no_match`. `rejected`
+/// covers every 4xx/5xx final response from the routing/media layer (see
+/// `siphon_ai_core::AcceptError::sip_status`); `rejected_attestation` is
+/// carved out for STIR/SHAKEN policy rejections (`min_attestation` gate or
+/// `require_identity`) so fraud-control alerts don't bury in routing noise.
 pub const INVITES_TOTAL: &str = "siphon_ai_invites_total";
 
 /// Calls that completed (controller exited). Labeled by `cause`:
@@ -176,7 +178,7 @@ pub fn install_recorder() -> Result<PrometheusHandle, InitError> {
 pub fn register_descriptions() {
     describe_counter!(
         INVITES_TOTAL,
-        "Inbound INVITEs by routing result (accepted, rejected, no_match)."
+        "Inbound INVITEs by result (accepted, rejected, rejected_attestation, no_match)."
     );
     describe_counter!(
         CALLS_TOTAL,

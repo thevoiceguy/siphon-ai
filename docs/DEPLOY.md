@@ -407,7 +407,7 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 
 | Metric                                  | Type      | Labels                                | What it measures |
 |-----------------------------------------|-----------|---------------------------------------|------------------|
-| `siphon_ai_invites_total`               | counter   | `result=accepted\|rejected`           | INVITEs by acceptance outcome. |
+| `siphon_ai_invites_total`               | counter   | `result=accepted\|rejected\|rejected_attestation\|no_match` | INVITEs by acceptance outcome. `rejected_attestation` is a STIR/SHAKEN policy reject (`min_attestation` gate or `require_identity`) — separately alertable from ordinary routing/media `rejected`. |
 | `siphon_ai_calls_total`                 | counter   | `cause=server_hangup\|local_shutdown\|bridge_ended\|tap_ended` | Ended calls by termination cause. |
 | `siphon_ai_calls_active`                | gauge     | —                                     | Currently-running calls. |
 | `siphon_ai_route_match_total`           | counter   | `route`                               | Calls per matched route. |

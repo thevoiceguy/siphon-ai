@@ -172,6 +172,8 @@ on_ws_failure = "hangup"         # v1 only supports "hangup"
 codecs = ["pcma", "pcmu"]        # override the global priority for this route
 dtmf = "off"
 inactivity_timeout_secs = 30     # override [media].inactivity_timeout_secs
+[route.security]
+min_attestation = "A"            # strict override of [security].min_attestation
 ```
 
 Match keys (any combination, all AND together): `request_uri_user`,
@@ -309,7 +311,25 @@ The gate admits a call only when verification **fully passed** and the claimed a
 | `"B"` | ✓ | ✓ | reject | reject | reject |
 | `"A"` | ✓ | reject | reject | reject | reject |
 
-A per-route override (`[route.security].min_attestation`, strict override of the global) is a follow-on chunk.
+A rejected call gets the configured status plus a `Reason: Q.850;cause=21` header so a Homer/upstream sees *why* it was screened. The gate runs before media bring-up, so a rejected call never allocates an RTP port or WS bridge.
+
+**Per-route override.** `[route.security].min_attestation` overrides the global for calls that match a route — a *strict* override (the route value fully replaces the global, even when more permissive), matching `[route.media].srtp` semantics. Unset → inherit the global. Like the global, a non-`none` override **requires** `stir_shaken.enabled = true` (fail-loud at load otherwise); `"none"` is an always-allowed no-op override.
+
+```toml
+[[route]]
+name = "vip_inbound"
+[route.match]
+to_user = "2000"
+[route.security]
+min_attestation = "A"   # this route admits only fully-attested calls
+
+[[route]]
+name = "consumer_inbound"
+[route.match]
+any = true
+[route.security]
+min_attestation = "C"   # looser than a stricter global, by design
+```
 
 ### `[security.stir_shaken]`
 

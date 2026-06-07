@@ -75,6 +75,7 @@ use siphon_ai_media_glue::{
     SetupError, TapDisconnect,
 };
 use siphon_ai_routes::CompiledRoute;
+use siphon_ai_security::MinAttestation;
 use siphon_ai_sip_glue::{CallAcceptor, InviteFacts, MatchedCall};
 use siphon_ai_stir_shaken::Verifier;
 use siphon_ai_telemetry::{
@@ -324,6 +325,24 @@ pub enum AcceptError {
         /// Effective mode after resolving the route override.
         mode: SrtpMode,
     },
+
+    /// `[security.stir_shaken].require_identity` is set and the INVITE
+    /// carried no `Identity` header. Maps to **428 Use Identity Header**
+    /// (RFC 8224 §6.2.2).
+    #[error("INVITE carried no Identity header but require_identity is set")]
+    IdentityRequired,
+
+    /// The call's *trusted* attestation was below the effective
+    /// `min_attestation` policy (global, or the per-route override). Maps to
+    /// the configured `min_attestation_response` (403 / 488 / 606) with a
+    /// Q.850 `Reason` header (plan §9 decision 4).
+    #[error("call attestation below policy minimum {required:?}")]
+    AttestationRejected {
+        /// The effective minimum the call failed to meet.
+        required: MinAttestation,
+        /// Configured SIP status to return (403 / 488 / 606).
+        code: u16,
+    },
 }
 
 impl AcceptError {
@@ -352,8 +371,120 @@ impl AcceptError {
             | AcceptError::Setup(SetupError::Tap(_))
             | AcceptError::Controller(_) => (500, "Server Internal Error"),
             AcceptError::SrtpModeMismatch { .. } => (488, "Not Acceptable Here"),
+            AcceptError::IdentityRequired => (428, "Use Identity Header"),
+            AcceptError::AttestationRejected { code, .. } => (*code, reason_phrase(*code)),
         }
     }
+
+    /// The `result` label this rejection contributes to
+    /// `siphon_ai_invites_total`. STIR/SHAKEN policy rejections get their
+    /// own `rejected_attestation` bucket so they're separately alertable
+    /// from ordinary routing/media rejections.
+    pub fn reject_metric_label(&self) -> &'static str {
+        match self {
+            AcceptError::IdentityRequired | AcceptError::AttestationRejected { .. } => {
+                "rejected_attestation"
+            }
+            _ => "rejected",
+        }
+    }
+
+    /// The `Reason` header value to attach to the final response, if any.
+    /// Attestation rejections carry `Q.850;cause=21` ("call rejected") so a
+    /// downstream/Homer can see *why* the call was screened, not just the
+    /// bare status (plan §9 decision 4).
+    pub fn reason_header(&self) -> Option<&'static str> {
+        match self {
+            AcceptError::AttestationRejected { .. } => {
+                Some("Q.850;cause=21;text=\"STIR/SHAKEN attestation below policy\"")
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Reason phrase for the configurable attestation-rejection status codes.
+fn reason_phrase(code: u16) -> &'static str {
+    match code {
+        403 => "Forbidden",
+        488 => "Not Acceptable Here",
+        606 => "Not Acceptable",
+        // `min_attestation_response` is validated to one of the above at
+        // config load; this arm is just a total-match safety net.
+        _ => "Forbidden",
+    }
+}
+
+/// The daemon's compiled STIR/SHAKEN *policy* knobs — the gate the accept
+/// path applies to a verification verdict. Separate from the [`Verifier`]
+/// (which produces the verdict): verification can be on while the gate is
+/// fully permissive (`min_attestation = none`, `require_identity = false`),
+/// which is the default and a complete no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcceptSecurityPolicy {
+    /// Global minimum trusted attestation. `None` admits every call.
+    pub min_attestation: MinAttestation,
+    /// SIP status returned when the gate rejects (403 / 488 / 606).
+    pub min_attestation_response: u16,
+    /// Reject inbound INVITEs with no `Identity` header (428).
+    pub require_identity: bool,
+}
+
+impl Default for AcceptSecurityPolicy {
+    /// Fully permissive: no attestation floor, no identity requirement. A
+    /// 403 response code is carried but never used until a floor is set.
+    fn default() -> Self {
+        Self {
+            min_attestation: MinAttestation::None,
+            min_attestation_response: 403,
+            require_identity: false,
+        }
+    }
+}
+
+/// Resolve the effective minimum-attestation policy for a matched route:
+/// the per-route `[route.security].min_attestation` override (strict —
+/// fully replaces the global, matching `[route.media].srtp` semantics) or
+/// the global when the route sets none. An unparseable override can't reach
+/// here — the config crate validates it at load.
+fn resolve_min_attestation(global: MinAttestation, route: &CompiledRoute) -> MinAttestation {
+    let route_override = route
+        .security
+        .min_attestation
+        .as_deref()
+        .and_then(MinAttestation::parse);
+    MinAttestation::resolve(global, route_override)
+}
+
+/// Apply the attestation gate to a verification verdict. Free function (not
+/// a method) so the policy decision is unit-testable without standing up an
+/// acceptor. `effective_min` is the already-resolved floor (global + route
+/// override); `had_identity` distinguishes an unsigned call (no `Identity`
+/// header) from a present-but-failed one, which only `require_identity`
+/// cares about.
+fn apply_attestation_gate(
+    policy: &AcceptSecurityPolicy,
+    effective_min: MinAttestation,
+    verdict: &siphon_ai_security::VerificationResult,
+    had_identity: bool,
+) -> Result<(), AcceptError> {
+    // Gate 1: require_identity rejects a call with no Identity header
+    // outright (428), independent of any attestation floor.
+    if policy.require_identity && !had_identity {
+        return Err(AcceptError::IdentityRequired);
+    }
+
+    // Gate 2: the effective minimum-attestation floor. `permits` trusts the
+    // attestation only when verification fully passed, so an unsigned/failed
+    // call can never satisfy a non-`none` floor.
+    if !effective_min.permits(verdict) {
+        return Err(AcceptError::AttestationRejected {
+            required: effective_min,
+            code: policy.min_attestation_response,
+        });
+    }
+
+    Ok(())
 }
 
 // ─── Pure helpers (unit-tested below) ───────────────────────────────
@@ -1271,6 +1402,10 @@ pub struct BridgingAcceptor {
     /// deployment upgrades with zero behaviour change. Shared across calls
     /// (it owns a process-wide cert cache); cheap to clone.
     verifier: Option<Arc<Verifier>>,
+    /// Attestation-gate policy applied to the verdict. Default is fully
+    /// permissive; only consulted when `verifier` is `Some` (a verdict
+    /// exists to gate on).
+    security: AcceptSecurityPolicy,
 }
 
 /// Daemon-wide REFER plumbing (shared across every accepted call).
@@ -1419,6 +1554,7 @@ impl BridgingAcceptor {
             call_progress: CallProgressMode::default(),
             dtls_cert,
             verifier: None,
+            security: AcceptSecurityPolicy::default(),
         }
     }
 
@@ -1499,6 +1635,14 @@ impl BridgingAcceptor {
     /// nothing.
     pub fn with_verifier(mut self, verifier: Option<Arc<Verifier>>) -> Self {
         self.verifier = verifier;
+        self
+    }
+
+    /// Install the attestation-gate policy (`[security].min_attestation`,
+    /// its response code, and `require_identity`). Defaults to fully
+    /// permissive; the gate is only consulted when a verifier is installed.
+    pub fn with_security_policy(mut self, policy: AcceptSecurityPolicy) -> Self {
+        self.security = policy;
         self
     }
 
@@ -2237,8 +2381,13 @@ impl CallAcceptor for BridgingAcceptor {
             Err(e) => {
                 let (code, reason) = e.sip_status();
                 warn!(error = %e, code, reason, "rejecting INVITE");
-                metrics::counter!(INVITES_TOTAL, "result" => "rejected").increment(1);
-                let response = UserAgentServer::create_response(call.request, code, reason);
+                metrics::counter!(INVITES_TOTAL, "result" => e.reject_metric_label()).increment(1);
+                let mut response = UserAgentServer::create_response(call.request, code, reason);
+                // Attestation rejections carry a Q.850 Reason so the caller /
+                // Homer sees why the call was screened (plan §9 decision 4).
+                if let Some(reason_value) = e.reason_header() {
+                    let _ = response.headers_mut().set_or_push("Reason", reason_value);
+                }
                 call.handle.send_final(response).await;
                 // The acceptor's contract with the routing layer is
                 // "MUST send a final response" — we did, so this is
@@ -2499,38 +2648,51 @@ impl std::fmt::Debug for PreparedCall {
 }
 
 impl BridgingAcceptor {
-    /// Verify the inbound INVITE's `Identity` header, when STIR/SHAKEN is
-    /// enabled. Returns the verdict to surface on `start` (and the CDR), or
-    /// `None` when verification is disabled — in which case no `verstat` is
-    /// emitted at all.
+    /// Verify the inbound INVITE's `Identity` header and apply the
+    /// attestation gate, when STIR/SHAKEN is enabled.
+    ///
+    /// Returns:
+    /// - `Ok(Some(verdict))` — verification ran and the call passed the gate;
+    ///   the verdict is surfaced on `start` and the CDR.
+    /// - `Ok(None)` — verification is disabled; no `verstat` is emitted.
+    /// - `Err(_)` — the gate rejected the call (`require_identity` with no
+    ///   `Identity` header → 428, or attestation below `min_attestation` →
+    ///   the configured 4xx). The caller turns this into the final response.
     ///
     /// A missing `Identity` header yields [`VerificationResult::unsigned`]
     /// (attestation `null`, nothing verified) rather than `None`: with
     /// verification on, the absence of a signature is itself a reportable
-    /// outcome. Policy enforcement (reject-on-`require_identity`,
-    /// `min_attestation` gate) is a separate chunk — this only produces and
-    /// records the verdict.
-    async fn verify_identity(
+    /// outcome — and one `require_identity` may reject.
+    async fn run_security(
         &self,
         facts: &InviteFacts,
+        route: &CompiledRoute,
         bridge_call_id: &str,
-    ) -> Option<Box<siphon_ai_security::VerificationResult>> {
-        let (verdict, had_identity) =
-            run_identity_verification(self.verifier.as_deref(), facts).await?;
+    ) -> Result<Option<Box<siphon_ai_security::VerificationResult>>, AcceptError> {
+        let Some((verdict, had_identity)) =
+            run_identity_verification(self.verifier.as_deref(), facts).await
+        else {
+            // Verification disabled — no verdict, no gate.
+            return Ok(None);
+        };
 
         let result = verstat_metric_result(&verdict, had_identity);
         metrics::counter!(VERSTAT_TOTAL, "result" => result).increment(1);
+
+        let effective_min = resolve_min_attestation(self.security.min_attestation, route);
         info!(
             call_id = %bridge_call_id,
             verstat_result = result,
             verstat_attest = verdict.attest.map(|a| a.as_str()).unwrap_or("none"),
             verstat_passed = verdict.passed(),
             orig_tn = verdict.orig_tn.as_deref().unwrap_or(""),
+            min_attestation = effective_min.as_str(),
             error = verdict.error.as_deref().unwrap_or(""),
             "STIR/SHAKEN verification complete"
         );
 
-        Some(Box::new(verdict))
+        apply_attestation_gate(&self.security, effective_min, &verdict, had_identity)?;
+        Ok(Some(Box::new(verdict)))
     }
 
     /// Run every step from "matched route" up to "ready-to-run
@@ -2600,6 +2762,14 @@ impl BridgingAcceptor {
 
         let bridge_call_id = (self.call_id_factory)();
         let forge_call_id = forge_core::CallId::new(bridge_call_id.as_str());
+
+        // STIR/SHAKEN verification + attestation gate. Runs before media
+        // bring-up so a policy-rejected call never allocates a forge session
+        // or RTP port. Returns the verdict to ride `start` → CDR; an `Err`
+        // here is a gate rejection the async wrapper turns into a 4xx/428.
+        let verstat = self
+            .run_security(facts, route, bridge_call_id.as_str())
+            .await?;
 
         debug!(
             ws_url = %bridge_config.ws_url,
@@ -2678,12 +2848,8 @@ impl BridgingAcceptor {
             None
         };
 
-        // STIR/SHAKEN verification, when enabled. Runs here — after media
-        // bring-up, before the controller is built — so the verdict can ride
-        // the `start` message (and from there the CDR). `None` when
-        // verification is disabled, so the field is omitted from `start`.
-        let verstat = self.verify_identity(facts, bridge_call_id.as_str()).await;
-
+        // `verstat` was produced by `run_security` above (before media
+        // bring-up); thread it onto `start` so it flows to the CDR too.
         let start = build_start_msg(
             bridge_call_id.clone(),
             facts,
@@ -4171,5 +4337,160 @@ a=sendrecv\r\n",
         v.dest_passed = true;
         assert!(v.passed());
         assert_eq!(verstat_metric_result(&v, true), "passed");
+    }
+
+    // ─── Attestation gate ─────────────────────────────────────────
+
+    use siphon_ai_security::{AttestationLevel, VerificationResult};
+
+    /// A fully-passing verdict claiming `attest`.
+    fn passing(attest: AttestationLevel) -> VerificationResult {
+        VerificationResult {
+            attest: Some(attest),
+            orig_tn: Some("+12155551212".into()),
+            orig_passed: true,
+            dest_passed: true,
+            cert_chain_valid: true,
+            signature_valid: true,
+            error: None,
+        }
+    }
+
+    fn policy(min: MinAttestation, require_identity: bool) -> AcceptSecurityPolicy {
+        AcceptSecurityPolicy {
+            min_attestation: min,
+            min_attestation_response: 403,
+            require_identity,
+        }
+    }
+
+    #[test]
+    fn gate_admits_when_no_floor_and_no_identity_requirement() {
+        let p = policy(MinAttestation::None, false);
+        // Unsigned call, no identity → still admitted (default-open).
+        let u = VerificationResult::unsigned();
+        assert!(apply_attestation_gate(&p, MinAttestation::None, &u, false).is_ok());
+    }
+
+    #[test]
+    fn gate_rejects_missing_identity_when_required() {
+        let p = policy(MinAttestation::None, true);
+        let u = VerificationResult::unsigned();
+        // require_identity bites only when the header was absent.
+        assert!(matches!(
+            apply_attestation_gate(&p, MinAttestation::None, &u, false),
+            Err(AcceptError::IdentityRequired)
+        ));
+        // Present (even if failed) header satisfies require_identity; with no
+        // floor it then passes.
+        assert!(apply_attestation_gate(&p, MinAttestation::None, &u, true).is_ok());
+    }
+
+    #[test]
+    fn gate_enforces_attestation_floor() {
+        let p = policy(MinAttestation::B, false);
+        // A and B clear a B floor; C does not.
+        assert!(
+            apply_attestation_gate(&p, MinAttestation::B, &passing(AttestationLevel::A), true)
+                .is_ok()
+        );
+        assert!(
+            apply_attestation_gate(&p, MinAttestation::B, &passing(AttestationLevel::B), true)
+                .is_ok()
+        );
+        assert!(matches!(
+            apply_attestation_gate(&p, MinAttestation::B, &passing(AttestationLevel::C), true),
+            Err(AcceptError::AttestationRejected {
+                required: MinAttestation::B,
+                code: 403
+            })
+        ));
+    }
+
+    #[test]
+    fn gate_distrusts_unverified_attestation() {
+        let p = policy(MinAttestation::C, false);
+        // Claims A but verification failed → not trusted → rejected even at
+        // the lowest floor.
+        let mut claimed_a_failed = passing(AttestationLevel::A);
+        claimed_a_failed.signature_valid = false;
+        assert!(matches!(
+            apply_attestation_gate(&p, MinAttestation::C, &claimed_a_failed, true),
+            Err(AcceptError::AttestationRejected { .. })
+        ));
+    }
+
+    #[test]
+    fn gate_response_code_follows_policy() {
+        let p = policy(MinAttestation::A, false);
+        let p = AcceptSecurityPolicy {
+            min_attestation_response: 488,
+            ..p
+        };
+        let err =
+            apply_attestation_gate(&p, MinAttestation::A, &passing(AttestationLevel::B), true)
+                .unwrap_err();
+        assert_eq!(err.sip_status(), (488, "Not Acceptable Here"));
+    }
+
+    #[test]
+    fn accept_error_security_mappings() {
+        let rejected = AcceptError::AttestationRejected {
+            required: MinAttestation::B,
+            code: 403,
+        };
+        assert_eq!(rejected.sip_status(), (403, "Forbidden"));
+        assert_eq!(rejected.reject_metric_label(), "rejected_attestation");
+        assert!(rejected.reason_header().unwrap().contains("cause=21"));
+
+        let no_id = AcceptError::IdentityRequired;
+        assert_eq!(no_id.sip_status(), (428, "Use Identity Header"));
+        assert_eq!(no_id.reject_metric_label(), "rejected_attestation");
+        assert_eq!(no_id.reason_header(), None);
+
+        // A non-security rejection keeps the plain bucket and no Reason.
+        let other = AcceptError::Controller("boom".into());
+        assert_eq!(other.reject_metric_label(), "rejected");
+        assert_eq!(other.reason_header(), None);
+    }
+
+    #[test]
+    fn resolve_min_attestation_strict_override() {
+        use siphon_ai_routes::{compile, RawRoute, RawRouteFile, RawRouteMatch, SecurityOverride};
+        let route = |over: Option<&str>| {
+            let raw = RawRoute {
+                name: "r".into(),
+                match_: RawRouteMatch {
+                    any: true,
+                    ..Default::default()
+                },
+                bridge: Default::default(),
+                media: Default::default(),
+                security: SecurityOverride {
+                    min_attestation: over.map(String::from),
+                },
+            };
+            compile(RawRouteFile { routes: vec![raw] })
+                .unwrap()
+                .iter()
+                .next()
+                .unwrap()
+                .clone()
+        };
+
+        // No override → inherit global.
+        assert_eq!(
+            resolve_min_attestation(MinAttestation::B, &route(None)),
+            MinAttestation::B
+        );
+        // Strict override replaces global, even when more permissive.
+        assert_eq!(
+            resolve_min_attestation(MinAttestation::B, &route(Some("C"))),
+            MinAttestation::C
+        );
+        assert_eq!(
+            resolve_min_attestation(MinAttestation::None, &route(Some("A"))),
+            MinAttestation::A
+        );
     }
 }

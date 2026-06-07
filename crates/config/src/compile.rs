@@ -1573,6 +1573,26 @@ mod security_tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn shipped_trust_anchor_template_ships_empty_and_fails_loud() {
+        // The contrib bundle ships as a template with zero certificates so an
+        // operator who enables verification before populating it gets a loud
+        // startup failure — never silent. This also guards against anyone
+        // accidentally vendoring a real (or malformed) root: the decision is
+        // "operator supplies the anchor", and a change here forces it to be
+        // conscious.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../contrib/sti-pa-roots.pem"
+        );
+        let err = siphon_ai_security::validate_trust_anchors(std::path::Path::new(path))
+            .expect_err("template must contain no certificates");
+        assert!(matches!(
+            err,
+            siphon_ai_security::TrustAnchorError::NoCertificates { .. }
+        ));
+    }
 }
 
 #[cfg(test)]

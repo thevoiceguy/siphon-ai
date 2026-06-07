@@ -4333,6 +4333,7 @@ a=sendrecv\r\n",
             vec![vec![0u8; 8]],
             Duration::from_secs(3600),
             Duration::from_secs(60),
+            Vec::new(),
         )
         .expect("build verifier")
     }

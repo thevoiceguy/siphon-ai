@@ -253,6 +253,11 @@ pub struct RawStirShaken {
     /// ATIS-1000074). `None` → 60. `0` disables the check.
     #[serde(default)]
     pub iat_freshness_secs: Option<u64>,
+    /// Optional PEM bundle of extra CA cert(s) trusted for the `x5u` HTTPS
+    /// fetch only (private/lab x5u hosting). `None` → public web PKI only.
+    /// Validated at load when `enabled`.
+    #[serde(default)]
+    pub x5u_tls_extra_ca: Option<String>,
 }
 
 /// `[cdr]` — call detail record sinks. v1 supports a JSONL file

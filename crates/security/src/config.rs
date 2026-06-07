@@ -41,6 +41,12 @@ pub struct StirShakenConfig {
     /// ATIS-1000074. `Duration::ZERO` disables the check (any `iat` passes),
     /// an escape hatch for upstreams with broken clocks.
     pub iat_freshness: Duration,
+    /// Optional supplemental CA certificate bundle (PEM path) trusted **for
+    /// the `x5u` HTTPS fetch only** — added to the public web-PKI roots, for
+    /// operators hosting `x5u` behind a private/lab CA. `None` (default)
+    /// trusts only the public roots. This widens *fetch* trust, NOT the
+    /// SHAKEN chain trust (that stays [`trust_anchors`](Self::trust_anchors)).
+    pub x5u_tls_extra_ca: Option<PathBuf>,
 }
 
 impl Default for StirShakenConfig {
@@ -51,6 +57,7 @@ impl Default for StirShakenConfig {
             cert_cache_ttl: DEFAULT_CERT_CACHE_TTL,
             require_identity: false,
             iat_freshness: DEFAULT_IAT_FRESHNESS,
+            x5u_tls_extra_ca: None,
         }
     }
 }

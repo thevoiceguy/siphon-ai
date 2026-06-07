@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  stir_shaken_attestation_pass — the happy path: a fully-verifiable
+  STIR/SHAKEN call is ADMITTED (200 OK), not rejected. The daemon runs
+  with verification enabled, `min_attestation = "A"`, and trusts the test
+  CA both as the STI-PA anchor and (via `x5u_tls_extra_ca`) for the x5u
+  HTTPS fetch. The PASSporT is freshly signed by a leaf that chains to that
+  CA, served from a local HTTPS x5u, with `orig.tn` = the From user and a
+  `dest.tn` matching the To user, and a current `iat`.
+
+  TEMPLATED: the `Identity:` line's `__IDENTITY__` is substituted at run
+  time by run-all.sh with the value emitted by the `gen_test_passport`
+  example (certs + PASSporT are generated fresh so the cert window and
+  `iat` are current). This file does not run standalone.
+
+  From user is `+12155551212` to match the generated `orig.tn`; SIPp's
+  `-s 1000` makes the To/Request-URI user `1000`, matching `dest.tn`.
+-->
+<scenario name="stir_shaken_attestation_pass">
+  <send>
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:+12155551212@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:+12155551212@[local_ip]:[local_port]>
+Identity: __IDENTITY__
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+
+  <!-- Admitted: verstat passed, so the attestation gate lets it through. -->
+  <recv response="200" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:+12155551212@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="500"/>
+
+  <send>
+<![CDATA[
+BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-bye
+Max-Forwards: 70
+From: <sip:+12155551212@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 BYE
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="200" rtd="true"/>
+</scenario>

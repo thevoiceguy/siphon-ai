@@ -165,23 +165,48 @@ run_scenario session_progress_then_answer.xml || failures=$((failures + 1))
 sp_cleanup
 trap - EXIT
 
-# ─── Always-on auxiliary phase: STIR/SHAKEN gate ─────────────────
-# Verifies the accept-path STIR/SHAKEN gate rejects before media:
-#   * no Identity header + require_identity        → 428
-#   * Identity present but unverifiable + min "A"  → 403
-# Both reject paths are pre-media, so no x5u is reachable and no WS
-# bridge is involved. A throwaway self-signed cert satisfies the
-# load-time trust-anchor check (verification never validates a real
-# chain on these paths — the 403 fails at the unreachable x5u fetch).
+# ─── Always-on auxiliary phase: STIR/SHAKEN ──────────────────────
+# Exercises the accept-path verifier + gate end-to-end:
+#   * no Identity header + require_identity        → 428 (reject)
+#   * Identity present but unverifiable + min "A"  → 403 (reject)
+#   * fully-verifiable Identity + min "A"          → 200 (admitted)
+#
+# The passing case needs a real, current rig: the `gen_test_passport`
+# example mints a throwaway CA, a leaf signing cert, an x5u TLS server
+# cert (SAN 127.0.0.1), and a freshly-signed PASSporT whose `iat` is now.
+# A local HTTPS server serves the leaf at the x5u URL; the daemon trusts
+# the CA both as the STI-PA anchor (chain) and via `x5u_tls_extra_ca`
+# (fetch TLS). The 428/403 rejects are pre-media and don't depend on the
+# rig, so all three share one daemon config.
 echo
-echo "─── auxiliary phase: stir_shaken gate ─────────────────"
+echo "─── auxiliary phase: stir_shaken ──────────────────────"
 SS_DAEMON_LOG=$(mktemp -t siphon-ai-ss.XXXXXX.log)
 SS_CONFIG=$(mktemp -t siphon-ai-ss.XXXXXX.toml)
-SS_KEY=$(mktemp -t siphon-ai-ss-key.XXXXXX.pem)
-SS_TA=$(mktemp -t siphon-ai-ss-ta.XXXXXX.pem)
-openssl ecparam -name prime256v1 -genkey -noout -out "$SS_KEY" 2>/dev/null
-openssl req -x509 -new -key "$SS_KEY" -out "$SS_TA" -days 3650 \
-    -subj "/CN=siphon-test-sti-pa-root" 2>/dev/null
+SS_RIG=$(mktemp -d -t siphon-ai-ss-rig.XXXXXX)
+SS_X5U_PORT=8443
+SS_X5U_LOG=$(mktemp -t siphon-ai-ss-x5u.XXXXXX.log)
+
+# Build + run the rig generator (reuses the stir-shaken crate's dev-deps).
+echo "generating STIR/SHAKEN test rig …"
+cargo build -q -p siphon-ai-stir-shaken --example gen_test_passport
+SS_IDENTITY=$("$REPO_ROOT/target/debug/examples/gen_test_passport" \
+    "$SS_RIG" "https://127.0.0.1:$SS_X5U_PORT/leaf.crt" "+12155551212" "1000")
+
+# Serve the leaf cert over HTTPS with the rig's TLS server cert. Stdlib
+# only (http.server + ssl) — no pip deps. Backgrounded; chdir's into the
+# rig dir so GET /leaf.crt returns the leaf certificate.
+python3 - "$SS_X5U_PORT" "$SS_RIG" >"$SS_X5U_LOG" 2>&1 <<'PY' &
+import http.server, ssl, sys, os
+port = int(sys.argv[1]); d = sys.argv[2]
+os.chdir(d)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(os.path.join(d, "server.crt"), os.path.join(d, "server.key"))
+httpd = http.server.HTTPServer(("127.0.0.1", port), http.server.SimpleHTTPRequestHandler)
+httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+httpd.serve_forever()
+PY
+SS_X5U_PID=$!
+
 cat >"$SS_CONFIG" <<EOF
 [node]
 id = "siphon-ai-sipp-ss"
@@ -195,7 +220,8 @@ ws_url = "ws://127.0.0.1:8765/"
 min_attestation = "A"
 [security.stir_shaken]
 enabled = true
-trust_anchors = "$SS_TA"
+trust_anchors = "$SS_RIG/ca.pem"
+x5u_tls_extra_ca = "$SS_RIG/ca.pem"
 require_identity = true
 [[route]]
 name = "default"
@@ -207,17 +233,29 @@ RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$SS_CONFIG" \
     >"$SS_DAEMON_LOG" 2>&1 &
 SS_DAEMON_PID=$!
 ss_cleanup() {
-    if kill -0 "$SS_DAEMON_PID" 2>/dev/null; then
-        kill "$SS_DAEMON_PID" 2>/dev/null || true
-        wait "$SS_DAEMON_PID" 2>/dev/null || true
-    fi
+    kill "$SS_DAEMON_PID" "$SS_X5U_PID" 2>/dev/null || true
+    wait "$SS_DAEMON_PID" 2>/dev/null || true
 }
 trap ss_cleanup EXIT
 sleep 1.2
 
-total=$((total + 2))
+# Substitute the freshly-minted Identity into the passing scenario.
+SS_PASS_XML=$(mktemp -t siphon-ai-ss-pass.XXXXXX.xml)
+sed "s|__IDENTITY__|$SS_IDENTITY|" \
+    "$SCRIPT_DIR/stir_shaken_attestation_pass.xml" >"$SS_PASS_XML"
+
+total=$((total + 3))
 run_scenario stir_shaken_no_identity_428.xml || failures=$((failures + 1))
 run_scenario stir_shaken_attestation_403.xml || failures=$((failures + 1))
+# Run the (generated) passing scenario by absolute path.
+echo "─── stir_shaken_attestation_pass ─────────────────────"
+if sipp -sf "$SS_PASS_XML" -m 1 -timeout 15s -trace_err \
+        -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1; then
+    echo "  OK"
+else
+    echo "  FAIL (see stir_shaken_attestation_pass_*errors.log; daemon: $SS_DAEMON_LOG)"
+    failures=$((failures + 1))
+fi
 
 ss_cleanup
 trap - EXIT

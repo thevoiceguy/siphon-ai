@@ -54,6 +54,9 @@ pub enum BuildError {
     /// The HTTP client could not be built (TLS backend init, …).
     #[error("building HTTP client: {0}")]
     HttpClient(String),
+    /// A supplemental x5u-TLS CA certificate could not be parsed.
+    #[error("x5u_tls_extra_ca certificate invalid: {0}")]
+    ExtraCa(String),
 }
 
 /// Verifies inbound `Identity` headers against the STI-PA trust anchors.
@@ -73,19 +76,30 @@ pub struct Verifier {
 
 impl Verifier {
     /// Build a verifier from already-decoded trust-anchor DERs, a cache TTL,
-    /// and an `iat` freshness window (`Duration::ZERO` disables the freshness
-    /// check). Prefer [`Verifier::from_config`] from daemon code; this is the
-    /// seam for tests and embedders that hold anchors in memory.
+    /// an `iat` freshness window (`Duration::ZERO` disables the freshness
+    /// check), and optional supplemental CA DERs trusted **for the `x5u`
+    /// HTTPS fetch only** (added to the public web-PKI roots; empty = public
+    /// roots only). Prefer [`Verifier::from_config`] from daemon code; this
+    /// is the seam for tests and embedders that hold anchors in memory.
     pub fn new(
         trust_anchors: Vec<Vec<u8>>,
         cache_ttl: Duration,
         iat_freshness: Duration,
+        x5u_extra_roots: Vec<Vec<u8>>,
     ) -> Result<Self, BuildError> {
-        let http = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .timeout(FETCH_TIMEOUT)
             // x5u is a direct cert URL; never chase a redirect to an
             // attacker-chosen or internal host.
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(reqwest::redirect::Policy::none());
+        for der in &x5u_extra_roots {
+            // Additive to the default web roots, applied to the fetch TLS
+            // handshake only — never to the SHAKEN chain (that's `anchors`).
+            let cert = reqwest::Certificate::from_der(der)
+                .map_err(|e| BuildError::ExtraCa(e.to_string()))?;
+            builder = builder.add_root_certificate(cert);
+        }
+        let http = builder
             .build()
             .map_err(|e| BuildError::HttpClient(e.to_string()))?;
         Ok(Self {
@@ -98,12 +112,21 @@ impl Verifier {
     }
 
     /// Build a verifier from the compiled `[security.stir_shaken]` config:
-    /// load + decode the trust-anchor PEM file and adopt the configured
-    /// cache TTL and `iat` freshness window. Fails loud if the anchor file is
-    /// unreadable or empty.
+    /// load + decode the trust-anchor PEM file, the optional supplemental
+    /// x5u-TLS CA bundle, and adopt the configured cache TTL and `iat`
+    /// freshness window. Fails loud if either PEM file is unreadable or empty.
     pub fn from_config(cfg: &StirShakenConfig) -> Result<Self, BuildError> {
         let anchors = load_trust_anchors(&cfg.trust_anchors)?;
-        Self::new(anchors, cfg.cert_cache_ttl, cfg.iat_freshness)
+        let x5u_extra_roots = match &cfg.x5u_tls_extra_ca {
+            Some(path) => load_trust_anchors(path)?,
+            None => Vec::new(),
+        };
+        Self::new(
+            anchors,
+            cfg.cert_cache_ttl,
+            cfg.iat_freshness,
+            x5u_extra_roots,
+        )
     }
 
     /// Verify the `Identity` header of an inbound INVITE.
@@ -745,5 +768,24 @@ mod tests {
             Duration::ZERO,
         );
         assert!(r.iat_passed && r.passed());
+    }
+
+    // ─── x5u TLS extra-CA ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn new_accepts_a_valid_x5u_extra_ca() {
+        // A real DER cert (the fixture CA) is accepted as a supplemental
+        // x5u-fetch root and the client builds. (Malformed cert DER isn't
+        // rejected eagerly — the rustls backend defers it to the TLS
+        // handshake; the operator-facing guard is the config-layer
+        // existence/≥1-cert check on the PEM file.)
+        let f = make_fixture(&payload("A", "+12155551212", "+12155551213"));
+        let v = Verifier::new(
+            Vec::new(),
+            Duration::from_secs(3600),
+            Duration::from_secs(60),
+            vec![f.ca_der.clone()],
+        );
+        assert!(v.is_ok());
     }
 }

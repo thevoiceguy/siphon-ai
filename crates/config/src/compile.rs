@@ -433,6 +433,9 @@ pub enum CompileError {
     #[error("[security.stir_shaken].trust_anchors {path:?} is invalid: {err}")]
     StirShakenTrustAnchorsInvalid { path: String, err: String },
 
+    #[error("[security.stir_shaken].x5u_tls_extra_ca {path:?} is invalid: {err}")]
+    StirShakenExtraCaInvalid { path: String, err: String },
+
     #[error("[media].rtp_port_range {min}-{max} is invalid (min must be < max and even)")]
     BadRtpPortRange { min: u16, max: u16 },
 
@@ -804,6 +807,7 @@ fn compile_security(raw: RawSecurity) -> Result<SecurityConfig, CompileError> {
         .iat_freshness_secs
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_IAT_FRESHNESS);
+    let x5u_tls_extra_ca = stir.x5u_tls_extra_ca.map(PathBuf::from);
 
     // A minimum-attestation gate is meaningless without verification: with
     // stir_shaken off, no call yields a trusted attestation, so the gate
@@ -826,6 +830,17 @@ fn compile_security(raw: RawSecurity) -> Result<SecurityConfig, CompileError> {
                 err: err.to_string(),
             }
         })?;
+
+        // The supplemental x5u-fetch CA, when set, gets the same load-time
+        // existence + ≥1-cert check so a typo fails at startup.
+        if let Some(extra) = &x5u_tls_extra_ca {
+            validate_trust_anchors(extra).map_err(|err| {
+                CompileError::StirShakenExtraCaInvalid {
+                    path: extra.display().to_string(),
+                    err: err.to_string(),
+                }
+            })?;
+        }
     }
 
     Ok(SecurityConfig {
@@ -837,6 +852,7 @@ fn compile_security(raw: RawSecurity) -> Result<SecurityConfig, CompileError> {
             cert_cache_ttl,
             require_identity,
             iat_freshness,
+            x5u_tls_extra_ca,
         },
     })
 }
@@ -1567,6 +1583,7 @@ mod security_tests {
                 cert_cache_ttl_secs: Some(1800),
                 require_identity: Some(true),
                 iat_freshness_secs: Some(30),
+                x5u_tls_extra_ca: None,
             },
         };
         let c = compile_security(raw).unwrap();
@@ -1585,6 +1602,32 @@ mod security_tests {
         assert_eq!(c.stir_shaken.trust_anchors, path);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn invalid_x5u_extra_ca_rejected_at_load() {
+        // A valid trust-anchor bundle but a bogus x5u_tls_extra_ca path →
+        // loud failure at config load (only checked when enabled).
+        let anchors = std::env::temp_dir().join("siphon_x5u_ca_test_anchors.pem");
+        std::fs::write(
+            &anchors,
+            "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let raw = RawSecurity {
+            stir_shaken: RawStirShaken {
+                enabled: Some(true),
+                trust_anchors: Some(anchors.to_string_lossy().into_owned()),
+                x5u_tls_extra_ca: Some("/nonexistent/lab-ca.pem".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(matches!(
+            compile_security(raw),
+            Err(CompileError::StirShakenExtraCaInvalid { .. })
+        ));
+        let _ = std::fs::remove_file(&anchors);
     }
 
     #[test]

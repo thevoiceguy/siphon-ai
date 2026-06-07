@@ -172,6 +172,8 @@ on_ws_failure = "hangup"         # v1 only supports "hangup"
 codecs = ["pcma", "pcmu"]        # override the global priority for this route
 dtmf = "off"
 inactivity_timeout_secs = 30     # override [media].inactivity_timeout_secs
+[route.security]
+min_attestation = "A"            # strict override of [security].min_attestation
 ```
 
 Match keys (any combination, all AND together): `request_uri_user`,
@@ -309,14 +311,32 @@ The gate admits a call only when verification **fully passed** and the claimed a
 | `"B"` | ✓ | ✓ | reject | reject | reject |
 | `"A"` | ✓ | reject | reject | reject | reject |
 
-A per-route override (`[route.security].min_attestation`, strict override of the global) is a follow-on chunk.
+A rejected call gets the configured status plus a `Reason: Q.850;cause=21` header so a Homer/upstream sees *why* it was screened. The gate runs before media bring-up, so a rejected call never allocates an RTP port or WS bridge.
+
+**Per-route override.** `[route.security].min_attestation` overrides the global for calls that match a route — a *strict* override (the route value fully replaces the global, even when more permissive), matching `[route.media].srtp` semantics. Unset → inherit the global. Like the global, a non-`none` override **requires** `stir_shaken.enabled = true` (fail-loud at load otherwise); `"none"` is an always-allowed no-op override.
+
+```toml
+[[route]]
+name = "vip_inbound"
+[route.match]
+to_user = "2000"
+[route.security]
+min_attestation = "A"   # this route admits only fully-attested calls
+
+[[route]]
+name = "consumer_inbound"
+[route.match]
+any = true
+[route.security]
+min_attestation = "C"   # looser than a stricter global, by design
+```
 
 ### `[security.stir_shaken]`
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `enabled` | bool | `false` | Master switch. When off, no Identity parsing/verification runs and no `verstat` is surfaced. |
-| `trust_anchors` | string | — | Path to the PEM bundle of STI-PA trust anchors (ship `contrib/sti-pa-roots.pem`). **Required when `enabled = true`**; validated at load time (must exist and contain ≥1 PEM certificate). |
+| `trust_anchors` | string | — | Path to the PEM bundle of STI-PA trust anchors. `contrib/sti-pa-roots.pem` is a **template** — populate it with the authentic STI-PA root(s) per `contrib/README.md` (we don't vendor a baked-in root; a stale/wrong anchor is a security defect). **Required when `enabled = true`**; validated at load time (must exist and contain ≥1 PEM certificate, so the unpopulated template fails loud by design). |
 | `cert_cache_ttl_secs` | int | `3600` | How long a fetched signing certificate is cached before re-fetch. (Seconds, matching the other duration fields in this config.) |
 | `require_identity` | bool | `false` | Reject inbound INVITEs that carry no `Identity` header with `428 Use Identity Header` (RFC 8224 §6.2.2) instead of admitting them as unsigned. |
 

@@ -41,9 +41,11 @@ use thiserror::Error;
 // ─── Counters ───────────────────────────────────────────────────────
 
 /// Total INVITEs the daemon has seen. Labeled by `result`:
-/// `accepted`, `rejected`, `no_match`. `rejected` covers every 4xx/
-/// 5xx final response from the routing layer (see
-/// `siphon_ai_core::AcceptError::sip_status`).
+/// `accepted`, `rejected`, `rejected_attestation`, `no_match`. `rejected`
+/// covers every 4xx/5xx final response from the routing/media layer (see
+/// `siphon_ai_core::AcceptError::sip_status`); `rejected_attestation` is
+/// carved out for STIR/SHAKEN policy rejections (`min_attestation` gate or
+/// `require_identity`) so fraud-control alerts don't bury in routing noise.
 pub const INVITES_TOTAL: &str = "siphon_ai_invites_total";
 
 /// Calls that completed (controller exited). Labeled by `cause`:
@@ -53,6 +55,15 @@ pub const CALLS_TOTAL: &str = "siphon_ai_calls_total";
 /// Per-route call counter. Labeled by `route` (the matched
 /// `[[route]].name`). Useful for "which route is hot" dashboards.
 pub const ROUTE_MATCH_TOTAL: &str = "siphon_ai_route_match_total";
+
+/// STIR/SHAKEN verification outcomes on inbound INVITEs, counted only
+/// when `[security.stir_shaken].enabled = true`. Labeled by `result`:
+/// `passed` (every check held — attestation is trustworthy),
+/// `failed` (an `Identity` header was present but verification did not
+/// fully pass), `unsigned` (no `Identity` header on the INVITE).
+/// Bounded cardinality (three values); per-call detail lives on the CDR
+/// (`verstat_attest`/`verstat_passed`) and in traces.
+pub const VERSTAT_TOTAL: &str = "siphon_ai_verstat_total";
 
 /// REGISTER attempts the daemon has driven. Labeled by `name`
 /// (the `[[register]].name`) and `outcome`:
@@ -167,13 +178,17 @@ pub fn install_recorder() -> Result<PrometheusHandle, InitError> {
 pub fn register_descriptions() {
     describe_counter!(
         INVITES_TOTAL,
-        "Inbound INVITEs by routing result (accepted, rejected, no_match)."
+        "Inbound INVITEs by result (accepted, rejected, rejected_attestation, no_match)."
     );
     describe_counter!(
         CALLS_TOTAL,
         "Completed calls by termination cause (server_hangup, local_shutdown, bridge_ended, tap_ended)."
     );
     describe_counter!(ROUTE_MATCH_TOTAL, "Calls accepted by matched route name.");
+    describe_counter!(
+        VERSTAT_TOTAL,
+        "STIR/SHAKEN verification outcomes by result (passed, failed, unsigned)."
+    );
     describe_counter!(
         REGISTER_ATTEMPTS_TOTAL,
         "REGISTER attempts by [[register]].name and outcome."

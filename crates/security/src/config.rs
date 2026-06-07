@@ -22,8 +22,9 @@ pub struct StirShakenConfig {
     /// verification runs and no `verstat` is surfaced — a 0.3.x deployment
     /// upgrades with zero behaviour change.
     pub enabled: bool,
-    /// Path to the PEM bundle of STI-PA trust anchors (the iconectiv root,
-    /// shipped in `contrib/sti-pa-roots.pem` per plan §9 decision 1).
+    /// Path to the PEM bundle of STI-PA trust anchors. `contrib/sti-pa-roots.pem`
+    /// is a template the operator populates with the authentic root(s) (plan §9
+    /// decision 1; see `contrib/README.md`).
     pub trust_anchors: PathBuf,
     /// How long a fetched signing certificate is cached before re-fetch.
     pub cert_cache_ttl: Duration,

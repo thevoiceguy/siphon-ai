@@ -216,6 +216,82 @@ ws_url = "wss://x/y"
 }
 
 #[test]
+fn invalid_per_route_min_attestation_rejected_at_load() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "vip"
+[route.match]
+any = true
+[route.security]
+min_attestation = "platinum"
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("platinum") && msg.contains("vip"),
+        "got: {msg}"
+    );
+}
+
+#[test]
+fn per_route_min_attestation_without_stir_shaken_rejected() {
+    // A valid level, but verification is off — the gate would 4xx every
+    // call this route matches, so config load must fail loud.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "vip"
+[route.match]
+any = true
+[route.security]
+min_attestation = "A"
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("vip") && msg.contains("stir_shaken"),
+        "got: {msg}"
+    );
+}
+
+#[test]
+fn per_route_min_attestation_none_is_inert_without_stir_shaken() {
+    // `min_attestation = "none"` is a no-op override — allowed even with
+    // verification off (it can't reject anything).
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "open"
+[route.match]
+any = true
+[route.security]
+min_attestation = "none"
+"#;
+    let cfg = load_from_str_with_env(toml, &env).expect("none override compiles");
+    let route = cfg.routes.iter().next().expect("one route");
+    assert_eq!(route.security.min_attestation.as_deref(), Some("none"));
+}
+
+#[test]
 fn session_timer_defaults_to_90s_floor() {
     let env = MapEnv::new([]);
     let toml = r#"

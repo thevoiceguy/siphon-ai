@@ -38,6 +38,9 @@ pub struct RawRoute {
 
     #[serde(default)]
     pub media: MediaOverride,
+
+    #[serde(default)]
+    pub security: SecurityOverride,
 }
 
 /// `[route.match]` block — the matcher's input grammar.
@@ -121,4 +124,19 @@ pub struct MediaOverride {
     /// `"preferred"`, `"required"` overrides. Validated at config
     /// load via the same path as the global field.
     pub srtp: Option<String>,
+}
+
+/// `[route.security]` overrides. Same merge rules as the other override
+/// blocks — `None` inherits the global `[security]` value. Kept as the
+/// raw string so the routes crate stays free of a dependency on the
+/// security-policy types; the config crate validates it and the accept
+/// path parses it against the global default.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct SecurityOverride {
+    /// `[route.security].min_attestation` — per-route override of the
+    /// global `[security].min_attestation` gate. `None` inherits; any of
+    /// `"none"`, `"A"`, `"B"`, `"C"` overrides (strict override, matching
+    /// `[route.media].srtp` semantics — the route value fully replaces the
+    /// global, even when more permissive).
+    pub min_attestation: Option<String>,
 }

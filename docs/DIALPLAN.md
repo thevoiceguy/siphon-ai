@@ -50,6 +50,10 @@ Each `[[route]]` has:
   `[bridge]` block. Anything not specified inherits.
 - `[route.media]` *(optional)* — overrides for the global `[media]`
   block. Same merge rules.
+- `[route.security]` *(optional)* — overrides for the global
+  `[security]` block (currently `min_attestation`). **Strict**
+  override: the route value fully replaces the global, even when more
+  permissive. See `docs/CONFIG.md` `[security]`.
 
 ---
 
@@ -63,10 +67,10 @@ These rules are CLAUDE.md §4.6 cardinal — don't try to bend them:
    numbers, scores, or weighted matching.
 2. **AND across keys within a route.** All match keys must hold.
    For OR semantics, write multiple routes.
-3. **Per-route override.** Set fields in `[route.bridge]` or
-   `[route.media]` override the corresponding global fields *for
-   that call only*. Unset fields inherit from globals — a route
-   never silently ignores a global setting.
+3. **Per-route override.** Set fields in `[route.bridge]`,
+   `[route.media]`, or `[route.security]` override the corresponding
+   global fields *for that call only*. Unset fields inherit from
+   globals — a route never silently ignores a global setting.
 4. **No match → SIP 404.** If you want a catch-all, write a default
    route at the end with `any = true`. Production deployments
    without a default get a startup warning.

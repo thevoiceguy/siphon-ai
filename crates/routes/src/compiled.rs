@@ -10,7 +10,7 @@
 
 use regex::Regex;
 
-use crate::raw::{BridgeOverride, MediaOverride};
+use crate::raw::{BridgeOverride, MediaOverride, SecurityOverride};
 
 /// One pre-compiled match predicate (string or regex). Stored per
 /// match key so a route can mix string keys (most common) with
@@ -84,6 +84,7 @@ pub struct CompiledRoute {
     pub(crate) match_: CompiledMatch,
     pub bridge: BridgeOverride,
     pub media: MediaOverride,
+    pub security: SecurityOverride,
 }
 
 impl CompiledRoute {

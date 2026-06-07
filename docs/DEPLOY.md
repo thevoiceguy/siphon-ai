@@ -353,17 +353,20 @@ re-opens on `SIGHUP` (in practice — restart is simpler).
 additive; the `version` integer bumps only on breaking changes.
 
 Two optional STIR/SHAKEN fields appear when `[security.stir_shaken]` is
-enabled and an inbound call carried an `Identity` header (added in 0.4.0;
-schema stays at version 1 — they're omitted entirely otherwise):
+enabled (added in 0.4.0; schema stays at version 1 — both are omitted
+entirely when verification is disabled):
 
-- `verstat_attest` — claimed attestation, `"A"` / `"B"` / `"C"`.
+- `verstat_attest` — claimed attestation, `"A"` / `"B"` / `"C"`. Present
+  only when the `Identity` header carried a valid attestation claim;
+  omitted for unsigned calls.
 - `verstat_passed` — composite verification result (`true` only when the
-  signature, certificate chain, and orig/dest checks all passed).
+  signature, certificate chain, and orig/dest checks all passed). Emitted
+  for every inbound call while verification is on, including `false` for
+  unsigned or failed calls.
 
 `verstat_attest` is the *claimed* level; a CDR with `verstat_attest: "A"`
 and `verstat_passed: false` is a call that asserted full attestation but
-failed verification. (Both are absent until the accept-path verifier is
-wired in a later 0.4.0 release.)
+failed verification.
 
 The webhook sink delivers the same JSON to `[cdr.webhook].url` with
 `Content-Type: application/json`. Retries on non-2xx up to
@@ -404,10 +407,11 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 
 | Metric                                  | Type      | Labels                                | What it measures |
 |-----------------------------------------|-----------|---------------------------------------|------------------|
-| `siphon_ai_invites_total`               | counter   | `result=accepted\|rejected`           | INVITEs by acceptance outcome. |
+| `siphon_ai_invites_total`               | counter   | `result=accepted\|rejected\|rejected_attestation\|no_match` | INVITEs by acceptance outcome. `rejected_attestation` is a STIR/SHAKEN policy reject (`min_attestation` gate or `require_identity`) — separately alertable from ordinary routing/media `rejected`. |
 | `siphon_ai_calls_total`                 | counter   | `cause=server_hangup\|local_shutdown\|bridge_ended\|tap_ended` | Ended calls by termination cause. |
 | `siphon_ai_calls_active`                | gauge     | —                                     | Currently-running calls. |
 | `siphon_ai_route_match_total`           | counter   | `route`                               | Calls per matched route. |
+| `siphon_ai_verstat_total`               | counter   | `result=passed\|failed\|unsigned`     | STIR/SHAKEN verification outcomes per inbound INVITE. Emitted only when `[security.stir_shaken].enabled = true`. `passed` = every check held; `failed` = `Identity` header present but verification didn't fully pass; `unsigned` = no `Identity` header. |
 | `siphon_ai_call_duration_seconds`       | histogram | —                                     | Wall-clock duration of ended calls. |
 | `siphon_ai_sdp_negotiate_seconds`       | histogram | `result=ok\|error`                    | Time spent in `prepare_call` (negotiate + port alloc + tap attach). |
 | `siphon_ai_ws_connect_seconds`          | histogram | —                                     | WS handshake time. |

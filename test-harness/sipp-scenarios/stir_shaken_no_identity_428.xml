@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  stir_shaken_no_identity_428 — daemon with STIR/SHAKEN verification
+  enabled and `[security.stir_shaken].require_identity = true` receives
+  an INVITE that carries NO `Identity` header. MUST reject with
+  428 Use Identity Header (RFC 8224 §6.2.2), before any media setup.
+
+  Paired with the STIR/SHAKEN phase in run-all.sh, which starts the
+  daemon with verification on + require_identity + a throwaway trust
+  anchor. The reject happens at the accept-path gate, so no x5u fetch,
+  WS bridge, or RTP is involved.
+-->
+<scenario name="stir_shaken_no_identity_428">
+  <send retrans="500">
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:+12155551212@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:+12155551212@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+
+  <!-- No Identity header + require_identity → 428. The transaction
+       layer auto-ACKs the non-2xx final (RFC 3261 §17.1.1.3). -->
+  <recv response="428" rtd="true"/>
+
+  <ResponseTimeRepartition value="200, 500, 1000"/>
+</scenario>

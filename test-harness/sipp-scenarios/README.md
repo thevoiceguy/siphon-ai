@@ -46,6 +46,14 @@ sipp -sf basic_call_then_bye.xml -m 1 -p 5070 -s 1000 127.0.0.1:5060
 | `caller_cancels_during_setup.xml`   | RFC 3261 §9.2 — CANCEL races the 200 OK; 487/200 both acceptable |
 | `unsupported_codec_488.xml`         | SDP with only G.722 → 488 Not Acceptable Here|
 | `blind_transfer.xml`                | WS-initiated REFER, 202 + BYE teardown       |
+| `stir_shaken_no_identity_428.xml`   | STIR/SHAKEN `require_identity`: INVITE with no `Identity` header → 428 Use Identity Header (stir_shaken phase) |
+| `stir_shaken_attestation_403.xml`   | STIR/SHAKEN gate: `Identity` present but unverifiable (unreachable `x5u`) below `min_attestation = "A"` → 403 Forbidden (stir_shaken phase) |
+
+The `stir_shaken_*` scenarios run in `run-all.sh`'s always-on
+**stir_shaken** auxiliary phase, which starts a daemon with verification
+enabled (`require_identity = true`, `min_attestation = "A"`) and a
+throwaway openssl-generated trust anchor. Both reject before media, so no
+reachable `x5u` or WS bridge is needed.
 
 ## Adding a new scenario
 

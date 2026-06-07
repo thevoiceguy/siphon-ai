@@ -1,5 +1,16 @@
 # SiphonAI 0.4.0 Development Plan
 
+> **STATUS: SHIPPED — released as [`v0.4.0`](https://github.com/thevoiceguy/siphon-ai/releases/tag/v0.4.0) on 2026-06-07** (tag `v0.4.0`, commit `c20e99f`).
+> The full STIR/SHAKEN must-have scope (§4) landed across PRs #113–#121, plus
+> the release cut (#122). Off by default; protocol stays at `version: "1"`.
+> Per-section completion is marked inline below (§7 sprint table, §9 decisions,
+> §10 Definition of Done). Deferred to a later release: the **Twilio Caller
+> Identity recipe** (stretch §5.3 / DoD #4), a **passing-attestation SIPp
+> scenario** (needs a trusted local HTTPS `x5u` fixture — the reject-path
+> 428/403 scenarios shipped), the standalone **`docs/SECURITY_STIR_SHAKEN.md`**
+> (§11), and upstream `sip-identity` **`iat`-freshness** (orig/dest claim checks
+> shipped app-side). See [`CHANGELOG.md`](../CHANGELOG.md) for the shipped notes.
+
 **Theme: call authentication — every inbound call gets a trust verdict.**
 
 0.1.0 shipped the bridge. 0.2.0 shipped the operator primitives.
@@ -160,14 +171,17 @@ One upstream PR sits in the critical path. Open it in Week 1 so
 review/back-pressure runs in parallel with siphon-ai work that
 doesn't need it yet.
 
-| Week | Focus | Deliverables |
-|---|---|---|
-| 1 | Upstream PR + scaffolding | Open siphon-rs `sip-identity` PR (Identity header parser + PASSporT JWT verifier + STI-PA trust-store loader). siphon-ai: `[security.stir_shaken]` config surface; `VerificationResult` types in a new `crates/security/` crate; trust-anchor file plumbing. No wire behaviour yet. |
-| 2 | Surface plumbing (no upstream gate) | `verstat` field on `BridgeOut::Start`; CDR `verstat_attest` / `verstat_passed` fields with schema-version bump-OR-stay decision; per-call state slot for the verdict. Tests with synthetic `VerificationResult` values to exercise the surface without needing the upstream parser. |
-| 3 | Wire the verifier in | Conditional on upstream PR landing. INVITE accept path calls into the verifier before route matching; verdict lands on per-call state and threads through to the surfaces wired in W2. First SIPp scenario (`stir_shaken_attest_a.xml`) — pre-recorded PASSporT JWT against a test cert. |
-| 4 | Policy gate + per-route override | `[security].min_attestation`; `[route.security].min_attestation` override; 4xx rejection path with `Reason:` header; metric ticks; per-policy unit tests for the matrix in §4-item-3. |
-| 5 | HEP + observability + reference recipe | Vendor-specific HEP chunk emission on accept; structured log line; `Twilio Caller Identity` recipe (stretch item 3 promoted into core if W1-4 were tidy). |
-| 6 | Hardening + release | Full smoke test, SIPp suite green incl. STIR/SHAKEN scenarios, CHANGELOG, version bump, tag, GitHub release. Real-world validation against a Twilio inbound (which always carries `Identity:` from US-originated calls). |
+All six weeks shipped. The actual landing was a stack of small PRs rather
+than week-boundaried drops; the mapping is in the Status column.
+
+| Week | Focus | Deliverables | Status |
+|---|---|---|---|
+| 1 | Upstream PR + scaffolding | Open siphon-rs `sip-identity` PR (Identity header parser + PASSporT JWT verifier + STI-PA trust-store loader). siphon-ai: `[security.stir_shaken]` config surface; `VerificationResult` types in a new `crates/security/` crate; trust-anchor file plumbing. No wire behaviour yet. | ✅ siphon-rs `sip-identity` #53/#54/#55 (parse + ES256 + chain). siphon-ai #113 (security crate), #114 (config surface). |
+| 2 | Surface plumbing (no upstream gate) | `verstat` field on `BridgeOut::Start`; CDR `verstat_attest` / `verstat_passed` fields with schema-version bump-OR-stay decision; per-call state slot for the verdict. Tests with synthetic `VerificationResult` values to exercise the surface without needing the upstream parser. | ✅ #115 (verstat on start + CDR; schema stayed at v1). |
+| 3 | Wire the verifier in | Conditional on upstream PR landing. INVITE accept path calls into the verifier before route matching; verdict lands on per-call state and threads through to the surfaces wired in W2. First SIPp scenario (`stir_shaken_attest_a.xml`) — pre-recorded PASSporT JWT against a test cert. | ✅ `siphon-ai-stir-shaken` verifier crate #116; accept-path wiring #117. SIPp shipped as reject-path scenarios #121 (a *passing*-attestation scenario is deferred — needs a trusted local HTTPS `x5u` fixture). |
+| 4 | Policy gate + per-route override | `[security].min_attestation`; `[route.security].min_attestation` override; 4xx rejection path with `Reason:` header; metric ticks; per-policy unit tests for the matrix in §4-item-3. | ✅ #118 (min_attestation 403/488/606 + `require_identity` 428 + per-route override + `Reason: Q.850;cause=21` + `rejected_attestation` metric). |
+| 5 | HEP + observability + reference recipe | Vendor-specific HEP chunk emission on accept; structured log line; `Twilio Caller Identity` recipe (stretch item 3 promoted into core if W1-4 were tidy). | ◑ #119 (HEP3 `Verstat` 0x66 chunk; structured log line; `siphon_ai_verstat_total` metric). Twilio Caller Identity recipe **deferred**. |
+| 6 | Hardening + release | Full smoke test, SIPp suite green incl. STIR/SHAKEN scenarios, CHANGELOG, version bump, tag, GitHub release. Real-world validation against a Twilio inbound (which always carries `Identity:` from US-originated calls). | ✅ #120 (trust-anchor template), #121 (SIPp scenarios in CI), #122 (release cut: CHANGELOG, 0.3.2→0.4.0, tag `v0.4.0`, GitHub release). Live Twilio attestation-A confirmation is an operational follow-up. |
 
 Stretch items slot into spare time, in §5 order. If a stretch
 eats more than Week 6, bump to 0.4.1.
@@ -211,63 +225,81 @@ ignore the new `verstat` field on `start`.
 Open questions that need resolution before W1 starts. Default
 recommendation listed; revisit during the planning conversation.
 
-1. ☐ **Trust anchor distribution.** Ship the iconectiv STI-PA
+1. ☑ **Trust anchor distribution.** Ship the iconectiv STI-PA
    root cert in `contrib/sti-pa-roots.pem` (operator copies into
    place) versus pulling it at runtime from a known URL? **Recommended**:
    ship it. The STI-PA root rotates rarely (years), and a runtime
    fetch is a startup-time dependency we don't currently have. Operator
    override via `[security.stir_shaken].trust_anchors` still possible.
-2. ☐ **Verification cert cache eviction.** TTL-based
+   **Decided:** ship it — but as a documented *template* (`contrib/sti-pa-roots.pem`
+   + `contrib/README.md`), not a baked-in root, since a stale/wrong anchor is a
+   security defect; the operator populates + fingerprint-verifies it. Unpopulated → fails loud (#120).
+2. ☑ **Verification cert cache eviction.** TTL-based
    (config-driven, default 1h) versus signature-count-driven?
    **Recommended**: TTL. Simpler invariant, matches HTTP cache
    semantics on the `info=` URL responses.
-3. ☐ **Per-route `min_attestation` resolution semantics.** Strict
+   **Decided:** TTL, default 1h, config key `cert_cache_ttl_secs` (u64 seconds, for
+   consistency with the other duration fields) (#114, #116).
+3. ☑ **Per-route `min_attestation` resolution semantics.** Strict
    override (route value wins even if more permissive than
    global) versus "max of global and route" (route can only
    tighten, never loosen)? **Recommended**: strict override,
    matching `[route.bridge.tls]` semantics from 0.3.0. Operators
    who want tighten-only can leave the route block out.
-4. ☐ **Policy-rejection response code.** 403, 488, or 606?
+   **Decided:** strict override (`MinAttestation::resolve`), matching `[route.media].srtp` (#118).
+4. ☑ **Policy-rejection response code.** 403, 488, or 606?
    **Recommended**: 403 (default) with `Reason: Q.850;cause=21;text="STIR/SHAKEN attestation insufficient"`.
    606 ("Not Acceptable") is appropriate when the *call itself*
    is unacceptable; 488 is for media. 403 is the cleanest
    "policy rejected this call" code.
-5. ☐ **CDR schema version bump.** Stay at 1 (emit fields only
+   **Decided:** 403 default (configurable to 488/606 via `min_attestation_response`) with
+   `Reason: Q.850;cause=21`. `require_identity` rejects header-absent calls with 428 (#118).
+5. ☑ **CDR schema version bump.** Stay at 1 (emit fields only
    when populated) vs. bump to 2 (always-present optional
    fields)? **Recommended**: stay at 1. Less downstream churn.
-6. ☐ **HEP chunk vendor ID.** Allocate a SiphonAI-specific
+   **Decided:** stayed at 1 — `verstat_attest`/`verstat_passed` emitted only when populated (#115).
+6. ☑ **HEP chunk vendor ID.** Allocate a SiphonAI-specific
    vendor ID for the verstat chunk versus piggyback on an
    existing one? **Recommended**: register a new vendor ID with
    Homer upstream; carry it locally as `0x0000` (generic) for
    0.4.0 while the upstream registration is in flight.
-7. ☐ **Sprint length.** 6 weeks (matches 0.3.0). One upstream PR
+   **Decided:** generic vendor (0x0000) for now, as a dedicated protocol-type value
+   `HepProtocol::Verstat = 102` (0x66) in hep-rs — mirroring `Log`/`Cdr` (hep-rs#1, siphon-ai #119).
+   A registered Homer vendor ID remains a future option.
+7. ☑ **Sprint length.** 6 weeks (matches 0.3.0). One upstream PR
    makes a shorter sprint plausible; 4 weeks if scope tightens.
    **Recommended**: 6 weeks. The verification primitive is
    significant siphon-rs work; review latency was the dominant
    cost in 0.3.0.
+   **Decided:** 6-week scope, landed as a stack of small chunked PRs (#113–#122).
 
 ## 10. Definition of Done — v0.4.0
 
-A reasonable user can:
+A reasonable user can (✅ done · ◑ partial · ⏳ deferred):
 
-1. Enable STIR/SHAKEN verification on a US-originated Twilio
+1. ✅ Enable STIR/SHAKEN verification on a US-originated Twilio
    inbound and see `verstat_attest: "A"` in the `BridgeOut::Start`
-   message AND the CDR.
-2. Reject inbound calls with attestation below `"B"` via
+   message AND the CDR. *(Capability shipped; live attestation-A
+   confirmation against a production Twilio inbound is an
+   operational follow-up.)*
+2. ✅ Reject inbound calls with attestation below `"B"` via
    `[security].min_attestation = "B"`, and observe
    `siphon_ai_invites_total{result="rejected_attestation"}`
    ticking.
-3. See per-route attestation policy override a route that
-   handles high-trust internal traffic.
-4. Cross-reference our verification verdict against Twilio's
+3. ✅ See per-route attestation policy override a route that
+   handles high-trust internal traffic (`[route.security].min_attestation`).
+4. ⏳ Cross-reference our verification verdict against Twilio's
    `X-Twilio-VerStat` header and see them agree (the recipe
-   demonstrates this).
-5. Correlate STIR/SHAKEN verdicts against SIP dialogs in Homer
-   via the new HEP chunk type.
-6. CI gates every PR on build + clippy + fmt + cargo test +
-   SIPp suite (now including STIR/SHAKEN pass and fail scenarios).
-   Carries forward from 0.2.0 / 0.3.0.
-7. Upgrade from 0.3.0 to 0.4.0 with no config changes and
+   demonstrates this). **Deferred** — the Twilio Caller Identity
+   recipe didn't ship in 0.4.0.
+5. ✅ Correlate STIR/SHAKEN verdicts against SIP dialogs in Homer
+   via the new HEP chunk type (`HepProtocol::Verstat`, 0x66).
+6. ◑ CI gates every PR on build + clippy + fmt + cargo test +
+   SIPp suite — now including STIR/SHAKEN **fail** scenarios
+   (428 require-identity, 403 attestation gate). A **pass**
+   scenario is deferred (needs a trusted local HTTPS `x5u`
+   fixture). Carries forward from 0.2.0 / 0.3.0.
+7. ✅ Upgrade from 0.3.0 to 0.4.0 with no config changes and
    observe no behavioural difference — STIR/SHAKEN defaults to
    `enabled = false`.
 

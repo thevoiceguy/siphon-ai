@@ -42,6 +42,20 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
+**v0.4.0** — fourth release. Theme: **STIR/SHAKEN call authentication.**
+Inbound INVITEs with an RFC 8224 `Identity` header are verified end-to-end
+(PASSporT/RFC 8225 decode, ES256, X.509 chain to a configured STI-PA trust
+anchor via the `x5u` cert with a TTL cache, and the `orig`/`dest` ↔
+`From`/`To` claim checks), producing a per-call *verstat* verdict. Operators
+can gate on it — `min_attestation` (403/488/606) and `require_identity`
+(428), with per-route overrides — and the verdict is surfaced on the WS
+`start` message, the CDR, a structured log line, and a new HEP3 chunk
+(`0x66`) for Homer. Everything is **off by default**: a 0.3.x deployment
+upgrades with zero behaviour change until `[security.stir_shaken].enabled
+= true`. Protocol stays at `version: "1"` — `start.verstat` is additive, so
+v1 WS servers built against earlier releases keep working unchanged. Full
+notes: [`CHANGELOG.md`](CHANGELOG.md).
+
 **v0.3.2** — patch release. `rtp_stats.rtcp_rtt_ms` now populates on live
 calls (forge-engine originates RTCP Sender Reports for its generated
 streams, so the carrier's Receiver Reports resolve a round-trip time per

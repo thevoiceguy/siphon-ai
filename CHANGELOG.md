@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-07
+
+Theme: **STIR/SHAKEN call authentication.** Inbound INVITEs carrying an
+RFC 8224 `Identity` header are now verified end-to-end — PASSporT decode
+(RFC 8225), ES256 signature, X.509 chain validation to a configured STI-PA
+trust anchor (via the `x5u` certificate, fetched and TTL-cached), and the
+SHAKEN `orig`/`dest` ↔ SIP `From`/`To` claim checks — yielding a per-call
+*verstat* verdict. Operators can gate on it (`min_attestation` 4xx,
+`require_identity` 428, with per-route overrides), and the verdict is
+surfaced everywhere observability already reaches: the WS `start` message,
+the CDR, a structured log line, and a new HEP3 chunk for Homer.
+
+Everything is **off by default** — a 0.3.x deployment upgrades with zero
+behaviour change until `[security.stir_shaken].enabled = true`. Protocol
+stays at `version: "1"`: `start.verstat` is an additive optional field, so
+v1 WS servers built against earlier releases keep working unchanged. The
+cryptographic core lives in two new building blocks — siphon-rs's
+`sip-identity` crate (parsing + ES256 + chain validation) and this repo's
+`siphon-ai-stir-shaken` crate (the `x5u` fetch, cert cache, and verdict
+orchestration the stack crate deliberately leaves to the application).
+
+### Added
+
+- **`siphon-ai-security` crate — the verstat vocabulary.** `AttestationLevel`
+  (SHAKEN A/B/C with an explicit trust rank), `VerificationResult` (the
+  verdict, with a `trusted_attestation()` accessor that only trusts a claim
+  when verification fully passed), and the `MinAttestation` policy gate
+  (strict per-route `resolve` + the §4 `permits` matrix). Dependency-light
+  so every layer can depend on it cheaply.
+
+- **`[security]` / `[security.stir_shaken]` config surface.** `enabled`,
+  `trust_anchors` (PEM bundle path, validated at load), `cert_cache_ttl_secs`
+  (default 1 h), `require_identity`, plus the gate knobs `min_attestation`
+  (`none`/`A`/`B`/`C`) and `min_attestation_response` (403/488/606). Fully
+  inert by default; misconfiguration fails loud at startup. See
+  [`docs/CONFIG.md`](docs/CONFIG.md).
+
+- **`siphon-ai-stir-shaken` crate — the verifier service.** The
+  application-layer half of verification: HTTPS `x5u` certificate fetch
+  (https-only, redirect-free, size/time-capped), a process-wide TTL cert
+  cache keyed by URL, trust-anchor loading, and verdict orchestration
+  (`Verifier::verify(identity, from, to) → VerificationResult`). The
+  cryptographic core (ES256 + X.509 chain validation) is siphon-rs
+  `sip-identity`; this crate wires it to the network and the cache.
+
+- **Accept-path verification + the verstat surface.** Each inbound INVITE
+  is verified before route/media bring-up; the verdict rides
+  `BridgeOut::Start` as the optional `verstat` object and lands on the CDR
+  as `verstat_attest` / `verstat_passed` (additive — CDR schema stays at
+  version 1; emitted only when verification is enabled). One `info!` line
+  per call carries the verstat fields. See [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
+- **Attestation policy gate.** After verification, before route matching,
+  the daemon can reject calls that don't meet policy — `require_identity`
+  → **428 Use Identity Header** (RFC 8224 §6.2.2) for an INVITE with no
+  `Identity` header, and a `min_attestation` floor → the configured
+  **403/488/606** with a `Reason: Q.850;cause=21` header. The gate runs
+  before media is allocated, so a rejected call never opens an RTP port or
+  WS bridge. Per-route override via `[route.security].min_attestation`
+  (strict override, like `[route.media].srtp`). See
+  [`docs/CONFIG.md`](docs/CONFIG.md) and [`docs/DIALPLAN.md`](docs/DIALPLAN.md).
+
+- **HEP3 verstat chunk for Homer.** When HEP is enabled, the verdict ships
+  as a `HepProtocol::Verstat` (chunk type `0x66`) packet correlated by SIP
+  `Call-ID`, threading onto the same call view as the SIP / RTCP / CDR
+  chunks. JSON payload, same shape as `start.verstat`. Requires the
+  upstream `hep-rs` `Verstat = 102` protocol type
+  ([thevoiceguy/hep-rs#1](https://github.com/thevoiceguy/hep-rs/pull/1)).
+  See [`docs/HEP.md`](docs/HEP.md).
+
+- **New metric `siphon_ai_verstat_total{result=passed|failed|unsigned}`** and
+  a `rejected_attestation` label on `siphon_ai_invites_total` so
+  STIR/SHAKEN policy rejections are separately alertable from ordinary
+  routing/media rejects. See [`docs/DEPLOY.md`](docs/DEPLOY.md).
+
+- **`contrib/sti-pa-roots.pem` trust-anchor template + `contrib/README.md`.**
+  A documented placeholder (not a baked-in root — a stale or wrong trust
+  anchor is a security defect): the operator populates it with the
+  authentic STI-PA root(s), verified by fingerprint. Using it unpopulated
+  fails loud at startup by design.
+
+- **STIR/SHAKEN SIPp regressions.** `stir_shaken_no_identity_428.xml` and
+  `stir_shaken_attestation_403.xml` exercise the accept-path gate end-to-end
+  over real SIP (both reject before media), run in a new always-on
+  `stir_shaken` phase of the regression suite.
+
 ### Changed
 
 - **`siphon_ai_rtp_rtt_ms` now renders as a bucketed Prometheus histogram instead of a summary.** The metric had no explicit buckets registered, so `metrics-exporter-prometheus` fell back to a summary (quantiles) — inconsistent with the other `_seconds` histograms and awkward to aggregate across instances. It now has explicit ms buckets (10 ms–1 s) via `set_buckets_for_metric`, matching the 0.3.0 housekeeping rule ("histograms get sensible buckets defined explicitly"). `/metrics` now emits `siphon_ai_rtp_rtt_ms_bucket{le="…"}` lines; anything scraping the old `{quantile="…"}` series should switch to `histogram_quantile()` over the buckets.

@@ -147,6 +147,52 @@ smoke test" recipe is in [`docs/DEPLOY.md`](DEPLOY.md) § TLS
 deployment (landed in 0.2.0). mTLS for the bridge WS leg and SRTP
 for the media leg are still 0.2.1 / 0.3.0 — see CHANGELOG.
 
+### Cross-checking STIR/SHAKEN against `X-Twilio-VerStat` (0.4.x)
+
+US-originated calls reach your trunk already carrying Twilio's own
+attestation verdict in the `X-Twilio-VerStat` SIP header — one of
+`TN-Validation-Passed-A` / `-B` / `-C`, `TN-Validation-Failed-…`, or
+`No-TN-Validation`. SiphonAI can **independently verify** the same call's
+`Identity` header (fetch the `x5u` cert, validate the chain to the STI-PA
+anchor, check the ES256 signature, the orig/dest TN binding, and `iat`
+freshness) and surface the result as `start.verstat`. Comparing the two is
+the cleanest sanity check during rollout: they should agree, and a wall of
+disagreement usually means *your* config is off (e.g. a stale trust anchor),
+not that Twilio is wrong.
+
+Turn on verification and forward Twilio's header so your WS server sees both:
+
+```toml
+[bridge]
+ws_url = "ws://127.0.0.1:8765/"
+forward_headers = ["X-Twilio-VerStat"]   # surfaces on start.sip.headers
+
+[security]
+min_attestation = "none"                 # observe-only — don't gate yet
+
+[security.stir_shaken]
+enabled       = true
+trust_anchors = "/etc/siphon-ai/sti-pa-roots.pem"   # the authentic STI-PA root(s)
+```
+
+Keep `min_attestation = "none"` until the verdicts agree in practice — that
+way a divergence is logged, not call-rejecting. Then your WS server has, on
+the `start` message:
+
+- `start.verstat` — SiphonAI's independent verdict (trust the `attest` only
+  when every boolean holds), and
+- `start.sip.headers["X-Twilio-VerStat"]` — Twilio's claim.
+
+The runnable [`examples/verstat-compare-py`](../examples/verstat-compare-py/)
+server logs `AGREE` / `DIVERGE` per call so you can watch them line up
+before you enable the `min_attestation` gate. Once you trust the setup,
+raise `min_attestation` (and optionally `require_identity`) to start
+rejecting — see [`docs/CONFIG.md`](CONFIG.md) `[security]`.
+
+**What attestation does and doesn't mean** — `A` means the carrier
+authenticated the caller's right to that number, *not* that the call is
+trustworthy. See [`docs/SECURITY_STIR_SHAKEN.md`](SECURITY_STIR_SHAKEN.md).
+
 ---
 
 ## Path 2 — Programmable Voice + `<Dial><Sip>` (alternative)

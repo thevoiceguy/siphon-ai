@@ -48,12 +48,26 @@ sipp -sf basic_call_then_bye.xml -m 1 -p 5070 -s 1000 127.0.0.1:5060
 | `blind_transfer.xml`                | WS-initiated REFER, 202 + BYE teardown       |
 | `stir_shaken_no_identity_428.xml`   | STIR/SHAKEN `require_identity`: INVITE with no `Identity` header → 428 Use Identity Header (stir_shaken phase) |
 | `stir_shaken_attestation_403.xml`   | STIR/SHAKEN gate: `Identity` present but unverifiable (unreachable `x5u`) below `min_attestation = "A"` → 403 Forbidden (stir_shaken phase) |
+| `stir_shaken_attestation_pass.xml`  | STIR/SHAKEN happy path: a fully-verifiable `Identity` (fresh PASSporT, real x5u fetch, chain to the test anchor) → **200 admitted** (stir_shaken phase). Templated — `__IDENTITY__` is substituted at run time; does not run standalone. |
 
 The `stir_shaken_*` scenarios run in `run-all.sh`'s always-on
-**stir_shaken** auxiliary phase, which starts a daemon with verification
-enabled (`require_identity = true`, `min_attestation = "A"`) and a
-throwaway openssl-generated trust anchor. Both reject before media, so no
-reachable `x5u` or WS bridge is needed.
+**stir_shaken** auxiliary phase. It builds + runs the
+`gen_test_passport` example (a `siphon-ai-stir-shaken` example) to mint a
+fresh CA + leaf + x5u TLS server cert + signed PASSporT, serves the leaf
+over a local HTTPS `x5u` (stdlib `http.server` + `ssl`), and starts a
+daemon with verification enabled (`require_identity = true`,
+`min_attestation = "A"`) trusting the test CA as both the STI-PA anchor and
+the `x5u_tls_extra_ca`. The 428/403 rejects happen before media (no x5u/WS
+needed); the pass case is a full admitted call through the echo WS bridge.
+
+`gen_test_passport` doubles as an operator lab tool:
+
+```sh
+cargo run -p siphon-ai-stir-shaken --example gen_test_passport -- \
+    /tmp/rig "https://127.0.0.1:8443/leaf.crt" "+12155551212" "1000"
+# writes ca.pem / leaf.crt / server.crt / server.key into /tmp/rig,
+# prints the Identity header value to stdout
+```
 
 ## Adding a new scenario
 

@@ -165,6 +165,63 @@ run_scenario session_progress_then_answer.xml || failures=$((failures + 1))
 sp_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: STIR/SHAKEN gate ─────────────────
+# Verifies the accept-path STIR/SHAKEN gate rejects before media:
+#   * no Identity header + require_identity        → 428
+#   * Identity present but unverifiable + min "A"  → 403
+# Both reject paths are pre-media, so no x5u is reachable and no WS
+# bridge is involved. A throwaway self-signed cert satisfies the
+# load-time trust-anchor check (verification never validates a real
+# chain on these paths — the 403 fails at the unreachable x5u fetch).
+echo
+echo "─── auxiliary phase: stir_shaken gate ─────────────────"
+SS_DAEMON_LOG=$(mktemp -t siphon-ai-ss.XXXXXX.log)
+SS_CONFIG=$(mktemp -t siphon-ai-ss.XXXXXX.toml)
+SS_KEY=$(mktemp -t siphon-ai-ss-key.XXXXXX.pem)
+SS_TA=$(mktemp -t siphon-ai-ss-ta.XXXXXX.pem)
+openssl ecparam -name prime256v1 -genkey -noout -out "$SS_KEY" 2>/dev/null
+openssl req -x509 -new -key "$SS_KEY" -out "$SS_TA" -days 3650 \
+    -subj "/CN=siphon-test-sti-pa-root" 2>/dev/null
+cat >"$SS_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-ss"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:8765/"
+[security]
+min_attestation = "A"
+[security.stir_shaken]
+enabled = true
+trust_anchors = "$SS_TA"
+require_identity = true
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$SS_CONFIG" \
+    >"$SS_DAEMON_LOG" 2>&1 &
+SS_DAEMON_PID=$!
+ss_cleanup() {
+    if kill -0 "$SS_DAEMON_PID" 2>/dev/null; then
+        kill "$SS_DAEMON_PID" 2>/dev/null || true
+        wait "$SS_DAEMON_PID" 2>/dev/null || true
+    fi
+}
+trap ss_cleanup EXIT
+sleep 1.2
+
+total=$((total + 2))
+run_scenario stir_shaken_no_identity_428.xml || failures=$((failures + 1))
+run_scenario stir_shaken_attestation_403.xml || failures=$((failures + 1))
+
+ss_cleanup
+trap - EXIT
+
 # ─── Optional third phase: blind_transfer ─────────────────────────
 # Needs a WS server that proactively emits BridgeIn::Transfer. The
 # runner stops the daemon, brings up an echo-ws that auto-emits

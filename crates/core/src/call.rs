@@ -55,7 +55,8 @@
 //!   yet — they're logged. Hangup terminates the call.
 //! - No CDR / webhook emission.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use sip_core::SipUri;
@@ -165,6 +166,39 @@ pub struct CallOutcome {
     pub termination: CallTermination,
     pub bridge: Option<Result<DisconnectReason, BridgeError>>,
     pub tap: Option<Result<TapDisconnect, MediaTapError>>,
+    /// Recording outcome, `Some` when the call was recorded (or recording was
+    /// attempted). `None` when recording was off, or on-demand and never
+    /// started. Feeds the CDR `recording_path` and the recordings metric.
+    pub recording: Option<RecordingSummary>,
+}
+
+/// Per-call recording outcome surfaced on [`CallOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingSummary {
+    pub path: std::path::PathBuf,
+    pub result: RecordingResult,
+}
+
+/// How a recording finished — the `result` label on `siphon_ai_recordings_total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingResult {
+    /// Written cleanly.
+    Ok,
+    /// Some 20 ms frames were dropped under writer back-pressure — the file
+    /// is short, not corrupt.
+    Degraded,
+    /// An I/O error; the recording is incomplete or absent.
+    Failed,
+}
+
+impl RecordingResult {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecordingResult::Ok => "ok",
+            RecordingResult::Degraded => "degraded",
+            RecordingResult::Failed => "failed",
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -352,18 +386,26 @@ impl CallController {
             None;
         let mut rec_ctrl_tx: Option<mpsc::Sender<RecControl>> = None;
         let mut rec_evt_rx: Option<mpsc::Receiver<RecEvent>> = None;
+        // Dropped-frame counter shared with the tap: incremented when the
+        // recording channel is full (back-pressure) → classifies the
+        // recording `degraded`. `None` when recording is off for the call.
+        let mut rec_drops: Option<Arc<AtomicU64>> = None;
+        let mut rec_path: Option<std::path::PathBuf> = None;
         // One recording per call in this revision → recording_id = call_id.
         let recording_id = call_id.as_str().to_string();
         let media_tap = if let Some(setup) = recording {
             let (rec_tx, rec_rx) = mpsc::channel::<RecFrame>(RECORDING_CHANNEL_CAPACITY);
             let (ctrl_tx, ctrl_rx) = mpsc::channel::<RecControl>(CONTROL_CHANNEL_CAPACITY);
             let (evt_tx, evt_rx) = mpsc::channel::<RecEvent>(CONTROL_CHANNEL_CAPACITY);
+            let drops = Arc::new(AtomicU64::new(0));
+            rec_path = Some(setup.path.clone());
             let writer =
                 RecordingWriter::new(setup.path, media_tap.sample_rate(), setup.auto_start);
             recording_task = Some(tokio::spawn(writer.run(rec_rx, ctrl_rx, evt_tx)));
             rec_ctrl_tx = Some(ctrl_tx);
             rec_evt_rx = Some(evt_rx);
-            media_tap.with_recording(Some(rec_tx))
+            rec_drops = Some(Arc::clone(&drops));
+            media_tap.with_recording(Some((rec_tx, drops)))
         } else {
             media_tap
         };
@@ -714,28 +756,62 @@ impl CallController {
 
         // Finalize the recording. The tap has now exited, dropping its fork
         // sender → the writer sees EOF, flushes, and patches the WAV header.
-        // Give it a budget so a slow final flush can't wedge teardown.
-        if let Some(mut rec_task) = recording_task.take() {
+        // Give it a budget so a slow final flush can't wedge teardown. The
+        // tap is done, so the drop counter is final: any drops → `degraded`.
+        let recording_summary = if let Some(mut rec_task) = recording_task.take() {
+            let dropped = rec_drops
+                .as_ref()
+                .map(|d| d.load(Ordering::Relaxed))
+                .unwrap_or(0);
+            let failed_path = || rec_path.clone().unwrap_or_default();
             match tokio::time::timeout(Duration::from_millis(500), &mut rec_task).await {
-                Ok(Ok(Ok(Some(stats)))) => debug!(
-                    call_id = %call_id,
-                    path = %stats.path.display(),
-                    frames = stats.frames,
-                    "recording written"
-                ),
-                // on-demand recording that was never started, or stopped early.
-                Ok(Ok(Ok(None))) => debug!(call_id = %call_id, "no recording for this call"),
-                Ok(Ok(Err(e))) => warn!(call_id = %call_id, error = %e, "recording failed"),
+                Ok(Ok(Ok(Some(stats)))) => {
+                    let result = if dropped > 0 {
+                        warn!(call_id = %call_id, dropped, path = %stats.path.display(),
+                            "recording degraded: frames dropped under writer back-pressure");
+                        RecordingResult::Degraded
+                    } else {
+                        debug!(call_id = %call_id, path = %stats.path.display(),
+                            frames = stats.frames, "recording written");
+                        RecordingResult::Ok
+                    };
+                    Some(RecordingSummary {
+                        path: stats.path,
+                        result,
+                    })
+                }
+                // on-demand recording that was never started.
+                Ok(Ok(Ok(None))) => {
+                    debug!(call_id = %call_id, "no recording for this call");
+                    None
+                }
+                Ok(Ok(Err(e))) => {
+                    warn!(call_id = %call_id, error = %e, "recording failed");
+                    Some(RecordingSummary {
+                        path: failed_path(),
+                        result: RecordingResult::Failed,
+                    })
+                }
                 Ok(Err(join_err)) => {
-                    warn!(call_id = %call_id, error = %join_err, "recording task panicked")
+                    warn!(call_id = %call_id, error = %join_err, "recording task panicked");
+                    Some(RecordingSummary {
+                        path: failed_path(),
+                        result: RecordingResult::Failed,
+                    })
                 }
                 Err(_) => {
                     warn!(call_id = %call_id, "recording did not finalize within 500 ms; aborting");
                     rec_task.abort();
                     let _ = (&mut rec_task).await;
+                    Some(RecordingSummary {
+                        path: failed_path(),
+                        result: RecordingResult::Failed,
+                    })
                 }
             }
-        }
+        } else {
+            None
+        };
 
         log_state(&call_id, CallState::Done);
 
@@ -744,6 +820,7 @@ impl CallController {
             termination,
             bridge: bridge_result,
             tap: tap_result,
+            recording: recording_summary,
         })
     }
 }

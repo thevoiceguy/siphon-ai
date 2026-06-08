@@ -368,6 +368,15 @@ entirely when verification is disabled):
 and `verstat_passed: false` is a call that asserted full attestation but
 failed verification.
 
+Two optional recording fields appear when the call was recorded (added in
+0.5.0; schema stays at version 1 — both omitted when recording is off):
+
+- `recording_id` — identifies the recording (equals `call_id` in this
+  release).
+- `recording_path` — filesystem path of the WAV. Present even when the
+  recording `failed` (it points at where the file would be); cross-check
+  with the `siphon_ai_recordings_total` metric for the outcome.
+
 The webhook sink delivers the same JSON to `[cdr.webhook].url` with
 `Content-Type: application/json`. Retries on non-2xx up to
 `[cdr.webhook].retry_max` times with exponential backoff.
@@ -412,6 +421,7 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_calls_active`                | gauge     | —                                     | Currently-running calls. |
 | `siphon_ai_route_match_total`           | counter   | `route`                               | Calls per matched route. |
 | `siphon_ai_verstat_total`               | counter   | `result=passed\|failed\|unsigned`     | STIR/SHAKEN verification outcomes per inbound INVITE. Emitted only when `[security.stir_shaken].enabled = true`. `passed` = every check held; `failed` = `Identity` header present but verification didn't fully pass; `unsigned` = no `Identity` header. |
+| `siphon_ai_recordings_total`            | counter   | `result=ok\|degraded\|failed`         | Recordings finished, when `[recording]` is on. `ok` = written cleanly; `degraded` = some 20 ms frames dropped under writer back-pressure (file is short, not corrupt); `failed` = an I/O error. |
 | `siphon_ai_call_duration_seconds`       | histogram | —                                     | Wall-clock duration of ended calls. |
 | `siphon_ai_sdp_negotiate_seconds`       | histogram | `result=ok\|error`                    | Time spent in `prepare_call` (negotiate + port alloc + tap attach). |
 | `siphon_ai_ws_connect_seconds`          | histogram | —                                     | WS handshake time. |

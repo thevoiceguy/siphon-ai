@@ -65,6 +65,13 @@ pub const ROUTE_MATCH_TOTAL: &str = "siphon_ai_route_match_total";
 /// (`verstat_attest`/`verstat_passed`) and in traces.
 pub const VERSTAT_TOTAL: &str = "siphon_ai_verstat_total";
 
+/// Recordings finished, when `[recording]` is on. Labeled by `result`:
+/// `ok` (written cleanly), `degraded` (some 20 ms frames were dropped under
+/// writer back-pressure — the file is short, not corrupt), `failed` (an I/O
+/// error). Bounded cardinality (three values); the per-call recording path
+/// lives on the CDR (`recording_path`).
+pub const RECORDINGS_TOTAL: &str = "siphon_ai_recordings_total";
+
 /// REGISTER attempts the daemon has driven. Labeled by `name`
 /// (the `[[register]].name`) and `outcome`:
 /// `registered` / `auth_failed` / `transport_error` / `timeout` /
@@ -188,6 +195,10 @@ pub fn register_descriptions() {
     describe_counter!(
         VERSTAT_TOTAL,
         "STIR/SHAKEN verification outcomes by result (passed, failed, unsigned)."
+    );
+    describe_counter!(
+        RECORDINGS_TOTAL,
+        "Call recordings finished by result (ok, degraded, failed)."
     );
     describe_counter!(
         REGISTER_ATTEMPTS_TOTAL,

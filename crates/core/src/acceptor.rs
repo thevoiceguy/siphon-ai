@@ -81,7 +81,7 @@ use siphon_ai_sip_glue::{CallAcceptor, InviteFacts, MatchedCall};
 use siphon_ai_stir_shaken::Verifier;
 use siphon_ai_telemetry::{
     HepTelemetry, CALLS_ACTIVE, CALLS_TOTAL, CALL_DURATION_SECONDS, INVITES_TOTAL,
-    ROUTE_MATCH_TOTAL, SDP_NEGOTIATE_SECONDS, VERSTAT_TOTAL,
+    RECORDINGS_TOTAL, ROUTE_MATCH_TOTAL, SDP_NEGOTIATE_SECONDS, VERSTAT_TOTAL,
 };
 use siphon_ai_webhooks::{
     CallEndEvent, CallStartEvent, NullSink as WebhookNullSink, WebhookEvent, WebhookSinkHandle,
@@ -91,7 +91,9 @@ use thiserror::Error;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
-use crate::call::{CallController, CallControllerConfig, CallOutcome, CallTermination};
+use crate::call::{
+    CallController, CallControllerConfig, CallOutcome, CallTermination, RecordingSummary,
+};
 use crate::registry::CallRegistry;
 use crate::transfer::TransferContext;
 
@@ -1728,6 +1730,16 @@ impl CallStart {
                 .as_ref()
                 .and_then(|v| v.attest.map(|a| a.as_str().to_string())),
             verstat_passed: self.verstat.as_ref().map(|v| v.passed()),
+            // recording_id == call_id this release; both omitted when the
+            // call wasn't recorded, keeping the CDR at v1.
+            recording_id: outcome
+                .recording
+                .as_ref()
+                .map(|_| self.bridge_call_id.as_str().to_string()),
+            recording_path: outcome
+                .recording
+                .as_ref()
+                .map(|r| r.path.display().to_string()),
         }
     }
 }
@@ -1738,6 +1750,9 @@ struct CallTerminationView {
     cause: CdrTerminationCause,
     bridge_detail: String,
     tap_detail: String,
+    /// Recording outcome, when the call was recorded. Feeds the CDR
+    /// `recording_path` and the `siphon_ai_recordings_total` metric.
+    recording: Option<RecordingSummary>,
 }
 
 impl CallTerminationView {
@@ -1747,6 +1762,7 @@ impl CallTerminationView {
                 cause: map_cause(o.termination),
                 bridge_detail: bridge_detail(o.bridge),
                 tap_detail: tap_detail(o.tap),
+                recording: o.recording,
             },
             Err(e) => Self {
                 // Treat a panic / join error as "bridge ended" —
@@ -1755,6 +1771,7 @@ impl CallTerminationView {
                 cause: CdrTerminationCause::BridgeEnded,
                 bridge_detail: format!("controller error: {e}"),
                 tap_detail: String::new(),
+                recording: None,
             },
         }
     }
@@ -2618,6 +2635,9 @@ impl BridgingAcceptor {
             )
             .increment(1);
             metrics::histogram!(CALL_DURATION_SECONDS).record(duration_secs);
+            if let Some(rec) = view.recording.as_ref() {
+                metrics::counter!(RECORDINGS_TOTAL, "result" => rec.result.as_str()).increment(1);
+            }
 
             let end_event = WebhookEvent::CallEnd(CallEndEvent {
                 version: WEBHOOK_VERSION,
@@ -2924,10 +2944,18 @@ impl BridgingAcceptor {
             dialog_manager: Arc::clone(&installed.dialog_manager),
         });
 
-        // Recording setup. `always` auto-starts; `on_demand` wires the
-        // writer idle, ready for a `StartRecording`. `off` → no recording.
-        // (Per-route override is a later chunk.)
-        let recording = match self.recording.mode {
+        // Recording setup. The matched route's `[route.recording].mode`
+        // strictly overrides the global `[recording].mode` (validated at
+        // load); `None` inherits. `always` auto-starts; `on_demand` wires the
+        // writer idle for a `StartRecording`; `off` → no recording. The
+        // output dir is always the global one.
+        let effective_mode = match route.recording.mode.as_deref() {
+            Some("off") => RecordingMode::Off,
+            Some("always") => RecordingMode::Always,
+            Some("on_demand") => RecordingMode::OnDemand,
+            _ => self.recording.mode,
+        };
+        let recording = match effective_mode {
             RecordingMode::Always => Some(RecordingSetup {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: true,
@@ -4551,6 +4579,7 @@ a=sendrecv\r\n",
                 security: SecurityOverride {
                     min_attestation: over.map(String::from),
                 },
+                recording: Default::default(),
             };
             compile(RawRouteFile { routes: vec![raw] })
                 .unwrap()

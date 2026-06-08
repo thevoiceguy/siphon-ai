@@ -363,6 +363,25 @@ dir  = "/var/lib/siphon-ai/recordings"
 | `mode` | string | `"off"` | `"off"` = no recording (zero behaviour change). `"always"` = record every accepted call for its full duration. `"on_demand"` = the WS server drives recording with `start_recording` / `stop_recording` / `pause_recording` / `resume_recording` (see `docs/PROTOCOL.md` §4.7); SiphonAI emits `recording_started` / `recording_stopped` / `recording_failed` back. (Per-route overrides land in a later 0.5.0 chunk.) |
 | `dir` | string | — | Directory recordings are written to as `<dir>/<call_id>.wav`. **Required when `mode != "off"`**; created at startup (a bad path fails loud at load). A `pause` omits the paused span from the file (the audio is dropped, not silenced). |
 
+**Per-route override.** A `[route.recording]` block overrides the global
+`mode` for calls that match that route (strict override — the route value
+fully replaces the global, like `[route.security]`). The output `dir` is
+always the global one, so `[recording].dir` must be set whenever any route
+enables recording — even if the global `mode = "off"`:
+
+```toml
+[recording]
+mode = "off"                         # global default: don't record
+dir  = "/var/lib/siphon-ai/recordings"
+
+[[route]]
+name = "support"
+[route.match]
+to = "5000"
+[route.recording]
+mode = "always"                      # …but always record the support line
+```
+
 Operational notes: recordings are uncompressed PCM16 stereo (≈115 MB/hour
 at 16 kHz; ≈58 MB/hour at 8 kHz) — size your disk and **manage retention
 yourself** (the daemon does not delete recordings). Recording consent and

@@ -22,8 +22,8 @@
 //! - **No SDP body** — the negotiated codec / sample rate / payload
 //!   type are flat fields; the raw SDP would balloon the record and
 //!   isn't operator-readable.
-//! - **No call audio** — recording is a different feature
-//!   (CLAUDE.md §8 calls it post-v1).
+//! - **No call audio** — the record carries a `recording_path` *pointer*
+//!   when recording is on (`[recording]`), never the audio itself.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -76,6 +76,15 @@ pub struct CdrRecord {
     /// an `Identity` header was present but did not fully verify.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verstat_passed: Option<bool>,
+
+    /// Recording identifier, present when the call was recorded
+    /// (`[recording]`). Equals `call_id` in this release. Additive optional
+    /// field → CDR schema stays at version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_id: Option<String>,
+    /// Filesystem path of the recording, when one was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +172,8 @@ mod tests {
             },
             verstat_attest: None,
             verstat_passed: None,
+            recording_id: None,
+            recording_path: None,
         }
     }
 

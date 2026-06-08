@@ -38,7 +38,7 @@ pub use compile::{compile, RouteError};
 pub use compiled::{CompiledRoute, RouteSet};
 pub use raw::{
     BargeInOverride, BridgeOverride, MediaOverride, RawRoute, RawRouteFile, RawRouteMatch,
-    SecurityOverride,
+    RecordingOverride, SecurityOverride,
 };
 
 /// Convenience: parse a TOML string into a [`RawRouteFile`] and

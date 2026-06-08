@@ -346,6 +346,29 @@ min_attestation = "C"   # looser than a stricter global, by design
 | `iat_freshness_secs` | int | `60` | PASSporT `iat` freshness window, in seconds (replay protection, ATIS-1000074). The verdict's `iat_passed` is `false` when `iat` is more than this far from now (past **or** future), or absent. `0` disables the check (any `iat` passes) — an escape hatch for upstreams with broken clocks. |
 | `x5u_tls_extra_ca` | string | — | Optional PEM bundle of extra CA cert(s) trusted **only** for the `x5u` HTTPS fetch — added to the public web-PKI roots, for operators hosting `x5u` behind a private/lab CA. Validated at load (exists + ≥1 cert) when `enabled`. **Note the two distinct trust domains:** this widens *fetch-TLS* trust; it does **not** affect the SHAKEN chain, which always validates against `trust_anchors`. Leave unset in production unless your `x5u` is privately hosted. |
 
+## `[recording]` — call recording
+
+Records each call's audio to a stereo WAV (caller = left channel, bot/WS =
+right). Off by default. Recording runs off the audio hot path — a backed-up
+writer can never stall live audio.
+
+```toml
+[recording]
+mode = "always"            # "off" (default) | "always"
+dir  = "/var/lib/siphon-ai/recordings"
+```
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `mode` | string | `"off"` | `"off"` = no recording (zero behaviour change). `"always"` = record every accepted call. (`"on_demand"` — WS-server-driven — and per-route overrides land in later 0.5.0 chunks.) |
+| `dir` | string | — | Directory recordings are written to as `<dir>/<call_id>.wav`. **Required when `mode != "off"`**; created at startup (a bad path fails loud at load). |
+
+Operational notes: recordings are uncompressed PCM16 stereo (≈115 MB/hour
+at 16 kHz; ≈58 MB/hour at 8 kHz) — size your disk and **manage retention
+yourself** (the daemon does not delete recordings). Recording consent and
+any "this call is recorded" announcement are the operator's responsibility
+(see `docs/SECURITY_STIR_SHAKEN.md` for the analogous trust-model framing).
+
 ## `[cdr]`
 
 ```toml

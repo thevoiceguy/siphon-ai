@@ -53,6 +53,9 @@ pub struct RawConfig {
     pub security: RawSecurity,
 
     #[serde(default)]
+    pub recording: RawRecording,
+
+    #[serde(default)]
     pub cdr: RawCdr,
 
     #[serde(default)]
@@ -258,6 +261,17 @@ pub struct RawStirShaken {
     /// Validated at load when `enabled`.
     #[serde(default)]
     pub x5u_tls_extra_ca: Option<String>,
+}
+
+/// `[recording]` — per-call audio recording (0.5.0). Off by default.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct RawRecording {
+    /// `"off"` (default) / `"always"`. (`"on_demand"` is a later chunk.)
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Directory recordings are written to. Required when `mode != "off"`.
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 /// `[cdr]` — call detail record sinks. v1 supports a JSONL file

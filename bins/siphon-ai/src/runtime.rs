@@ -141,6 +141,7 @@ impl Runtime {
             registrations,
             trunks,
             security,
+            recording,
             cdr,
             observability,
             webhooks,
@@ -254,7 +255,8 @@ impl Runtime {
                 .with_security_policy(security_policy)
                 // Share the same HEP worker the SIP/RTCP/CDR emitters use so
                 // the verstat chunk lands on the same Homer call view.
-                .with_hep_telemetry(hep_telemetry.clone()),
+                .with_hep_telemetry(hep_telemetry.clone())
+                .with_recording(recording),
         );
 
         // ─── Registration manager ──────────────────────────────────

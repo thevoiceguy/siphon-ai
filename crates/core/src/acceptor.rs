@@ -74,6 +74,7 @@ use siphon_ai_media_glue::{
     AnswerOutcome, Codec, InboundAccepted, InboundCall, MediaSetup, MediaTapError, SdpError,
     SetupError, TapDisconnect,
 };
+use siphon_ai_recording::{RecordingConfig, RecordingMode, RecordingSetup};
 use siphon_ai_routes::CompiledRoute;
 use siphon_ai_security::MinAttestation;
 use siphon_ai_sip_glue::{CallAcceptor, InviteFacts, MatchedCall};
@@ -1411,6 +1412,9 @@ pub struct BridgingAcceptor {
     /// `HepProtocol::Verstat` chunk correlated by SIP Call-ID. `None` → no
     /// HEP emission (the rest of the verdict surfacing is unaffected).
     hep: Option<Arc<HepTelemetry>>,
+    /// Recording policy. Default is `Off` (no recording). When `Always`,
+    /// every accepted call gets a per-call WAV writer.
+    recording: RecordingConfig,
 }
 
 /// Daemon-wide REFER plumbing (shared across every accepted call).
@@ -1561,6 +1565,7 @@ impl BridgingAcceptor {
             verifier: None,
             security: AcceptSecurityPolicy::default(),
             hep: None,
+            recording: RecordingConfig::default(),
         }
     }
 
@@ -1658,6 +1663,14 @@ impl BridgingAcceptor {
     /// / RTCP / CDR emitters use.
     pub fn with_hep_telemetry(mut self, hep: Option<Arc<HepTelemetry>>) -> Self {
         self.hep = hep;
+        self
+    }
+
+    /// Install the recording policy (`[recording]`). Default is `Off`; the
+    /// daemon passes the compiled config so `mode = "always"` records every
+    /// accepted call.
+    pub fn with_recording(mut self, recording: RecordingConfig) -> Self {
+        self.recording = recording;
         self
     }
 
@@ -2911,12 +2924,22 @@ impl BridgingAcceptor {
             dialog_manager: Arc::clone(&installed.dialog_manager),
         });
 
+        // Recording: `always` mode records every accepted call to
+        // `<dir>/<call_id>.wav`. (`on_demand` + per-route are later chunks.)
+        let recording = match self.recording.mode {
+            RecordingMode::Always => Some(RecordingSetup {
+                path: self.recording.path_for(bridge_call_id.as_str()),
+            }),
+            RecordingMode::Off => None,
+        };
+
         let cfg = CallControllerConfig {
             call_id: bridge_call_id.clone(),
             bridge: bridge_config.clone(),
             start: start.clone(),
             media_tap: tap,
             transfer,
+            recording,
         };
         let (controller, handle) = CallController::new(cfg);
 

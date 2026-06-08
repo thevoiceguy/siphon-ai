@@ -22,5 +22,6 @@ tracing.workspace    = true
 siphon-ai-bridge.workspace     = true
 siphon-ai-core.workspace       = true
 siphon-ai-media-glue.workspace = true
+siphon-ai-recording.workspace  = true
 siphon-ai-routes.workspace     = true
 siphon-ai-security.workspace   = true

@@ -8,6 +8,7 @@ members = [
     "crates/core",
     "crates/http",
     "crates/media-glue",
+    "crates/recording",
     "crates/routes",
     "crates/security",
     "crates/stir-shaken",
@@ -33,6 +34,7 @@ siphon-ai-config      = { path = "crates/config" }
 siphon-ai-core        = { path = "crates/core" }
 siphon-ai-http        = { path = "crates/http" }
 siphon-ai-media-glue  = { path = "crates/media-glue" }
+siphon-ai-recording   = { path = "crates/recording" }
 siphon-ai-routes      = { path = "crates/routes" }
 siphon-ai-security    = { path = "crates/security" }
 siphon-ai-stir-shaken = { path = "crates/stir-shaken" }

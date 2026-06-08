@@ -25,6 +25,7 @@ serde_json.workspace  = true
 siphon-ai-bridge.workspace     = true
 siphon-ai-cdr.workspace        = true
 siphon-ai-media-glue.workspace = true
+siphon-ai-recording.workspace  = true
 siphon-ai-routes.workspace     = true
 siphon-ai-security.workspace   = true
 siphon-ai-stir-shaken.workspace = true

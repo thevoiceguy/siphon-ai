@@ -70,6 +70,7 @@ use forge_engine::{
 use siphon_ai_bridge::{
     pack_pcm16_le, unpack_pcm16_le, AudioError, DtmfMethod, OutgoingEvent, Reframer,
 };
+use siphon_ai_recording::RecFrame;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, instrument, warn};
@@ -258,6 +259,11 @@ pub struct MediaTap {
     /// [`Self::with_rtp_stats_interval`] before `run()`. See
     /// `crates/media-glue/src/rtp_stats.rs` for the rationale.
     rtp_stats: RtpStatsTracker,
+    /// Recording fork. `None` (default) → no recording. When set, the tap
+    /// `try_send`s a copy of each leg's 20 ms frame here — best-effort and
+    /// non-blocking, so a backed-up recording writer never stalls the audio
+    /// path (CLAUDE.md §4.3). The `CallController` sets this before `run()`.
+    recording: Option<mpsc::Sender<RecFrame>>,
 }
 
 impl std::fmt::Debug for MediaTap {
@@ -322,6 +328,7 @@ impl MediaTap {
             muted: false,
             idle_detector: IdleDetector::new(None, None, Instant::now()),
             rtp_stats: RtpStatsTracker::new(None),
+            recording: None,
         })
     }
 
@@ -352,6 +359,15 @@ impl MediaTap {
     /// override). `None` disables the event for this call.
     pub fn with_rtp_stats_interval(mut self, interval: Option<Duration>) -> Self {
         self.rtp_stats = RtpStatsTracker::new(interval);
+        self
+    }
+
+    /// Install the recording fork. `Some(tx)` makes the tap copy each leg's
+    /// 20 ms frame to `tx` (non-blocking `try_send`); `None` (default) is no
+    /// recording. The `CallController` sets this before `run()` when the call
+    /// is being recorded.
+    pub fn with_recording(mut self, recording: Option<mpsc::Sender<RecFrame>>) -> Self {
+        self.recording = recording;
         self
     }
 
@@ -474,6 +490,12 @@ impl MediaTap {
                     if self.muted {
                         continue;
                     }
+                    // Recording fork (right channel): only non-muted playout
+                    // is recorded, so a muted span shows as silence on the
+                    // bot side — what the caller actually heard.
+                    if let Some(rec) = &self.recording {
+                        let _ = rec.try_send(RecFrame::Bot(bytes.clone()));
+                    }
                     let samples = unpack_pcm16_le(&bytes)?;
                     let frame = OutboundMediaFrame {
                         target: MediaTarget::A,
@@ -521,6 +543,10 @@ impl MediaTap {
                     reframer.push(&frame.samples);
                     while let Some(samples) = reframer.pop_frame() {
                         let bytes = pack_pcm16_le(&samples);
+                        // Recording fork (left channel), best-effort.
+                        if let Some(rec) = &self.recording {
+                            let _ = rec.try_send(RecFrame::Caller(bytes.clone()));
+                        }
                         if caller_audio_tx.send(bytes).await.is_err() {
                             debug!("caller_audio_tx closed; ending tap");
                             return Ok(TapDisconnect::ControllerHungUp);

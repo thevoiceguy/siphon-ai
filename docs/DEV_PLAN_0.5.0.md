@@ -1,8 +1,7 @@
 # SiphonAI 0.5.0 Development Plan — DRAFT
 
-> **STATUS: DRAFT for review.** Scope is set (theme below); the §9 decisions
-> are proposed, not locked — confirm/iterate before Sprint 1 (the 0.4.x
-> plans worked the same way).
+> **STATUS: APPROVED — §9 decisions locked (recommendations adopted).**
+> Executing chunk-by-chunk off `main` (land each before basing the next).
 
 **Theme: call recording — compliance/QA capture of call audio, with a timed
 SRTP re-key riding along.**
@@ -151,30 +150,30 @@ Additive — protocol stays `version: "1"`:
 
 ## 9. Decisions before Sprint 1 (proposed; confirm)
 
-1. ☐ **Recording control model.** `off`/`always`/`on_demand` modes + WS
-   control. **Recommended:** ship all three — compliance wants `always`
+1. ☑ **Recording control model.** `off`/`always`/`on_demand` modes + WS
+   control. **Decided:** ship all three — compliance wants `always`
    per-route, QA wants `on_demand`.
-2. ☐ **Channel layout.** Dual-channel stereo (caller L / bot R) vs mono mix.
-   **Recommended:** stereo default (QA + per-speaker STT value), mono mix as
+2. ☑ **Channel layout.** Dual-channel stereo (caller L / bot R) vs mono mix.
+   **Decided:** stereo default (QA + per-speaker STT value), mono mix as
    a config option.
-3. ☐ **Format.** WAV/PCM16 vs compressed. **Recommended:** WAV first; Opus
+3. ☑ **Format.** WAV/PCM16 vs compressed. **Decided:** WAV first; Opus
    is §4 stretch.
-4. ☐ **Sink.** Local file first vs object-storage now. **Recommended:** file
+4. ☑ **Sink.** Local file first vs object-storage now. **Decided:** file
    first behind a sink trait; object-storage is §4 stretch.
-5. ☐ **Pause/resume in scope?** **Recommended:** yes — PCI "pause while the
+5. ☑ **Pause/resume in scope?** **Decided:** yes — PCI "pause while the
    caller reads a card number" is a core compliance need.
-6. ☐ **Overflow policy** when the writer can't keep up. **Recommended:**
+6. ☑ **Overflow policy** when the writer can't keep up. **Decided:**
    flag the recording `degraded` (metric + `RecordingStopped` reason) and
    keep going — never block the audio task (§4.3), never silently drop.
-7. ☐ **Retention / lifecycle.** Daemon-managed reaper vs operator-managed.
-   **Recommended:** operator-managed (storage/cron) — the daemon writes
+7. ☑ **Retention / lifecycle.** Daemon-managed reaper vs operator-managed.
+   **Decided:** operator-managed (storage/cron) — the daemon writes
    files + emits the path; no reaper in 0.5.0. Document it.
-8. ☐ **Roadmap ordering** of outbound vs conferencing (§6). **Recommended:**
+8. ☑ **Roadmap ordering** of outbound vs conferencing (§6). **Decided:**
    outbound 0.6.0, conferencing after.
-9. ☐ **Consent/announcement.** **Recommended:** out of core — the WS server
+9. ☑ **Consent/announcement.** **Decided:** out of core — the WS server
    plays any "this call is recorded" prompt; we document the operator's
    legal responsibility (two-party-consent jurisdictions).
-10. ☐ **Sprint length.** 6 weeks.
+10. ☑ **Sprint length.** 6 weeks.
 
 ## 10. Definition of Done — v0.5.0
 

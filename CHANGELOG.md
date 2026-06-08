@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-08
+
+Theme: **call recording.** Each call's audio can be captured to a stereo WAV
+(caller on the left channel, bot/WS on the right) for compliance and QA.
+**Off by default** — a 0.4.x deployment upgrades with zero behaviour change
+until `[recording].mode` is set. The WS protocol stays at `version: "1"`
+(the new recording messages are additive) and the CDR schema stays at
+version 1 (the new fields are additive optionals).
+
+### Added
+
+- **Call recording** (`[recording]`) — writes `<dir>/<call_id>.wav`, stereo
+  PCM16 at the call's negotiated rate. `mode = "off"` (default) / `"always"`
+  (whole call) / `"on_demand"` (WS-server-driven). The recorder runs off the
+  audio hot path (CLAUDE.md §4.3): the media tap only does a non-blocking
+  copy onto a bounded channel, and a per-call writer task does the file I/O —
+  a backed-up writer drops frames (flagged `degraded`) rather than ever
+  stalling or gapping the live call. See `docs/RECORDING.md`.
+- **Per-route override** — `[route.recording].mode` strictly overrides the
+  global mode for matched calls (mirrors `[route.security]`). The output
+  `dir` is the global one, so `[recording].dir` is required (and created at
+  load) whenever any route enables recording, even with the global mode
+  `off`.
+- **On-demand control (WS protocol).** New `BridgeIn`: `start_recording` /
+  `stop_recording` / `pause_recording` / `resume_recording`. New
+  `BridgeOut`: `recording_started` / `recording_stopped` /
+  `recording_failed` (each with `recording_id`). `pause_recording` **omits**
+  the paused span from the file (dropped, not silenced) — the PCI
+  "pause while the caller reads a card number" primitive. PROTOCOL.md §3.11 /
+  §4.7.
+- **CDR pointer** — `recording_id` / `recording_path` on the CDR (additive
+  optionals, omitted when the call wasn't recorded → schema stays at v1).
+- **Metric** — `siphon_ai_recordings_total{result="ok"|"degraded"|"failed"}`.
+- **`docs/RECORDING.md`** — the recording guide (enabling, output format,
+  on-demand control, observability, the hot-path/degraded story, disk
+  sizing, retention, consent, and limitations), plus an always-on recording
+  phase in the SIPp regression suite that asserts a valid stereo WAV.
+
+### Notes
+
+- Recordings are written **decrypted** — even for SRTP-encrypted calls, the
+  WAV on disk is plaintext PCM (forge decrypts the media to bridge it; the
+  recorder taps the decoded audio). The recording directory is sensitive
+  data; protect it at rest (disk encryption, permissions) and manage
+  retention yourself — the daemon never deletes recordings. Consent and any
+  "this call is recorded" announcement are the operator's responsibility.
+- **SRTP re-key on a timer** was planned to ride along but was **deferred**:
+  forge-media has no coordinated mid-call re-key (DTLS renegotiation is
+  blocked; a unilateral key swap would break media), so it needs upstream
+  work first. See `docs/DEV_PLAN_0.5.0.md` §3.2 / §6.
+
 ## [0.4.1] - 2026-06-07
 
 Completes the 0.4.0 STIR/SHAKEN theme — the four items deferred from that
@@ -533,7 +584,10 @@ the WebSocket server's job.
 - Reference WebSocket servers in `examples/`: echo (Python / Node),
   an OpenAI Realtime bridge, and a Deepgram + LLM voice bot.
 
-[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/thevoiceguy/siphon-ai/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.2.0...v0.3.1
 [0.2.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.1.0...v0.2.0

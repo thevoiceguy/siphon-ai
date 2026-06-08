@@ -1,17 +1,19 @@
 # SiphonAI 0.5.0 Development Plan — DRAFT
 
-> **STATUS: APPROVED — §9 decisions locked (recommendations adopted).**
+> **STATUS: APPROVED — §9 decisions locked. Scope narrowed mid-sprint:
+> the SRTP-rekey ride-along was DEFERRED (see §3.2 / §6) — forge-media has no
+> coordinated re-key API. 0.5.0 ships recording only.**
 > Executing chunk-by-chunk off `main` (land each before basing the next).
 
-**Theme: call recording — compliance/QA capture of call audio, with a timed
-SRTP re-key riding along.**
+**Theme: call recording — compliance/QA capture of call audio.**
 
 0.1.0 shipped the bridge. 0.2.0 operator primitives + call-progress. 0.3.0
 made the wire defensible (SRTP / mTLS / hot-reload TLS). 0.4.x shipped
 STIR/SHAKEN. 0.5.0 adds the one big remaining table-stakes contact-center
 feature that needs **no AI, no conferencing, and no outbound origination**:
-recording the call to storage for compliance and QA. It also closes the
-0.3.0 SRTP carry-forward (timed re-key).
+recording the call to storage for compliance and QA. (A timed SRTP re-key
+was planned to ride along but was deferred once the upstream capability
+turned out not to exist — see §3.2.)
 
 ### How we got to this theme
 
@@ -78,12 +80,25 @@ to a writer.
 - **Lifecycle**: the writer is a per-call sub-task; on call end it flushes,
   finalizes the WAV header, closes, and the path lands on the CDR.
 
-### 3.2 SRTP re-key on a timer (ride-along)
+### 3.2 SRTP re-key on a timer (ride-along) — **DEFERRED**
 
-The 0.3.0 carry-forward. The DTLS-SRTP re-key crypto exists in `forge-rtp`;
-0.5.0 exposes the trigger `[media.srtp].rekey_after_seconds` — renegotiate
-keys mid-call on the threshold without dropping audio. Log line + metric; no
-protocol change.
+Planned as the 0.3.0 carry-forward on the assumption that "the DTLS-SRTP
+re-key crypto exists in `forge-rtp`; just expose the trigger." **That
+assumption was wrong** (verified during chunk 4):
+
+- forge-engine **explicitly blocks DTLS renegotiation** (post-handshake DTLS
+  packets are dropped); `export_srtp_keys()` is one-shot.
+- Only low-level `SrtpContext::set_local_key`/`set_remote_key` primitives
+  exist — a **unilateral local swap breaks media** (the peer keeps the old
+  keys → auth failures), so it's not a usable re-key.
+- The SDES path needs a re-INVITE carrying fresh `a=crypto`, but siphon-ai's
+  re-INVITE handler only does hold/resume direction changes, and siphon-ai is
+  **UAS-only** — it can't originate a re-INVITE to push a rotation.
+
+A real coordinated re-key therefore needs new **upstream forge-media** work
+(DTLS-SRTP renegotiation / re-export) and/or UAS-initiated re-INVITE +
+SDES regen in siphon-ai. That's a separate effort, not a "trigger." Moved to
+§6 (deferred); 0.5.0 ships recording only.
 
 ## 4. Stretch (slip target)
 
@@ -116,25 +131,30 @@ left 0.5.0; pinning their homes:
   on the roadmap. **Proposed target: a dedicated theme once outbound lands.**
 - **AMD** — a later audio-analysis release; the `forge-amd` primitive is
   ready to pick up when outbound makes it pay off.
+- **SRTP re-key on a timer** (was §3.2) — needs a coordinated key rotation
+  forge-media doesn't expose (DTLS renegotiation is blocked; SDES would need
+  a UAS-initiated re-INVITE). **Next step:** an upstream forge-media issue/PR
+  for a DTLS-SRTP re-key (renegotiate + re-export), then expose
+  `[media.srtp].rekey_after_seconds` in siphon-ai. Target a later release.
 
 Confirm the outbound-vs-conferencing ordering in §9 decision 8.
 
 Also deferred (unchanged): video, WebRTC client, WS reconnect mid-call.
 
-## 7. Sprint plan (6 weeks)
+## 7. Chunk plan
 
-No upstream critical path this time — recording is siphon-ai-only (it taps
-existing forge PCM). SRTP re-key touches forge-rtp config but the crypto is
-already there.
+No upstream critical path — recording is siphon-ai-only (it taps existing
+forge PCM). Each chunk is its own PR, landed on `main` before the next is
+based on it.
 
-| Week | Focus | Deliverables |
-|---|---|---|
-| 1 | Recording capture core | Per-call writer task fed off the media tap over a bounded channel; WAV/PCM16 stereo sink to a local file. Hot-path-safe (no I/O on the audio task). `[recording].mode = "always"` path only. |
-| 2 | Control + modes | `off`/`always`/`on_demand`; `Start`/`Stop`/`Pause`/`Resume` BridgeIn + `RecordingStarted`/`Stopped`/`Failed` BridgeOut; pause gaps handled correctly in the WAV timeline. |
-| 3 | Config + CDR + metrics | `[recording]` + `[route.recording]` override; path templating; `recording_id`/`recording_path` on the CDR; `siphon_ai_recordings_total`; degraded-on-overflow signalling. |
-| 4 | SRTP re-key | `[media.srtp].rekey_after_seconds` → timed DTLS-SRTP re-key, no audio drop; metric + log; interop check. |
-| 5 | Hardening + tests | SIPp scenario that records a call and asserts a valid non-empty WAV; pause/resume + degraded-path tests; docs (`docs/RECORDING.md`, CONFIG/PROTOCOL/DEPLOY). Stretch sinks if time. |
-| 6 | Release | Full smoke + SIPp suite green, CHANGELOG, version bump, tag, GitHub release. |
+| # | Focus | Status | Deliverables |
+|---|---|---|---|
+| 1 | Recording capture core | ✅ #132 | Per-call writer task fed off the media tap over a bounded channel; WAV/PCM16 stereo sink to a local file. Hot-path-safe (no I/O on the audio task). `[recording].mode = "always"` path only. |
+| 2 | Control + modes | ✅ #133 | `off`/`always`/`on_demand`; `Start`/`Stop`/`Pause`/`Resume` BridgeIn + `RecordingStarted`/`Stopped`/`Failed` BridgeOut; pause omits the span. |
+| 3 | Config + CDR + metrics | ✅ #134 | `[recording]` + `[route.recording]` override; `recording_id`/`recording_path` on the CDR; `siphon_ai_recordings_total`; degraded-on-overflow signalling. |
+| ~~4~~ | ~~SRTP re-key~~ | **deferred** | Moved to §6 — forge-media has no coordinated re-key API (§3.2). |
+| 5 | Hardening + tests | next | SIPp scenario that records a call and asserts a valid non-empty WAV; docs (`docs/RECORDING.md`, CONFIG/PROTOCOL/DEPLOY already updated per chunk). |
+| 6 | Release | — | Full smoke + SIPp suite green, CHANGELOG, version bump, tag, GitHub release. |
 
 ## 8. Protocol versioning
 
@@ -146,7 +166,6 @@ Additive — protocol stays `version: "1"`:
   `RecordingFailed`.
 - CDR gains optional `recording_id` / `recording_path` (emitted only when
   populated → schema stays at 1).
-- SRTP re-key is config-only (no wire change).
 
 ## 9. Decisions before Sprint 1 (proposed; confirm)
 
@@ -162,6 +181,8 @@ Additive — protocol stays `version: "1"`:
    first behind a sink trait; object-storage is §4 stretch.
 5. ☑ **Pause/resume in scope?** **Decided:** yes — PCI "pause while the
    caller reads a card number" is a core compliance need.
+   ~~5b. SRTP re-key trigger.~~ **Deferred** (§3.2 / §6) — no forge-media
+   re-key API.
 6. ☑ **Overflow policy** when the writer can't keep up. **Decided:**
    flag the recording `degraded` (metric + `RecordingStopped` reason) and
    keep going — never block the audio task (§4.3), never silently drop.
@@ -187,12 +208,12 @@ Additive — protocol stays `version: "1"`:
    surfaced as `degraded`, not silent loss.
 4. `siphon_ai_recordings_total` ticks by result; `[route.recording]`
    overrides the global.
-5. `[media.srtp].rekey_after_seconds` triggers a mid-call SRTP re-key with
-   no audio drop, visible in logs/metrics.
-6. CI gates every PR (fmt + clippy + test + SIPp), with a recording SIPp
+5. CI gates every PR (fmt + clippy + test + SIPp), with a recording SIPp
    scenario asserting a non-empty valid WAV.
-7. Upgrade from 0.4.1 is config-compatible — recording is `off` by default;
+6. Upgrade from 0.4.1 is config-compatible — recording is `off` by default;
    no behaviour change.
+
+(The SRTP-rekey DoD item was dropped — deferred per §3.2 / §6.)
 
 ## 11. Risks
 
@@ -214,6 +235,6 @@ Additive — protocol stays `version: "1"`:
 ## 12. Out of scope (explicit non-goals for 0.5.0)
 
 Outbound origination, conferencing/whisper/barge/park, attended transfer,
-AMD (§6), video, WebRTC client, WS reconnect mid-call, recording *analysis*
-(transcription/QA — WS-server examples, §5), and a daemon-side retention
-reaper (§9 decision 7).
+AMD, **SRTP re-key** (all §6), video, WebRTC client, WS reconnect mid-call,
+recording *analysis* (transcription/QA — WS-server examples, §5), and a
+daemon-side retention reaper (§9 decision 7).

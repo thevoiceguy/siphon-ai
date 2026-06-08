@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-07
+
+Completes the 0.4.0 STIR/SHAKEN theme — the four items deferred from that
+release, plus the small feature that makes the passing path testable. Still
+**off by default**; protocol stays at `version: "1"` (the one new `verstat`
+field is additive).
+
+### Added
+
+- **PASSporT `iat` freshness check (replay protection).** With verification
+  enabled, a PASSporT whose `iat` is outside `[security.stir_shaken]
+  .iat_freshness_secs` of now (past **or** future), or missing, now fails —
+  surfaced as the new `verstat.iat_passed` boolean and folded into the
+  composite pass. Default window 60 s (ATIS-1000074); `0` disables the check
+  for upstreams with broken clocks.
+- **`[security.stir_shaken].x5u_tls_extra_ca`** — optional supplemental CA
+  bundle trusted **for the `x5u` HTTPS fetch only** (added to the public
+  web-PKI roots), for operators hosting `x5u` behind a private/lab CA.
+  Validated at load when enabled. Does not affect the SHAKEN chain, which
+  always validates against `trust_anchors`.
+- **`docs/SECURITY_STIR_SHAKEN.md`** — the STIR/SHAKEN security model:
+  attestation is a signal not a verdict, the two trust domains, the
+  `verstat` trust rule, replay/freshness, observe-first gate rollout,
+  monitoring, and limitations.
+- **Twilio Caller Identity cross-check recipe** — a `docs/INTEGRATIONS_TWILIO.md`
+  section and a runnable `examples/verstat-compare-py` server that compares
+  SiphonAI's independent `verstat` against Twilio's `X-Twilio-VerStat`
+  header (forwarded via `[bridge].forward_headers`), logging AGREE/DIVERGE.
+- **Passing-attestation SIPp regression** (`stir_shaken_attestation_pass.xml`)
+  plus the `gen_test_passport` example (a `siphon-ai-stir-shaken` example
+  that mints a CA + leaf + x5u TLS cert + fresh signed PASSporT, doubling as
+  an operator lab tool). The first *green* verstat path under CI — a
+  fully-verifiable call is admitted, alongside the 0.4.0 428/403 rejects.
+
+### Changed
+
+- **`verstat.iat_passed` is part of the composite `passed()`** — a
+  deployment that already opted into `stir_shaken` will now reject a
+  previously-passing call that carries a stale `iat`. This is the
+  spec-correct outcome; tune or disable it via `iat_freshness_secs`.
+
 ## [0.4.0] - 2026-06-07
 
 Theme: **STIR/SHAKEN call authentication.** Inbound INVITEs carrying an

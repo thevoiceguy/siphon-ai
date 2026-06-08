@@ -42,6 +42,14 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
+**v0.4.1** — patch release completing the 0.4.0 STIR/SHAKEN theme: PASSporT
+`iat` freshness (replay protection, `verstat.iat_passed`), an
+`x5u_tls_extra_ca` knob for privately-hosted `x5u`, the security-model doc
+([`docs/SECURITY_STIR_SHAKEN.md`](docs/SECURITY_STIR_SHAKEN.md)), a Twilio
+`X-Twilio-VerStat` cross-check recipe, and the first CI-gated *passing*
+attestation scenario. Still off by default; protocol stays `version: "1"`.
+Full notes: [`CHANGELOG.md`](CHANGELOG.md).
+
 **v0.4.0** — fourth release. Theme: **STIR/SHAKEN call authentication.**
 Inbound INVITEs with an RFC 8224 `Identity` header are verified end-to-end
 (PASSporT/RFC 8225 decode, ES256, X.509 chain to a configured STI-PA trust

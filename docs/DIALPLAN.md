@@ -54,6 +54,11 @@ Each `[[route]]` has:
   `[security]` block (currently `min_attestation`). **Strict**
   override: the route value fully replaces the global, even when more
   permissive. See `docs/CONFIG.md` `[security]`.
+- `[route.recording]` *(optional)* — overrides the global
+  `[recording].mode` (`off` / `always` / `on_demand`). **Strict**
+  override. The output `dir` is always the global one, so
+  `[recording].dir` must be set when any route enables recording. See
+  `docs/CONFIG.md` `[recording]`.
 
 ---
 
@@ -68,9 +73,9 @@ These rules are CLAUDE.md §4.6 cardinal — don't try to bend them:
 2. **AND across keys within a route.** All match keys must hold.
    For OR semantics, write multiple routes.
 3. **Per-route override.** Set fields in `[route.bridge]`,
-   `[route.media]`, or `[route.security]` override the corresponding
-   global fields *for that call only*. Unset fields inherit from
-   globals — a route never silently ignores a global setting.
+   `[route.media]`, `[route.security]`, or `[route.recording]` override
+   the corresponding global fields *for that call only*. Unset fields
+   inherit from globals — a route never silently ignores a global setting.
 4. **No match → SIP 404.** If you want a catch-all, write a default
    route at the end with `any = true`. Production deployments
    without a default get a startup warning.

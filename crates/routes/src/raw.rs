@@ -41,6 +41,9 @@ pub struct RawRoute {
 
     #[serde(default)]
     pub security: SecurityOverride,
+
+    #[serde(default)]
+    pub recording: RecordingOverride,
 }
 
 /// `[route.match]` block — the matcher's input grammar.
@@ -139,4 +142,16 @@ pub struct SecurityOverride {
     /// `[route.media].srtp` semantics — the route value fully replaces the
     /// global, even when more permissive).
     pub min_attestation: Option<String>,
+}
+
+/// `[route.recording]` overrides. Same merge rules — `None` inherits the
+/// global `[recording].mode`. Kept as the raw string so the routes crate
+/// stays free of a dependency on the recording types; the config crate
+/// validates it and the accept path resolves it against the global.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RecordingOverride {
+    /// `[route.recording].mode` — per-route override of the global
+    /// `[recording].mode`. `None` inherits; `"off"` / `"always"` /
+    /// `"on_demand"` override (strict — fully replaces the global).
+    pub mode: Option<String>,
 }

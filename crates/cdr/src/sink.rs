@@ -118,6 +118,8 @@ mod tests {
             },
             verstat_attest: None,
             verstat_passed: None,
+            recording_id: None,
+            recording_path: None,
         }
     }
 

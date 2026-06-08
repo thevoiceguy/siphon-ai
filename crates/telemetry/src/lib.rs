@@ -35,7 +35,7 @@ pub use log_filter::{LogFilterError, LogFilterHandle};
 // direct dep on `metrics-exporter-prometheus`.
 pub use metrics::{
     install_recorder, prometheus_builder, register_descriptions, InitError, CALLS_ACTIVE,
-    CALLS_TOTAL, CALL_DURATION_BUCKETS, CALL_DURATION_SECONDS, INVITES_TOTAL,
+    CALLS_TOTAL, CALL_DURATION_BUCKETS, CALL_DURATION_SECONDS, INVITES_TOTAL, RECORDINGS_TOTAL,
     REGISTER_ATTEMPTS_TOTAL, REGISTER_STATE, ROUTE_MATCH_TOTAL, SDP_NEGOTIATE_BUCKETS,
     SDP_NEGOTIATE_SECONDS, VERSTAT_TOTAL, WS_CONNECT_BUCKETS, WS_CONNECT_SECONDS,
 };

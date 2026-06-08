@@ -446,6 +446,12 @@ pub enum CompileError {
     #[error("[recording].dir {path:?} could not be created: {err}")]
     RecordingDirInvalid { path: String, err: String },
 
+    #[error("[route.recording].mode on route {route:?} is {value:?}; expected \"off\", \"always\", or \"on_demand\"")]
+    RouteRecordingModeInvalid { route: String, value: String },
+
+    #[error("route {route:?} enables recording but [recording].dir is not set")]
+    RouteRecordingWithoutDir { route: String },
+
     #[error("[media].rtp_port_range {min}-{max} is invalid (min must be < max and even)")]
     BadRtpPortRange { min: u16, max: u16 },
 
@@ -579,6 +585,24 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
                 .is_some_and(|m| m != siphon_ai_security::MinAttestation::None);
             if overrides_gate {
                 return Err(CompileError::RouteMinAttestationWithoutStirShaken {
+                    route: route.name.clone(),
+                });
+            }
+        }
+    }
+
+    // A per-route recording override that enables recording needs an output
+    // directory. The dir lives on the global `[recording]` block; require it
+    // (created at load by `compile_recording`) when any route turns recording
+    // on, even if the global mode is `off`.
+    if recording.dir.as_os_str().is_empty() {
+        for route in routes.iter() {
+            let enables = matches!(
+                route.recording.mode.as_deref(),
+                Some("always") | Some("on_demand")
+            );
+            if enables {
+                return Err(CompileError::RouteRecordingWithoutDir {
                     route: route.name.clone(),
                 });
             }
@@ -883,10 +907,14 @@ fn compile_recording(
         Some(other) => return Err(CompileError::UnknownRecordingMode(other.to_string())),
     };
     let dir = raw.dir.map(PathBuf::from).unwrap_or_default();
-    if mode != RecordingMode::Off {
-        if dir.as_os_str().is_empty() {
-            return Err(CompileError::RecordingDirRequired);
-        }
+    if mode != RecordingMode::Off && dir.as_os_str().is_empty() {
+        return Err(CompileError::RecordingDirRequired);
+    }
+    // Create the dir at load whenever one is configured — even with the
+    // global mode `off`, a per-route `[route.recording]` may enable
+    // recording, so the directory must already exist. A bad path fails loud
+    // here, not on the first recorded call.
+    if !dir.as_os_str().is_empty() {
         std::fs::create_dir_all(&dir).map_err(|err| CompileError::RecordingDirInvalid {
             path: dir.display().to_string(),
             err: err.to_string(),
@@ -1070,6 +1098,16 @@ fn compile_dialplan(routes: Vec<siphon_ai_routes::RawRoute>) -> Result<RouteSet,
         if let Some(value) = route.security.min_attestation.as_deref() {
             if siphon_ai_security::MinAttestation::parse(value).is_none() {
                 return Err(CompileError::UnknownRouteMinAttestation {
+                    route: route.name.clone(),
+                    value: value.to_string(),
+                });
+            }
+        }
+        // Validate the per-route recording override the same way. The
+        // dir-required cross-check happens in `compile` (global scope).
+        if let Some(value) = route.recording.mode.as_deref() {
+            if !matches!(value, "off" | "always" | "on_demand") {
+                return Err(CompileError::RouteRecordingModeInvalid {
                     route: route.name.clone(),
                     value: value.to_string(),
                 });
@@ -1513,6 +1551,77 @@ mod srtp_mode_tests {
         assert!(matches!(
             compile_srtp_mode(Some("PREFERRED")),
             Err(CompileError::UnknownSrtpMode(_))
+        ));
+    }
+}
+
+#[cfg(test)]
+mod recording_tests {
+    use super::{compile_dialplan, compile_recording, CompileError, RawRecording};
+    use siphon_ai_recording::RecordingMode;
+    use siphon_ai_routes::{RawRoute, RawRouteMatch, RecordingOverride};
+
+    fn raw(mode: Option<&str>, dir: Option<&str>) -> RawRecording {
+        RawRecording {
+            mode: mode.map(str::to_string),
+            dir: dir.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn default_is_off() {
+        let c = compile_recording(RawRecording::default()).unwrap();
+        assert_eq!(c.mode, RecordingMode::Off);
+    }
+
+    #[test]
+    fn modes_parse() {
+        let dir = std::env::temp_dir().join("siphon_rec_cfg_test");
+        let d = dir.to_str();
+        assert_eq!(
+            compile_recording(raw(Some("always"), d)).unwrap().mode,
+            RecordingMode::Always
+        );
+        assert_eq!(
+            compile_recording(raw(Some("on_demand"), d)).unwrap().mode,
+            RecordingMode::OnDemand
+        );
+    }
+
+    #[test]
+    fn unknown_mode_fails_loud() {
+        assert!(matches!(
+            compile_recording(raw(Some("sometimes"), Some("/tmp/x"))),
+            Err(CompileError::UnknownRecordingMode(s)) if s == "sometimes"
+        ));
+    }
+
+    #[test]
+    fn enabled_requires_dir() {
+        assert!(matches!(
+            compile_recording(raw(Some("always"), None)),
+            Err(CompileError::RecordingDirRequired)
+        ));
+    }
+
+    #[test]
+    fn per_route_invalid_mode_fails_loud() {
+        let route = RawRoute {
+            name: "r".into(),
+            match_: RawRouteMatch {
+                any: true,
+                ..Default::default()
+            },
+            bridge: Default::default(),
+            media: Default::default(),
+            security: Default::default(),
+            recording: RecordingOverride {
+                mode: Some("sometimes".into()),
+            },
+        };
+        assert!(matches!(
+            compile_dialplan(vec![route]),
+            Err(CompileError::RouteRecordingModeInvalid { value, .. }) if value == "sometimes"
         ));
     }
 }

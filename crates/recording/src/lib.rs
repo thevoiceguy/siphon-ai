@@ -8,14 +8,17 @@
 //! mixes on a 20 ms clock, and does the (batched) file I/O off the audio
 //! task.
 //!
-//! 0.5.0 chunk 1 ships the capture core: `[recording].mode = "always"` → a
-//! stereo WAV per call. Control messages (start/stop/pause), per-route
-//! overrides, the CDR pointer, and metrics land in later chunks.
+//! Modes: `always` records the whole call; `on_demand` wires the writer
+//! idle and the WS server drives it with start/stop/pause/resume (a pause
+//! omits the span). Per-route overrides, the CDR pointer, and metrics land
+//! in later chunks.
 
 mod config;
+mod control;
 mod frame;
 mod writer;
 
 pub use config::{RecordingConfig, RecordingMode, RecordingSetup};
+pub use control::{RecControl, RecEvent};
 pub use frame::RecFrame;
 pub use writer::{RecordingError, RecordingStats, RecordingWriter};

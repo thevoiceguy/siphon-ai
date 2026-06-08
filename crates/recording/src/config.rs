@@ -2,8 +2,7 @@
 
 use std::path::PathBuf;
 
-/// When to record. (`on_demand` — WS-server-driven — lands in a later
-/// chunk; 0.5.0 chunk 1 ships `off` / `always`.)
+/// When to record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RecordingMode {
     /// No recording (default) — zero behaviour change.
@@ -11,6 +10,9 @@ pub enum RecordingMode {
     Off,
     /// Record every call that reaches a controller.
     Always,
+    /// Wire the per-call writer but leave it idle — the WS server drives it
+    /// with `StartRecording` / `StopRecording` (and `Pause` / `Resume`).
+    OnDemand,
 }
 
 /// Compiled `[recording]` block.
@@ -39,9 +41,12 @@ impl RecordingConfig {
 }
 
 /// Per-call recording instructions handed to the `CallController` when a
-/// call should be recorded. Carries the resolved output path; the sample
-/// rate is taken from the call's media tap.
+/// call may be recorded. Carries the resolved output path; the sample rate
+/// is taken from the call's media tap.
 #[derive(Debug, Clone)]
 pub struct RecordingSetup {
     pub path: PathBuf,
+    /// `true` (mode `always`) → start recording immediately. `false` (mode
+    /// `on_demand`) → wait for a `StartRecording` from the WS server.
+    pub auto_start: bool,
 }

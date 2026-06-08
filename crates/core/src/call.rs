@@ -65,7 +65,7 @@ use siphon_ai_bridge::{
 };
 use siphon_ai_media_glue::{MediaTap, MediaTapError, TapCommand, TapDisconnect};
 use siphon_ai_recording::{
-    RecFrame, RecordingError, RecordingSetup, RecordingStats, RecordingWriter,
+    RecControl, RecEvent, RecFrame, RecordingError, RecordingSetup, RecordingStats, RecordingWriter,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, Notify};
@@ -344,12 +344,25 @@ impl CallController {
         // Recording (optional). Spawn the per-call writer task and fork both
         // legs to it via the tap. The writer does its file I/O off the audio
         // path; the tap only `try_send`s copies (§4.3). `media_tap` is
-        // rebound with the fork sender installed before it's spawned.
-        let mut recording_task: Option<JoinHandle<Result<RecordingStats, RecordingError>>> = None;
+        // rebound with the fork sender installed before it's spawned. The
+        // controller drives the writer's state machine over `rec_ctrl_tx`
+        // (from `BridgeIn` recording messages) and ferries the writer's
+        // lifecycle events back out via `rec_evt_rx`.
+        let mut recording_task: Option<JoinHandle<Result<Option<RecordingStats>, RecordingError>>> =
+            None;
+        let mut rec_ctrl_tx: Option<mpsc::Sender<RecControl>> = None;
+        let mut rec_evt_rx: Option<mpsc::Receiver<RecEvent>> = None;
+        // One recording per call in this revision → recording_id = call_id.
+        let recording_id = call_id.as_str().to_string();
         let media_tap = if let Some(setup) = recording {
             let (rec_tx, rec_rx) = mpsc::channel::<RecFrame>(RECORDING_CHANNEL_CAPACITY);
-            let writer = RecordingWriter::new(setup.path, media_tap.sample_rate());
-            recording_task = Some(tokio::spawn(writer.run(rec_rx)));
+            let (ctrl_tx, ctrl_rx) = mpsc::channel::<RecControl>(CONTROL_CHANNEL_CAPACITY);
+            let (evt_tx, evt_rx) = mpsc::channel::<RecEvent>(CONTROL_CHANNEL_CAPACITY);
+            let writer =
+                RecordingWriter::new(setup.path, media_tap.sample_rate(), setup.auto_start);
+            recording_task = Some(tokio::spawn(writer.run(rec_rx, ctrl_rx, evt_tx)));
+            rec_ctrl_tx = Some(ctrl_tx);
+            rec_evt_rx = Some(evt_rx);
             media_tap.with_recording(Some(rec_tx))
         } else {
             media_tap
@@ -478,6 +491,18 @@ impl CallController {
                             if let Err(e) = tap_cmd_tx.try_send(TapCommand::Unmute) {
                                 warn!(error = %e, "tap command channel full or closed; dropping Unmute");
                             }
+                        }
+                        Some(BridgeIn::StartRecording { call_id: cid }) => {
+                            route_rec_control(&rec_ctrl_tx, RecControl::Start, "StartRecording", &cid);
+                        }
+                        Some(BridgeIn::StopRecording { call_id: cid }) => {
+                            route_rec_control(&rec_ctrl_tx, RecControl::Stop, "StopRecording", &cid);
+                        }
+                        Some(BridgeIn::PauseRecording { call_id: cid }) => {
+                            route_rec_control(&rec_ctrl_tx, RecControl::Pause, "PauseRecording", &cid);
+                        }
+                        Some(BridgeIn::ResumeRecording { call_id: cid }) => {
+                            route_rec_control(&rec_ctrl_tx, RecControl::Resume, "ResumeRecording", &cid);
                         }
                         Some(BridgeIn::Mark { call_id: cid, name }) => {
                             debug!(ws_call_id = %cid, %name, "forwarding Mark to tap");
@@ -611,6 +636,31 @@ impl CallController {
                     termination = CallTermination::TapEnded;
                     break;
                 }
+
+                // Recording writer lifecycle event → relay to the WS server.
+                maybe_evt = recv_rec_evt(&mut rec_evt_rx) => {
+                    match maybe_evt {
+                        Some(evt) => {
+                            let out = match evt {
+                                RecEvent::Started => {
+                                    debug!(call_id = %call_id, recording_id = %recording_id, "recording started");
+                                    OutgoingEvent::RecordingStarted { recording_id: recording_id.clone() }
+                                }
+                                RecEvent::Stopped { data_bytes, frames } => {
+                                    debug!(call_id = %call_id, data_bytes, frames, "recording stopped");
+                                    OutgoingEvent::RecordingStopped { recording_id: recording_id.clone() }
+                                }
+                                RecEvent::Failed { reason } => {
+                                    warn!(call_id = %call_id, %reason, "recording failed");
+                                    OutgoingEvent::RecordingFailed { recording_id: recording_id.clone(), reason }
+                                }
+                            };
+                            let _ = control_out_tx.send(out).await;
+                        }
+                        // Writer task ended → stop polling this arm.
+                        None => rec_evt_rx = None,
+                    }
+                }
             }
         }
 
@@ -667,12 +717,14 @@ impl CallController {
         // Give it a budget so a slow final flush can't wedge teardown.
         if let Some(mut rec_task) = recording_task.take() {
             match tokio::time::timeout(Duration::from_millis(500), &mut rec_task).await {
-                Ok(Ok(Ok(stats))) => debug!(
+                Ok(Ok(Ok(Some(stats)))) => debug!(
                     call_id = %call_id,
                     path = %stats.path.display(),
                     frames = stats.frames,
                     "recording written"
                 ),
+                // on-demand recording that was never started, or stopped early.
+                Ok(Ok(Ok(None))) => debug!(call_id = %call_id, "no recording for this call"),
                 Ok(Ok(Err(e))) => warn!(call_id = %call_id, error = %e, "recording failed"),
                 Ok(Err(join_err)) => {
                     warn!(call_id = %call_id, error = %join_err, "recording task panicked")
@@ -698,6 +750,39 @@ impl CallController {
 
 fn log_state(call_id: &CallId, state: CallState) {
     info!(call_id = %call_id, ?state, "call state");
+}
+
+/// Forward a recording control to the writer (best-effort, non-blocking).
+/// `None` sender → recording isn't enabled for this call; log and drop.
+fn route_rec_control(
+    tx: &Option<mpsc::Sender<RecControl>>,
+    ctrl: RecControl,
+    label: &str,
+    cid: &CallId,
+) {
+    match tx {
+        Some(tx) => {
+            debug!(ws_call_id = %cid, label, "forwarding recording control to writer");
+            if let Err(e) = tx.try_send(ctrl) {
+                warn!(error = %e, label, "recording control channel full or closed; dropping");
+            }
+        }
+        None => debug!(
+            ws_call_id = %cid,
+            label,
+            "recording control ignored; recording not enabled for this call"
+        ),
+    }
+}
+
+/// `select!`-friendly receive over the optional recording-event channel.
+/// Pends forever when there's no channel (recording off, or the writer
+/// already ended), so the arm never busy-loops.
+async fn recv_rec_evt(rx: &mut Option<mpsc::Receiver<RecEvent>>) -> Option<RecEvent> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// One-shot REFER round-trip. Lookup → URI parse → send_refer →

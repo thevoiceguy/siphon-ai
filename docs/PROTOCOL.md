@@ -331,6 +331,21 @@ then closes the WebSocket cleanly (close code 1000).
 `error` is always followed by `stop` (with `reason: "error"`) and a
 clean close.
 
+### 3.11 `recording_started` / `recording_stopped` / `recording_failed` — recording lifecycle (0.5.0)
+
+Emitted when call recording is on (`[recording].mode`). `recording_started`
+fires automatically on `always`, or in response to a `start_recording`
+control on `on_demand`; `recording_stopped` on call end or `stop_recording`.
+
+```json
+{ "type": "recording_started", "call_id": "...", "seq": 12, "recording_id": "..." }
+{ "type": "recording_stopped", "call_id": "...", "seq": 40, "recording_id": "..." }
+{ "type": "recording_failed",  "call_id": "...", "seq": 13, "recording_id": "...", "reason": "disk full" }
+```
+
+`recording_id` identifies the recording (one per call in this release).
+Recording is best-effort — `recording_failed` never tears the call down.
+
 ---
 
 ## 4. Server → SiphonAI messages
@@ -427,6 +442,24 @@ fired in response to caller barge-in — that drains pending playout
 once and then accepts new audio. `mute` is sustained, requires an
 explicit `unmute` to release, and is the right primitive for "put
 this call on hold from the AI side."
+
+### 4.7 `start_recording` / `stop_recording` / `pause_recording` / `resume_recording` — on-demand recording (0.5.0)
+
+```json
+{ "type": "start_recording",  "call_id": "..." }
+{ "type": "stop_recording",   "call_id": "..." }
+{ "type": "pause_recording",  "call_id": "..." }
+{ "type": "resume_recording", "call_id": "..." }
+```
+
+Drive recording when `[recording].mode = "on_demand"`. `start_recording`
+begins it (SiphonAI replies `recording_started`, or `recording_failed`);
+`stop_recording` finalizes it (`recording_stopped`). `pause_recording`
+**omits** the paused span from the file — the paused audio is dropped, not
+silenced (e.g. while the caller reads a card number) — and `resume_recording`
+continues. All are no-ops if recording isn't enabled for the call or the
+control is invalid for the current state. (With `mode = "always"` recording
+covers the whole call; these controls aren't needed.)
 
 ---
 

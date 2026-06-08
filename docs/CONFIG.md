@@ -272,16 +272,19 @@ request_uri_user = "9000"
 
 ## `[security]` — STIR/SHAKEN call authentication
 
-> **Status (0.4.0, in progress):** the configuration surface is wired and
-> validated at load time. The verifier that produces the verdict (Identity-
-> header parsing, ES256 signature check, certificate-chain validation) lands
-> in subsequent chunks. With `[security.stir_shaken].enabled = false` (the
-> default) the feature is entirely inert — a 0.3.x config upgrades with no
-> behaviour change.
-
 Verifies the RFC 8224 `Identity` header (RFC 8225 PASSporT, SHAKEN profile)
-on inbound INVITEs and, optionally, rejects calls whose attestation is below
-a configured minimum.
+on inbound INVITEs — Identity parsing, ES256 signature, certificate-chain
+validation to a STI-PA anchor, `orig`/`dest` claim binding, and `iat`
+freshness — surfaces the verdict (`verstat`) on the WS `start`, the CDR, and
+HEP, and optionally rejects calls below a configured attestation minimum.
+
+With `[security.stir_shaken].enabled = false` (the default) the feature is
+entirely inert — a 0.3.x config upgrades with no behaviour change.
+
+**Read [`SECURITY_STIR_SHAKEN.md`](SECURITY_STIR_SHAKEN.md) before enabling
+the gate** — it covers what attestation does and doesn't prove, the two
+trust domains (`x5u` fetch TLS vs the SHAKEN chain), and observe-first
+rollout.
 
 ```toml
 [security]

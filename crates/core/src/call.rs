@@ -64,6 +64,9 @@ use siphon_ai_bridge::{
     ErrorCode, OutgoingEvent, StartMsg, StopReason,
 };
 use siphon_ai_media_glue::{MediaTap, MediaTapError, TapCommand, TapDisconnect};
+use siphon_ai_recording::{
+    RecFrame, RecordingError, RecordingSetup, RecordingStats, RecordingWriter,
+};
 use thiserror::Error;
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
@@ -75,6 +78,11 @@ use crate::transfer::{TransferContext, TransferOutcome};
 /// of audio; per CLAUDE.md §6.2 audio channels are bounded for
 /// roughly that span.
 const AUDIO_CHANNEL_CAPACITY: usize = 10;
+
+/// Bounded capacity for the recording fork — generous (≈2 s) slack so the
+/// writer keeps up; a full channel drops frames best-effort rather than
+/// stalling the audio path (CLAUDE.md §4.3).
+const RECORDING_CHANNEL_CAPACITY: usize = 100;
 
 /// Bounded channel capacity for control-plane messages. Per
 /// CLAUDE.md §6.2, control channels get small bounded buffers.
@@ -103,6 +111,12 @@ pub struct CallControllerConfig {
     /// it for every accepted call when the daemon-wide
     /// `IntegratedUAC` is installed.
     pub transfer: Option<TransferContext>,
+
+    /// Optional recording. `Some` when `[recording]` selects this call
+    /// (e.g. `mode = "always"`); the controller spawns a per-call writer
+    /// task, forks both audio legs to it via the tap, and finalizes the WAV
+    /// at teardown. `None` → no recording.
+    pub recording: Option<RecordingSetup>,
 }
 
 /// Where in its life a call is. State transitions are logged at
@@ -290,6 +304,7 @@ impl CallController {
             start,
             media_tap,
             transfer,
+            recording,
         } = cfg;
 
         log_state(&call_id, CallState::Initializing);
@@ -325,6 +340,20 @@ impl CallController {
 
         // ─── Spawn sub-tasks ─────────────────────────────────────
         log_state(&call_id, CallState::Connecting);
+
+        // Recording (optional). Spawn the per-call writer task and fork both
+        // legs to it via the tap. The writer does its file I/O off the audio
+        // path; the tap only `try_send`s copies (§4.3). `media_tap` is
+        // rebound with the fork sender installed before it's spawned.
+        let mut recording_task: Option<JoinHandle<Result<RecordingStats, RecordingError>>> = None;
+        let media_tap = if let Some(setup) = recording {
+            let (rec_tx, rec_rx) = mpsc::channel::<RecFrame>(RECORDING_CHANNEL_CAPACITY);
+            let writer = RecordingWriter::new(setup.path, media_tap.sample_rate());
+            recording_task = Some(tokio::spawn(writer.run(rec_rx)));
+            media_tap.with_recording(Some(rec_tx))
+        } else {
+            media_tap
+        };
 
         let mut bridge_task: JoinHandle<Result<DisconnectReason, BridgeError>> =
             tokio::spawn(connect_and_run(bridge, start, channels));
@@ -630,6 +659,29 @@ impl CallController {
         } else if !tap_task.is_finished() {
             if let Ok(inner) = (&mut tap_task).await {
                 tap_result = Some(inner);
+            }
+        }
+
+        // Finalize the recording. The tap has now exited, dropping its fork
+        // sender → the writer sees EOF, flushes, and patches the WAV header.
+        // Give it a budget so a slow final flush can't wedge teardown.
+        if let Some(mut rec_task) = recording_task.take() {
+            match tokio::time::timeout(Duration::from_millis(500), &mut rec_task).await {
+                Ok(Ok(Ok(stats))) => debug!(
+                    call_id = %call_id,
+                    path = %stats.path.display(),
+                    frames = stats.frames,
+                    "recording written"
+                ),
+                Ok(Ok(Err(e))) => warn!(call_id = %call_id, error = %e, "recording failed"),
+                Ok(Err(join_err)) => {
+                    warn!(call_id = %call_id, error = %join_err, "recording task panicked")
+                }
+                Err(_) => {
+                    warn!(call_id = %call_id, "recording did not finalize within 500 ms; aborting");
+                    rec_task.abort();
+                    let _ = (&mut rec_task).await;
+                }
             }
         }
 

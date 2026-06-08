@@ -2944,6 +2944,7 @@ dependencies = [
  "siphon-ai-bridge",
  "siphon-ai-core",
  "siphon-ai-media-glue",
+ "siphon-ai-recording",
  "siphon-ai-routes",
  "siphon-ai-security",
  "thiserror 1.0.69",
@@ -2976,6 +2977,7 @@ dependencies = [
  "siphon-ai-bridge",
  "siphon-ai-cdr",
  "siphon-ai-media-glue",
+ "siphon-ai-recording",
  "siphon-ai-routes",
  "siphon-ai-security",
  "siphon-ai-sip-glue",
@@ -3019,10 +3021,20 @@ dependencies = [
  "forge-sdp",
  "metrics 0.23.1",
  "siphon-ai-bridge",
+ "siphon-ai-recording",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "siphon-ai-recording"
+version = "0.4.1"
+dependencies = [
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

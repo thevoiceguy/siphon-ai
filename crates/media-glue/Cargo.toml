@@ -19,6 +19,7 @@ metrics.workspace     = true
 
 # Sibling SiphonAI crates
 siphon-ai-bridge.workspace = true
+siphon-ai-recording.workspace = true
 
 # Upstream media stack
 forge-core.workspace   = true

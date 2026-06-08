@@ -116,6 +116,7 @@ fn make_controller(port: u16, call_id: &str) -> (CallController, siphon_ai_core:
         start: start_msg(call_id),
         media_tap: tap,
         transfer: None,
+        recording: None,
     };
     CallController::new(cfg)
 }

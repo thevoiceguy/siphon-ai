@@ -1,0 +1,17 @@
+[package]
+name        = "siphon-ai-recording"
+description = "Per-call audio recording: stereo WAV writer fed off the media tap, off the audio hot path."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+tokio     = { workspace = true }
+tracing.workspace   = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -35,8 +35,8 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::raw::{
-    RawBridge, RawCdr, RawConfig, RawHep, RawMedia, RawNode, RawObservability, RawRegister,
-    RawSecurity, RawSip, RawSipTls, RawWebhooks,
+    RawBridge, RawCdr, RawConfig, RawHep, RawMedia, RawNode, RawObservability, RawRecording,
+    RawRegister, RawSecurity, RawSip, RawSipTls, RawWebhooks,
 };
 
 /// Compiled, ready-to-pass daemon config.
@@ -62,6 +62,7 @@ pub struct Config {
     /// inbound INVITE must match a trunk or it's 403'd.
     pub trunks: Vec<TrunkConfig>,
     pub security: SecurityConfig,
+    pub recording: siphon_ai_recording::RecordingConfig,
     pub cdr: CdrConfig,
     pub observability: ObservabilityConfig,
     pub webhooks: WebhooksConfig,
@@ -436,6 +437,15 @@ pub enum CompileError {
     #[error("[security.stir_shaken].x5u_tls_extra_ca {path:?} is invalid: {err}")]
     StirShakenExtraCaInvalid { path: String, err: String },
 
+    #[error("[recording].mode is {0:?}; expected \"off\" or \"always\"")]
+    UnknownRecordingMode(String),
+
+    #[error("[recording].dir is required when mode is not \"off\"")]
+    RecordingDirRequired,
+
+    #[error("[recording].dir {path:?} could not be created: {err}")]
+    RecordingDirInvalid { path: String, err: String },
+
     #[error("[media].rtp_port_range {min}-{max} is invalid (min must be < max and even)")]
     BadRtpPortRange { min: u16, max: u16 },
 
@@ -541,6 +551,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let registrations = compile_registrations(raw.registrations)?;
     let trunks = compile_trunks(raw.trunks)?;
     let security = compile_security(raw.security)?;
+    let recording = compile_recording(raw.recording)?;
     let cdr = compile_cdr(raw.cdr)?;
     let observability = compile_observability(raw.observability)?;
     let webhooks = compile_webhooks(raw.webhooks)?;
@@ -611,6 +622,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         registrations,
         trunks,
         security,
+        recording,
         cdr,
         observability,
         webhooks,
@@ -855,6 +867,31 @@ fn compile_security(raw: RawSecurity) -> Result<SecurityConfig, CompileError> {
             x5u_tls_extra_ca,
         },
     })
+}
+
+/// Compile and validate `[recording]`. Off by default. When recording is
+/// on, the output directory is required and **created at load** so a bad
+/// path fails loud at startup, not on the first recorded call.
+fn compile_recording(
+    raw: RawRecording,
+) -> Result<siphon_ai_recording::RecordingConfig, CompileError> {
+    use siphon_ai_recording::{RecordingConfig, RecordingMode};
+    let mode = match raw.mode.as_deref() {
+        None | Some("") | Some("off") => RecordingMode::Off,
+        Some("always") => RecordingMode::Always,
+        Some(other) => return Err(CompileError::UnknownRecordingMode(other.to_string())),
+    };
+    let dir = raw.dir.map(PathBuf::from).unwrap_or_default();
+    if mode != RecordingMode::Off {
+        if dir.as_os_str().is_empty() {
+            return Err(CompileError::RecordingDirRequired);
+        }
+        std::fs::create_dir_all(&dir).map_err(|err| CompileError::RecordingDirInvalid {
+            path: dir.display().to_string(),
+            err: err.to_string(),
+        })?;
+    }
+    Ok(RecordingConfig { mode, dir })
 }
 
 fn min_attestation_label(m: siphon_ai_security::MinAttestation) -> &'static str {

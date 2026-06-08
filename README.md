@@ -42,6 +42,21 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
+**v0.5.0** — fifth release. Theme: **call recording.** Each call's audio can
+be captured to a stereo WAV (caller left, bot/WS right) for compliance and
+QA — `[recording].mode` = `off` (default) / `always` / `on_demand`, with a
+per-route `[route.recording]` override. On-demand recording is driven over
+the WS protocol (`start`/`stop`/`pause`/`resume_recording`; a pause *omits*
+the span — the PCI primitive), and surfaced on the CDR (`recording_id` /
+`recording_path`) and a `siphon_ai_recordings_total` metric. The recorder
+runs off the audio hot path — a backed-up writer drops frames (`degraded`)
+rather than ever stalling the live call. **Off by default**; a 0.4.x
+deployment upgrades with zero behaviour change. Protocol stays `version: "1"`
+and the CDR schema stays at version 1 (both additions are additive). See
+[`docs/RECORDING.md`](docs/RECORDING.md). (A timed SRTP re-key was planned to
+ride along but was deferred — forge-media has no coordinated re-key API.)
+Full notes: [`CHANGELOG.md`](CHANGELOG.md).
+
 **v0.4.1** — patch release completing the 0.4.0 STIR/SHAKEN theme: PASSporT
 `iat` freshness (replay protection, `verstat.iat_passed`), an
 `x5u_tls_extra_ca` knob for privately-hosted `x5u`, the security-model doc

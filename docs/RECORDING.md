@@ -130,6 +130,14 @@ call. A recording is always best-effort; it never degrades call quality.
 
 ## 6. Operating
 
+- **Recordings are plaintext at rest — even for encrypted calls.** Recording
+  works on SRTP calls (the recorder taps the *decoded* audio — forge already
+  decrypts the media to bridge it to your WS server), so the WAV on disk is
+  always cleartext PCM regardless of `[media].srtp`. SRTP protects the media
+  *in transit*; it does nothing for the recording *at rest*. Treat the
+  recording directory as sensitive PII/PCI: protect it with volume
+  encryption, filesystem permissions, and access controls. SiphonAI does not
+  encrypt recordings.
 - **Disk sizing:** recordings are uncompressed — ≈115 MB/hour at 16 kHz,
   ≈58 MB/hour at 8 kHz (stereo PCM16). With `mode = "always"`, size the disk
   for your peak concurrent-call-hours.

@@ -50,6 +50,12 @@ sipp -sf basic_call_then_bye.xml -m 1 -p 5070 -s 1000 127.0.0.1:5060
 | `stir_shaken_attestation_403.xml`   | STIR/SHAKEN gate: `Identity` present but unverifiable (unreachable `x5u`) below `min_attestation = "A"` → 403 Forbidden (stir_shaken phase) |
 | `stir_shaken_attestation_pass.xml`  | STIR/SHAKEN happy path: a fully-verifiable `Identity` (fresh PASSporT, real x5u fetch, chain to the test anchor) → **200 admitted** (stir_shaken phase). Templated — `__IDENTITY__` is substituted at run time; does not run standalone. |
 
+`run-all.sh` also has an always-on **recording** auxiliary phase: it starts
+a daemon with `[recording].mode = "always"` writing to a temp dir, runs one
+`basic_call_then_bye.xml` call through the echo WS bridge, then asserts the
+written file is a valid stereo PCM16 WAV with audio in it (via Python's
+`wave`). It reuses `basic_call_then_bye.xml` — no dedicated scenario file.
+
 The `stir_shaken_*` scenarios run in `run-all.sh`'s always-on
 **stir_shaken** auxiliary phase. It builds + runs the
 `gen_test_passport` example (a `siphon-ai-stir-shaken` example) to mint a

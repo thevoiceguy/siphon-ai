@@ -260,6 +260,75 @@ fi
 ss_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: recording ─────────────────────────
+# Verifies `[recording].mode = "always"` writes a valid stereo WAV. A
+# fresh daemon records to a temp dir; after one basic call we assert the
+# file exists and is a well-formed stereo PCM16 WAV with audio in it.
+# (A signaling-only call records silence frames over the call's duration,
+# which still exercises the whole tap → writer → finalize path.) Reuses
+# the echo WS on :8765 that the rest of the suite already needs.
+echo
+echo "─── auxiliary phase: recording ────────────────────────"
+REC_DAEMON_LOG=$(mktemp -t siphon-ai-rec.XXXXXX.log)
+REC_CONFIG=$(mktemp -t siphon-ai-rec.XXXXXX.toml)
+REC_DIR=$(mktemp -d -t siphon-ai-rec.XXXXXX)
+cat >"$REC_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-rec"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:8765/"
+[recording]
+mode = "always"
+dir = "$REC_DIR"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$REC_CONFIG" \
+    >"$REC_DAEMON_LOG" 2>&1 &
+REC_DAEMON_PID=$!
+rec_cleanup() {
+    kill "$REC_DAEMON_PID" 2>/dev/null || true
+    wait "$REC_DAEMON_PID" 2>/dev/null || true
+    rm -rf "$REC_DIR" 2>/dev/null || true
+}
+trap rec_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── recording_writes_valid_wav ───────────────────────"
+rec_ok=0
+if sipp -sf "$SCRIPT_DIR/basic_call_then_bye.xml" -m 1 -timeout 15s -trace_err \
+        -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1; then
+    sleep 0.6  # let teardown finalize the WAV header
+    if python3 - "$REC_DIR" <<'PY'
+import sys, glob, wave
+wavs = glob.glob(sys.argv[1] + "/*.wav")
+assert len(wavs) == 1, f"expected exactly 1 recording, found {len(wavs)}"
+w = wave.open(wavs[0], "rb")
+assert w.getnchannels() == 2, f"expected stereo, got {w.getnchannels()}"
+assert w.getsampwidth() == 2, "expected PCM16"
+assert w.getframerate() in (8000, 16000), f"unexpected rate {w.getframerate()}"
+assert w.getnframes() > 0, "recording is empty"
+PY
+    then rec_ok=1; fi
+fi
+if (( rec_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (recording invalid or call failed; daemon: $REC_DAEMON_LOG)"
+    failures=$((failures + 1))
+fi
+
+rec_cleanup
+trap - EXIT
+
 # ─── Optional third phase: blind_transfer ─────────────────────────
 # Needs a WS server that proactively emits BridgeIn::Transfer. The
 # runner stops the daemon, brings up an echo-ws that auto-emits

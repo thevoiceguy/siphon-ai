@@ -350,7 +350,7 @@ min_attestation = "C"   # looser than a stricter global, by design
 
 Records each call's audio to a stereo WAV (caller = left channel, bot/WS =
 right). Off by default. Recording runs off the audio hot path — a backed-up
-writer can never stall live audio.
+writer can never stall live audio. **Full guide: `docs/RECORDING.md`.**
 
 ```toml
 [recording]

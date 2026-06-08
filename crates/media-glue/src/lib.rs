@@ -14,8 +14,11 @@ pub mod setup;
 pub mod tap;
 
 pub use sdp::{
-    audio_remote_addr, build_answer, negotiate_answer, parse_offer, AnswerOutcome, Codec,
-    LocalCapabilities, MediaDirection, SdpError,
+    audio_remote_addr, build_answer, generate_offer, negotiate_answer, negotiate_offer_answer,
+    parse_offer, AnswerOutcome, Codec, LocalCapabilities, MediaDirection, SdpError,
 };
-pub use setup::{InboundAccepted, InboundCall, MediaSetup, SetupError};
+pub use setup::{
+    InboundAccepted, InboundCall, MediaSetup, OutboundAccepted, OutboundOffer,
+    OutboundOfferRequest, SetupError, TapOptions,
+};
 pub use tap::{BargeInAction, MediaTap, MediaTapError, TapCommand, TapDisconnect};

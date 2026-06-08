@@ -1,8 +1,10 @@
-//! SDP offer/answer for inbound INVITEs.
+//! SDP offer/answer for inbound and outbound calls.
 //!
-//! Per CLAUDE.md §4.8 we don't write our own SDP parser or
-//! negotiator — `forge-sdp` (and through it `sip-sdp`) already does
-//! both. This module is a thin shim that:
+//! Inbound, we answer a peer's offer ([`negotiate_answer`]); outbound, we
+//! make the offer ([`generate_offer`]) and read the peer's answer
+//! ([`negotiate_offer_answer`]). Per CLAUDE.md §4.8 we don't write our own
+//! SDP parser or negotiator — `forge-sdp` (and through it `sip-sdp`) already
+//! does both. This module is a thin shim that:
 //!
 //! 1. Defines the small [`Codec`] enum SiphonAI v1 actually
 //!    supports (G.711 µ-law/A-law, G.722, Opus).
@@ -407,6 +409,70 @@ pub fn build_answer(offer_sdp: &str, caps: &LocalCapabilities) -> Result<AnswerO
     negotiate_answer(&offer, caps)
 }
 
+/// Build the SDP **offer** for an outbound call — every configured codec,
+/// in priority order, at our `local_port`, `sendrecv`. This is the inverse
+/// of [`negotiate_answer`]: there we answer a peer's offer; here we make the
+/// first move. The result is the body for the outbound INVITE.
+pub fn generate_offer(caps: &LocalCapabilities) -> String {
+    caps.to_sdp().serialize()
+}
+
+/// Read the negotiated audio out of the peer's **answer** to an offer we
+/// sent (the offerer side of RFC 3264 §6.1). `offered` is the same
+/// capabilities [`generate_offer`] advertised — we validate the peer picked
+/// a codec we actually offered.
+///
+/// Returns an [`AnswerOutcome`] whose `answer` is the *received* answer (so
+/// callers can pull the peer's RTP endpoint via [`audio_remote_addr`]); the
+/// `negotiated_*` fields describe the agreed media. Mirrors
+/// [`negotiate_answer`]'s extraction so the inbound and outbound paths read
+/// the same.
+pub fn negotiate_offer_answer(
+    answer_sdp: &str,
+    offered: &LocalCapabilities,
+) -> Result<AnswerOutcome, SdpError> {
+    let answer = parse_offer(answer_sdp)?; // parses any SDP, offer or answer
+    let audio = answer
+        .find_media(MediaType::Audio)
+        .ok_or(SdpError::NoAudio)?;
+
+    // Port 0 → the peer rejected the audio stream (RFC 3264 §6).
+    if audio.port == 0 {
+        return Err(if audio.formats.is_empty() {
+            SdpError::NoCommonCodec
+        } else {
+            SdpError::AudioRejected
+        });
+    }
+
+    // The answer's primary format is the codec the peer settled on.
+    let primary = helpers::extract_primary_codec(audio).ok_or(SdpError::AudioRejected)?;
+    let codec = Codec::from_encoding_name(&primary.encoding_name).ok_or(SdpError::NoCommonCodec)?;
+    // A well-behaved peer only answers with a codec from our offer; if it
+    // didn't, we have no usable common codec.
+    if !offered.codecs.contains(&codec) {
+        return Err(SdpError::NoCommonCodec);
+    }
+
+    let negotiated_direction = audio
+        .direction()
+        .as_ref()
+        .map(|d| d.as_token())
+        .and_then(MediaDirection::from_attr)
+        .unwrap_or_default();
+
+    let answer_text = answer.serialize();
+    Ok(AnswerOutcome {
+        answer,
+        answer_text,
+        negotiated_codec: codec,
+        negotiated_payload_type: primary.payload_type,
+        negotiated_clock_rate: primary.clock_rate,
+        negotiated_audio_sample_rate: codec.audio_sample_rate(),
+        negotiated_direction,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,5 +508,79 @@ a=rtpmap:0 PCMU/8000\r\n";
         let s = parse_offer(SDP_MEDIA_LEVEL_C_WINS).unwrap();
         let addr = audio_remote_addr(&s).expect("address present");
         assert_eq!(addr.to_string(), "203.0.113.7:27492");
+    }
+
+    // ─── Outbound: offer generation + answer negotiation ─────────────────
+
+    fn caps(codecs: Vec<Codec>) -> LocalCapabilities {
+        LocalCapabilities {
+            local_ip: "198.51.100.10".into(),
+            local_port: 5000,
+            codecs,
+            dtmf_payload_type: Some(101),
+        }
+    }
+
+    /// A peer's answer to our offer, selecting `pt`/`name` at `198.51.100.20:4000`.
+    fn answer_sdp(port: u16, pt: u8, name: &str, clock: u32) -> String {
+        format!(
+            "v=0\r\n\
+o=peer 1 1 IN IP4 198.51.100.20\r\n\
+s=-\r\n\
+c=IN IP4 198.51.100.20\r\n\
+t=0 0\r\n\
+m=audio {port} RTP/AVP {pt}\r\n\
+a=rtpmap:{pt} {name}/{clock}\r\n\
+a=ptime:20\r\n\
+a=sendrecv\r\n"
+        )
+    }
+
+    #[test]
+    fn generate_offer_advertises_codecs_at_local_port() {
+        let sdp = generate_offer(&caps(vec![Codec::Pcmu, Codec::Pcma]));
+        let parsed = parse_offer(&sdp).expect("our own offer parses");
+        let audio = parsed
+            .find_media(MediaType::Audio)
+            .expect("audio media present");
+        assert_eq!(audio.port, 5000, "offer advertises our local port");
+        // Both offered codecs + telephone-event are present, PCMU first.
+        let fmts: Vec<&str> = audio.formats.iter().map(|f| f.as_str()).collect();
+        assert!(fmts.contains(&"0"), "PCMU offered");
+        assert!(fmts.contains(&"8"), "PCMA offered");
+        assert!(fmts.contains(&"101"), "telephone-event offered");
+        assert_eq!(fmts.first(), Some(&"0"), "preferred codec first");
+    }
+
+    #[test]
+    fn negotiate_offer_answer_reads_peer_selection() {
+        let offered = caps(vec![Codec::Pcmu, Codec::Pcma]);
+        let outcome = negotiate_offer_answer(&answer_sdp(4000, 0, "PCMU", 8000), &offered).unwrap();
+        assert_eq!(outcome.negotiated_codec, Codec::Pcmu);
+        assert_eq!(outcome.negotiated_payload_type, 0);
+        assert_eq!(outcome.negotiated_audio_sample_rate, 8000);
+        // The peer's RTP endpoint is read from the answer, not the offer.
+        let addr = audio_remote_addr(&outcome.answer).expect("answer carries remote addr");
+        assert_eq!(addr.to_string(), "198.51.100.20:4000");
+    }
+
+    #[test]
+    fn negotiate_offer_answer_rejects_port_zero() {
+        // m=audio 0 → the peer declined the audio stream.
+        let err = negotiate_offer_answer(&answer_sdp(0, 0, "PCMU", 8000), &caps(vec![Codec::Pcmu]))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SdpError::AudioRejected | SdpError::NoCommonCodec
+        ));
+    }
+
+    #[test]
+    fn negotiate_offer_answer_rejects_unoffered_codec() {
+        // We offered only PCMA but the peer answered PCMU — no usable codec.
+        let err =
+            negotiate_offer_answer(&answer_sdp(4000, 0, "PCMU", 8000), &caps(vec![Codec::Pcma]))
+                .unwrap_err();
+        assert!(matches!(err, SdpError::NoCommonCodec));
     }
 }

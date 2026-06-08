@@ -260,6 +260,7 @@ sit them behind an authenticating reverse proxy.
 4. `docs/INSTALL_DEBIAN13.md` + `docs/FREESWITCH_INTEGRATION.md` +
    `docs/BOT_LOCALHOST_SETUP.md` — the deploy-the-thing path.
 5. `docs/CONFIG.md` — every TOML field documented.
+6. `docs/RECORDING.md` — call recording (stereo WAV, on-demand control, CDR).
 
 ## Upstream dependencies
 

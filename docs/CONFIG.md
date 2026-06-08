@@ -354,14 +354,14 @@ writer can never stall live audio.
 
 ```toml
 [recording]
-mode = "always"            # "off" (default) | "always"
+mode = "always"            # "off" (default) | "always" | "on_demand"
 dir  = "/var/lib/siphon-ai/recordings"
 ```
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `mode` | string | `"off"` | `"off"` = no recording (zero behaviour change). `"always"` = record every accepted call. (`"on_demand"` — WS-server-driven — and per-route overrides land in later 0.5.0 chunks.) |
-| `dir` | string | — | Directory recordings are written to as `<dir>/<call_id>.wav`. **Required when `mode != "off"`**; created at startup (a bad path fails loud at load). |
+| `mode` | string | `"off"` | `"off"` = no recording (zero behaviour change). `"always"` = record every accepted call for its full duration. `"on_demand"` = the WS server drives recording with `start_recording` / `stop_recording` / `pause_recording` / `resume_recording` (see `docs/PROTOCOL.md` §4.7); SiphonAI emits `recording_started` / `recording_stopped` / `recording_failed` back. (Per-route overrides land in a later 0.5.0 chunk.) |
+| `dir` | string | — | Directory recordings are written to as `<dir>/<call_id>.wav`. **Required when `mode != "off"`**; created at startup (a bad path fails loud at load). A `pause` omits the paused span from the file (the audio is dropped, not silenced). |
 
 Operational notes: recordings are uncompressed PCM16 stereo (≈115 MB/hour
 at 16 kHz; ≈58 MB/hour at 8 kHz) — size your disk and **manage retention

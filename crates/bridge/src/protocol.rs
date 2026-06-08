@@ -162,6 +162,32 @@ pub enum BridgeOut {
         name: String,
     },
 
+    /// A recording has begun (auto on `mode = "always"`, or in response to
+    /// [`BridgeIn::StartRecording`]). `recording_id` identifies it for
+    /// correlation. Added in 0.5.0.
+    RecordingStarted {
+        call_id: CallId,
+        seq: Seq,
+        recording_id: String,
+    },
+
+    /// A recording finalized (call ended, or [`BridgeIn::StopRecording`]).
+    RecordingStopped {
+        call_id: CallId,
+        seq: Seq,
+        recording_id: String,
+    },
+
+    /// A recording could not start or write (e.g. disk error). The call is
+    /// unaffected — recording is best-effort.
+    RecordingFailed {
+        call_id: CallId,
+        seq: Seq,
+        recording_id: String,
+        /// Human-readable reason.
+        reason: String,
+    },
+
     /// Last message SiphonAI sends. Followed by a clean WS close (1000).
     Stop {
         call_id: CallId,
@@ -389,6 +415,24 @@ pub enum BridgeIn {
     /// Resume AI-side playout after a [`BridgeIn::Mute`]. A no-op
     /// if the call is not muted.
     Unmute { call_id: CallId },
+
+    /// Begin recording this call (when `[recording].mode = "on_demand"`).
+    /// No-op if recording is off for the call or already in progress.
+    /// SiphonAI replies with [`BridgeOut::RecordingStarted`] (or
+    /// [`BridgeOut::RecordingFailed`]).
+    StartRecording { call_id: CallId },
+
+    /// Finalize the recording now (close the file early). SiphonAI replies
+    /// with [`BridgeOut::RecordingStopped`].
+    StopRecording { call_id: CallId },
+
+    /// Suspend recording — the paused span is **omitted** from the file
+    /// (e.g. while the caller reads a card number), not silenced. No-op if
+    /// not recording.
+    PauseRecording { call_id: CallId },
+
+    /// Resume recording after a [`BridgeIn::PauseRecording`].
+    ResumeRecording { call_id: CallId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -784,6 +828,72 @@ mod tests {
         let raw = r#"{ "type": "unmute", "call_id": "c" }"#;
         let msg: BridgeIn = assert_round_trip(raw);
         assert!(matches!(msg, BridgeIn::Unmute { ref call_id } if call_id.as_str() == "c"));
+    }
+
+    #[test]
+    fn bridge_in_recording_controls() {
+        for (wire, ok) in [
+            (
+                "start_recording",
+                matches!(
+                    serde_json::from_str::<BridgeIn>(r#"{"type":"start_recording","call_id":"c"}"#)
+                        .unwrap(),
+                    BridgeIn::StartRecording { .. }
+                ),
+            ),
+            (
+                "stop_recording",
+                matches!(
+                    serde_json::from_str::<BridgeIn>(r#"{"type":"stop_recording","call_id":"c"}"#)
+                        .unwrap(),
+                    BridgeIn::StopRecording { .. }
+                ),
+            ),
+            (
+                "pause_recording",
+                matches!(
+                    serde_json::from_str::<BridgeIn>(r#"{"type":"pause_recording","call_id":"c"}"#)
+                        .unwrap(),
+                    BridgeIn::PauseRecording { .. }
+                ),
+            ),
+            (
+                "resume_recording",
+                matches!(
+                    serde_json::from_str::<BridgeIn>(
+                        r#"{"type":"resume_recording","call_id":"c"}"#
+                    )
+                    .unwrap(),
+                    BridgeIn::ResumeRecording { .. }
+                ),
+            ),
+        ] {
+            assert!(ok, "{wire} did not parse to its variant");
+            let raw = format!(r#"{{ "type": "{wire}", "call_id": "c" }}"#);
+            let _: BridgeIn = assert_round_trip(&raw);
+        }
+    }
+
+    #[test]
+    fn bridge_out_recording_started_stopped() {
+        let started: BridgeOut = assert_round_trip(
+            r#"{ "type": "recording_started", "call_id": "c", "seq": 5, "recording_id": "c" }"#,
+        );
+        assert!(matches!(started, BridgeOut::RecordingStarted { .. }));
+        let stopped: BridgeOut = assert_round_trip(
+            r#"{ "type": "recording_stopped", "call_id": "c", "seq": 6, "recording_id": "c" }"#,
+        );
+        assert!(matches!(stopped, BridgeOut::RecordingStopped { .. }));
+    }
+
+    #[test]
+    fn bridge_out_recording_failed() {
+        let raw = r#"{ "type": "recording_failed", "call_id": "c", "seq": 7, "recording_id": "c", "reason": "disk full" }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        let BridgeOut::RecordingFailed { reason, .. } = msg else {
+            panic!("expected RecordingFailed");
+        };
+        assert_eq!(reason, "disk full");
     }
 
     // ─── Negative cases ─────────────────────────────────────────────────

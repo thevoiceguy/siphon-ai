@@ -879,6 +879,7 @@ fn compile_recording(
     let mode = match raw.mode.as_deref() {
         None | Some("") | Some("off") => RecordingMode::Off,
         Some("always") => RecordingMode::Always,
+        Some("on_demand") => RecordingMode::OnDemand,
         Some(other) => return Err(CompileError::UnknownRecordingMode(other.to_string())),
     };
     let dir = raw.dir.map(PathBuf::from).unwrap_or_default();

@@ -2924,11 +2924,17 @@ impl BridgingAcceptor {
             dialog_manager: Arc::clone(&installed.dialog_manager),
         });
 
-        // Recording: `always` mode records every accepted call to
-        // `<dir>/<call_id>.wav`. (`on_demand` + per-route are later chunks.)
+        // Recording setup. `always` auto-starts; `on_demand` wires the
+        // writer idle, ready for a `StartRecording`. `off` → no recording.
+        // (Per-route override is a later chunk.)
         let recording = match self.recording.mode {
             RecordingMode::Always => Some(RecordingSetup {
                 path: self.recording.path_for(bridge_call_id.as_str()),
+                auto_start: true,
+            }),
+            RecordingMode::OnDemand => Some(RecordingSetup {
+                path: self.recording.path_for(bridge_call_id.as_str()),
+                auto_start: false,
             }),
             RecordingMode::Off => None,
         };

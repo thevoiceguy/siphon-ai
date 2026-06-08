@@ -180,6 +180,20 @@ pub enum OutgoingEvent {
         code: ErrorCode,
         message: String,
     },
+    /// A recording began. The conn stamps `seq` and emits
+    /// [`BridgeOut::RecordingStarted`].
+    RecordingStarted {
+        recording_id: String,
+    },
+    /// A recording finalized → [`BridgeOut::RecordingStopped`].
+    RecordingStopped {
+        recording_id: String,
+    },
+    /// A recording failed → [`BridgeOut::RecordingFailed`].
+    RecordingFailed {
+        recording_id: String,
+        reason: String,
+    },
 }
 
 /// Why the connection task ended cleanly.
@@ -558,6 +572,25 @@ fn build_bridge_out(event: OutgoingEvent, call_id: CallId, seq: Seq) -> BridgeOu
             code,
             message,
         },
+        OutgoingEvent::RecordingStarted { recording_id } => BridgeOut::RecordingStarted {
+            call_id,
+            seq,
+            recording_id,
+        },
+        OutgoingEvent::RecordingStopped { recording_id } => BridgeOut::RecordingStopped {
+            call_id,
+            seq,
+            recording_id,
+        },
+        OutgoingEvent::RecordingFailed {
+            recording_id,
+            reason,
+        } => BridgeOut::RecordingFailed {
+            call_id,
+            seq,
+            recording_id,
+            reason,
+        },
     }
 }
 
@@ -570,6 +603,10 @@ fn bridge_in_call_id(msg: &BridgeIn) -> &str {
         BridgeIn::SendDtmf { call_id, .. } => call_id.as_str(),
         BridgeIn::Mute { call_id } => call_id.as_str(),
         BridgeIn::Unmute { call_id } => call_id.as_str(),
+        BridgeIn::StartRecording { call_id } => call_id.as_str(),
+        BridgeIn::StopRecording { call_id } => call_id.as_str(),
+        BridgeIn::PauseRecording { call_id } => call_id.as_str(),
+        BridgeIn::ResumeRecording { call_id } => call_id.as_str(),
     }
 }
 

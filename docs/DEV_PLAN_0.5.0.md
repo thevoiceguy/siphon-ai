@@ -133,9 +133,11 @@ left 0.5.0; pinning their homes:
   ready to pick up when outbound makes it pay off.
 - **SRTP re-key on a timer** (was §3.2) — needs a coordinated key rotation
   forge-media doesn't expose (DTLS renegotiation is blocked; SDES would need
-  a UAS-initiated re-INVITE). **Next step:** an upstream forge-media issue/PR
-  for a DTLS-SRTP re-key (renegotiate + re-export), then expose
-  `[media.srtp].rekey_after_seconds` in siphon-ai. Target a later release.
+  a UAS-initiated re-INVITE). **Tracked upstream as
+  [forge-media#71](https://github.com/thevoiceguy/forge-media/issues/71)**
+  (DTLS-SRTP re-key: renegotiate + re-export, and/or SDES re-offer
+  coordination). Once a re-key API lands, siphon-ai exposes
+  `[media.srtp].rekey_after_seconds`. Target a later release.
 
 Confirm the outbound-vs-conferencing ordering in §9 decision 8.
 

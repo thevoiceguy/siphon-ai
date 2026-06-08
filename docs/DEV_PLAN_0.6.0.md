@@ -170,8 +170,11 @@ off, but it carries a forge-media dependency.
   0.6.0.
 - **Conferencing / whisper / barge + call park** — the other big theme;
   still post-outbound. A dedicated release.
-- **SRTP re-key** — tracked upstream as
-  [forge-media#71](https://github.com/thevoiceguy/forge-media/issues/71).
+- **SRTP re-key** — the SDES upstream primitive landed
+  ([forge-media#72](https://github.com/thevoiceguy/forge-media/pull/72)); the
+  siphon-ai SDES re-key trigger is unblocked for a later release. DTLS-SRTP
+  renegotiation is parked
+  ([forge-media#73](https://github.com/thevoiceguy/forge-media/issues/73)).
 - **Campaigns / scheduling** — bulk/scheduled outbound (dialer lists, pacing)
   is a layer *above* single-call origination; out of 0.6.0. The originate API
   is the primitive a campaign tool would call.
@@ -281,5 +284,6 @@ APIs.
 
 Campaign/bulk/scheduled dialing (the API is the primitive; the dialer is a
 layer above), **attended transfer (locked to 0.6.1, §6/§9.7)**, AMD (§6),
-conferencing/whisper/barge/park, SRTP re-key (forge-media#71), video, WebRTC,
+conferencing/whisper/barge/park, SRTP re-key (SDES primitive done,
+forge-media#72; DTLS parked, forge-media#73), video, WebRTC,
 and the outbound *bot* logic itself (WS-server example).

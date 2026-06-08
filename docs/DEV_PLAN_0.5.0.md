@@ -131,13 +131,15 @@ left 0.5.0; pinning their homes:
   on the roadmap. **Proposed target: a dedicated theme once outbound lands.**
 - **AMD** — a later audio-analysis release; the `forge-amd` primitive is
   ready to pick up when outbound makes it pay off.
-- **SRTP re-key on a timer** (was §3.2) — needs a coordinated key rotation
-  forge-media doesn't expose (DTLS renegotiation is blocked; SDES would need
-  a UAS-initiated re-INVITE). **Tracked upstream as
-  [forge-media#71](https://github.com/thevoiceguy/forge-media/issues/71)**
-  (DTLS-SRTP re-key: renegotiate + re-export, and/or SDES re-offer
-  coordination). Once a re-key API lands, siphon-ai exposes
-  `[media.srtp].rekey_after_seconds`. Target a later release.
+- **SRTP re-key on a timer** (was §3.2) — the **SDES** upstream primitive now
+  exists: forge-media [#72](https://github.com/thevoiceguy/forge-media/pull/72)
+  (merged) added `SrtpContext::rekey()` + `rekey_srtp_keys()`, which rotate the
+  master keys mid-stream while preserving ROC/replay. So the siphon-ai side is
+  **unblocked for SDES**: expose `[media.srtp].rekey_after_seconds` + originate
+  a UAS re-INVITE carrying fresh `a=crypto:` and call `rekey_srtp_keys` on the
+  200-OK. (The DTLS-SRTP renegotiation path remains parked upstream —
+  [forge-media#73](https://github.com/thevoiceguy/forge-media/issues/73).)
+  Target a later release.
 
 Confirm the outbound-vs-conferencing ordering in §9 decision 8.
 

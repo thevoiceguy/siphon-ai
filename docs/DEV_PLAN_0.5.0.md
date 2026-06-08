@@ -1,222 +1,220 @@
 # SiphonAI 0.5.0 Development Plan — DRAFT
 
-> **STATUS: DRAFT for review.** Scope and the §9 decisions are proposed,
-> not locked. Confirm/iterate before Sprint 1 (the 0.4.0 plan worked the
-> same way). Effort + sequencing assume the §9 recommendations.
+> **STATUS: DRAFT for review.** Scope is set (theme below); the §9 decisions
+> are proposed, not locked — confirm/iterate before Sprint 1 (the 0.4.x
+> plans worked the same way).
 
-**Theme: enterprise call-handling primitives — the SBC features a contact
-center expects, minus AI and minus conferencing.**
+**Theme: call recording — compliance/QA capture of call audio, with a timed
+SRTP re-key riding along.**
 
-0.1.0 shipped the bridge. 0.2.0 shipped operator primitives + call-progress
-modes. 0.3.0 made the wire defensible (SRTP / mTLS / hot-reload TLS). 0.4.x
-shipped STIR/SHAKEN call authentication. 0.5.0 fills the remaining
-*non-AI, non-conferencing* gaps in call handling: detecting whether a leg
-is a human or a machine (AMD), parking a call, completing the transfer
-surface (attended transfer), and finishing the SRTP story (timed re-key).
+0.1.0 shipped the bridge. 0.2.0 operator primitives + call-progress. 0.3.0
+made the wire defensible (SRTP / mTLS / hot-reload TLS). 0.4.x shipped
+STIR/SHAKEN. 0.5.0 adds the one big remaining table-stakes contact-center
+feature that needs **no AI, no conferencing, and no outbound origination**:
+recording the call to storage for compliance and QA. It also closes the
+0.3.0 SRTP carry-forward (timed re-key).
 
-These are deliberately the items from the original wishlist that (a) need
-**no AI** (CLAUDE.md §4.1) and (b) **don't** require the N-leg conferencing
-lift, which is pinned as its own future theme (§6).
+### How we got to this theme
+
+After mapping the wishlist, the other 0.5.0 candidates all hit a wall and
+moved out:
+
+- **AMD (human/voicemail detection)** — deferred to a later audio-analysis
+  release. Pure audio analysis (a `forge-amd` sibling to `forge-vad`), so
+  it's ready to pick up — but its real payoff is on *outbound* dials
+  (post-v1), so it waits.
+- **Call park** and **attended transfer** — both need a second leg
+  (an outbound consultation call, or coordinated cross-call state that
+  §4.4 forbids), so they belong with **outbound origination / conferencing**
+  (§6), not here. The siphon-rs UAC *already* supports REFER+`Replaces`
+  (`create_refer_with_replaces`); the blocker is the consultation leg, not
+  the SIP primitive.
 
 ## 1. Cardinal rule, restated
 
-Still no AI code. AMD is **pure audio analysis** (cadence / energy / tone
-patterns) — no STT, no LLM — so it lives in forge-media (sibling to
-`forge-vad`), with SiphonAI surfacing its result as WS events. Everything
-new is off by default or opt-in; observability ships with each feature
-(§4.5).
+Still no AI. Recording is a media-tap → storage sink; the brain stays in the
+WS server. The hot-path rule (§4.3) is the binding constraint here: the
+audio task must never block on recording I/O — frames go to a per-call
+writer task over a bounded channel, and the writer does the file I/O. No
+cross-call state (§4.4): each recording is owned by its `CallController`.
+Observability ships with the feature (§4.5).
 
 ## 2. Already shipped (context)
 
-So the plan doesn't re-propose done work:
-
-- **Call-progress modes** (instant_answer / ringing / session_progress) — 0.2.0.
-- **Operator events** silence_detected / dead_air_detected, RTP stats
-  (jitter / loss / rtt) — 0.2.0 / 0.3.x.
-- **Call handling**: hold/unhold, blind transfer (REFER), mute/unmute,
-  SendDtmf, hangup, clear, mark — shipped.
-- **Encryption**: SRTP (DTLS-SRTP + SDES), mTLS bridge leg + SPKI pin,
-  hot-reload SIP/TLS cert, WSS — 0.3.x.
-- **STIR/SHAKEN** verification, policy gate, verstat surfaces, HEP chunk — 0.4.x.
+Call-progress modes, operator events (silence/dead-air/RTP stats), call
+handling (hold, blind transfer, mute, DTMF, hangup, clear, mark),
+encryption (SRTP DTLS+SDES, mTLS, hot-reload TLS, WSS), and STIR/SHAKEN
+(0.4.x). 0.5.0 does **not** re-propose any of these.
 
 ## 3. Recommended 0.5.0 scope (must-have)
 
-Three deliverables. AMD is the critical-path item (an upstream forge-media
-capability); park and SRTP re-key are siphon-ai-only and small.
+### 3.1 Call recording
 
-### 3.1 Answering-machine / voicemail detection (AMD)
+Capture the call's audio to storage. SiphonAI already taps both legs' PCM
+(the media-glue tap that feeds the WS bridge); recording forks that stream
+to a writer.
 
-Classify the **answered leg's audio** as human vs machine without any AI —
-greeting cadence, energy envelope, speech-then-long-tail patterns, and beep
-detection. Emits a WS event the server can act on (e.g. drop a voicemail,
-or wait for the beep before playing a message).
+- **Capture**: tap the decoded PCM16 both directions. Default layout
+  **dual-channel stereo** — caller on the left, bot/WS on the right — which
+  is what QA and per-speaker transcription want (see §9 decision 2). Encode
+  to WAV/PCM16 (no new codec dependency; matches the 8 k/16 k bridge path).
+- **Off the hot path (§4.3)**: the audio task pushes frames onto a bounded
+  per-call channel; a dedicated writer task buffers and writes. On sustained
+  overflow the recording is flagged **degraded** (metric + the
+  `RecordingStopped` reason) rather than blocking audio or silently lying
+  about a gap (see §9 decision 6).
+- **Control**: `[recording].mode` = `off` (default) / `always` (record every
+  matched call) / `on_demand` (WS server drives it). On-demand adds
+  `BridgeIn::StartRecording` / `StopRecording`, and — for PCI "stop while
+  the caller reads a card number" — `PauseRecording` / `ResumeRecording`.
+  `BridgeOut::RecordingStarted` / `RecordingStopped` / `RecordingFailed`
+  carry a `recording_id` and (on the file sink) the path.
+- **Config**: `[recording]` — mode, output dir + path template
+  (`{date}/{call_id}.wav`), channel layout, per-route override
+  `[route.recording]`. A pluggable sink (file first, like the CDR sink
+  abstraction; object-storage is a later sink — §4).
+- **CDR**: optional `recording_id` / `recording_path` (emitted only when
+  populated → schema stays at version 1, per the 0.4.0 precedent).
+- **Metric**: `siphon_ai_recordings_total{result="ok|degraded|failed"}`.
+- **Lifecycle**: the writer is a per-call sub-task; on call end it flushes,
+  finalizes the WAV header, closes, and the path lands on the CDR.
 
-- **Upstream**: a forge-media `forge-amd` crate (sibling to `forge-vad`),
-  fed the decoded PCM it already has. Produces a classification +
-  confidence + the time it settled, or `unknown` on timeout.
-- **siphon-ai**: `media-glue` subscribes and emits a new `BridgeOut`
-  event (see §9 decision 1 for shape). Config `[media.amd]` —
-  `enabled` (default off), confidence threshold, analysis timeout,
-  per-route override. CDR field + `siphon_ai_amd_total{result}` metric.
-- **Scope note (be honest):** classic AMD pays off most on **outbound**
-  dials (is this an answering machine?), which is post-v1. On inbound its
-  value is robocall / voicemail-drop / IVR detection on the caller leg.
-  Shipping the primitive now means it's ready the day outbound lands, and
-  it's useful for inbound machine-detection today. If that framing isn't
-  worth a release slot, say so — it's the one scope call worth challenging.
+### 3.2 SRTP re-key on a timer (ride-along)
 
-### 3.2 Call park (REFER-to-orbit)
-
-A `BridgeIn::Park` that REFERs the caller to a configured parking-orbit URI
-on the upstream PBX, which holds the call and provides retrieval (another
-phone dials the orbit code). Reuses the existing blind-transfer REFER path
-— small, and it keeps SiphonAI's "no cross-call state" invariant (§4.4): the
-PBX owns the orbit and the pickup, not us.
-
-- **siphon-ai**: `BridgeIn::Park { call_id, orbit }` (or a configured
-  default orbit); on success the dialog is handed to the PBX exactly like a
-  blind transfer; `BridgeOut::Parked` / `ParkFailed`. Config for a default
-  orbit URI + an allowlist.
-- **Why not in-bridge park:** true cross-endpoint pickup (park here, grab
-  there) needs shared per-call state / a registry that §4.4 forbids and
-  that conferencing (§6) would underpin. REFER-to-orbit sidesteps that by
-  delegating to the PBX. See §9 decision 4.
-
-### 3.3 SRTP re-key on a timer
-
-The 0.3.0 SRTP carry-forward. The re-key crypto exists in `forge-rtp`
-(DTLS-SRTP handshake re-key); 0.5.0 exposes the *trigger*:
-`[media.srtp].rekey_after_seconds`. On the threshold, renegotiate keys
-mid-call without dropping audio. Observable via a log line + a metric; no
+The 0.3.0 carry-forward. The DTLS-SRTP re-key crypto exists in `forge-rtp`;
+0.5.0 exposes the trigger `[media.srtp].rekey_after_seconds` — renegotiate
+keys mid-call on the threshold without dropping audio. Log line + metric; no
 protocol change.
 
 ## 4. Stretch (slip target)
 
-### 4.1 Attended transfer (REFER with `Replaces`)
+- **Object-storage sink** (e.g. S3-compatible) behind the same sink trait as
+  the file sink — for operators who don't want recordings on the call node's
+  local disk. File sink is the must-have; this is additive.
+- **Compressed format** (Opus) as an alternative to WAV, to cut storage. WAV
+  is the must-have.
 
-The 0.3.1 call-handling carry-forward. Completes the transfer surface:
-`BridgeIn::Transfer` gains an attended mode that issues a REFER with a
-`Replaces` header so the transferee joins an existing consultation dialog.
-
-**Dependency:** needs a siphon-rs UAC capability (REFER/Replaces
-construction) that isn't confirmed shipped — the same upstream-critical-path
-shape STIR/SHAKEN had with `sip-identity`. If that capability is ready
-early, promote to must-have; if it slips, this stays stretch and rolls to
-0.5.1. Don't gate the AMD/park/re-key release on it.
+Both slip to 0.5.1 if Week 6 is tight.
 
 ## 5. Out of scope — the AI line (unchanged)
 
-CLAUDE.md §4.1 keeps these on the WS-server side, shipped as reference
-examples, not core features: real-time transcription, call analytics
-(sentiment / escalation / compliance), live translation, AI provider
-abstraction, and the *generation* of semantic events
-(`intent_detected`, etc.). The protocol could grow an `IntentDetected`
-carrier message for a server to ferry such events, but the producing brain
-is never in the bridge. Example backlog (each its own PR, gates nothing):
-`analytics-server-py`, `translator-bot-py`.
+CLAUDE.md §4.1 keeps transcription, analytics (sentiment / compliance
+scoring), translation, and semantic-event *generation* in the WS server,
+shipped as reference examples. Recording produces the audio file those tools
+consume; it does not analyze it. (A recording is, notably, the perfect input
+to a WS-side transcription/QA bot — but that bot is an example, not core.)
 
-## 6. Deferred — conferencing, and a pinned target
+## 6. Deferred — outbound, conferencing, AMD, and a pinned target
 
-**N-leg conferencing / whisper / barge is the single biggest unlock left**
-(it underpins supervisor-whisper and N-party AI sessions) and the single
-biggest lift: ~weeks of forge-media work to add N-leg per-call routing,
-then siphon-ai work to expose conference primitives in the protocol.
-CLAUDE.md §8 marks it post-v1 and the 0.3.0 plan called it "the largest
-architectural lift on the roadmap."
+These keep coming up as prerequisites for the call-handling features that
+left 0.5.0; pinning their homes:
 
-**Proposed target: 0.6.0 as its own dedicated theme.** It is explicitly NOT
-0.5.0. Pinning it here so the roadmap has a home for everything that depends
-on it (supervisor whisper, N-party). Decide the target in §9.
+- **Outbound origination** — the keystone that unlocks **attended transfer**
+  and callbacks (and AMD's real payoff). Changes auth, dialog ownership, and
+  SIP routing (CLAUDE.md §8). **Proposed: its own theme, 0.6.0 or 0.7.0.**
+- **N-leg conferencing / whisper / barge** — and **call park** with it (true
+  park needs the cross-call routing conferencing brings). The largest lift
+  on the roadmap. **Proposed target: a dedicated theme once outbound lands.**
+- **AMD** — a later audio-analysis release; the `forge-amd` primitive is
+  ready to pick up when outbound makes it pay off.
 
-Also deferred (post-v1, unchanged): outbound originated calls, recording,
-video, WebRTC client, WS reconnect mid-call.
+Confirm the outbound-vs-conferencing ordering in §9 decision 8.
+
+Also deferred (unchanged): video, WebRTC client, WS reconnect mid-call.
 
 ## 7. Sprint plan (6 weeks)
 
-AMD's forge-media crate is the one critical-path dependency — open it Week 1
-so review runs in parallel.
+No upstream critical path this time — recording is siphon-ai-only (it taps
+existing forge PCM). SRTP re-key touches forge-rtp config but the crypto is
+already there.
 
 | Week | Focus | Deliverables |
 |---|---|---|
-| 1 | AMD upstream + scaffolding | Open the forge-media `forge-amd` PR (classifier + confidence + timeout). siphon-ai: `[media.amd]` config surface + the WS event type, behind `enabled = false`. No wire behaviour yet. |
-| 2 | SRTP re-key | `[media.srtp].rekey_after_seconds` → timed DTLS-SRTP re-key, no audio drop; metric + log; SIPp/interop check. Independent of AMD upstream. |
-| 3 | Wire AMD in | media-glue consumes forge-amd, emits the WS event; CDR field; metric; per-route override. First test against recorded voicemail-greeting vs live-speech fixtures. |
-| 4 | Call park | `BridgeIn::Park` (REFER-to-orbit) reusing the transfer path; `Parked`/`ParkFailed`; config (default orbit + allowlist); SIPp scenario. |
-| 5 | Attended transfer (stretch) OR hardening | If the siphon-rs UAC capability landed: REFER+Replaces attended transfer. Else: AMD tuning, more AMD fixtures, docs. |
-| 6 | Hardening + release | Full smoke + SIPp suite green (incl. new scenarios), CHANGELOG, version bump, tag, GitHub release. |
+| 1 | Recording capture core | Per-call writer task fed off the media tap over a bounded channel; WAV/PCM16 stereo sink to a local file. Hot-path-safe (no I/O on the audio task). `[recording].mode = "always"` path only. |
+| 2 | Control + modes | `off`/`always`/`on_demand`; `Start`/`Stop`/`Pause`/`Resume` BridgeIn + `RecordingStarted`/`Stopped`/`Failed` BridgeOut; pause gaps handled correctly in the WAV timeline. |
+| 3 | Config + CDR + metrics | `[recording]` + `[route.recording]` override; path templating; `recording_id`/`recording_path` on the CDR; `siphon_ai_recordings_total`; degraded-on-overflow signalling. |
+| 4 | SRTP re-key | `[media.srtp].rekey_after_seconds` → timed DTLS-SRTP re-key, no audio drop; metric + log; interop check. |
+| 5 | Hardening + tests | SIPp scenario that records a call and asserts a valid non-empty WAV; pause/resume + degraded-path tests; docs (`docs/RECORDING.md`, CONFIG/PROTOCOL/DEPLOY). Stretch sinks if time. |
+| 6 | Release | Full smoke + SIPp suite green, CHANGELOG, version bump, tag, GitHub release. |
 
 ## 8. Protocol versioning
 
-All 0.5.0 additions are **additive** to v1 — protocol stays `version: "1"`:
+Additive — protocol stays `version: "1"`:
 
-- New `BridgeOut` AMD event (+ optional `IntentDetected` carrier is *not*
-  in scope here).
-- New `BridgeIn::Park` + `BridgeOut::Parked` / `ParkFailed`.
-- Attended transfer is a new field/mode on the existing `Transfer` message.
+- New `BridgeIn`: `StartRecording` / `StopRecording` / `PauseRecording` /
+  `ResumeRecording`.
+- New `BridgeOut`: `RecordingStarted` / `RecordingStopped` /
+  `RecordingFailed`.
+- CDR gains optional `recording_id` / `recording_path` (emitted only when
+  populated → schema stays at 1).
 - SRTP re-key is config-only (no wire change).
-
-CDR gains optional AMD fields (emitted only when populated → schema stays
-at version 1, per the 0.4.0 precedent).
 
 ## 9. Decisions before Sprint 1 (proposed; confirm)
 
-1. ☐ **AMD event shape.** Single `amd_result { result: "human" |
-   "voicemail" | "fax" | "unknown", confidence }` vs two events
-   (`voicemail_detected` / `human_detected`). **Recommended:** single
-   `amd_result` — covers `fax`/`unknown` cleanly and is one thing for a
-   server to handle.
-2. ☐ **AMD home.** New `forge-amd` crate vs extend `forge-vad`.
-   **Recommended:** new sibling crate — keeps VAD lean and AMD's heuristics
-   separable.
-3. ☐ **AMD timeout behaviour.** Default analysis window (e.g. 3–4 s) and
-   what a timeout emits. **Recommended:** ~3 s, emit `unknown` so the
-   server always gets exactly one verdict.
-4. ☐ **Park semantics.** REFER-to-orbit (delegates pickup to the PBX; fits
-   §4.4) vs an in-bridge named-hold (no cross-endpoint pickup; brushes
-   post-v1 WS-reconnect). **Recommended:** REFER-to-orbit.
-5. ☐ **SRTP re-key trigger.** Time-based only (`rekey_after_seconds`) vs
-   also packet/byte-count. **Recommended:** time-based only.
-6. ☐ **Attended transfer: must-have or stretch?** Depends on the siphon-rs
-   UAC REFER/Replaces capability. **Recommended:** stretch until the
-   upstream is confirmed.
-7. ☐ **Conferencing target release.** 0.6.0 dedicated theme vs later.
-   **Recommended:** pin 0.6.0.
-8. ☐ **Is AMD worth a 0.5.0 slot given inbound-only?** (§3.1 scope note.)
-   **Recommended:** yes — ship the primitive; honest about the
-   outbound payoff.
-9. ☐ **Sprint length.** 6 weeks. **Recommended:** 6.
+1. ☐ **Recording control model.** `off`/`always`/`on_demand` modes + WS
+   control. **Recommended:** ship all three — compliance wants `always`
+   per-route, QA wants `on_demand`.
+2. ☐ **Channel layout.** Dual-channel stereo (caller L / bot R) vs mono mix.
+   **Recommended:** stereo default (QA + per-speaker STT value), mono mix as
+   a config option.
+3. ☐ **Format.** WAV/PCM16 vs compressed. **Recommended:** WAV first; Opus
+   is §4 stretch.
+4. ☐ **Sink.** Local file first vs object-storage now. **Recommended:** file
+   first behind a sink trait; object-storage is §4 stretch.
+5. ☐ **Pause/resume in scope?** **Recommended:** yes — PCI "pause while the
+   caller reads a card number" is a core compliance need.
+6. ☐ **Overflow policy** when the writer can't keep up. **Recommended:**
+   flag the recording `degraded` (metric + `RecordingStopped` reason) and
+   keep going — never block the audio task (§4.3), never silently drop.
+7. ☐ **Retention / lifecycle.** Daemon-managed reaper vs operator-managed.
+   **Recommended:** operator-managed (storage/cron) — the daemon writes
+   files + emits the path; no reaper in 0.5.0. Document it.
+8. ☐ **Roadmap ordering** of outbound vs conferencing (§6). **Recommended:**
+   outbound 0.6.0, conferencing after.
+9. ☐ **Consent/announcement.** **Recommended:** out of core — the WS server
+   plays any "this call is recorded" prompt; we document the operator's
+   legal responsibility (two-party-consent jurisdictions).
+10. ☐ **Sprint length.** 6 weeks.
 
 ## 10. Definition of Done — v0.5.0
 
-1. A call whose answered leg is an answering-machine greeting emits the AMD
-   event as `voicemail` (and a live human as `human`); `[media.amd]` gates
-   it; the result lands on the CDR and `siphon_ai_amd_total`.
-2. A WS server can `BridgeIn::Park` a call to a configured orbit; the caller
-   is REFERed and the PBX confirms; `Parked` / `ParkFailed` are surfaced.
-3. `[media.srtp].rekey_after_seconds` triggers a mid-call SRTP re-key with
+1. With `[recording].mode = "always"`, a completed call leaves a valid,
+   playable WAV (stereo: caller/bot separated) at the templated path, and
+   the path is on the CDR.
+2. A WS server can `StartRecording` / `StopRecording` mid-call in
+   `on_demand` mode, and `PauseRecording` / `ResumeRecording` produce a
+   recording with the paused span omitted.
+3. Recording never blocks or gaps the live audio path; writer overflow is
+   surfaced as `degraded`, not silent loss.
+4. `siphon_ai_recordings_total` ticks by result; `[route.recording]`
+   overrides the global.
+5. `[media.srtp].rekey_after_seconds` triggers a mid-call SRTP re-key with
    no audio drop, visible in logs/metrics.
-4. (stretch) Attended transfer (REFER+Replaces) completes against a PBX that
-   supports `Replaces`.
-5. CI gates every PR (fmt + clippy + test + SIPp), with new SIPp scenarios
-   for park and (if landed) attended transfer.
-6. Upgrade from 0.4.1 with no config changes and no behaviour difference —
-   AMD/park/re-key are all opt-in.
+6. CI gates every PR (fmt + clippy + test + SIPp), with a recording SIPp
+   scenario asserting a non-empty valid WAV.
+7. Upgrade from 0.4.1 is config-compatible — recording is `off` by default;
+   no behaviour change.
 
 ## 11. Risks
 
-- **AMD accuracy.** False voicemail/human calls are the core risk; mitigate
-  with a confidence threshold, a recorded-fixture test corpus, and
-  `unknown` rather than a forced guess. Tunable, off by default.
-- **AMD upstream latency.** One critical-path forge-media PR (as
-  `sip-identity` was for 0.4.0). Mitigation: open Week 1; SRTP re-key + park
-  don't depend on it, so the release isn't blocked if AMD slips to 0.5.1.
-- **Park architectural fit.** REFER-to-orbit keeps us clear of §4.4; if an
-  operator expects in-bridge pickup, that's a conferencing-era feature —
-  document the boundary.
-- **Attended-transfer upstream dependency** (see §4.1).
+- **Hot-path safety (the big one).** Recording I/O on the audio task would
+  add jitter / drops to live calls. Mitigation: hard separation — bounded
+  channel + dedicated writer task, file I/O never on the audio task; load
+  test confirms no added jitter under recording.
+- **Disk exhaustion.** Always-on recording fills disks. Mitigation: document
+  sizing (PCM16 stereo ≈ 256 kbit/s ≈ ~115 MB/hour at 16 k); operator-
+  managed retention; a `degraded`/`failed` result when writes error
+  (ENOSPC) rather than a wedged call.
+- **Legal/consent.** Recording has jurisdiction-specific consent law.
+  Mitigation: documentation is explicit that consent + announcement are the
+  operator's responsibility (§9 decision 9).
+- **WAV correctness across pause/resume.** Finalizing the header and
+  handling paused spans needs care. Mitigation: fixture tests that decode
+  the output and assert duration/channels.
 
 ## 12. Out of scope (explicit non-goals for 0.5.0)
 
-Conferencing / whisper / barge (§6, pinned 0.6.0), outbound origination,
-recording, video, WebRTC client, WS reconnect mid-call, and all AI features
-(§5) — those are WS-server reference examples, never bridge code.
+Outbound origination, conferencing/whisper/barge/park, attended transfer,
+AMD (§6), video, WebRTC client, WS reconnect mid-call, recording *analysis*
+(transcription/QA — WS-server examples, §5), and a daemon-side retention
+reaper (§9 decision 7).

@@ -1,8 +1,10 @@
 # SiphonAI 0.6.0 Development Plan — DRAFT
 
-> **STATUS: DRAFT for review.** Theme is set; the §9 decisions are proposed,
-> not locked — confirm/iterate before chunk 1 (the 0.4.x / 0.5.0 plans worked
-> the same way). Effort + sequencing assume the §9 recommendations.
+> **STATUS: DRAFT for review.** Theme set. The three shaping §9 decisions are
+> **locked** — gateways = `[[register]]` reuse **+** `[[gateway]]` (§9.2);
+> originate-API auth = reverse-proxy posture, no native token (§9.5);
+> attended transfer = **0.6.1 fast-follow** (§9.7). The remaining §9 items are
+> proposed (with recommendations); confirm them before chunk 1.
 
 **Theme: outbound call origination — SiphonAI places calls, not just answers
 them.**
@@ -61,8 +63,10 @@ So 0.6.0 is **net-new siphon-ai glue**, not an upstream project:
 - **New stakes: outbound spends money.** This is the first feature where
   SiphonAI *places billable calls* and exposes a control surface that
   triggers them. Toll-fraud / abuse / runaway loops are first-class concerns
-  (§9, §11), not afterthoughts. Auth, a concurrency cap, and rate limiting
-  ship **with** the originate API, not later.
+  (§9, §11), not afterthoughts. The originate endpoint has **no native auth**
+  (reverse-proxy posture, §9.5), so a **concurrency cap + rate limit +
+  localhost-default bind** ship **with** it as the native guardrails, and
+  "restrict access to this endpoint" is a documented operator responsibility.
 - **Observability ships with the feature (§4.5).** Outbound CDRs, call-
   progress webhooks, and metrics are in-scope must-haves, not follow-ups.
 
@@ -96,21 +100,36 @@ controller, registry, CDR, webhook, and recording paths.
 
 ### 3.3 Gateways (where outbound calls go)
 
-A named **gateway** = the SIP trunk/provider SiphonAI dials *through*:
-destination proxy/registrar, default From / caller-ID, codecs, and digest
-credentials (fed to the UAC `CredentialProvider`). The originate request
-names a gateway. See §9 decision 2 for whether a gateway is a new
-`[[gateway]]` block, a reuse of `[[register]]`, or both.
+A named **gateway** = the SIP trunk/provider SiphonAI dials *through*. The
+originate request names one, and (decision §9.2, **locked**) a gateway is
+**either**:
+
+- an existing **`[[register]]`** entry — dial out through a PBX/provider
+  SiphonAI is already registered to, reusing its server address and digest
+  credentials; **or**
+- a new **`[[gateway]]`** block — a static / IP-auth trunk: destination
+  proxy, default From / caller-ID, codecs, and optional digest credentials
+  (fed to the UAC `CredentialProvider`).
+
+Both resolve to the same internal "where + how to dial" shape the outbound
+handler consumes.
 
 ### 3.4 Originate trigger (control API)
 
-An authenticated HTTP endpoint to place a call — `POST` a JSON body
+An HTTP endpoint to place a call — `POST` a JSON body
 (`{to, gateway, ws_url|route, from?, headers?}`) → SiphonAI returns a
 `call_id` immediately (202 Accepted) and the call proceeds asynchronously.
-**Auth is mandatory on this endpoint** (it spends money — §9 decision 5), and
-a **max-concurrent-outbound cap** + basic rate limit ship with it (§9
-decision 6). The admin HTTP surface exists (`crates/telemetry/src/admin.rs`)
-but has no auth and no originate endpoint today — both are net-new.
+
+**Auth posture (decision §9.5, locked): reverse-proxy, not a native token.**
+The originate endpoint keeps the existing admin-surface model — no built-in
+auth; the operator **must** bind admin to localhost (the default) and/or
+front it with an authenticating reverse proxy. Because this endpoint spends
+money, the **native guardrails are the abuse controls, not auth**: a
+**`max_concurrent_outbound` cap** + a basic **rate limit** ship with it
+(§9.6), the toll-fraud surface is documented loudly, and "you must restrict
+access to this endpoint" is stated as operator responsibility. The admin HTTP
+surface exists (`crates/telemetry/src/admin.rs`); the originate endpoint, the
+cap, and the rate limit are net-new.
 
 ### 3.5 Outbound observability (must-have, same PR as the feature)
 
@@ -124,13 +143,11 @@ but has no auth and no originate endpoint today — both are net-new.
 
 ## 4. Stretch (slip target)
 
-- **Attended transfer (REFER + `Replaces`)** — now *unblocked* by outbound
-  (the consultation leg is an outbound call; siphon-rs already has
-  `create_refer_with_replaces`). A strong fast-follow, but it's a second
-  feature on top of origination — see §9 decision 7 for in-0.6.0 vs 0.6.1.
 - **Early media** — connect the WS bridge before answer so the bot can hear
   ringback / provide pre-answer audio (183 session-progress). Default is
   connect-on-answer (§9 decision 3); early media is additive.
+
+(Attended transfer was a candidate here but is **locked to 0.6.1** — §6.)
 
 ## 5. Out of scope — the AI line (unchanged)
 
@@ -142,6 +159,11 @@ off, but it carries a forge-media dependency.
 
 ## 6. Deferred / unlocked-but-later, and pinned targets
 
+- **Attended transfer (REFER + `Replaces`)** — unblocked by outbound (the
+  consultation leg is an outbound call; siphon-rs already has
+  `create_refer_with_replaces`). **Locked to 0.6.1** as the fast-follow
+  (§9.7): keep 0.6.0 focused on the origination foundation, then ship the
+  transfer it unlocks as the next point release.
 - **AMD** — human/voicemail detection. Outbound makes it valuable; still its
   own audio-analysis release (needs a `forge-amd` classifier). Pick up after
   0.6.0.
@@ -163,12 +185,12 @@ APIs.
 |---|---|---|
 | 1 | Outbound media | `MediaSetup::originate_outbound` (offer gen) + apply-remote-answer-to-session binding; unit tests over fixture SDP. No SIP yet. |
 | 2 | Outbound call handler | `OutboundOriginator`: UAC `invite()` → dialog → answer-bind → `CallController` (UAC-side BYE/CANCEL). Failure outcomes (busy/decline/timeout). Behind no public trigger yet (drive from a test). |
-| 3 | Gateways + safety | Gateway config (§9.2) + caller-ID + `CredentialProvider` wiring for digest trunks; `max_concurrent_outbound` cap + rate limit. |
-| 4 | Originate API | Authenticated `POST` originate endpoint (§9.5) → returns `call_id` (202); request/response contract; admin auth. |
+| 3 | Gateways + safety | `[[register]]`-reuse **+** `[[gateway]]` config (§9.2) + caller-ID + `CredentialProvider` wiring for digest trunks; `max_concurrent_outbound` cap + rate limit (the native guardrails). |
+| 4 | Originate API | `POST` originate endpoint → returns `call_id` (202); request/response contract. Reverse-proxy auth posture (§9.5) — localhost-default bind + loud toll-fraud docs; the cap/limit from chunk 3 are the native protection. |
 | 5 | Observability | CDR `direction=outbound` + target/gateway; call-progress webhooks; `siphon_ai_outbound_calls_total` + concurrency gauge; HEP if applicable. |
 | 6 | Docs + tests + release | `docs/OUTBOUND.md`; a SIPp scenario where SIPp is the **UAS** answering SiphonAI's INVITE; CHANGELOG/README; tag + release. |
 
-(Attended transfer, if §9.7 puts it in 0.6.0, is a chunk between 5 and 6.)
+(Attended transfer is **0.6.1**, not a 0.6.0 chunk — §6 / §9.7.)
 
 ## 8. New surfaces & versioning
 
@@ -189,11 +211,9 @@ APIs.
    scheduled calls vs both. **Recommended:** HTTP API — it's the primitive
    everything else (campaigns, click-to-dial) builds on; the admin surface
    already exists.
-2. ☐ **Gateway config model.** New `[[gateway]]` block vs reuse `[[register]]`
-   (dial through an endpoint SiphonAI is already registered to) vs both.
-   **Recommended:** support **both** — `[[register]]` reuse for
-   registrar/PBX trunks (credentials already there) and a `[[gateway]]` for
-   static IP-auth trunks; the originate request names one.
+2. ☑ **Gateway config model.** **Decided: both** — `[[register]]` reuse for
+   registrar/PBX trunks (credentials already there) **and** a `[[gateway]]`
+   block for static IP-auth trunks; the originate request names one.
 3. ☐ **WS connect timing.** Connect the bridge on answer vs early media
    (pre-answer). **Recommended:** on answer (mirrors inbound); early media is
    §4 stretch.
@@ -202,18 +222,18 @@ APIs.
    documented as reserved) or bump to v2? **Recommended:** keep v1 but call
    it out in the release notes; strict consumers pinned to `"inbound"` should
    already tolerate the documented reserved value.
-5. ☐ **Originate-API auth.** It places billable calls. Bearer-token auth on
-   the originate endpoint (and ideally the whole admin surface) vs the
-   current "bind to localhost / front with a reverse proxy" posture.
-   **Recommended:** require a bearer token for originate, default-bind admin
-   to localhost, and document the toll-fraud surface loudly.
+5. ☑ **Originate-API auth.** **Decided: reverse-proxy posture** — no native
+   token on the endpoint; admin defaults to localhost-bind and the operator
+   fronts it with an authenticating reverse proxy (or keeps it on a trusted
+   network). The native guardrails are the §9.6 abuse controls + loud docs;
+   restricting access to the endpoint is the operator's responsibility.
 6. ☐ **Abuse controls.** `max_concurrent_outbound` cap + a simple rate limit
-   in 0.6.0? **Recommended:** yes — both are cheap and the lack of them is a
-   real toll-fraud footgun.
-7. ☐ **Attended transfer in 0.6.0?** It's unblocked by outbound. In-scope
-   must-have, stretch, or a 0.6.1 fast-follow? **Recommended:** 0.6.1 fast-
-   follow — keep 0.6.0 focused on the origination foundation; attended
-   transfer is a distinct second feature.
+   in 0.6.0? **Recommended:** yes — and **doubly so given §9.5**: with no
+   native auth on the endpoint, the cap + rate limit are the only built-in
+   defense against a runaway/abused originate path.
+7. ☑ **Attended transfer in 0.6.0?** **Decided: 0.6.1 fast-follow** — keep
+   0.6.0 focused on the origination foundation; ship attended transfer
+   (REFER+Replaces) as the next point release on top of it.
 8. ☐ **Does the WS `start` message distinguish inbound vs outbound?** Add a
    `direction` field to `start` (additive, protocol stays "1") so the bot
    knows which side it's on? **Recommended:** yes — additive and useful; an
@@ -240,11 +260,14 @@ APIs.
 
 ## 11. Risks
 
-- **Toll fraud / abuse (the big new one).** An exposed or unauthenticated
-  originate API can place unlimited billable calls. Mitigation: mandatory
-  auth on the endpoint, `max_concurrent_outbound`, rate limiting, localhost-
-  default binding, loud docs. This is §9.5/§9.6 and a DoD item, not a
-  follow-up.
+- **Toll fraud / abuse (the big new one).** An exposed originate API can
+  place unlimited billable calls — and per §9.5 the endpoint has **no native
+  auth** (reverse-proxy posture). So the built-in defenses are
+  `max_concurrent_outbound` + rate limiting + **localhost-default binding**,
+  and access control is the operator's responsibility (front it with an
+  authenticating proxy / trusted network). Mitigation is a DoD item, and the
+  docs must state the "you must restrict this endpoint" responsibility
+  loudly — the lack of native auth makes the cap/limit/bind non-negotiable.
 - **Call-progress semantics.** Mapping SIP responses (180/183/200/486/603/
   408/487) and timeouts to clean outcomes is fiddly and provider-dependent.
   Mitigation: an explicit outcome enum + a SIPp matrix covering the cases.
@@ -261,6 +284,6 @@ APIs.
 ## 12. Out of scope (explicit non-goals for 0.6.0)
 
 Campaign/bulk/scheduled dialing (the API is the primitive; the dialer is a
-layer above), AMD (§6), conferencing/whisper/barge/park, SRTP re-key
-(forge-media#71), video, WebRTC, the outbound *bot* logic itself (WS-server
-example), and — pending §9.7 — attended transfer (recommended 0.6.1).
+layer above), **attended transfer (locked to 0.6.1, §6/§9.7)**, AMD (§6),
+conferencing/whisper/barge/park, SRTP re-key (forge-media#71), video, WebRTC,
+and the outbound *bot* logic itself (WS-server example).

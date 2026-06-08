@@ -1,10 +1,11 @@
 # SiphonAI 0.6.0 Development Plan — DRAFT
 
-> **STATUS: DRAFT for review.** Theme set. The three shaping §9 decisions are
-> **locked** — gateways = `[[register]]` reuse **+** `[[gateway]]` (§9.2);
-> originate-API auth = reverse-proxy posture, no native token (§9.5);
-> attended transfer = **0.6.1 fast-follow** (§9.7). The remaining §9 items are
-> proposed (with recommendations); confirm them before chunk 1.
+> **STATUS: APPROVED — all §9 decisions locked.** Headlines: gateways =
+> `[[register]]` reuse **+** `[[gateway]]` (§9.2); originate-API auth =
+> reverse-proxy posture, no native token, so the abuse controls are the
+> native guardrails (§9.5/§9.6); attended transfer = **0.6.1 fast-follow**
+> (§9.7); WS protocol stays `version: "1"`. Ready to execute chunk-by-chunk
+> off `main` (land each before basing the next).
 
 **Theme: outbound call origination — SiphonAI places calls, not just answers
 them.**
@@ -196,49 +197,44 @@ APIs.
 
 - **New control API** — the originate endpoint is a new public surface; spec
   it in a doc and treat it like the WS protocol (versioned, documented).
-- **New config** — `[[gateway]]` (or `[[register]]` reuse) + an
-  `[outbound]` block (concurrency cap, default caller-ID, API auth).
+- **New config** — `[[gateway]]` **+** `[[register]]` reuse (§9.2) + an
+  `[outbound]` block (concurrency cap, rate limit, default caller-ID).
 - **WS protocol** — **unchanged** (`version: "1"`). An outbound call uses the
-  exact same `start` → audio → control messages; the WS server can't tell
-  inbound from outbound except by the `start` metadata (which already carries
-  direction-ish context — confirm in §9.8).
-- **CDR** — `direction = "outbound"` (see §9.4 on whether a new enum value
-  bumps the schema version).
+  exact same `start` → audio → control messages, plus a new additive
+  `direction` field on `start` (§9.8) so the bot knows which side it's on.
+- **CDR** — `direction = "outbound"`; **schema stays at version 1** (§9.4) —
+  the field was always there, reserved for this value.
 
 ## 9. Decisions before chunk 1 (proposed; confirm)
 
-1. ☐ **Trigger mechanism.** Authenticated HTTP originate API vs config-driven
-   scheduled calls vs both. **Recommended:** HTTP API — it's the primitive
+1. ☑ **Trigger mechanism.** **Decided: HTTP originate API** — the primitive
    everything else (campaigns, click-to-dial) builds on; the admin surface
-   already exists.
+   already exists. (Config-driven scheduled calls are out of scope, §12.)
 2. ☑ **Gateway config model.** **Decided: both** — `[[register]]` reuse for
    registrar/PBX trunks (credentials already there) **and** a `[[gateway]]`
    block for static IP-auth trunks; the originate request names one.
-3. ☐ **WS connect timing.** Connect the bridge on answer vs early media
-   (pre-answer). **Recommended:** on answer (mirrors inbound); early media is
-   §4 stretch.
-4. ☐ **CDR versioning for `direction`.** A new `"outbound"` value on the
-   existing `direction` field — keep schema v1 (the field was always there,
-   documented as reserved) or bump to v2? **Recommended:** keep v1 but call
-   it out in the release notes; strict consumers pinned to `"inbound"` should
-   already tolerate the documented reserved value.
+3. ☑ **WS connect timing.** **Decided: connect on answer** (mirrors inbound);
+   early media (pre-answer) is the §4 stretch.
+4. ☑ **CDR versioning for `direction`.** **Decided: keep schema v1** — the
+   `direction` field always existed and was documented as reserved for
+   outbound; the new `"outbound"` value is called out in the release notes.
 5. ☑ **Originate-API auth.** **Decided: reverse-proxy posture** — no native
    token on the endpoint; admin defaults to localhost-bind and the operator
    fronts it with an authenticating reverse proxy (or keeps it on a trusted
    network). The native guardrails are the §9.6 abuse controls + loud docs;
    restricting access to the endpoint is the operator's responsibility.
-6. ☐ **Abuse controls.** `max_concurrent_outbound` cap + a simple rate limit
-   in 0.6.0? **Recommended:** yes — and **doubly so given §9.5**: with no
-   native auth on the endpoint, the cap + rate limit are the only built-in
-   defense against a runaway/abused originate path.
+6. ☑ **Abuse controls.** **Decided: yes** — `max_concurrent_outbound` cap + a
+   simple rate limit ship in 0.6.0, **doubly required given §9.5**: with no
+   native auth on the endpoint, they are the only built-in defense against a
+   runaway/abused originate path.
 7. ☑ **Attended transfer in 0.6.0?** **Decided: 0.6.1 fast-follow** — keep
    0.6.0 focused on the origination foundation; ship attended transfer
    (REFER+Replaces) as the next point release on top of it.
-8. ☐ **Does the WS `start` message distinguish inbound vs outbound?** Add a
-   `direction` field to `start` (additive, protocol stays "1") so the bot
-   knows which side it's on? **Recommended:** yes — additive and useful; an
-   outbound bot behaves differently (it speaks first).
-9. ☐ **Sprint length.** ~5–6 weeks (6 chunks). **Recommended:** 6.
+8. ☑ **Does the WS `start` message distinguish inbound vs outbound?**
+   **Decided: yes** — add a `direction` field to `start` (additive, protocol
+   stays "1") so the bot knows which side it's on (an outbound bot speaks
+   first).
+9. ☑ **Sprint length.** **Decided: 6 weeks** (6 chunks).
 
 ## 10. Definition of Done — v0.6.0
 

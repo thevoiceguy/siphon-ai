@@ -142,6 +142,10 @@ impl Runtime {
             trunks,
             security,
             recording,
+            // Outbound gateways + guardrails are validated at config load
+            // (compile_outbound); the daemon wires them in the originate-API
+            // chunk. Bound-but-unused until then.
+            outbound: _outbound,
             cdr,
             observability,
             webhooks,

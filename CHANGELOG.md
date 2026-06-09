@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-09
+
+Theme: **outbound call origination.** SiphonAI inverts its inbound-only
+model — `POST /admin/v1/calls` places a SIP call through a configured
+gateway and bridges the answered call to a WS server over the same
+protocol v1 session inbound calls use. **Off by default** (fail-closed on
+`[outbound].max_concurrent = 0`) — a 0.5.0 deployment upgrades with zero
+behaviour change. The WS protocol stays at `version: "1"` (the new
+`start.direction` field is additive) and the CDR schema stays at version 1
+(`direction` was reserved for outbound since v1).
+
+### Added
+
+- **Outbound origination** — `[outbound]` (`max_concurrent`,
+  `rate_limit_per_sec`) + `[[gateway]]` blocks: standalone trunks
+  (`proxy` / `from` / optional digest `auth_username` + `auth_password`)
+  or `register = "<name>"` to dial through an existing `[[register]]`,
+  inheriting its server, credentials, and AOR. Validated at config load.
+  See `docs/OUTBOUND.md`.
+- **Originate API** — `POST /admin/v1/calls` `{to, gateway, ws_url?,
+  from?}` → `202 {call_id}`. **No built-in auth by design** (reverse-proxy
+  posture, plan §9.5): bind the admin API private and front it yourself.
+  The cap + rate limit are the native toll-fraud guardrails; the
+  `503`/`429` rejections are fail-closed.
+- **WS protocol** — `start.direction: "inbound" | "outbound"` (additive;
+  servers that ignore it keep working). Outbound sessions start at answer
+  and carry the dialed `to` and the caller-ID `from`.
+- **Call-progress webhooks** — `outbound_initiated` `{to, gateway}`,
+  `outbound_answered` `{sip_call_id}`, terminal `outbound_failed`
+  `{cause}`; answered calls finish with the existing `call_end`. `cause`
+  mirrors the metric's `result` labels.
+- **CDR** — `direction: "outbound"` for answered originated calls;
+  `route` carries the gateway name. Unanswered calls get no CDR (webhook +
+  metric cover them), mirroring inbound where CDRs cover bridged calls.
+- **Metrics** — `siphon_ai_outbound_calls_total{result="answered"|"busy"|
+  "declined"|"no_answer"|"rejected"|"unreachable"|"failed"}` and the
+  `siphon_ai_outbound_calls_active` gauge.
+- **SIPp coverage** — `outbound_uas_answer.xml` + an always-on roles-
+  inverted regression phase (SIPp answers SiphonAI's INVITE; pass requires
+  the full INVITE → ACK → BYE flow *and* the answered-counter reading 1),
+  driven by a new `--auto-hangup-after-ms` test-harness knob on the echo
+  WS example server.
+- **`docs/OUTBOUND.md`** — the outbound guide (enabling, originate API,
+  the toll-fraud security posture, lifecycle, observability, testing
+  without spending money, limitations).
+
+### Notes
+
+- Outbound calls **spend money**. The security model is deliberate:
+  no native API auth, so the documented posture (private bind +
+  authenticating reverse proxy + `max_concurrent` + `rate_limit_per_sec`
+  + trunk-side destination allowlists) is mandatory reading —
+  `docs/OUTBOUND.md` §3.
+- Not in 0.6.0: early media (WS session starts at answer), attended
+  transfer (the 0.6.1 fast-follow), outbound recording, outbound
+  STIR/SHAKEN signing, built-in AMD (the WS server's job, by design).
+
 ## [0.5.0] - 2026-06-08
 
 Theme: **call recording.** Each call's audio can be captured to a stereo WAV
@@ -584,7 +641,8 @@ the WebSocket server's job.
 - Reference WebSocket servers in `examples/`: echo (Python / Node),
   an OpenAI Realtime bridge, and a Deepgram + LLM voice bot.
 
-[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.3.2...v0.4.0

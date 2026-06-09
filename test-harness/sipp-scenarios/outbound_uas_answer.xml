@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  outbound_uas_answer — roles inverted: SIPp acts as the CALLEE (UAS);
+  SiphonAI is the UAC, placing the call via `POST /admin/v1/calls`
+  through a `[[gateway]]` that points at SIPp's listen port.
+
+  Validates the 0.6.0 outbound answer path end-to-end over real SIP:
+  INVITE (with SDP offer) → 180 → 200 (SDP answer) → ACK, then the
+  WS bridge runs (the harness echo server auto-hangs-up after a
+  beat), and SiphonAI tears the dialog down with BYE → 200.
+
+  Run via run-all.sh's outbound auxiliary phase — the scenario alone
+  does nothing until the runner POSTs the originate request.
+-->
+<scenario name="outbound_uas_answer">
+  <recv request="INVITE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 180 Ringing
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <send retrans="500">
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv request="ACK" rtd="true"/>
+
+  <!-- The call is up; SiphonAI's bridge connects to the echo WS
+       server, which emits `hangup` after ~1.5s (the runner starts it
+       with the auto-hangup-after-ms flag). SiphonAI then BYEs us. -->
+  <recv request="BYE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]>
+  </send>
+</scenario>

@@ -313,7 +313,7 @@ the listener on a private network.
 ### `POST /admin/v1/calls` — outbound origination
 
 Requires `[outbound].max_concurrent > 0` and at least one `[[gateway]]` (see
-`docs/CONFIG.md`). **This endpoint places billable calls and has no built-in
+`docs/CONFIG.md`; full guide: `docs/OUTBOUND.md`). **This endpoint places billable calls and has no built-in
 auth** — restrict access to it (bind to a private network / front with an
 authenticating reverse proxy). The `max_concurrent` cap + `rate_limit_per_sec`
 are the native guardrails.

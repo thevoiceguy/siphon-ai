@@ -55,7 +55,8 @@ pub struct CdrRecord {
 
     /// Name of the matched `[[route]]` block (or `"unmatched"` if
     /// the route table didn't match — we don't currently emit CDRs
-    /// for those, but reserved).
+    /// for those, but reserved). For outbound calls this is the
+    /// `[[gateway]]` name the call was placed through.
     pub route: String,
     /// WebSocket URL the bridge connected to.
     pub ws_url: String,
@@ -90,9 +91,13 @@ pub struct CdrRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
-    /// The only direction in v1; reserved for symmetry with future
-    /// outbound originated calls.
+    /// SiphonAI answered the call (trunk INVITE or registered line).
     Inbound,
+    /// SiphonAI placed the call (`POST /admin/v1/calls` through a
+    /// gateway). The field was reserved for this since v1, so the
+    /// schema version stays 1 (0.6.0 plan §9.4). For outbound CDRs
+    /// `route` carries the gateway name instead of a `[[route]]` name.
+    Outbound,
 }
 
 /// Audio metadata from the negotiated SDP answer. The wire-side
@@ -205,6 +210,22 @@ mod tests {
     fn direction_uses_snake_case_on_wire() {
         let v = serde_json::to_value(Direction::Inbound).unwrap();
         assert_eq!(v, serde_json::json!("inbound"));
+        let v = serde_json::to_value(Direction::Outbound).unwrap();
+        assert_eq!(v, serde_json::json!("outbound"));
+    }
+
+    #[test]
+    fn outbound_direction_is_additive_and_stays_at_v1() {
+        // §9.4: `direction` was reserved for outbound since v1, so an
+        // outbound CDR parses under the same schema version.
+        let mut rec = sample();
+        rec.direction = Direction::Outbound;
+        rec.route = "twilio_main".into(); // gateway name, not a route
+        let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
+        assert_eq!(v["direction"], serde_json::json!("outbound"));
+        assert_eq!(v["version"], serde_json::json!(1));
+        let back: CdrRecord = serde_json::from_value(v).unwrap();
+        assert_eq!(back.direction, Direction::Outbound);
     }
 
     #[test]

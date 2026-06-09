@@ -14,6 +14,7 @@
 //! | GET    | `/admin/log`                  | Current `tracing` filter directive   |
 //! | PUT    | `/admin/log`                  | Replace the filter (body = directive)|
 //! | POST   | `/admin/hep/test`             | Emit a probe HEP log packet          |
+//! | POST   | `/admin/v1/calls`             | Originate an outbound call (0.6.0)    |
 //!
 //! ## Threat model
 //!
@@ -38,7 +39,7 @@ use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::header::CONTENT_TYPE;
 use hyper::{Response, StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::log_filter::LogFilterHandle;
@@ -53,6 +54,9 @@ pub struct AdminState {
     pub registration_snapshot: Option<RegistrationSnapshotFn>,
     pub log_filter: Option<LogFilterHandle>,
     pub hep: Option<Arc<HepTelemetry>>,
+    /// Outbound-origination handle (0.6.0). `None` when `[outbound]` is
+    /// disabled — `POST /admin/v1/calls` then returns 501.
+    pub outbound: Option<AdminOutbound>,
 }
 
 /// Minimal trait surface the admin endpoints need on the call
@@ -73,6 +77,50 @@ pub type AdminCallRegistry = Arc<dyn CallRegistryHandle>;
 /// admin request. Same indirection rationale as `CallRegistryHandle`
 /// — keeps `siphon-ai-sip-glue` out of the telemetry crate's deps.
 pub type RegistrationSnapshotFn = Arc<dyn Fn() -> Vec<RegistrationRow> + Send + Sync>;
+
+/// `POST /admin/v1/calls` request body — originate an outbound call (0.6.0).
+#[derive(Debug, Clone, Deserialize)]
+pub struct OriginateRequest {
+    /// Dialed destination (E.164 number or SIP user) — becomes the
+    /// Request-URI user dialed through the gateway.
+    pub to: String,
+    /// Name of the `[[gateway]]` (or `[[register]]` reuse) to dial through.
+    pub gateway: String,
+    /// WS server to bridge the answered call to. Falls back to
+    /// `[bridge].ws_url` when omitted.
+    #[serde(default)]
+    pub ws_url: Option<String>,
+    /// Caller-ID override (a `sip:` URI). Falls back to the gateway's `from`.
+    #[serde(default)]
+    pub from: Option<String>,
+}
+
+/// Why an originate request was refused synchronously (before the call is
+/// placed). The admin layer maps each to an HTTP status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OriginateRejection {
+    /// No `[[gateway]]` with that name → 404.
+    UnknownGateway(String),
+    /// No `ws_url` and no `[bridge].ws_url` default → 400.
+    NoWsUrl,
+    /// The dialed destination didn't form a valid SIP URI → 400.
+    BadTarget(String),
+    /// `max_concurrent_outbound` reached → 503.
+    AtCapacity,
+    /// The per-second outbound rate limit was exceeded → 429.
+    RateLimited,
+}
+
+/// The outbound-origination entry point the admin endpoint calls. Defined
+/// here (not in `siphon-ai-core`) to avoid a dep cycle — `siphon-ai-core`
+/// implements it. Synchronous: it validates + admits + kicks off the call,
+/// returning the bridge `call_id` immediately (the call proceeds async).
+pub trait OutboundOriginateHandle: Send + Sync + 'static {
+    fn originate(&self, req: OriginateRequest) -> Result<String, OriginateRejection>;
+}
+
+/// Boxed handle the runtime installs into [`AdminState`].
+pub type AdminOutbound = Arc<dyn OutboundOriginateHandle>;
 
 /// One row of the `GET /admin/registrations` response. Mirrors
 /// `sip_glue::RegistrationState` but defined here so telemetry
@@ -108,6 +156,7 @@ pub async fn dispatch(
         (&hyper::Method::GET, "/admin/log") => get_log_filter(state),
         (&hyper::Method::PUT, "/admin/log") => set_log_filter(state, &body),
         (&hyper::Method::POST, "/admin/hep/test") => hep_test(state),
+        (&hyper::Method::POST, "/admin/v1/calls") => originate_call(state, &body),
         (m, p)
             if m == hyper::Method::POST
                 && p.starts_with("/admin/calls/")
@@ -244,6 +293,50 @@ fn hep_test(state: &AdminState) -> Response<Full<Bytes>> {
             "hint": "look for a chunk-type 100 log packet at the collector",
         }),
     )
+}
+
+fn originate_call(state: &AdminState, body: &Bytes) -> Response<Full<Bytes>> {
+    let Some(svc) = state.outbound.as_ref() else {
+        return json_response(
+            StatusCode::NOT_IMPLEMENTED,
+            &json!({ "error": "outbound origination not enabled ([outbound].max_concurrent = 0)" }),
+        );
+    };
+    let req: OriginateRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &json!({ "error": format!("invalid originate request: {e}") }),
+            )
+        }
+    };
+    match svc.originate(req) {
+        Ok(call_id) => json_response(StatusCode::ACCEPTED, &json!({ "call_id": call_id })),
+        Err(rej) => {
+            let (status, msg) = match rej {
+                OriginateRejection::UnknownGateway(g) => {
+                    (StatusCode::NOT_FOUND, format!("unknown gateway: {g}"))
+                }
+                OriginateRejection::NoWsUrl => (
+                    StatusCode::BAD_REQUEST,
+                    "no ws_url (and no [bridge].ws_url default)".to_string(),
+                ),
+                OriginateRejection::BadTarget(t) => {
+                    (StatusCode::BAD_REQUEST, format!("bad target: {t}"))
+                }
+                OriginateRejection::AtCapacity => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "max_concurrent_outbound reached".to_string(),
+                ),
+                OriginateRejection::RateLimited => (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "outbound rate limit exceeded".to_string(),
+                ),
+            };
+            json_response(status, &json!({ "error": msg }))
+        }
+    }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -420,5 +513,82 @@ mod tests {
     #[test]
     fn parse_filter_body_rejects_whitespace_only() {
         assert!(parse_filter_body(&Bytes::from_static(b"   \n   ")).is_err());
+    }
+
+    // ─── POST /admin/v1/calls (originate) ────────────────────────────
+
+    struct StubOutbound(Result<String, OriginateRejection>);
+    impl OutboundOriginateHandle for StubOutbound {
+        fn originate(&self, _req: OriginateRequest) -> Result<String, OriginateRejection> {
+            self.0.clone()
+        }
+    }
+
+    fn outbound_state(result: Result<String, OriginateRejection>) -> AdminState {
+        AdminState {
+            outbound: Some(Arc::new(StubOutbound(result)) as AdminOutbound),
+            ..AdminState::default()
+        }
+    }
+
+    async fn originate(state: &AdminState, body: &str) -> StatusCode {
+        dispatch(
+            &hyper::Method::POST,
+            "/admin/v1/calls",
+            Bytes::from(body.to_string()),
+            state,
+        )
+        .await
+        .expect("admin dispatch")
+        .status()
+    }
+
+    const GOOD_BODY: &str = r#"{"to":"+15558675309","gateway":"trunk"}"#;
+
+    #[tokio::test]
+    async fn originate_accepts_returns_202() {
+        let state = outbound_state(Ok("siphon-abc".into()));
+        assert_eq!(originate(&state, GOOD_BODY).await, StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn originate_501_when_outbound_disabled() {
+        // No outbound handle installed → 501.
+        assert_eq!(
+            originate(&empty_state(), GOOD_BODY).await,
+            StatusCode::NOT_IMPLEMENTED
+        );
+    }
+
+    #[tokio::test]
+    async fn originate_400_on_bad_json() {
+        let state = outbound_state(Ok("x".into()));
+        assert_eq!(originate(&state, "not json").await, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn originate_maps_rejections_to_status() {
+        for (rej, status) in [
+            (
+                OriginateRejection::UnknownGateway("g".into()),
+                StatusCode::NOT_FOUND,
+            ),
+            (OriginateRejection::NoWsUrl, StatusCode::BAD_REQUEST),
+            (
+                OriginateRejection::BadTarget("x".into()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                OriginateRejection::AtCapacity,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                OriginateRejection::RateLimited,
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
+        ] {
+            let state = outbound_state(Err(rej.clone()));
+            assert_eq!(originate(&state, GOOD_BODY).await, status, "{rej:?}");
+        }
     }
 }

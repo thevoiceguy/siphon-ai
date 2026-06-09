@@ -308,6 +308,36 @@ the listener on a private network.
 | GET    | `/admin/registrations`        | —               | Snapshot of every `[[register]]` row and its current state. |
 | GET    | `/admin/log`                  | —               | Current `tracing` filter directive. |
 | PUT    | `/admin/log`                  | text directive  | Replace the filter (e.g., `siphon_ai=info,siphon_ai_bridge=debug`). Returns the previous filter. |
+| POST   | `/admin/v1/calls`             | JSON (below)    | **Originate an outbound call** (0.6.0). Returns `202 {"call_id": "..."}`; the call proceeds asynchronously. `501` when `[outbound]` is disabled. |
+
+### `POST /admin/v1/calls` — outbound origination
+
+Requires `[outbound].max_concurrent > 0` and at least one `[[gateway]]` (see
+`docs/CONFIG.md`). **This endpoint places billable calls and has no built-in
+auth** — restrict access to it (bind to a private network / front with an
+authenticating reverse proxy). The `max_concurrent` cap + `rate_limit_per_sec`
+are the native guardrails.
+
+```sh
+curl -X POST http://localhost:9091/admin/v1/calls -d '{
+  "to": "+15558675309",
+  "gateway": "twilio",
+  "ws_url": "wss://my-bot.example/outbound"
+}'
+# → 202 {"call_id":"siphon-…"}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `to` | yes | Dialed destination (E.164 / SIP user) — the Request-URI user dialed through the gateway. |
+| `gateway` | yes | Name of a `[[gateway]]`. `404` if unknown. |
+| `ws_url` | no | WS server to bridge the answered call to. Falls back to `[bridge].ws_url`; `400` if neither is set. |
+| `from` | no | Caller-ID override (`sip:` URI). Falls back to the gateway's `from`. |
+
+Responses: `202` (accepted — placing), `404` (unknown gateway), `400` (bad
+target / no ws_url / invalid JSON), `503` (`max_concurrent` reached), `429`
+(rate limited), `501` (outbound disabled). The call's progress (ringing /
+answered / failed) is reported via webhooks + the CDR (chunk 5).
 
 Example: bump bridge logging to debug for an incident, then revert.
 

@@ -42,6 +42,22 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
+**v0.6.0** — sixth release. Theme: **outbound call origination.** SiphonAI
+now **places** calls, not just answers them: `POST /admin/v1/calls` dials a
+destination through a configured `[[gateway]]` (a standalone trunk, or
+dialing through an existing `[[register]]`) and bridges the answered call
+to a WS server over the same protocol v1 session — `start.direction:
+"outbound"` is the only wire difference (additive). Progress arrives via
+new `outbound_initiated` / `outbound_answered` / `outbound_failed`
+webhooks, a `direction: "outbound"` CDR, and a
+`siphon_ai_outbound_calls_total{result}` metric. **Off by default**
+(fail-closed on `max_concurrent = 0`) and **toll-fraud-aware by design**:
+the originate API has no native auth — the documented posture is a private
+bind + authenticating reverse proxy, with the concurrency cap + rate limit
+as native guardrails. See [`docs/OUTBOUND.md`](docs/OUTBOUND.md). Attended
+transfer is the 0.6.1 fast-follow. Full notes:
+[`CHANGELOG.md`](CHANGELOG.md).
+
 **v0.5.0** — fifth release. Theme: **call recording.** Each call's audio can
 be captured to a stereo WAV (caller left, bot/WS right) for compliance and
 QA — `[recording].mode` = `off` (default) / `always` / `on_demand`, with a

@@ -59,6 +59,10 @@ class Options:
     # silent on the control channel by default (see file docstring).
     auto_transfer_target: str | None
     auto_transfer_delay_ms: int
+    # Test-harness knob: after `start`, wait this long and then send a
+    # `hangup`. Lets the outbound SIPp scenario end the call from the
+    # WS side (the callee just waits for our BYE). None = disabled.
+    auto_hangup_after_ms: int | None
 
 
 # ─── HTTP-side concerns: auth + subprotocol ─────────────────────────────────
@@ -183,6 +187,19 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
                         )
                     )
 
+                if opts.auto_hangup_after_ms is not None and call_id:
+                    # Test-harness behaviour: end the call from the WS
+                    # side after a beat. Used by the outbound SIPp
+                    # scenario, where SIPp (the callee) answers and then
+                    # waits for SiphonAI's BYE.
+                    asyncio.create_task(
+                        _send_after(
+                            connection,
+                            opts.auto_hangup_after_ms,
+                            {"type": "hangup", "call_id": call_id},
+                        )
+                    )
+
             elif mtype == "stop":
                 LOG.info("stop call_id=%s reason=%s", call_id, msg.get("reason"))
                 # SiphonAI closes the connection right after `stop`; we
@@ -281,6 +298,17 @@ def parse_args(argv: list[str] | None = None) -> Options:
         help="ms to wait after `start` before emitting the transfer (default: 200)",
     )
     p.add_argument(
+        "--auto-hangup-after-ms",
+        type=int,
+        default=None,
+        metavar="MS",
+        help=(
+            "test-harness only: after `start`, emit a `hangup` after "
+            "this many ms. See test-harness/sipp-scenarios/"
+            "outbound_uas_answer.xml."
+        ),
+    )
+    p.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -299,6 +327,7 @@ def parse_args(argv: list[str] | None = None) -> Options:
         log_level=args.log_level,
         auto_transfer_target=args.auto_transfer_target,
         auto_transfer_delay_ms=args.auto_transfer_delay_ms,
+        auto_hangup_after_ms=args.auto_hangup_after_ms,
     )
 
 

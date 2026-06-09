@@ -329,6 +329,101 @@ fi
 rec_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: outbound origination ──────────────
+# Roles inverted: SIPp is the CALLEE (UAS), SiphonAI the UAC. A fresh
+# daemon comes up with `[outbound]` enabled and a `[[gateway]]`
+# pointing at SIPp's port; the runner POSTs /admin/v1/calls, SIPp
+# answers (180 → 200 + SDP), the WS bridge runs against a dedicated
+# echo-ws instance that auto-emits `hangup` after ~1.5s, and SiphonAI
+# BYEs the dialog. This is the live SIP answer-path test for 0.6.0
+# (everything below the originate endpoint ran only against unit
+# tests until now). Needs its own echo-ws because the auto-hangup
+# knob is incompatible with the long-lived calls other phases expect.
+echo
+echo "─── auxiliary phase: outbound ─────────────────────────"
+OB_WS_PORT=8767
+OB_ADMIN_PORT=9091
+OB_WS_LOG=$(mktemp -t echo-ws-ob.XXXXXX.log)
+OB_DAEMON_LOG=$(mktemp -t siphon-ai-ob.XXXXXX.log)
+OB_CONFIG=$(mktemp -t siphon-ai-ob.XXXXXX.toml)
+cat >"$OB_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-ob"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$OB_WS_PORT/"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$OB_ADMIN_PORT"
+[outbound]
+max_concurrent = 2
+[[gateway]]
+name = "sipp"
+proxy = "127.0.0.1:$SIPP_PORT"
+from = "sip:harness@127.0.0.1"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+# Dedicated echo-ws with the auto-hangup harness knob. Prefer the
+# venv the CI workflow preps (same as the transfer phase); fall back
+# to system python3 for local runs with `websockets` installed.
+OB_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$OB_PYTHON" ]] || OB_PYTHON=python3
+"$OB_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$OB_WS_PORT" \
+    --auto-hangup-after-ms 1500 \
+    >"$OB_WS_LOG" 2>&1 &
+OB_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$OB_CONFIG" \
+    >"$OB_DAEMON_LOG" 2>&1 &
+OB_DAEMON_PID=$!
+ob_cleanup() {
+    kill "$OB_WS_PID" "$OB_DAEMON_PID" 2>/dev/null || true
+    wait "$OB_WS_PID" "$OB_DAEMON_PID" 2>/dev/null || true
+}
+trap ob_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── outbound_uas_answer ──────────────────────────────"
+ob_ok=0
+# SIPp listens as the callee; no remote target needed until we make
+# it ring. -bg would detach past our PID bookkeeping, so plain &.
+sipp -sf "$SCRIPT_DIR/outbound_uas_answer.xml" \
+    -m 1 -timeout 15s -trace_err -p "$SIPP_PORT" >/dev/null 2>&1 &
+OB_SIPP_PID=$!
+sleep 0.3
+
+# Place the call. 202 + a call_id means admitted; the rest plays out
+# between the daemon, SIPp, and the echo-ws hangup.
+ob_resp=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "http://127.0.0.1:$OB_ADMIN_PORT/admin/v1/calls" \
+    -d '{"to": "7001", "gateway": "sipp"}')
+if [[ "$ob_resp" == "202" ]] && wait "$OB_SIPP_PID"; then
+    # SIPp saw INVITE → ACK → BYE. Cross-check the daemon agrees the
+    # call was ANSWERED (metric from chunk 5a).
+    if curl -s "http://127.0.0.1:$OB_ADMIN_PORT/metrics" \
+        | grep -q 'siphon_ai_outbound_calls_total{result="answered"} 1'; then
+        ob_ok=1
+    fi
+fi
+if (( ob_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (originate=$ob_resp; daemon: $OB_DAEMON_LOG; ws: $OB_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+ob_cleanup
+trap - EXIT
+
 # ─── Optional third phase: blind_transfer ─────────────────────────
 # Needs a WS server that proactively emits BridgeIn::Transfer. The
 # runner stops the daemon, brings up an echo-ws that auto-emits

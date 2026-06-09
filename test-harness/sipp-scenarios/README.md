@@ -2,7 +2,8 @@
 
 End-to-end SIP scenarios driven by [SIPp](https://github.com/SIPp/sipp).
 SIPp plays the role of the **caller (UAC)**; SiphonAI is the UAS under
-test. The point of these scenarios is to validate signaling
+test (except `outbound_uas_answer.xml`, where the roles invert: SiphonAI
+dials and SIPp answers). The point of these scenarios is to validate signaling
 correctness end-to-end: parse → route → media setup → SIP final →
 in-dialog handling → teardown. Audio quality is out of scope here
 (see `docs/DEV_PLAN.md` §10.3).
@@ -49,12 +50,21 @@ sipp -sf basic_call_then_bye.xml -m 1 -p 5070 -s 1000 127.0.0.1:5060
 | `stir_shaken_no_identity_428.xml`   | STIR/SHAKEN `require_identity`: INVITE with no `Identity` header → 428 Use Identity Header (stir_shaken phase) |
 | `stir_shaken_attestation_403.xml`   | STIR/SHAKEN gate: `Identity` present but unverifiable (unreachable `x5u`) below `min_attestation = "A"` → 403 Forbidden (stir_shaken phase) |
 | `stir_shaken_attestation_pass.xml`  | STIR/SHAKEN happy path: a fully-verifiable `Identity` (fresh PASSporT, real x5u fetch, chain to the test anchor) → **200 admitted** (stir_shaken phase). Templated — `__IDENTITY__` is substituted at run time; does not run standalone. |
+| `outbound_uas_answer.xml`           | 0.6.0 outbound answer path, roles inverted: SiphonAI dials via `POST /admin/v1/calls`, SIPp answers (180 → 200 + SDP), bridge runs, SiphonAI BYEs (outbound phase) |
 
 `run-all.sh` also has an always-on **recording** auxiliary phase: it starts
 a daemon with `[recording].mode = "always"` writing to a temp dir, runs one
 `basic_call_then_bye.xml` call through the echo WS bridge, then asserts the
 written file is a valid stereo PCM16 WAV with audio in it (via Python's
 `wave`). It reuses `basic_call_then_bye.xml` — no dedicated scenario file.
+
+`run-all.sh` also has an always-on **outbound** auxiliary phase — the
+roles-inverted scenario above. It starts a fresh daemon with `[outbound]`
+enabled and a `[[gateway]]` pointing at SIPp's port, a dedicated echo-ws
+instance with `--auto-hangup-after-ms 1500` (so the WS side ends the call),
+backgrounds SIPp as the callee, then POSTs `/admin/v1/calls`. Pass = SIPp
+completed INVITE → ACK → BYE **and** the daemon's
+`siphon_ai_outbound_calls_total{result="answered"}` metric reads 1.
 
 The `stir_shaken_*` scenarios run in `run-all.sh`'s always-on
 **stir_shaken** auxiliary phase. It builds + runs the

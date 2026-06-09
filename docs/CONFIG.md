@@ -274,7 +274,8 @@ request_uri_user = "9000"
 
 SiphonAI can **place** calls (not just answer them) and bridge them to a WS
 server on answer. Outbound is **disabled by default** and fail-closed: it
-turns on only when `[outbound].max_concurrent` is a positive number.
+turns on only when `[outbound].max_concurrent` is a positive number. Full
+guide (originate API, lifecycle, toll-fraud posture): `docs/OUTBOUND.md`.
 
 ```toml
 [outbound]

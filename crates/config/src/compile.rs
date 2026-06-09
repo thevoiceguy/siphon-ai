@@ -35,8 +35,8 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::raw::{
-    RawBridge, RawCdr, RawConfig, RawHep, RawMedia, RawNode, RawObservability, RawRecording,
-    RawRegister, RawSecurity, RawSip, RawSipTls, RawWebhooks,
+    RawBridge, RawCdr, RawConfig, RawGateway, RawHep, RawMedia, RawNode, RawObservability,
+    RawOutbound, RawRecording, RawRegister, RawSecurity, RawSip, RawSipTls, RawWebhooks,
 };
 
 /// Compiled, ready-to-pass daemon config.
@@ -63,10 +63,64 @@ pub struct Config {
     pub trunks: Vec<TrunkConfig>,
     pub security: SecurityConfig,
     pub recording: siphon_ai_recording::RecordingConfig,
+    pub outbound: OutboundConfig,
     pub cdr: CdrConfig,
     pub observability: ObservabilityConfig,
     pub webhooks: WebhooksConfig,
     pub hep: HepConfig,
+}
+
+/// Compiled `[outbound]` + `[[gateway]]` — outbound call origination
+/// (0.6.0). `max_concurrent == 0` means outbound is disabled (fail-closed).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OutboundConfig {
+    pub max_concurrent: usize,
+    pub rate_limit_per_sec: Option<u32>,
+    pub gateways: Vec<Gateway>,
+}
+
+impl OutboundConfig {
+    /// Outbound origination is enabled only when a positive concurrency cap
+    /// is set (fail-closed — see `docs/DEV_PLAN_0.6.0.md` §9.5/§9.6).
+    pub fn enabled(&self) -> bool {
+        self.max_concurrent > 0
+    }
+
+    /// Look a gateway up by name.
+    pub fn gateway(&self, name: &str) -> Option<&Gateway> {
+        self.gateways.iter().find(|g| g.name == name)
+    }
+}
+
+/// One compiled outbound gateway (trunk/provider). `proxy_host` is left
+/// unresolved — siphon-rs does RFC 3263 resolution at INVITE time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gateway {
+    pub name: String,
+    pub proxy_host: String,
+    pub proxy_port: u16,
+    /// Default caller-ID `sip:` URI.
+    pub from: String,
+    pub credentials: Option<GatewayCredentials>,
+}
+
+impl Gateway {
+    /// The Request-URI for dialing `destination` through this gateway —
+    /// `sip:<destination>@<proxy_host>:<proxy_port>`.
+    pub fn request_uri(&self, destination: &str) -> String {
+        format!(
+            "sip:{}@{}:{}",
+            destination, self.proxy_host, self.proxy_port
+        )
+    }
+}
+
+/// Digest credentials for a gateway's UAC (the `CredentialProvider` source).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayCredentials {
+    pub username: String,
+    pub password: String,
+    pub realm: Option<String>,
 }
 
 /// Compiled `[security]` — the call-authentication policy (STIR/SHAKEN).
@@ -452,6 +506,34 @@ pub enum CompileError {
     #[error("route {route:?} enables recording but [recording].dir is not set")]
     RouteRecordingWithoutDir { route: String },
 
+    #[error("[[gateway]] #{index} has an empty name")]
+    GatewayEmptyName { index: usize },
+
+    #[error("duplicate [[gateway]] name {name:?}")]
+    GatewayDuplicateName { name: String },
+
+    #[error("[[gateway]] {name:?} needs either `proxy` or `register`")]
+    GatewayNeedsProxyOrRegister { name: String },
+
+    #[error("[[gateway]] {gateway:?} references unknown [[register]] {register:?}")]
+    GatewayUnknownRegister { gateway: String, register: String },
+
+    #[error("[[gateway]] {name:?} proxy {proxy:?} is invalid: {err}")]
+    GatewayBadProxy {
+        name: String,
+        proxy: String,
+        err: String,
+    },
+
+    #[error("[[gateway]] {name:?} needs a `from` caller-ID URI")]
+    GatewayFromRequired { name: String },
+
+    #[error("[[gateway]] {name:?} `from` {from:?} must be a sip:/sips: URI")]
+    GatewayBadFrom { name: String, from: String },
+
+    #[error("[[gateway]] {name:?} has `auth_username` without `auth_password` (or vice versa)")]
+    GatewayIncompleteAuth { name: String },
+
     #[error("[media].rtp_port_range {min}-{max} is invalid (min must be < max and even)")]
     BadRtpPortRange { min: u16, max: u16 },
 
@@ -558,6 +640,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let trunks = compile_trunks(raw.trunks)?;
     let security = compile_security(raw.security)?;
     let recording = compile_recording(raw.recording)?;
+    let outbound = compile_outbound(raw.outbound, raw.gateways, &registrations)?;
     let cdr = compile_cdr(raw.cdr)?;
     let observability = compile_observability(raw.observability)?;
     let webhooks = compile_webhooks(raw.webhooks)?;
@@ -647,6 +730,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         trunks,
         security,
         recording,
+        outbound,
         cdr,
         observability,
         webhooks,
@@ -921,6 +1005,122 @@ fn compile_recording(
         })?;
     }
     Ok(RecordingConfig { mode, dir })
+}
+
+/// Compile `[outbound]` and `[[gateway]]`. Gateways resolve to a uniform
+/// "where and how to dial" shape: either a standalone trunk (a `proxy` plus
+/// a `from`, with optional digest auth) or a `[[register]]` reuse that
+/// inherits the registrar's server, credentials, and AOR. Validated at load:
+/// unique names, a proxy-or-register source, a `sip:` caller-ID, and
+/// complete auth.
+fn compile_outbound(
+    raw: RawOutbound,
+    gateways: Vec<RawGateway>,
+    registrations: &[RegisterConfig],
+) -> Result<OutboundConfig, CompileError> {
+    let max_concurrent = raw.max_concurrent.unwrap_or(0);
+    let rate_limit_per_sec = raw.rate_limit_per_sec.filter(|&r| r > 0);
+
+    let mut compiled: Vec<Gateway> = Vec::with_capacity(gateways.len());
+    for (i, g) in gateways.into_iter().enumerate() {
+        if g.name.trim().is_empty() {
+            return Err(CompileError::GatewayEmptyName { index: i });
+        }
+        if compiled.iter().any(|c| c.name == g.name) {
+            return Err(CompileError::GatewayDuplicateName { name: g.name });
+        }
+
+        let gw = if let Some(reg_name) = g.register.as_deref().filter(|s| !s.is_empty()) {
+            // Register reuse — inherit server + credentials + AOR.
+            let reg = registrations
+                .iter()
+                .find(|r| r.name == reg_name)
+                .ok_or_else(|| CompileError::GatewayUnknownRegister {
+                    gateway: g.name.clone(),
+                    register: reg_name.to_string(),
+                })?;
+            let from = g
+                .from
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("sip:{}@{}", reg.username, reg.server_host));
+            validate_gateway_from(&from, &g.name)?;
+            Gateway {
+                name: g.name.clone(),
+                proxy_host: reg.server_host.clone(),
+                proxy_port: reg.server_addr.port(),
+                from,
+                credentials: Some(GatewayCredentials {
+                    username: reg.auth_username.clone(),
+                    password: reg.password.clone(),
+                    realm: reg.realm.clone(),
+                }),
+            }
+        } else {
+            // Standalone trunk.
+            let proxy = g
+                .proxy
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| CompileError::GatewayNeedsProxyOrRegister {
+                    name: g.name.clone(),
+                })?;
+            let (proxy_host, proxy_port) =
+                parse_register_server(proxy, None, 5060).map_err(|err| {
+                    CompileError::GatewayBadProxy {
+                        name: g.name.clone(),
+                        proxy: proxy.to_string(),
+                        err,
+                    }
+                })?;
+            let from = g.from.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
+                CompileError::GatewayFromRequired {
+                    name: g.name.clone(),
+                }
+            })?;
+            validate_gateway_from(&from, &g.name)?;
+            let user = g.auth_username.as_deref().filter(|s| !s.is_empty());
+            let pass = g.auth_password.as_deref().filter(|s| !s.is_empty());
+            let credentials = match (user, pass) {
+                (Some(u), Some(p)) => Some(GatewayCredentials {
+                    username: u.to_string(),
+                    password: p.to_string(),
+                    realm: g.realm.clone().filter(|s| !s.is_empty()),
+                }),
+                (None, None) => None,
+                _ => {
+                    return Err(CompileError::GatewayIncompleteAuth {
+                        name: g.name.clone(),
+                    })
+                }
+            };
+            Gateway {
+                name: g.name.clone(),
+                proxy_host,
+                proxy_port,
+                from,
+                credentials,
+            }
+        };
+        compiled.push(gw);
+    }
+
+    Ok(OutboundConfig {
+        max_concurrent,
+        rate_limit_per_sec,
+        gateways: compiled,
+    })
+}
+
+fn validate_gateway_from(from: &str, gateway: &str) -> Result<(), CompileError> {
+    if from.starts_with("sip:") || from.starts_with("sips:") {
+        Ok(())
+    } else {
+        Err(CompileError::GatewayBadFrom {
+            name: gateway.to_string(),
+            from: from.to_string(),
+        })
+    }
 }
 
 fn min_attestation_label(m: siphon_ai_security::MinAttestation) -> &'static str {
@@ -1622,6 +1822,161 @@ mod recording_tests {
         assert!(matches!(
             compile_dialplan(vec![route]),
             Err(CompileError::RouteRecordingModeInvalid { value, .. }) if value == "sometimes"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod outbound_tests {
+    use super::{compile_outbound, CompileError, OutboundConfig, RegisterConfig};
+    use crate::raw::{RawGateway, RawOutbound};
+    use crate::SipTransport;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    fn gw(name: &str) -> RawGateway {
+        RawGateway {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    fn register(name: &str) -> RegisterConfig {
+        RegisterConfig {
+            name: name.into(),
+            server_addr: "10.0.0.1:5061".parse::<SocketAddr>().unwrap(),
+            server_host: "pbx.example.com".into(),
+            transport: SipTransport::Tls,
+            username: "siphon".into(),
+            auth_username: "siphon-auth".into(),
+            password: "pw".into(),
+            realm: Some("pbx".into()),
+            expires: Duration::from_secs(3600),
+            register_on_startup: true,
+        }
+    }
+
+    #[test]
+    fn standalone_trunk_compiles_with_auth() {
+        let raw = RawGateway {
+            proxy: Some("twilio.example:5060".into()),
+            from: Some("sip:+13125551234@twilio.example".into()),
+            auth_username: Some("acct".into()),
+            auth_password: Some("token".into()),
+            ..gw("twilio")
+        };
+        let out = compile_outbound(RawOutbound::default(), vec![raw], &[]).unwrap();
+        let g = out.gateway("twilio").expect("gateway present");
+        assert_eq!(g.proxy_host, "twilio.example");
+        assert_eq!(g.proxy_port, 5060);
+        assert_eq!(
+            g.request_uri("+15551112222"),
+            "sip:+15551112222@twilio.example:5060"
+        );
+        let creds = g.credentials.as_ref().expect("creds");
+        assert_eq!(
+            (creds.username.as_str(), creds.password.as_str()),
+            ("acct", "token")
+        );
+    }
+
+    #[test]
+    fn register_reuse_inherits_server_and_creds() {
+        let raw = RawGateway {
+            register: Some("pbx".into()),
+            ..gw("pbx-out")
+        };
+        let out = compile_outbound(RawOutbound::default(), vec![raw], &[register("pbx")]).unwrap();
+        let g = out.gateway("pbx-out").unwrap();
+        assert_eq!(g.proxy_host, "pbx.example.com");
+        assert_eq!(g.proxy_port, 5061);
+        assert_eq!(g.from, "sip:siphon@pbx.example.com"); // default AOR
+        let creds = g.credentials.as_ref().unwrap();
+        assert_eq!(creds.username, "siphon-auth");
+        assert_eq!(creds.realm.as_deref(), Some("pbx"));
+    }
+
+    #[test]
+    fn max_concurrent_drives_enabled() {
+        assert!(!OutboundConfig::default().enabled());
+        let out = compile_outbound(
+            RawOutbound {
+                max_concurrent: Some(5),
+                rate_limit_per_sec: Some(2),
+            },
+            vec![],
+            &[],
+        )
+        .unwrap();
+        assert!(out.enabled());
+        assert_eq!(out.max_concurrent, 5);
+        assert_eq!(out.rate_limit_per_sec, Some(2));
+    }
+
+    #[test]
+    fn validation_failures_are_loud() {
+        let only = |g: RawGateway, regs: &[RegisterConfig]| {
+            compile_outbound(RawOutbound::default(), vec![g], regs).unwrap_err()
+        };
+        // No proxy and no register.
+        assert!(matches!(
+            only(gw("bare"), &[]),
+            CompileError::GatewayNeedsProxyOrRegister { .. }
+        ));
+        // Unknown register reference.
+        assert!(matches!(
+            only(
+                RawGateway {
+                    register: Some("nope".into()),
+                    ..gw("x")
+                },
+                &[]
+            ),
+            CompileError::GatewayUnknownRegister { .. }
+        ));
+        // from missing the sip: scheme.
+        assert!(matches!(
+            only(
+                RawGateway {
+                    proxy: Some("h:5060".into()),
+                    from: Some("+1555@h".into()),
+                    ..gw("x")
+                },
+                &[]
+            ),
+            CompileError::GatewayBadFrom { .. }
+        ));
+        // username without password.
+        assert!(matches!(
+            only(
+                RawGateway {
+                    proxy: Some("h:5060".into()),
+                    from: Some("sip:a@h".into()),
+                    auth_username: Some("u".into()),
+                    ..gw("x")
+                },
+                &[]
+            ),
+            CompileError::GatewayIncompleteAuth { .. }
+        ));
+        // duplicate names.
+        assert!(matches!(
+            compile_outbound(
+                RawOutbound::default(),
+                vec![
+                    RawGateway {
+                        register: Some("pbx".into()),
+                        ..gw("dup")
+                    },
+                    RawGateway {
+                        register: Some("pbx".into()),
+                        ..gw("dup")
+                    },
+                ],
+                &[register("pbx")]
+            )
+            .unwrap_err(),
+            CompileError::GatewayDuplicateName { .. }
         ));
     }
 }

@@ -270,6 +270,47 @@ request_uri_user = "9000"
 - Digest auth on inbound INVITEs (RFC 3261 §22) is the proper
   "no trust in network" answer; it's a post-v1 feature.
 
+## `[outbound]` + `[[gateway]]` — outbound call origination (0.6.0)
+
+SiphonAI can **place** calls (not just answer them) and bridge them to a WS
+server on answer. Outbound is **disabled by default** and fail-closed: it
+turns on only when `[outbound].max_concurrent` is a positive number.
+
+```toml
+[outbound]
+max_concurrent     = 20      # 0 (default) = outbound disabled
+rate_limit_per_sec = 5       # optional new-calls/sec ceiling (token bucket)
+
+# A standalone trunk (static / IP-auth or digest):
+[[gateway]]
+name          = "twilio"
+proxy         = "siptrunk.example.com:5060"
+from          = "sip:+13125551234@siptrunk.example.com"   # caller-ID, sip: URI
+auth_username = "ACxxxx"                                   # optional digest
+auth_password = "${TWILIO_TRUNK_SECRET}"
+
+# Or dial through an existing [[register]] (reuse its server + credentials):
+[[gateway]]
+name     = "pbx-out"
+register = "pbx"            # name of a [[register]] block
+# from = "sip:..."         # optional; defaults to the register AOR
+```
+
+| Field | Block | Notes |
+|---|---|---|
+| `max_concurrent` | `[outbound]` | Max simultaneous outbound calls. `0` (default) disables outbound entirely. This + `rate_limit_per_sec` are the **native guardrails** — the originate API itself has no built-in auth (it's fronted by a reverse proxy / trusted network), so **you must restrict access to that endpoint and set a sane cap** to avoid toll fraud. |
+| `rate_limit_per_sec` | `[outbound]` | Optional ceiling on *new* outbound calls per second (token bucket, burst = the rate). `0`/unset = no rate limit. |
+| `name` | `[[gateway]]` | Unique gateway name; the originate request names one. |
+| `proxy` | `[[gateway]]` | `host` or `host:port` of the trunk (resolved per RFC 3263 at INVITE time). Required unless `register` is set. |
+| `from` | `[[gateway]]` | Default caller-ID — a full `sip:`/`sips:` URI. Required for standalone trunks; defaults to the register AOR when `register` is set. |
+| `register` | `[[gateway]]` | Name of a `[[register]]` to dial through, inheriting its server address, digest credentials, and AOR. |
+| `auth_username` / `auth_password` | `[[gateway]]` | Digest credentials for a standalone trunk (both or neither). Answered on any 401/407 challenge the trunk sends. |
+| `realm` | `[[gateway]]` | Optional digest realm hint. |
+
+All of the above is validated at config load — unknown `register` references,
+a `from` missing the `sip:` scheme, half-set credentials, duplicate names, or
+a bad `proxy` all fail loud at startup.
+
 ## `[security]` — STIR/SHAKEN call authentication
 
 Verifies the RFC 8224 `Identity` header (RFC 8225 PASSporT, SHAKEN profile)

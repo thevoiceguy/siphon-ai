@@ -55,6 +55,14 @@ pub struct RawConfig {
     #[serde(default)]
     pub recording: RawRecording,
 
+    /// `[[gateway]]` — outbound SIP trunks/providers SiphonAI dials
+    /// *through* for originated calls (0.6.0).
+    #[serde(default, rename = "gateway")]
+    pub gateways: Vec<RawGateway>,
+
+    #[serde(default)]
+    pub outbound: RawOutbound,
+
     #[serde(default)]
     pub cdr: RawCdr,
 
@@ -272,6 +280,52 @@ pub struct RawRecording {
     /// Directory recordings are written to. Required when `mode != "off"`.
     #[serde(default)]
     pub dir: Option<String>,
+}
+
+/// `[[gateway]]` — one outbound trunk/provider (0.6.0). A gateway is the
+/// SIP peer SiphonAI sends originated INVITEs *through*. Two forms:
+///
+/// - **Standalone trunk**: set `proxy` + `from` (+ optional digest auth).
+/// - **Register reuse**: set `register = "<name>"` to dial through a
+///   `[[register]]` entry, inheriting its server address, credentials, and
+///   AOR (used as the default `from`).
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct RawGateway {
+    pub name: String,
+    /// `host` or `host:port` of the trunk. Required unless `register` is set.
+    #[serde(default)]
+    pub proxy: Option<String>,
+    /// Default caller-ID — a full `sip:` URI. Required for standalone
+    /// trunks; defaults to the register AOR when `register` is set.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// Name of a `[[register]]` to dial through (reuse its server + creds).
+    #[serde(default)]
+    pub register: Option<String>,
+    /// Digest username for the trunk (standalone form). `${VAR}`-expandable.
+    #[serde(default)]
+    pub auth_username: Option<String>,
+    /// Digest password for the trunk (standalone form).
+    #[serde(default)]
+    pub auth_password: Option<String>,
+    /// Optional digest realm hint.
+    #[serde(default)]
+    pub realm: Option<String>,
+}
+
+/// `[outbound]` — global outbound-origination controls (0.6.0). The native
+/// guardrails for the originate path (which has no built-in auth — the
+/// endpoint is fronted by a reverse proxy, see `docs/DEV_PLAN_0.6.0.md` §9.5).
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct RawOutbound {
+    /// Max simultaneous outbound calls. `0` (the default) disables outbound
+    /// origination entirely (fail-closed). Set a positive cap to enable it.
+    #[serde(default)]
+    pub max_concurrent: Option<usize>,
+    /// Optional ceiling on new outbound calls per second (token bucket).
+    /// `None` / `0` = no rate limit (the concurrency cap still applies).
+    #[serde(default)]
+    pub rate_limit_per_sec: Option<u32>,
 }
 
 /// `[cdr]` — call detail record sinks. v1 supports a JSONL file

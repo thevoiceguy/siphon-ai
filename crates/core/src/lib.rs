@@ -21,6 +21,9 @@ pub use call::{
     CallController, CallControllerConfig, CallError, CallHandle, CallOutcome, CallState,
     CallTermination,
 };
-pub use outbound::{NotAnsweredCause, OutboundCall, OutboundError, OutboundOriginator};
+pub use outbound::{
+    NotAnsweredCause, OutboundCall, OutboundError, OutboundGuard, OutboundOriginator,
+    OutboundPermit, OutboundRejection, StaticCredentials,
+};
 pub use registry::{CallEntry, CallRegistry};
 pub use transfer::{TransferContext, TransferOutcome};

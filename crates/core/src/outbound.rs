@@ -18,16 +18,20 @@
 //! §4.4); this struct is process-wide plumbing (one shared UAC + media
 //! setup), not per-call state.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
+use async_trait::async_trait;
 use forge_core::CallId;
 use sip_core::SipUri;
 use sip_dialog::Dialog;
 use sip_uac::integrated::{CallHandle, IntegratedUAC, RequestTarget};
+use sip_uac::CredentialProvider;
 use siphon_ai_media_glue::{
     MediaSetup, OutboundAccepted, OutboundOfferRequest, SetupError, TapOptions,
 };
 use thiserror::Error;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info, instrument, warn};
 
 /// Places outbound calls through a shared UAC, allocating + binding media
@@ -188,6 +192,125 @@ fn classify_failure(code: u16, reason: &str) -> NotAnsweredCause {
     }
 }
 
+/// A static digest credential source for a gateway's UAC — supplies the
+/// configured username/password on any 401/407 challenge so the UAC's
+/// auto-retry can authenticate to the trunk. (One credential per UAC, so we
+/// answer every realm; build a UAC per gateway.)
+pub struct StaticCredentials {
+    username: String,
+    password: String,
+}
+
+impl StaticCredentials {
+    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+        Self {
+            username: username.into(),
+            password: password.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl CredentialProvider for StaticCredentials {
+    async fn credentials(&self, _realm: &str) -> Option<(String, String)> {
+        Some((self.username.clone(), self.password.clone()))
+    }
+}
+
+/// Why the [`OutboundGuard`] refused to admit a new outbound call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundRejection {
+    /// `max_concurrent_outbound` is already in use.
+    AtCapacity,
+    /// The per-second rate limit was exceeded.
+    RateLimited,
+}
+
+/// The native guardrails on the originate path (the originate API has no
+/// built-in auth — see `docs/DEV_PLAN_0.6.0.md` §9.5/§9.6). A
+/// `max_concurrent` semaphore plus an optional per-second token-bucket rate
+/// limit. Acquire a permit before placing a call; hold it for the call's
+/// lifetime (dropping it frees the slot).
+pub struct OutboundGuard {
+    concurrency: Arc<Semaphore>,
+    rate: Option<Mutex<TokenBucket>>,
+}
+
+impl OutboundGuard {
+    pub fn new(max_concurrent: usize, rate_limit_per_sec: Option<u32>) -> Self {
+        Self {
+            concurrency: Arc::new(Semaphore::new(max_concurrent)),
+            rate: rate_limit_per_sec
+                .filter(|&r| r > 0)
+                .map(|r| Mutex::new(TokenBucket::new(r as f64, Instant::now()))),
+        }
+    }
+
+    /// Try to admit one new outbound call. On success returns a permit the
+    /// caller holds for the call's lifetime; the concurrency slot is freed
+    /// when it drops. The rate token (if any) is only consumed on admission.
+    pub fn try_admit(&self) -> Result<OutboundPermit, OutboundRejection> {
+        // Concurrency first — a rejected slot consumes nothing.
+        let permit = Arc::clone(&self.concurrency)
+            .try_acquire_owned()
+            .map_err(|_| OutboundRejection::AtCapacity)?;
+        if let Some(rate) = &self.rate {
+            if !rate
+                .lock()
+                .expect("rate bucket mutex")
+                .try_take(Instant::now())
+            {
+                drop(permit); // give the concurrency slot back
+                return Err(OutboundRejection::RateLimited);
+            }
+        }
+        Ok(OutboundPermit { _permit: permit })
+    }
+
+    /// Currently-available concurrency slots (for a metric / admin view).
+    pub fn available(&self) -> usize {
+        self.concurrency.available_permits()
+    }
+}
+
+/// Held for the lifetime of an admitted outbound call; frees the
+/// concurrency slot on drop.
+#[derive(Debug)]
+pub struct OutboundPermit {
+    _permit: OwnedSemaphorePermit,
+}
+
+/// A simple token bucket: `refill_per_sec` tokens/sec, burst = the rate.
+struct TokenBucket {
+    tokens: f64,
+    capacity: f64,
+    refill_per_sec: f64,
+    last: Instant,
+}
+
+impl TokenBucket {
+    fn new(rate: f64, now: Instant) -> Self {
+        Self {
+            tokens: rate,
+            capacity: rate,
+            refill_per_sec: rate,
+            last: now,
+        }
+    }
+
+    fn try_take(&mut self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +358,70 @@ mod tests {
                 "code {code} should fall back to Rejected"
             );
         }
+    }
+
+    #[test]
+    fn guard_caps_concurrency_and_releases_on_drop() {
+        let guard = OutboundGuard::new(2, None);
+        let p1 = guard.try_admit().expect("1st admit");
+        let _p2 = guard.try_admit().expect("2nd admit");
+        assert_eq!(guard.available(), 0);
+        assert_eq!(
+            guard.try_admit().unwrap_err(),
+            OutboundRejection::AtCapacity
+        );
+        drop(p1); // call ended → slot freed
+        assert_eq!(guard.available(), 1);
+        let _p3 = guard.try_admit().expect("admit after a call ended");
+    }
+
+    #[test]
+    fn guard_with_zero_capacity_always_rejects() {
+        let guard = OutboundGuard::new(0, None);
+        assert_eq!(
+            guard.try_admit().unwrap_err(),
+            OutboundRejection::AtCapacity
+        );
+    }
+
+    #[test]
+    fn token_bucket_limits_then_refills() {
+        let base = Instant::now();
+        let mut bucket = TokenBucket::new(2.0, base);
+        assert!(bucket.try_take(base), "burst token 1");
+        assert!(bucket.try_take(base), "burst token 2");
+        assert!(
+            !bucket.try_take(base),
+            "3rd within the same instant is limited"
+        );
+        // One second later, ~2 tokens have refilled.
+        let later = base + std::time::Duration::from_secs(1);
+        assert!(bucket.try_take(later), "refilled token available");
+    }
+
+    #[test]
+    fn guard_rate_limit_rejects_without_consuming_a_slot() {
+        // rate 1/s, cap 5 — the 2nd immediate admit is rate-limited, and the
+        // concurrency slot it briefly took is given back.
+        let guard = OutboundGuard::new(5, Some(1));
+        let _p1 = guard.try_admit().expect("1st admit");
+        assert_eq!(
+            guard.try_admit().unwrap_err(),
+            OutboundRejection::RateLimited
+        );
+        assert_eq!(
+            guard.available(),
+            4,
+            "rate-limited admit didn't keep a slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_credentials_answers_any_realm() {
+        let creds = StaticCredentials::new("alice", "s3cret");
+        assert_eq!(
+            creds.credentials("sip.example.com").await,
+            Some(("alice".to_string(), "s3cret".to_string()))
+        );
     }
 }

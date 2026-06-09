@@ -34,14 +34,15 @@ use std::path::Path;
 use thiserror::Error;
 
 pub use compile::{
-    compile, CdrConfig, CdrFileConfig, CdrWebhookConfig, CompileError, Config, HepConfig,
-    MediaConfig, NodeConfig, ObservabilityConfig, RegisterConfig, SecurityConfig, SipConfig,
-    SipTlsConfig, SipTransport, TrunkCidr, TrunkCidrParseError, TrunkConfig, WebhooksConfig,
+    compile, CdrConfig, CdrFileConfig, CdrWebhookConfig, CompileError, Config, Gateway,
+    GatewayCredentials, HepConfig, MediaConfig, NodeConfig, ObservabilityConfig, OutboundConfig,
+    RegisterConfig, SecurityConfig, SipConfig, SipTlsConfig, SipTransport, TrunkCidr,
+    TrunkCidrParseError, TrunkConfig, WebhooksConfig,
 };
 pub use env::{expand, expand_cow, EnvError, EnvSource, ProcessEnv};
 pub use raw::{
-    RawBridge, RawCdr, RawCdrFile, RawCdrWebhook, RawConfig, RawHep, RawMedia, RawNode,
-    RawObservability, RawRegister, RawSip, RawSipTls, RawTrunk, RawWebhooks,
+    RawBridge, RawCdr, RawCdrFile, RawCdrWebhook, RawConfig, RawGateway, RawHep, RawMedia, RawNode,
+    RawObservability, RawOutbound, RawRegister, RawSip, RawSipTls, RawTrunk, RawWebhooks,
 };
 
 /// Top-level error type. Loaders surface this; consumers match on

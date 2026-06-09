@@ -315,8 +315,12 @@ pub struct SipMeta {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
-    /// The only valid direction in v1.
+    /// SiphonAI answered an inbound call. The bot reacts to the caller.
     Inbound,
+    /// SiphonAI placed the call (outbound origination, 0.6.0). The bot
+    /// drives — it typically speaks first. Additive on the `start` message;
+    /// the protocol version stays `"1"`.
+    Outbound,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -524,6 +528,29 @@ mod tests {
             start.sip.headers.get("User-Agent").map(String::as_str),
             Some("Cisco-CP8841")
         );
+    }
+
+    #[test]
+    fn bridge_out_start_outbound_direction() {
+        // Outbound origination (0.6.0): `direction: "outbound"`, additive —
+        // protocol version stays "1".
+        let raw = r#"{
+          "type": "start",
+          "version": "1",
+          "call_id": "siphon-out-1",
+          "seq": 0,
+          "from": "+13125551234",
+          "to": "+15558675309",
+          "direction": "outbound",
+          "audio": { "encoding": "pcm16le", "sample_rate": 8000, "channels": 1, "frame_ms": 20 },
+          "sip": { "call_id": "out-abc@trunk.example", "headers": {} }
+        }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        let BridgeOut::Start(start) = msg else {
+            panic!("expected Start variant");
+        };
+        assert_eq!(start.direction, Direction::Outbound);
+        assert_eq!(start.to, "+15558675309");
     }
 
     #[test]

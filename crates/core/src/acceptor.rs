@@ -1267,6 +1267,42 @@ pub fn build_start_msg(
     }
 }
 
+/// Build the WS `start` message for an **outbound** (originated) call —
+/// 0.6.0. The inbound counterpart [`build_start_msg`] reads `InviteFacts`
+/// from a received INVITE; here SiphonAI placed the call, so the
+/// gateway caller-ID (`from`), the dialed destination (`to`), and the
+/// `sip_call_id` of the dialog we created are passed in. `direction` is
+/// [`Direction::Outbound`]; there are no forwarded inbound headers, no SRTP
+/// info, and no verstat. The audio format comes from the negotiated answer.
+pub fn build_outbound_start_msg(
+    bridge_call_id: BridgeCallId,
+    from: &str,
+    to: &str,
+    sip_call_id: &str,
+    answer: &AnswerOutcome,
+) -> StartMsg {
+    StartMsg {
+        version: PROTOCOL_VERSION.to_string(),
+        call_id: bridge_call_id,
+        seq: 0,
+        from: from.to_string(),
+        to: to.to_string(),
+        direction: Direction::Outbound,
+        audio: AudioFormat {
+            encoding: AudioEncoding::Pcm16le,
+            sample_rate: answer.negotiated_audio_sample_rate,
+            channels: 1,
+            frame_ms: 20,
+        },
+        sip: SipMeta {
+            call_id: sip_call_id.to_string(),
+            headers: std::collections::HashMap::new(),
+        },
+        srtp: None,
+        verstat: None,
+    }
+}
+
 /// Produce the STIR/SHAKEN verdict for an inbound INVITE, or `None` when
 /// verification is disabled (no verifier installed). The `bool` is whether
 /// an `Identity` header was present — the caller needs it to distinguish an
@@ -3945,6 +3981,31 @@ a=sendrecv\r\n";
         assert_eq!(start.audio.frame_ms, 20);
         assert_eq!(start.sip.call_id, "abc-123@pbx");
         assert!(start.sip.headers.is_empty());
+    }
+
+    #[test]
+    fn outbound_start_msg_is_outbound_with_passed_endpoints() {
+        let answer = fake_answer();
+        let start = build_outbound_start_msg(
+            BridgeCallId::new("siphon-out-1"),
+            "+13125551234",
+            "+15558675309",
+            "out-abc@trunk.example",
+            &answer,
+        );
+        assert_eq!(start.direction, Direction::Outbound);
+        assert_eq!(start.from, "+13125551234");
+        assert_eq!(start.to, "+15558675309");
+        assert_eq!(start.sip.call_id, "out-abc@trunk.example");
+        assert_eq!(start.audio.sample_rate, 8000);
+        assert_eq!(start.version, PROTOCOL_VERSION);
+        assert_eq!(start.seq, 0);
+        assert!(start.sip.headers.is_empty());
+        assert!(start.verstat.is_none());
+        // Serializes with direction "outbound" (additive; protocol stays "1").
+        let json = serde_json::to_value(&start).expect("serialize");
+        assert_eq!(json["direction"], "outbound");
+        assert_eq!(json["version"], "1");
     }
 
     #[test]

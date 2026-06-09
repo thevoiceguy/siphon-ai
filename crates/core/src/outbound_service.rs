@@ -19,14 +19,20 @@ use forge_core::{CallId, ParticipantId};
 use sip_core::SipUri;
 use siphon_ai_bridge::{BridgeConfig, CallId as BridgeCallId};
 use siphon_ai_media_glue::{OutboundOfferRequest, TapOptions};
-use siphon_ai_telemetry::{OriginateRejection, OriginateRequest, OutboundOriginateHandle};
+use siphon_ai_telemetry::{
+    OriginateRejection, OriginateRequest, OutboundOriginateHandle, OUTBOUND_CALLS_ACTIVE,
+    OUTBOUND_CALLS_TOTAL,
+};
 use tracing::{info, warn};
 
 use crate::acceptor::{
     barge_in_to_tap_action, build_outbound_start_msg, BridgeDefaults, CallIdFactory,
 };
 use crate::call::{CallController, CallControllerConfig};
-use crate::outbound::{OutboundCall, OutboundGuard, OutboundOriginator, OutboundRejection};
+use crate::outbound::{
+    NotAnsweredCause, OutboundCall, OutboundError, OutboundGuard, OutboundOriginator,
+    OutboundRejection,
+};
 
 /// One configured outbound gateway, ready to dial. Built by the daemon from a
 /// compiled `[[gateway]]` (the `siphon-ai-config::Gateway`) plus a per-gateway
@@ -123,13 +129,36 @@ impl OutboundOriginateHandle for OutboundService {
         let log_id = bridge_id_str.clone();
         tokio::spawn(async move {
             let _permit = permit; // held until the call ends, then released
-            match originator.place(target, offer_req, tap).await {
+            metrics::gauge!(OUTBOUND_CALLS_ACTIVE).increment(1.0);
+            let result = originator.place(target, offer_req, tap).await;
+            metrics::counter!(OUTBOUND_CALLS_TOTAL, "result" => outbound_result_label(&result))
+                .increment(1);
+            match result {
                 Ok(call) => run_call(originator, call, bridge_id, bridge, from, to).await,
                 Err(e) => warn!(call_id = %log_id, error = %e, "outbound call did not connect"),
             }
+            metrics::gauge!(OUTBOUND_CALLS_ACTIVE).decrement(1.0);
         });
 
         Ok(bridge_id_str)
+    }
+}
+
+/// The `result` label for `siphon_ai_outbound_calls_total`, from the
+/// `place()` outcome.
+fn outbound_result_label(result: &Result<OutboundCall, OutboundError>) -> &'static str {
+    match result {
+        Ok(_) => "answered",
+        Err(OutboundError::NotAnswered(cause)) => match cause {
+            NotAnsweredCause::Busy => "busy",
+            NotAnsweredCause::Declined => "declined",
+            NotAnsweredCause::NoAnswer => "no_answer",
+            NotAnsweredCause::Rejected { .. } => "rejected",
+        },
+        // No usable final response — DNS / transport / transaction timeout.
+        Err(OutboundError::Transport(_)) => "unreachable",
+        // Local media (offer/answer) setup failure.
+        Err(OutboundError::Setup(_)) => "failed",
     }
 }
 
@@ -176,4 +205,34 @@ async fn run_call(
     originator.hangup(&dialog).await;
     originator.stop_session(&call_id).await;
     drop(call_handle); // stop keepalives / session-timer tasks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn result_labels_map_failure_outcomes() {
+        let na = |c| Err::<OutboundCall, _>(OutboundError::NotAnswered(c));
+        assert_eq!(outbound_result_label(&na(NotAnsweredCause::Busy)), "busy");
+        assert_eq!(
+            outbound_result_label(&na(NotAnsweredCause::Declined)),
+            "declined"
+        );
+        assert_eq!(
+            outbound_result_label(&na(NotAnsweredCause::NoAnswer)),
+            "no_answer"
+        );
+        assert_eq!(
+            outbound_result_label(&na(NotAnsweredCause::Rejected {
+                code: 500,
+                reason: "x".into()
+            })),
+            "rejected"
+        );
+        assert_eq!(
+            outbound_result_label(&Err(OutboundError::Transport("dns".into()))),
+            "unreachable"
+        );
+    }
 }

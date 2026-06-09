@@ -81,11 +81,22 @@ pub const RECORDINGS_TOTAL: &str = "siphon_ai_recordings_total";
 /// challenges aren't counted here.
 pub const REGISTER_ATTEMPTS_TOTAL: &str = "siphon_ai_register_attempts_total";
 
+/// Outbound calls placed (0.6.0). Labeled by `result`: `answered`,
+/// `busy` (486/600), `declined` (403/603), `no_answer` (408/480/487),
+/// `rejected` (other non-2xx), `unreachable` (DNS/transport/timeout, no
+/// response), `failed` (local media setup error). Bounded cardinality.
+pub const OUTBOUND_CALLS_TOTAL: &str = "siphon_ai_outbound_calls_total";
+
 // ─── Gauges ─────────────────────────────────────────────────────────
 
 /// Currently-active calls. Incremented when the controller spawns,
 /// decremented when it exits.
 pub const CALLS_ACTIVE: &str = "siphon_ai_calls_active";
+
+/// Currently in-flight outbound calls (0.6.0) — incremented when an
+/// originate is admitted, decremented when the call settles (answered+ended,
+/// or failed to connect). Compare with `[outbound].max_concurrent`.
+pub const OUTBOUND_CALLS_ACTIVE: &str = "siphon_ai_outbound_calls_active";
 
 /// Per-`[[register]]` registration status. Labeled by `name` and
 /// `state` (`pending`/`registered`/`failed`/`disabled`); the gauge
@@ -204,10 +215,19 @@ pub fn register_descriptions() {
         REGISTER_ATTEMPTS_TOTAL,
         "REGISTER attempts by [[register]].name and outcome."
     );
+    describe_counter!(
+        OUTBOUND_CALLS_TOTAL,
+        "Outbound calls placed, by result (answered, busy, declined, no_answer, rejected, unreachable, failed)."
+    );
     describe_gauge!(
         CALLS_ACTIVE,
         Unit::Count,
         "Currently-running per-call controllers."
+    );
+    describe_gauge!(
+        OUTBOUND_CALLS_ACTIVE,
+        Unit::Count,
+        "In-flight outbound calls (admitted but not yet settled)."
     );
     describe_gauge!(
         REGISTER_STATE,

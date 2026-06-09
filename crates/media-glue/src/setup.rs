@@ -57,6 +57,7 @@ use crate::tap::{BargeInAction, MediaTap, MediaTapError};
 
 /// Daemon-wide handles `MediaSetup` needs once at startup. Cheap to
 /// clone — every field is already `Arc`-ed.
+#[derive(Clone)]
 pub struct MediaSetup {
     session_manager: Arc<SessionManager>,
     bridge_manager: Arc<MediaBridgeManager>,

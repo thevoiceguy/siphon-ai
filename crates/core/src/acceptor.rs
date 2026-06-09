@@ -1206,7 +1206,7 @@ fn attach_sdp_body(response: Response, sdp: &str) -> Response {
     Response::new(start, headers, bytes.into()).expect("valid response with SDP body")
 }
 
-fn barge_in_to_tap_action(cfg: &BargeInConfig) -> siphon_ai_media_glue::BargeInAction {
+pub(crate) fn barge_in_to_tap_action(cfg: &BargeInConfig) -> siphon_ai_media_glue::BargeInAction {
     if !cfg.enabled {
         return siphon_ai_media_glue::BargeInAction::Notify;
     }
@@ -1366,7 +1366,10 @@ fn canonical_header_name(name: &str) -> String {
 /// uses a v4 UUID prefixed with `siphon-`.
 pub type CallIdFactory = Arc<dyn Fn() -> BridgeCallId + Send + Sync>;
 
-fn default_call_id_factory() -> CallIdFactory {
+/// The default per-call bridge-id generator (`siphon-<uuid>`). Shared by the
+/// inbound acceptor and the outbound service so call ids look the same
+/// regardless of direction.
+pub fn default_call_id_factory() -> CallIdFactory {
     Arc::new(|| BridgeCallId::new(format!("siphon-{}", Uuid::new_v4().simple())))
 }
 

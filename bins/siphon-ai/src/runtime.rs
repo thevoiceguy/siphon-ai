@@ -46,6 +46,7 @@
 //! - HEP / Homer (depends on the upstream `hep-rs` crate).
 //! - Admin endpoints (dynamic log level, force-hangup).
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,14 +74,17 @@ use siphon_ai_config::{
     CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, HepConfig, MediaConfig, NodeConfig,
     ObservabilityConfig, SipConfig, SipTlsConfig, SipTransport, WebhooksConfig,
 };
-use siphon_ai_core::{BridgingAcceptor, CallRegistry};
+use siphon_ai_core::{
+    default_call_id_factory, BridgingAcceptor, CallRegistry, OutboundGateway, OutboundGuard,
+    OutboundOriginator, OutboundService, StaticCredentials,
+};
 use siphon_ai_media_glue::MediaSetup;
 use siphon_ai_sip_glue::{
     DialogTerminatorHandle, RegisterSourceResolver, RegistrationEntry, RegistrationManager,
     RoutingHandler,
 };
 use siphon_ai_telemetry::{
-    admin::{AdminCallRegistry, AdminState, CallRegistryHandle, RegistrationRow},
+    admin::{AdminCallRegistry, AdminOutbound, AdminState, CallRegistryHandle, RegistrationRow},
     install_recorder, HepTelemetry, HepTelemetryBuild, HepWorkerHandle, LogFilterHandle,
     ObservabilityServer, ReadinessFlag,
 };
@@ -142,10 +146,7 @@ impl Runtime {
             trunks,
             security,
             recording,
-            // Outbound gateways + guardrails are validated at config load
-            // (compile_outbound); the daemon wires them in the originate-API
-            // chunk. Bound-but-unused until then.
-            outbound: _outbound,
+            outbound,
             cdr,
             observability,
             webhooks,
@@ -248,6 +249,13 @@ impl Runtime {
             min_attestation_response: security.min_attestation_response,
             require_identity: security.stir_shaken.require_identity,
         };
+
+        // The acceptor consumes `media_setup` + `bridge_defaults`; the
+        // outbound service (built below) needs them too. Cheap clones (all
+        // Arc / already-cloneable). Used only in the `[outbound]`-enabled
+        // branch, so harmless when outbound is off.
+        let outbound_media = Arc::clone(&media_setup);
+        let outbound_bridge_defaults = bridge_defaults.clone();
 
         let acceptor = Arc::new(
             BridgingAcceptor::new(media_setup, bridge_defaults, registry.clone())
@@ -445,6 +453,59 @@ impl Runtime {
             tls_server_config,
         );
 
+        // ─── Outbound origination service (0.6.0) ──────────────────
+        // One authenticated UAC + originator per `[[gateway]]`, then the
+        // daemon-wide service the `POST /admin/v1/calls` endpoint drives.
+        // Only when `[outbound]` is enabled (a positive concurrency cap);
+        // otherwise the endpoint returns 501. The originate endpoint has no
+        // built-in auth — the cap + rate limit are the native guardrails
+        // (DEV_PLAN_0.6.0 §9.5/§9.6).
+        let outbound_handle: Option<AdminOutbound> = if outbound.enabled() {
+            let mut gateways = HashMap::with_capacity(outbound.gateways.len());
+            for gw in &outbound.gateways {
+                let uac = build_outbound_uac(
+                    TransferUacBuild {
+                        local_uri: &local_uri,
+                        contact_uri: &contact_uri,
+                        listen_addr: sip.listen_addr,
+                        public_addr: sip_public_addr(&node, &sip),
+                        transaction_mgr: Arc::clone(&transaction_mgr),
+                        dispatcher: Arc::clone(&dispatcher),
+                        sip_resolver: Arc::clone(&sip_resolver),
+                    },
+                    gw.credentials.as_ref(),
+                )?;
+                let originator = Arc::new(OutboundOriginator::new(
+                    (*outbound_media).clone(),
+                    Arc::new(uac),
+                ));
+                gateways.insert(
+                    gw.name.clone(),
+                    OutboundGateway {
+                        originator,
+                        proxy_host: gw.proxy_host.clone(),
+                        proxy_port: gw.proxy_port,
+                        from: gw.from.clone(),
+                    },
+                );
+            }
+            let guard = OutboundGuard::new(outbound.max_concurrent, outbound.rate_limit_per_sec);
+            let service = OutboundService::new(
+                gateways,
+                guard,
+                outbound_bridge_defaults,
+                default_call_id_factory(),
+            );
+            info!(
+                gateways = outbound.gateways.len(),
+                max_concurrent = outbound.max_concurrent,
+                "outbound origination enabled"
+            );
+            Some(Arc::new(service) as AdminOutbound)
+        } else {
+            None
+        };
+
         // ─── Build admin state + observability HTTP listener ──────
         // Deferred until now so admin endpoints have the call
         // registry, registration manager, hep telemetry, and log-
@@ -466,6 +527,7 @@ impl Runtime {
             })),
             log_filter: Some(log_filter),
             hep: hep_telemetry.clone(),
+            outbound: outbound_handle,
         };
         let observability_server = build_observability(
             observability,
@@ -1039,6 +1101,39 @@ fn build_transfer_uac(args: TransferUacBuild<'_>) -> Result<IntegratedUAC> {
     builder
         .build()
         .map_err(|e| anyhow!("transfer UAC build: {e}"))
+}
+
+/// Build a per-gateway outbound UAC. Same shape as [`build_transfer_uac`],
+/// but — unlike REFER, which inherits the dialog's auth — an originated
+/// INVITE may be challenged (401/407) by the trunk, so when the gateway has
+/// credentials we install a [`StaticCredentials`] provider for the UAC's
+/// auto-retry. One UAC per gateway keeps each trunk's credentials isolated.
+fn build_outbound_uac(
+    args: TransferUacBuild<'_>,
+    credentials: Option<&siphon_ai_config::GatewayCredentials>,
+) -> Result<IntegratedUAC> {
+    let mut builder = IntegratedUAC::builder()
+        .local_uri(args.local_uri)
+        .contact_uri(args.contact_uri)
+        .transaction_manager(args.transaction_mgr)
+        .dispatcher(args.dispatcher)
+        .resolver(args.sip_resolver)
+        .local_addr(args.listen_addr.to_string())
+        .map_err(|e| anyhow!("outbound UAC local_addr: {e}"))?;
+    if let Some(public) = args.public_addr {
+        builder = builder
+            .public_addr(public.to_string())
+            .map_err(|e| anyhow!("outbound UAC public_addr: {e}"))?;
+    }
+    if let Some(creds) = credentials {
+        builder = builder.credential_provider(Arc::new(StaticCredentials::new(
+            creds.username.clone(),
+            creds.password.clone(),
+        )));
+    }
+    builder
+        .build()
+        .map_err(|e| anyhow!("outbound UAC build: {e}"))
 }
 
 fn rtp_port_pool(media: &MediaConfig) -> Result<PortPoolConfig> {

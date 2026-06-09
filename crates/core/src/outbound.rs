@@ -50,6 +50,9 @@ pub struct OutboundCall {
     pub dialog: Dialog,
     /// The live INVITE handle (keepalives / session timer / `cancel`).
     pub call_handle: CallHandle,
+    /// The forge session / bridge call id, for tearing the media session
+    /// down at the end of the call.
+    pub call_id: CallId,
 }
 
 impl std::fmt::Debug for OutboundCall {
@@ -124,7 +127,7 @@ impl OutboundOriginator {
         {
             Ok(h) => h,
             Err(e) => {
-                self.rollback(&call_id).await;
+                self.stop_session(&call_id).await;
                 return Err(OutboundError::Transport(e.to_string()));
             }
         };
@@ -134,7 +137,7 @@ impl OutboundOriginator {
         let response = match handle.await_final().await {
             Ok(r) => r,
             Err(e) => {
-                self.rollback(&call_id).await;
+                self.stop_session(&call_id).await;
                 return Err(OutboundError::Transport(e.to_string()));
             }
         };
@@ -143,7 +146,7 @@ impl OutboundOriginator {
         if !(200..300).contains(&code) {
             let cause = classify_failure(code, response.reason());
             debug!(code, ?cause, "outbound INVITE not answered");
-            self.rollback(&call_id).await;
+            self.stop_session(&call_id).await;
             return Err(OutboundError::NotAnswered(cause));
         }
 
@@ -158,21 +161,24 @@ impl OutboundOriginator {
             accepted,
             dialog,
             call_handle: handle,
+            call_id,
         })
     }
 
-    /// End an established outbound call by sending BYE on its dialog. The
-    /// daemon calls this after the `CallController` returns. Best-effort —
-    /// a BYE failure is logged, not propagated (the call is over either way).
-    pub async fn hangup(&self, call: &OutboundCall) {
-        if let Err(e) = self.uac.bye(&call.dialog).await {
+    /// Send BYE on an established call's dialog. The daemon calls this after
+    /// the `CallController` returns. Best-effort — a BYE failure is logged,
+    /// not propagated (the call is over either way).
+    pub async fn hangup(&self, dialog: &Dialog) {
+        if let Err(e) = self.uac.bye(dialog).await {
             warn!(error = %e, "outbound BYE failed");
         }
     }
 
-    async fn rollback(&self, call_id: &CallId) {
+    /// Tear down the call's forge media session. Used both to roll back a
+    /// failed origination and to clean up after a completed call.
+    pub async fn stop_session(&self, call_id: &CallId) {
         if let Err(e) = self.media.session_manager().stop_session(call_id).await {
-            warn!(call_id = %call_id, error = %e, "outbound session rollback failed");
+            warn!(call_id = %call_id, error = %e, "outbound session teardown failed");
         }
     }
 }

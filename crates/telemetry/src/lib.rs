@@ -26,7 +26,10 @@ pub mod log_filter;
 pub mod metrics;
 pub mod readiness;
 
-pub use admin::{AdminCallRegistry, AdminState, CallRegistryHandle, RegistrationRow};
+pub use admin::{
+    AdminCallRegistry, AdminOutbound, AdminState, CallRegistryHandle, OriginateRejection,
+    OriginateRequest, OutboundOriginateHandle, RegistrationRow,
+};
 pub use hep::{HepBuildError, HepTelemetry, HepTelemetryBuild, HepWorkerHandle};
 pub use http::ObservabilityServer;
 pub use log_filter::{LogFilterError, LogFilterHandle};

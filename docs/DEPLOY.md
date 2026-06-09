@@ -336,8 +336,10 @@ curl -X POST http://localhost:9091/admin/v1/calls -d '{
 
 Responses: `202` (accepted — placing), `404` (unknown gateway), `400` (bad
 target / no ws_url / invalid JSON), `503` (`max_concurrent` reached), `429`
-(rate limited), `501` (outbound disabled). The call's progress (ringing /
-answered / failed) is reported via webhooks + the CDR (chunk 5).
+(rate limited), `501` (outbound disabled). The call's progress arrives
+out-of-band via lifecycle webhooks: `outbound_initiated`, then exactly one
+of `outbound_answered` (followed by `call_end` + a CDR when the call
+finishes) or `outbound_failed` (see [Lifecycle webhooks](#lifecycle-webhooks)).
 
 Example: bump bridge logging to debug for an incident, then revert.
 
@@ -407,6 +409,20 @@ Two optional recording fields appear when the call was recorded (added in
   recording `failed` (it points at where the file would be); cross-check
   with the `siphon_ai_recordings_total` metric for the outcome.
 
+Outbound originated calls (0.6.0, `POST /admin/v1/calls`) produce the same
+record with `direction: "outbound"` — the schema stays at version 1 (the
+field was reserved for this since v1). Two outbound-specific readings:
+
+- `route` carries the `[[gateway]]` name the call was placed through, not
+  a `[[route]]` name.
+- `started_at` is when the INVITE went out, so `duration_ms` includes ring
+  time; the answer instant is on the `outbound_answered` webhook.
+
+Only *answered* outbound calls get a CDR — calls that end busy / declined /
+unanswered / unreachable are covered by the `outbound_failed` webhook and
+the `siphon_ai_outbound_calls_total{result}` metric, mirroring inbound
+where CDRs cover bridged calls only.
+
 The webhook sink delivers the same JSON to `[cdr.webhook].url` with
 `Content-Type: application/json`. Retries on non-2xx up to
 `[cdr.webhook].retry_max` times with exponential backoff.
@@ -419,11 +435,30 @@ CDR webhook. Event types:
 | `type`                          | When                                             |
 |---------------------------------|--------------------------------------------------|
 | `call_start`                    | After 200 OK has gone out on an accepted INVITE. |
-| `call_end`                      | After the controller exits and the CDR record is built. |
+| `call_end`                      | After the controller exits and the CDR record is built (inbound *and* answered outbound calls). |
 | `registration_state_changed`    | Each `[[register]]` state transition (`pending` → `registered`, `registered` → `failed`, etc.). |
+| `outbound_initiated`            | An originated call (`POST /admin/v1/calls`) was admitted and its INVITE is going out. |
+| `outbound_answered`             | The callee answered (2xx) and the WS bridge is starting. |
+| `outbound_failed`               | The originated call ended without an answer. Terminal — no `call_end`/CDR follows. |
 
 Each delivery is a single JSON object with `version`, `timestamp` (ISO 8601), `type`,
 and per-event fields documented in `crates/webhooks/src/event.rs`.
+
+An outbound call emits `outbound_initiated`, then exactly one of
+`outbound_answered` or `outbound_failed`, all sharing the `call_id` that
+`POST /admin/v1/calls` returned. Answered calls finish with a `call_end`
+(same shape as inbound; `route` = gateway name). `outbound_failed.cause`
+mirrors the `siphon_ai_outbound_calls_total{result}` metric labels:
+`busy` / `declined` / `no_answer` / `rejected` / `unreachable` / `failed`.
+
+```json
+{ "type": "outbound_initiated", "version": 1, "call_id": "siphon-…",
+  "timestamp": "2026-06-09T10:00:00Z", "to": "+15558675309", "gateway": "twilio" }
+{ "type": "outbound_answered", "version": 1, "call_id": "siphon-…",
+  "sip_call_id": "f81d4fae…@10.0.0.5", "timestamp": "2026-06-09T10:00:06Z" }
+{ "type": "outbound_failed", "version": 1, "call_id": "siphon-…",
+  "timestamp": "2026-06-09T10:00:30Z", "cause": "no_answer" }
+```
 
 ## HEP / Homer
 

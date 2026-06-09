@@ -465,7 +465,7 @@ regardless of sub-block state. Adding fields to the CDR schema bumps the
 | `enabled`     | bool     | `false`                | |
 | `url`         | URL      | required if on         | POST target. |
 | `auth_header` | string   | unset                  | Sent verbatim. `${VAR}` expansion works. |
-| `events`      | string[] | all                    | Allowlist. Valid today: `"call_start"`, `"call_end"`, `"registration_state_changed"`. |
+| `events`      | string[] | all                    | Allowlist. Valid today: `"call_start"`, `"call_end"`, `"registration_state_changed"`, `"outbound_initiated"`, `"outbound_answered"`, `"outbound_failed"`. |
 | `retry_max`   | integer  | `3`                    | |
 | `timeout_ms`  | integer  | `5000`                 | |
 

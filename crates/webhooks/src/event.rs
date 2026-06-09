@@ -50,6 +50,23 @@ pub enum WebhookEvent {
     /// `failed → registered`. Ops integrations subscribe to this
     /// to alert when an upstream PBX deregisters us.
     RegistrationStateChanged(RegistrationStateChangedEvent),
+
+    /// Fired when an outbound call (`POST /admin/v1/calls`) is
+    /// admitted and the INVITE is about to be sent. Exactly one of
+    /// `OutboundAnswered` or `OutboundFailed` follows with the same
+    /// `call_id`.
+    OutboundInitiated(OutboundInitiatedEvent),
+
+    /// Fired when the callee answers an outbound call (2xx received,
+    /// media bound, WS bridge starting). A `CallEnd` with the same
+    /// `call_id` follows when the call ends — answered outbound calls
+    /// share the inbound end-of-call shape (and get a CDR).
+    OutboundAnswered(OutboundAnsweredEvent),
+
+    /// Fired when an outbound call ends without being answered —
+    /// busy / declined / no-answer / rejected / unreachable / setup
+    /// failure. Terminal: no `CallEnd` (and no CDR) follows.
+    OutboundFailed(OutboundFailedEvent),
 }
 
 impl WebhookEvent {
@@ -61,6 +78,9 @@ impl WebhookEvent {
             WebhookEvent::CallStart(_) => "call_start",
             WebhookEvent::CallEnd(_) => "call_end",
             WebhookEvent::RegistrationStateChanged(_) => "registration_state_changed",
+            WebhookEvent::OutboundInitiated(_) => "outbound_initiated",
+            WebhookEvent::OutboundAnswered(_) => "outbound_answered",
+            WebhookEvent::OutboundFailed(_) => "outbound_failed",
         }
     }
 
@@ -72,6 +92,9 @@ impl WebhookEvent {
             WebhookEvent::CallStart(e) => Some(&e.call_id),
             WebhookEvent::CallEnd(e) => Some(&e.call_id),
             WebhookEvent::RegistrationStateChanged(_) => None,
+            WebhookEvent::OutboundInitiated(e) => Some(&e.call_id),
+            WebhookEvent::OutboundAnswered(e) => Some(&e.call_id),
+            WebhookEvent::OutboundFailed(e) => Some(&e.call_id),
         }
     }
 }
@@ -144,6 +167,53 @@ pub struct RegistrationStateChangedEvent {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+/// An outbound call was admitted and is being placed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboundInitiatedEvent {
+    /// Schema version. Bumped per CLAUDE.md §7.9.
+    pub version: u32,
+    /// SiphonAI bridge call id — the one `POST /admin/v1/calls`
+    /// returned, shared by the follow-up answered/failed/end events.
+    pub call_id: String,
+    /// When the INVITE was dispatched (UTC).
+    pub timestamp: DateTime<Utc>,
+    /// Destination as given in the originate request (user part —
+    /// the gateway supplies host/port).
+    pub to: String,
+    /// `[[gateway]].name` the call is placed through.
+    pub gateway: String,
+}
+
+/// The callee answered an outbound call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboundAnsweredEvent {
+    pub version: u32,
+    /// Bridge call id, pairing with `OutboundInitiated`.
+    pub call_id: String,
+    /// SIP `Call-ID` of the established dialog — correlates with
+    /// HEP/Homer captures.
+    pub sip_call_id: String,
+    /// When the 2xx answer was processed (UTC).
+    pub timestamp: DateTime<Utc>,
+}
+
+/// An outbound call ended without an answer. Terminal for its
+/// `call_id` — no `CallEnd` or CDR follows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboundFailedEvent {
+    pub version: u32,
+    /// Bridge call id, pairing with `OutboundInitiated`.
+    pub call_id: String,
+    /// When the failure was observed (UTC).
+    pub timestamp: DateTime<Utc>,
+    /// Why the call didn't connect, mirroring the
+    /// `siphon_ai_outbound_calls_total{result}` metric labels so
+    /// dashboards correlate without a re-mapping table: `busy` /
+    /// `declined` / `no_answer` / `rejected` / `unreachable` /
+    /// `failed`.
+    pub cause: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +246,57 @@ mod tests {
             duration_ms: 42_000,
             termination_cause: "server_hangup".into(),
         })
+    }
+
+    fn sample_outbound() -> [WebhookEvent; 3] {
+        let ts = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap();
+        [
+            WebhookEvent::OutboundInitiated(OutboundInitiatedEvent {
+                version: WEBHOOK_VERSION,
+                call_id: "siphon-9b2c".into(),
+                timestamp: ts,
+                to: "+13125550000".into(),
+                gateway: "twilio_main".into(),
+            }),
+            WebhookEvent::OutboundAnswered(OutboundAnsweredEvent {
+                version: WEBHOOK_VERSION,
+                call_id: "siphon-9b2c".into(),
+                sip_call_id: "xyz-789@siphon".into(),
+                timestamp: ts,
+            }),
+            WebhookEvent::OutboundFailed(OutboundFailedEvent {
+                version: WEBHOOK_VERSION,
+                call_id: "siphon-9b2c".into(),
+                timestamp: ts,
+                cause: "busy".into(),
+            }),
+        ]
+    }
+
+    #[test]
+    fn outbound_events_round_trip_through_json() {
+        for event in sample_outbound() {
+            let s = serde_json::to_string(&event).unwrap();
+            let parsed: WebhookEvent = serde_json::from_str(&s).unwrap();
+            assert_eq!(event, parsed);
+        }
+    }
+
+    #[test]
+    fn outbound_type_strs_match_wire_discriminators() {
+        let expected = ["outbound_initiated", "outbound_answered", "outbound_failed"];
+        for (event, want) in sample_outbound().iter().zip(expected) {
+            assert_eq!(event.type_str(), want);
+            let v: Value = serde_json::to_value(event).unwrap();
+            assert_eq!(v["type"], json!(want));
+        }
+    }
+
+    #[test]
+    fn outbound_events_are_call_scoped() {
+        for event in sample_outbound() {
+            assert_eq!(event.call_id(), Some("siphon-9b2c"));
+        }
     }
 
     #[test]

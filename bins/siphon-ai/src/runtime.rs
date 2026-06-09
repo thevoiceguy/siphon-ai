@@ -250,12 +250,14 @@ impl Runtime {
             require_identity: security.stir_shaken.require_identity,
         };
 
-        // The acceptor consumes `media_setup` + `bridge_defaults`; the
-        // outbound service (built below) needs them too. Cheap clones (all
-        // Arc / already-cloneable). Used only in the `[outbound]`-enabled
-        // branch, so harmless when outbound is off.
+        // The acceptor consumes `media_setup` + `bridge_defaults` + the CDR
+        // and webhook sinks; the outbound service (built below) needs them
+        // too. Cheap clones (all Arc / already-cloneable). Used only in the
+        // `[outbound]`-enabled branch, so harmless when outbound is off.
         let outbound_media = Arc::clone(&media_setup);
         let outbound_bridge_defaults = bridge_defaults.clone();
+        let outbound_cdr_sink = Arc::clone(&cdr_sink);
+        let outbound_webhook_sink = Arc::clone(&webhook_sink);
 
         let acceptor = Arc::new(
             BridgingAcceptor::new(media_setup, bridge_defaults, registry.clone())
@@ -495,6 +497,8 @@ impl Runtime {
                 guard,
                 outbound_bridge_defaults,
                 default_call_id_factory(),
+                outbound_cdr_sink,
+                outbound_webhook_sink,
             );
             info!(
                 gateways = outbound.gateways.len(),

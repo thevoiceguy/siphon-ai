@@ -1785,17 +1785,19 @@ impl CallStart {
 
 /// Flat view of `Result<CallOutcome, CallError>` for the CDR layer:
 /// just the cause + the human strings from the sub-task results.
-struct CallTerminationView {
-    cause: CdrTerminationCause,
-    bridge_detail: String,
-    tap_detail: String,
+/// `pub(crate)` so the outbound service's CDR assembly shares the
+/// exact same outcome→cause mapping as inbound.
+pub(crate) struct CallTerminationView {
+    pub(crate) cause: CdrTerminationCause,
+    pub(crate) bridge_detail: String,
+    pub(crate) tap_detail: String,
     /// Recording outcome, when the call was recorded. Feeds the CDR
     /// `recording_path` and the `siphon_ai_recordings_total` metric.
-    recording: Option<RecordingSummary>,
+    pub(crate) recording: Option<RecordingSummary>,
 }
 
 impl CallTerminationView {
-    fn from_run_result(result: Result<CallOutcome, crate::call::CallError>) -> Self {
+    pub(crate) fn from_run_result(result: Result<CallOutcome, crate::call::CallError>) -> Self {
         match result {
             Ok(o) => Self {
                 cause: map_cause(o.termination),
@@ -1829,7 +1831,7 @@ fn record_prepare_outcome(elapsed: std::time::Duration, ok: bool) {
 /// `siphon_ai_calls_total` counter label. Mirrors
 /// [`CdrTerminationCause`]'s snake_case serialization so dashboards
 /// can correlate the two without re-mapping.
-fn termination_label(cause: CdrTerminationCause) -> &'static str {
+pub(crate) fn termination_label(cause: CdrTerminationCause) -> &'static str {
     match cause {
         CdrTerminationCause::ServerHangup => "server_hangup",
         CdrTerminationCause::LocalShutdown => "local_shutdown",

@@ -7,26 +7,40 @@
 //! `POST /admin/v1/calls` endpoint drives it.
 //!
 //! The originate call returns immediately with the bridge `call_id` (202) —
-//! the call proceeds on a spawned task. Its progress (ringing / answered /
-//! failed) surfaces via webhooks + the CDR in chunk 5. The concurrency permit
-//! from the guard is held for the spawned task's lifetime, so it's released
+//! the call proceeds on a spawned task. Its progress surfaces out-of-band:
+//! an `outbound_initiated` webhook when the INVITE goes out, then exactly one
+//! of `outbound_answered` (followed by a `call_end` webhook + a CDR when the
+//! bridge finishes) or `outbound_failed` (terminal — failed calls get the
+//! webhook + the `siphon_ai_outbound_calls_total` metric, no CDR, mirroring
+//! inbound where CDRs cover bridged calls only). The concurrency permit from
+//! the guard is held for the spawned task's lifetime, so it's released
 //! exactly when the call ends.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use forge_core::{CallId, ParticipantId};
 use sip_core::SipUri;
 use siphon_ai_bridge::{BridgeConfig, CallId as BridgeCallId};
+use siphon_ai_cdr::{
+    AudioInfo as CdrAudioInfo, CdrRecord, CdrSinkHandle, Direction as CdrDirection,
+    TerminationInfo as CdrTerminationInfo, CDR_VERSION,
+};
 use siphon_ai_media_glue::{OutboundOfferRequest, TapOptions};
 use siphon_ai_telemetry::{
     OriginateRejection, OriginateRequest, OutboundOriginateHandle, OUTBOUND_CALLS_ACTIVE,
     OUTBOUND_CALLS_TOTAL,
 };
+use siphon_ai_webhooks::{
+    CallEndEvent, OutboundAnsweredEvent, OutboundFailedEvent, OutboundInitiatedEvent, WebhookEvent,
+    WebhookSinkHandle, WEBHOOK_VERSION,
+};
 use tracing::{info, warn};
 
 use crate::acceptor::{
-    barge_in_to_tap_action, build_outbound_start_msg, BridgeDefaults, CallIdFactory,
+    barge_in_to_tap_action, build_outbound_start_msg, termination_label, BridgeDefaults,
+    CallIdFactory, CallTerminationView,
 };
 use crate::call::{CallController, CallControllerConfig};
 use crate::outbound::{
@@ -52,6 +66,8 @@ pub struct OutboundService {
     guard: OutboundGuard,
     defaults: BridgeDefaults,
     call_id_factory: CallIdFactory,
+    cdr_sink: CdrSinkHandle,
+    webhook_sink: WebhookSinkHandle,
 }
 
 impl OutboundService {
@@ -60,12 +76,16 @@ impl OutboundService {
         guard: OutboundGuard,
         defaults: BridgeDefaults,
         call_id_factory: CallIdFactory,
+        cdr_sink: CdrSinkHandle,
+        webhook_sink: WebhookSinkHandle,
     ) -> Self {
         Self {
             gateways,
             guard,
             defaults,
             call_id_factory,
+            cdr_sink,
+            webhook_sink,
         }
     }
 }
@@ -123,19 +143,53 @@ impl OutboundOriginateHandle for OutboundService {
         };
         let from = req.from.clone().unwrap_or_else(|| gw.from.clone());
         let to = req.to.clone();
+        let gateway = req.gateway.clone();
         let originator = Arc::clone(&gw.originator);
+        let cdr_sink = Arc::clone(&self.cdr_sink);
+        let webhook_sink = Arc::clone(&self.webhook_sink);
 
-        info!(call_id = %bridge_id_str, gateway = %req.gateway, "originating outbound call");
+        info!(call_id = %bridge_id_str, gateway = %gateway, "originating outbound call");
         let log_id = bridge_id_str.clone();
         tokio::spawn(async move {
             let _permit = permit; // held until the call ends, then released
             metrics::gauge!(OUTBOUND_CALLS_ACTIVE).increment(1.0);
+            let started_at = Utc::now();
+            webhook_sink
+                .emit(WebhookEvent::OutboundInitiated(OutboundInitiatedEvent {
+                    version: WEBHOOK_VERSION,
+                    call_id: log_id.clone(),
+                    timestamp: started_at,
+                    to: to.clone(),
+                    gateway: gateway.clone(),
+                }))
+                .await;
             let result = originator.place(target, offer_req, tap).await;
-            metrics::counter!(OUTBOUND_CALLS_TOTAL, "result" => outbound_result_label(&result))
-                .increment(1);
+            let result_label = outbound_result_label(&result);
+            metrics::counter!(OUTBOUND_CALLS_TOTAL, "result" => result_label).increment(1);
             match result {
-                Ok(call) => run_call(originator, call, bridge_id, bridge, from, to).await,
-                Err(e) => warn!(call_id = %log_id, error = %e, "outbound call did not connect"),
+                Ok(call) => {
+                    let ctx = OutboundCallContext {
+                        bridge_id,
+                        started_at,
+                        from,
+                        to,
+                        gateway,
+                        cdr_sink,
+                        webhook_sink,
+                    };
+                    run_call(originator, call, bridge, ctx).await;
+                }
+                Err(e) => {
+                    warn!(call_id = %log_id, error = %e, "outbound call did not connect");
+                    webhook_sink
+                        .emit(WebhookEvent::OutboundFailed(OutboundFailedEvent {
+                            version: WEBHOOK_VERSION,
+                            call_id: log_id,
+                            timestamp: Utc::now(),
+                            cause: result_label.to_string(),
+                        }))
+                        .await;
+                }
             }
             metrics::gauge!(OUTBOUND_CALLS_ACTIVE).decrement(1.0);
         });
@@ -162,15 +216,31 @@ fn outbound_result_label(result: &Result<OutboundCall, OutboundError>) -> &'stat
     }
 }
 
-/// Run an answered outbound call's audio bridge to completion, then tear it
-/// down (BYE the dialog + stop the media session).
+/// Everything the answered-call path needs at CDR/webhook-emission time
+/// beyond the call itself — the outbound counterpart of the acceptor's
+/// `CallStart` snapshot.
+struct OutboundCallContext {
+    bridge_id: BridgeCallId,
+    /// When `place()` started (= the `outbound_initiated` timestamp), so
+    /// the CDR's `duration_ms` covers ring time too; answer time is on
+    /// the `outbound_answered` webhook.
+    started_at: DateTime<Utc>,
+    from: String,
+    to: String,
+    /// `[[gateway]].name` — fills the CDR `route` field for outbound.
+    gateway: String,
+    cdr_sink: CdrSinkHandle,
+    webhook_sink: WebhookSinkHandle,
+}
+
+/// Run an answered outbound call's audio bridge to completion, tear it
+/// down (BYE the dialog + stop the media session), then emit the CDR and
+/// the `call_end` webhook.
 async fn run_call(
     originator: Arc<OutboundOriginator>,
     call: OutboundCall,
-    bridge_id: BridgeCallId,
     bridge: BridgeConfig,
-    from: String,
-    to: String,
+    ctx: OutboundCallContext,
 ) {
     let OutboundCall {
         accepted,
@@ -179,15 +249,29 @@ async fn run_call(
         call_id,
     } = call;
     let sip_call_id = dialog.id().call_id().to_string();
+    ctx.webhook_sink
+        .emit(WebhookEvent::OutboundAnswered(OutboundAnsweredEvent {
+            version: WEBHOOK_VERSION,
+            call_id: ctx.bridge_id.as_str().to_string(),
+            sip_call_id: sip_call_id.clone(),
+            timestamp: Utc::now(),
+        }))
+        .await;
+    let audio = CdrAudioInfo {
+        codec: accepted.answer.negotiated_codec.encoding_name().to_string(),
+        payload_type: accepted.answer.negotiated_payload_type,
+        sample_rate: accepted.answer.negotiated_audio_sample_rate,
+    };
+    let ws_url = bridge.ws_url.clone();
     let start = build_outbound_start_msg(
-        bridge_id.clone(),
-        &from,
-        &to,
+        ctx.bridge_id.clone(),
+        &ctx.from,
+        &ctx.to,
         &sip_call_id,
         &accepted.answer,
     );
     let cfg = CallControllerConfig {
-        call_id: bridge_id,
+        call_id: ctx.bridge_id.clone(),
         bridge,
         start,
         media_tap: accepted.tap,
@@ -195,7 +279,8 @@ async fn run_call(
         recording: None,
     };
     let (controller, _handle) = CallController::new(cfg);
-    match controller.run().await {
+    let run_result = controller.run().await;
+    match &run_result {
         Ok(o) => {
             info!(sip_call_id = %sip_call_id, termination = ?o.termination, "outbound call ended")
         }
@@ -205,11 +290,115 @@ async fn run_call(
     originator.hangup(&dialog).await;
     originator.stop_session(&call_id).await;
     drop(call_handle); // stop keepalives / session-timer tasks
+
+    let view = CallTerminationView::from_run_result(run_result);
+    let ended_at = Utc::now();
+    let record = build_outbound_record(&ctx, &sip_call_id, audio, &ws_url, ended_at, &view);
+    let end_event = WebhookEvent::CallEnd(CallEndEvent {
+        version: WEBHOOK_VERSION,
+        call_id: ctx.bridge_id.as_str().to_string(),
+        sip_call_id,
+        timestamp: ended_at,
+        from: ctx.from.clone(),
+        to: ctx.to.clone(),
+        route: ctx.gateway.clone(),
+        ws_url,
+        duration_ms: record.duration_ms,
+        termination_cause: termination_label(view.cause).to_string(),
+    });
+    ctx.cdr_sink.emit(record).await;
+    ctx.webhook_sink.emit(end_event).await;
+}
+
+/// Assemble the CDR for an answered outbound call — the outbound
+/// counterpart of the acceptor's `CallStart::into_record`. Failed calls
+/// don't get a CDR (the `outbound_failed` webhook + metric cover them),
+/// mirroring inbound where CDRs cover bridged calls only.
+fn build_outbound_record(
+    ctx: &OutboundCallContext,
+    sip_call_id: &str,
+    audio: CdrAudioInfo,
+    ws_url: &str,
+    ended_at: DateTime<Utc>,
+    view: &CallTerminationView,
+) -> CdrRecord {
+    let duration_ms = (ended_at - ctx.started_at).num_milliseconds().max(0) as u64;
+    CdrRecord {
+        version: CDR_VERSION,
+        call_id: ctx.bridge_id.as_str().to_string(),
+        sip_call_id: sip_call_id.to_string(),
+        started_at: ctx.started_at,
+        ended_at,
+        duration_ms,
+        from: ctx.from.clone(),
+        to: ctx.to.clone(),
+        direction: CdrDirection::Outbound,
+        route: ctx.gateway.clone(),
+        ws_url: ws_url.to_string(),
+        audio,
+        termination: CdrTerminationInfo {
+            cause: view.cause,
+            bridge_disconnect: view.bridge_detail.clone(),
+            tap_disconnect: view.tap_detail.clone(),
+        },
+        // STIR/SHAKEN verstat is an inbound-verification concern; recording
+        // isn't wired for outbound calls in this release (controller runs
+        // with `recording: None`).
+        verstat_attest: None,
+        verstat_passed: None,
+        recording_id: None,
+        recording_path: None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+    use siphon_ai_cdr::TerminationCause as CdrTerminationCause;
+
+    #[test]
+    fn outbound_record_carries_direction_gateway_and_termination() {
+        let ctx = OutboundCallContext {
+            bridge_id: BridgeCallId::new("siphon-9b2c"),
+            started_at: Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap(),
+            from: "sip:bot@siphon.example.com".into(),
+            to: "+13125550000".into(),
+            gateway: "twilio_main".into(),
+            cdr_sink: Arc::new(siphon_ai_cdr::NullSink),
+            webhook_sink: Arc::new(siphon_ai_webhooks::NullSink),
+        };
+        let view = CallTerminationView {
+            cause: CdrTerminationCause::ServerHangup,
+            bridge_detail: "stop_sent".into(),
+            tap_detail: "controller_hung_up".into(),
+            recording: None,
+        };
+        let audio = CdrAudioInfo {
+            codec: "PCMU".into(),
+            payload_type: 0,
+            sample_rate: 8000,
+        };
+        let ended_at = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 42).unwrap();
+        let record = build_outbound_record(
+            &ctx,
+            "xyz-789@siphon",
+            audio,
+            "wss://agent.example.com/bridge",
+            ended_at,
+            &view,
+        );
+        assert_eq!(record.version, CDR_VERSION);
+        assert_eq!(record.direction, CdrDirection::Outbound);
+        assert_eq!(record.call_id, "siphon-9b2c");
+        assert_eq!(record.sip_call_id, "xyz-789@siphon");
+        assert_eq!(record.route, "twilio_main");
+        assert_eq!(record.duration_ms, 42_000);
+        assert_eq!(record.termination.cause, CdrTerminationCause::ServerHangup);
+        assert_eq!(record.termination.bridge_disconnect, "stop_sent");
+        assert_eq!(record.verstat_attest, None);
+        assert_eq!(record.recording_id, None);
+    }
 
     #[test]
     fn result_labels_map_failure_outcomes() {

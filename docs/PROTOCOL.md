@@ -125,12 +125,12 @@ MAY use it to detect dropped frames in their own logs.
 | `version` | string | Currently `"1"`. Strings, not numbers. |
 | `from` | string | E.164 number or SIP user; may be empty if PBX strips it. |
 | `to` | string | The dialed digits / extension / SIP user. |
-| `direction` | string | `"inbound"` only in v1. SiphonAI never originates. |
+| `direction` | string | `"inbound"` (SiphonAI answered the call) or `"outbound"` (SiphonAI placed it — outbound origination, 0.6.0). An outbound bot typically speaks first. Additive; the protocol version stays `"1"`. |
 | `audio.encoding` | string | `"pcm16le"` only in v1. |
 | `audio.sample_rate` | int | `8000` or `16000`. Set by the negotiated SIP codec. |
 | `audio.channels` | int | `1` only in v1. |
 | `audio.frame_ms` | int | `20` only in v1. |
-| `sip.call_id` | string | The SIP `Call-ID` from the inbound INVITE. |
+| `sip.call_id` | string | The SIP `Call-ID` of the call's dialog (the inbound INVITE's, or the one SiphonAI generated for an outbound call). |
 | `sip.headers` | object | Selected SIP headers, by name. The set is config-driven (`bridge.forward_headers` allowlist) — never assume any specific header is present. |
 | `srtp` | object \| absent | Present when the call's media leg was negotiated as SRTP; **absent** when the leg is plaintext `RTP/AVP` (the v0.1.0 / v0.2.0 default). Servers MUST treat absence and the v1 shape (no `srtp` key) as identical — this field was added in 0.3.0 and the protocol version stays `"1"`. |
 | `srtp.exchange` | string | `"sdes"` (RFC 4568, master key exchanged via `a=crypto:` on the SIP signalling plane) or `"dtls"` (RFC 5764 DTLS-SRTP, key derived from a DTLS handshake over the media path). |

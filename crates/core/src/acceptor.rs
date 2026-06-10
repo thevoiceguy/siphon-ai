@@ -95,6 +95,7 @@ use crate::call::{
     CallController, CallControllerConfig, CallOutcome, CallTermination, RecordingSummary,
 };
 use crate::registry::CallRegistry;
+use crate::registry::ConsultRegistry;
 use crate::transfer::TransferContext;
 
 /// Daemon-wide bridge & media defaults. Routes' `[route.bridge]`
@@ -1462,6 +1463,10 @@ pub struct BridgingAcceptor {
 struct InstalledTransfer {
     uac: Arc<IntegratedUAC>,
     dialog_manager: Arc<DialogManager>,
+    /// Attended-transfer consult lookup (DEV_PLAN_0.6.1 §2.1). Empty
+    /// (every lookup misses) when `[outbound]` is disabled — attended
+    /// transfers then fail gracefully with `TransferFailed`.
+    consult_registry: ConsultRegistry,
 }
 
 /// Pair handed to [`BridgingAcceptor::run_call`] when a call was
@@ -1638,11 +1643,17 @@ impl BridgingAcceptor {
     /// and `BridgeIn::Transfer` is rejected at the controller with
     /// `TransferFailed`. Calling twice panics — there is exactly one
     /// transfer UAC per daemon.
-    pub fn install_transfer(&self, uac: Arc<IntegratedUAC>, dialog_manager: Arc<DialogManager>) {
+    pub fn install_transfer(
+        &self,
+        uac: Arc<IntegratedUAC>,
+        dialog_manager: Arc<DialogManager>,
+        consult_registry: ConsultRegistry,
+    ) {
         self.transfer
             .set(InstalledTransfer {
                 uac,
                 dialog_manager,
+                consult_registry,
             })
             .map_err(|_| ())
             .expect("install_transfer called twice on BridgingAcceptor");
@@ -2983,6 +2994,7 @@ impl BridgingAcceptor {
             sip_call_id: sip_call_id.clone(),
             uac: Arc::clone(&installed.uac),
             dialog_manager: Arc::clone(&installed.dialog_manager),
+            consult_registry: installed.consult_registry.clone(),
         });
 
         // Recording setup. The matched route's `[route.recording].mode`

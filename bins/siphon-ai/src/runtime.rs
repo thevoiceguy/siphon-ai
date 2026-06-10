@@ -424,7 +424,16 @@ impl Runtime {
         })?;
         let transfer_uac = Arc::new(transfer_uac);
         let dialog_manager = uas.dialog_manager();
-        acceptor.install_transfer(Arc::clone(&transfer_uac), dialog_manager);
+        // Attended-transfer consult lookup (DEV_PLAN_0.6.1 §2.1): one
+        // daemon-wide registry shared between the transfer tasks (readers)
+        // and the outbound service (writer, below). With [outbound] off it
+        // stays empty and attended transfers fail gracefully.
+        let consult_registry = ConsultRegistry::new();
+        acceptor.install_transfer(
+            Arc::clone(&transfer_uac),
+            dialog_manager,
+            consult_registry.clone(),
+        );
 
         // ─── Per-registration UAC drive tasks ──────────────────────
         // Now that the dispatcher and transaction manager exist, spawn
@@ -492,10 +501,6 @@ impl Runtime {
                 );
             }
             let guard = OutboundGuard::new(outbound.max_concurrent, outbound.rate_limit_per_sec);
-            // Attended-transfer consult lookup (DEV_PLAN_0.6.1 §2.1).
-            // Answered outbound calls register here; the transfer task
-            // wiring that reads it lands in 0.6.1 chunk 2.
-            let consult_registry = ConsultRegistry::new();
             let service = OutboundService::new(
                 gateways,
                 guard,
@@ -503,7 +508,7 @@ impl Runtime {
                 default_call_id_factory(),
                 outbound_cdr_sink,
                 outbound_webhook_sink,
-                consult_registry,
+                consult_registry.clone(),
             );
             info!(
                 gateways = outbound.gateways.len(),

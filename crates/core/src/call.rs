@@ -59,7 +59,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use sip_core::SipUri;
 use siphon_ai_bridge::{
     connect_and_run, BridgeChannels, BridgeConfig, BridgeError, BridgeIn, CallId, DisconnectReason,
     ErrorCode, OutgoingEvent, StartMsg, StopReason,
@@ -73,7 +72,8 @@ use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 
-use crate::transfer::{TransferContext, TransferOutcome};
+use crate::transfer::{plan_refer, ReferPlan, TransferContext, TransferOutcome};
+use siphon_ai_telemetry::TRANSFERS_TOTAL;
 
 /// Bounded channel capacity for audio frames. 10 × 20 ms = 200 ms
 /// of audio; per CLAUDE.md §6.2 audio channels are bounded for
@@ -560,8 +560,10 @@ impl CallController {
                                 warn!(error = %e, %name, "tap command channel full or closed; dropping Mark");
                             }
                         }
-                        Some(BridgeIn::Transfer { call_id: cid, target }) => {
-                            // RFC 3515 blind transfer. Spawn a task so
+                        Some(BridgeIn::Transfer { call_id: cid, target, replaces_call_id }) => {
+                            // REFER — blind (RFC 3515) or, when
+                            // `replaces_call_id` names a consult call,
+                            // attended (RFC 5589). Spawn a task so
                             // the multi-RTT REFER never blocks the
                             // control loop (CLAUDE.md §4.3: nothing
                             // adjacent to audio may block). The task
@@ -572,13 +574,20 @@ impl CallController {
                                     let ctx = ctx.clone();
                                     let tx = transfer_result_tx.clone();
                                     let target_owned = target.clone();
+                                    let replaces_owned = replaces_call_id.clone();
                                     debug!(
                                         ws_call_id = %cid,
-                                        target = %target_owned,
+                                        target = ?target_owned,
+                                        replaces_call_id = ?replaces_owned,
                                         "spawning REFER task"
                                     );
                                     tokio::spawn(async move {
-                                        let outcome = run_transfer(&ctx, &target_owned).await;
+                                        let outcome = run_transfer(
+                                            &ctx,
+                                            target_owned.as_deref(),
+                                            replaces_owned.as_deref(),
+                                        )
+                                        .await;
                                         // Receiver is bounded(1); the
                                         // call ends on first Accepted
                                         // so try_send is safe — a
@@ -862,16 +871,40 @@ async fn recv_rec_evt(rx: &mut Option<mpsc::Receiver<RecEvent>>) -> Option<RecEv
     }
 }
 
-/// One-shot REFER round-trip. Lookup → URI parse → send_refer →
-/// classify the response. Errors are returned as [`TransferOutcome`]
-/// variants (never `Result::Err`) so the controller has a single
-/// match arm to handle every outcome.
-async fn run_transfer(ctx: &TransferContext, target: &str) -> TransferOutcome {
-    let refer_to = match SipUri::parse(target) {
-        Ok(uri) => uri,
-        Err(e) => {
-            return TransferOutcome::LocalError(format!("invalid transfer target {target:?}: {e}"));
-        }
+/// One-shot REFER round-trip — blind, or attended when
+/// `replaces_call_id` is set (DEV_PLAN_0.6.1 §2.2/§2.3). Plan →
+/// dialog lookup → send_refer → classify the response. Errors are
+/// returned as [`TransferOutcome`] variants (never `Result::Err`) so
+/// the controller has a single match arm to handle every outcome.
+/// Emits `siphon_ai_transfers_total{mode, result}` for every attempt.
+async fn run_transfer(
+    ctx: &TransferContext,
+    target: Option<&str>,
+    replaces_call_id: Option<&str>,
+) -> TransferOutcome {
+    let mode = if replaces_call_id.is_some() {
+        "attended"
+    } else {
+        "blind"
+    };
+    let outcome = run_transfer_inner(ctx, target, replaces_call_id).await;
+    let result = match &outcome {
+        TransferOutcome::Accepted => "accepted",
+        TransferOutcome::RemoteRejected { .. } => "rejected",
+        TransferOutcome::LocalError(_) => "local_error",
+    };
+    metrics::counter!(TRANSFERS_TOTAL, "mode" => mode, "result" => result).increment(1);
+    outcome
+}
+
+async fn run_transfer_inner(
+    ctx: &TransferContext,
+    target: Option<&str>,
+    replaces_call_id: Option<&str>,
+) -> TransferOutcome {
+    let plan = match plan_refer(&ctx.consult_registry, target, replaces_call_id) {
+        Ok(plan) => plan,
+        Err(msg) => return TransferOutcome::LocalError(msg),
     };
 
     // The UAS owns the canonical dialog; we operate on a clone so the
@@ -885,7 +918,12 @@ async fn run_transfer(ctx: &TransferContext, target: &str) -> TransferOutcome {
         ));
     };
 
-    match ctx.uac.send_refer(&mut dialog, &refer_to, None).await {
+    let (refer_to, consult) = match &plan {
+        ReferPlan::Blind { refer_to } => (refer_to, None),
+        ReferPlan::Attended { refer_to, consult } => (refer_to, Some(consult.as_ref())),
+    };
+
+    match ctx.uac.send_refer(&mut dialog, refer_to, consult).await {
         Ok((response, _subscription)) => {
             let status = response.code();
             if (200..300).contains(&status) {
@@ -894,6 +932,9 @@ async fn run_transfer(ctx: &TransferContext, target: &str) -> TransferOutcome {
                 // simpler "REFER + BYE" so the SIP dialog actually
                 // tears down on the wire. Without this the peer holds
                 // the dialog open until its session-expires kicks in.
+                // Attended: the consult leg is NOT hung up here — the
+                // transferee's INVITE-with-Replaces takes it over, and
+                // its own teardown path runs when that leg ends.
                 if let Err(e) = ctx.uac.bye(&dialog).await {
                     warn!(error = %e, "post-REFER BYE failed (dialog may linger)");
                 }

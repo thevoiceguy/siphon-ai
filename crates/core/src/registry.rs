@@ -275,8 +275,54 @@ impl DialogTerminator for CallRegistry {
     }
 }
 
+/// Test-only builders shared by this crate's unit tests (the
+/// ConsultRegistry tests here and the attended-transfer planner tests
+/// in `transfer.rs`).
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::Dialog;
+
+    /// Build a real UAC-side `Dialog` the way the outbound path does:
+    /// from an INVITE we sent and the 200 OK that answered it. Keeps
+    /// consumers honest about what a snapshot carries (id + tags +
+    /// remote target from the answer's Contact, which is
+    /// `sip:agent@10.0.0.5:5080`).
+    pub(crate) fn consult_dialog(call_id: &str, local_tag: &str, remote_tag: &str) -> Dialog {
+        let invite = format!(
+            "INVITE sip:agent@pbx.example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP siphon.example.com;branch=z9hG4bK-test\r\n\
+             From: <sip:bot@siphon.example.com>;tag={local_tag}\r\n\
+             To: <sip:agent@pbx.example.com>\r\n\
+             Call-ID: {call_id}\r\n\
+             CSeq: 1 INVITE\r\n\
+             Contact: <sip:bot@siphon.example.com:5070>\r\n\
+             Content-Length: 0\r\n\r\n"
+        );
+        let ok = format!(
+            "SIP/2.0 200 OK\r\n\
+             Via: SIP/2.0/UDP siphon.example.com;branch=z9hG4bK-test\r\n\
+             From: <sip:bot@siphon.example.com>;tag={local_tag}\r\n\
+             To: <sip:agent@pbx.example.com>;tag={remote_tag}\r\n\
+             Call-ID: {call_id}\r\n\
+             CSeq: 1 INVITE\r\n\
+             Contact: <sip:agent@10.0.0.5:5080>\r\n\
+             Content-Length: 0\r\n\r\n"
+        );
+        let req = sip_parse::parse_request(&bytes::Bytes::from(invite)).expect("parse INVITE");
+        let resp = sip_parse::parse_response(&bytes::Bytes::from(ok)).expect("parse 200");
+        Dialog::new_uac(
+            &req,
+            &resp,
+            sip_core::SipUri::parse("sip:bot@siphon.example.com").unwrap(),
+            sip_core::SipUri::parse("sip:agent@pbx.example.com").unwrap(),
+        )
+        .expect("dialog from 200")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::consult_dialog;
     use super::*;
     use crate::call::{CallController, CallControllerConfig};
     use forge_core::CallId as ForgeCallId;
@@ -450,42 +496,6 @@ mod tests {
     fn terminate_from_bye_unknown_returns_false() {
         let reg = CallRegistry::new();
         assert!(!reg.terminate_from_bye("never-seen@pbx"));
-    }
-
-    /// Build a real UAC-side `Dialog` the way the outbound path does:
-    /// from an INVITE we sent and the 200 OK that answered it. Keeps
-    /// the ConsultRegistry tests honest about what a snapshot carries
-    /// (id + tags + remote target from the answer's Contact).
-    fn consult_dialog(call_id: &str, local_tag: &str, remote_tag: &str) -> Dialog {
-        let invite = format!(
-            "INVITE sip:agent@pbx.example.com SIP/2.0\r\n\
-             Via: SIP/2.0/UDP siphon.example.com;branch=z9hG4bK-test\r\n\
-             From: <sip:bot@siphon.example.com>;tag={local_tag}\r\n\
-             To: <sip:agent@pbx.example.com>\r\n\
-             Call-ID: {call_id}\r\n\
-             CSeq: 1 INVITE\r\n\
-             Contact: <sip:bot@siphon.example.com:5070>\r\n\
-             Content-Length: 0\r\n\r\n"
-        );
-        let ok = format!(
-            "SIP/2.0 200 OK\r\n\
-             Via: SIP/2.0/UDP siphon.example.com;branch=z9hG4bK-test\r\n\
-             From: <sip:bot@siphon.example.com>;tag={local_tag}\r\n\
-             To: <sip:agent@pbx.example.com>;tag={remote_tag}\r\n\
-             Call-ID: {call_id}\r\n\
-             CSeq: 1 INVITE\r\n\
-             Contact: <sip:agent@10.0.0.5:5080>\r\n\
-             Content-Length: 0\r\n\r\n"
-        );
-        let req = sip_parse::parse_request(&bytes::Bytes::from(invite)).expect("parse INVITE");
-        let resp = sip_parse::parse_response(&bytes::Bytes::from(ok)).expect("parse 200");
-        Dialog::new_uac(
-            &req,
-            &resp,
-            sip_core::SipUri::parse("sip:bot@siphon.example.com").unwrap(),
-            sip_core::SipUri::parse("sip:agent@pbx.example.com").unwrap(),
-        )
-        .expect("dialog from 200")
     }
 
     #[test]

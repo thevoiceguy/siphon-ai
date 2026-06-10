@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  attended_transfer_a — SIPp is the CALLER (leg A, the transferee);
+  SiphonAI answers and bridges to an echo-ws started with the
+  auto-transfer-replaces knob. Meanwhile the harness has placed a
+  consult call (leg C) via POST /admin/v1/calls to a second SIPp
+  running outbound_uas_answer.xml.
+
+  Validates the 0.6.1 attended-transfer completion on the wire: after
+  the WS server sends `transfer { replaces_call_id }`, SiphonAI sends
+  us a REFER whose Refer-To carries a `Replaces=` parameter built
+  from the consult dialog (asserted below with check_it) — then the
+  "REFER + BYE" pattern tears our leg down.
+
+  Run via run-all.sh's attended_transfer auxiliary phase; standalone
+  it would wait forever for the REFER.
+-->
+<scenario name="attended_transfer_a">
+  <send>
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+
+  <recv response="200" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- The bridge is up; the echo-ws sends the attended `transfer`
+       after its delay. SiphonAI then REFERs us. check_it fails the
+       call if the Refer-To lacks an embedded Replaces parameter —
+       i.e. if a blind REFER snuck through instead of attended. -->
+  <recv request="REFER" rtd="true">
+    <action>
+      <ereg regexp="Refer-To:.*Replaces=" search_in="msg" check_it="true" assign_to="dummy"/>
+    </action>
+  </recv>
+
+  <send>
+<![CDATA[
+SIP/2.0 202 Accepted
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- Inbound legs keep the "REFER + BYE" pattern (RFC 5589 §6.1):
+       SiphonAI BYEs us right after the 202. -->
+  <recv request="BYE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- Reference the assigned var so SIPp doesn't warn about it. -->
+  <nop>
+    <action>
+      <log message="refer-to with replaces seen: [$dummy]"/>
+    </action>
+  </nop>
+</scenario>

@@ -424,6 +424,136 @@ fi
 ob_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: attended transfer ─────────────────
+# The full 0.6.1 three-party flow with SIPp on both far ends:
+#   * leg A  — SIPp UAC calls in (the transferee); its echo-ws is
+#     started with --auto-transfer-replaces so the WS side completes
+#     the attended transfer shortly after the bridge comes up.
+#   * leg C  — a consult call the harness places via the originate
+#     API to a second SIPp running outbound_uas_answer.xml; its own
+#     echo-ws auto-hangs-up later (the consult leg must outlive the
+#     REFER — SiphonAI does NOT tear it down at transfer time).
+# Pass = leg A saw a REFER whose Refer-To embeds a Replaces built
+# from the consult dialog (check_it in the scenario) + the metric
+# reads attended/accepted.
+echo
+echo "─── auxiliary phase: attended_transfer ────────────────"
+AT_CONSULT_PORT=5081
+AT_ADMIN_PORT=9091
+AT_A_WS_PORT=8768
+AT_C_WS_PORT=8769
+AT_A_WS_LOG=$(mktemp -t echo-ws-at-a.XXXXXX.log)
+AT_C_WS_LOG=$(mktemp -t echo-ws-at-c.XXXXXX.log)
+AT_DAEMON_LOG=$(mktemp -t siphon-ai-at.XXXXXX.log)
+AT_CONFIG=$(mktemp -t siphon-ai-at.XXXXXX.toml)
+cat >"$AT_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-at"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$AT_A_WS_PORT/"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$AT_ADMIN_PORT"
+[outbound]
+max_concurrent = 2
+[[gateway]]
+name = "sipp"
+proxy = "127.0.0.1:$AT_CONSULT_PORT"
+from = "sip:harness@127.0.0.1"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+AT_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$AT_PYTHON" ]] || AT_PYTHON=python3
+
+# Consult-leg echo-ws: hang the consult call up well AFTER the
+# transfer completes, so its dialog is still live when the REFER's
+# Replaces references it.
+"$AT_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$AT_C_WS_PORT" \
+    --auto-hangup-after-ms 6000 \
+    >"$AT_C_WS_LOG" 2>&1 &
+AT_C_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$AT_CONFIG" \
+    >"$AT_DAEMON_LOG" 2>&1 &
+AT_DAEMON_PID=$!
+AT_A_WS_PID=""
+AT_C_SIPP_PID=""
+# Kill the consult-side sipp too: on a failed run it never sees its
+# BYE and -timeout won't reap a call still in progress, so it would
+# squat on $AT_CONSULT_PORT past the end of the script.
+at_cleanup() {
+    kill "$AT_C_WS_PID" "$AT_DAEMON_PID" $AT_A_WS_PID $AT_C_SIPP_PID 2>/dev/null || true
+    wait "$AT_C_WS_PID" "$AT_DAEMON_PID" $AT_A_WS_PID $AT_C_SIPP_PID 2>/dev/null || true
+}
+trap at_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── attended_transfer ────────────────────────────────"
+at_ok=0
+# Consult callee first, then originate leg C through the gateway.
+sipp -sf "$SCRIPT_DIR/outbound_uas_answer.xml" \
+    -m 1 -timeout 20s -trace_err -p "$AT_CONSULT_PORT" >/dev/null 2>&1 &
+AT_C_SIPP_PID=$!
+sleep 0.3
+at_consult_id=$(curl -s -X POST "http://127.0.0.1:$AT_ADMIN_PORT/admin/v1/calls" \
+    -d "{\"to\": \"agent\", \"gateway\": \"sipp\", \"ws_url\": \"ws://127.0.0.1:$AT_C_WS_PORT/\"}" \
+    | sed -n 's/.*"call_id":"\([^"]*\)".*/\1/p')
+
+# Wait for the consult leg to be ANSWERED (registered as a consult
+# target) before leg A's transfer can reference it.
+at_answered=0
+for _ in $(seq 1 20); do
+    if curl -s "http://127.0.0.1:$AT_ADMIN_PORT/metrics" \
+        | grep -q 'siphon_ai_outbound_calls_total{result="answered"} 1'; then
+        at_answered=1; break
+    fi
+    sleep 0.2
+done
+
+if [[ -n "$at_consult_id" ]] && (( at_answered )); then
+    # Leg A's echo-ws completes the attended transfer once bridged.
+    "$AT_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+        --bind "127.0.0.1:$AT_A_WS_PORT" \
+        --auto-transfer-replaces "$at_consult_id" \
+        --auto-transfer-delay-ms 300 \
+        >"$AT_A_WS_LOG" 2>&1 &
+    AT_A_WS_PID=$!
+    sleep 0.5
+
+    if sipp -sf "$SCRIPT_DIR/attended_transfer_a.xml" \
+            -m 1 -timeout 15s -trace_err -p "$SIPP_PORT" -s 1000 \
+            "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1 \
+        && wait "$AT_C_SIPP_PID"; then
+        # Both far ends are happy; cross-check the daemon's view.
+        if curl -s "http://127.0.0.1:$AT_ADMIN_PORT/metrics" \
+            | grep 'siphon_ai_transfers_total' \
+            | grep 'mode="attended"' \
+            | grep -q 'result="accepted"'; then
+            at_ok=1
+        fi
+    fi
+fi
+if (( at_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (consult_id=$at_consult_id answered=$at_answered;" \
+         "daemon: $AT_DAEMON_LOG; ws A: $AT_A_WS_LOG; ws C: $AT_C_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+at_cleanup
+trap - EXIT
+
 # ─── Optional third phase: blind_transfer ─────────────────────────
 # Needs a WS server that proactively emits BridgeIn::Transfer. The
 # runner stops the daemon, brings up an echo-ws that auto-emits

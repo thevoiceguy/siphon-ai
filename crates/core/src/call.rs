@@ -630,6 +630,22 @@ impl CallController {
                     match outcome {
                         TransferOutcome::Accepted => {
                             info!(call_id = %call_id, "REFER accepted; tearing down call");
+                            // On inbound legs the transfer task has
+                            // already sent the post-REFER BYE ("REFER
+                            // + BYE"); flag the handle so the
+                            // acceptor's cleanup doesn't owe the peer
+                            // a second one (it would go out with a
+                            // fresh CSeq space, which strict peers
+                            // reject). Outbound legs stay unmarked —
+                            // their run_call teardown still sends the
+                            // BYE. If the task's BYE failed we skip
+                            // the cleanup BYE anyway: it would reuse
+                            // the same UAC and fail the same way, and
+                            // the task already warned that the dialog
+                            // may linger.
+                            if transfer.as_ref().is_some_and(|t| t.source.bye_after_refer()) {
+                                handle.mark_remote_bye();
+                            }
                             termination = CallTermination::LocalShutdown;
                             let _ = control_out_tx
                                 .send(OutgoingEvent::Stop { reason: StopReason::Transfer })

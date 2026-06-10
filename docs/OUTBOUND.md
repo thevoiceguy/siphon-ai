@@ -141,6 +141,22 @@ greeting flow might. Everything else — audio frames, barge-in, DTMF,
 `hangup`, transfer — behaves identically to inbound. See
 `docs/PROTOCOL.md`.
 
+### Consult legs — attended transfer (0.6.1)
+
+An outbound call doubles as the **consult leg** of an attended transfer:
+place it with `POST /admin/v1/calls`, let the bot talk to the consulted
+party over that call's own WS session, then send
+`transfer { replaces_call_id: "<the consult call_id>" }` on the *original*
+call's session. SiphonAI REFERs the original peer with a `Refer-To` that
+embeds a `Replaces` built from the consult dialog, so the two humans
+connect directly and both SiphonAI legs end. The consult call must be
+**answered** when the transfer fires, and SiphonAI does not tear it down at
+REFER time — the transferee's INVITE-with-Replaces takes it over. Field
+semantics, target derivation/override, and error cases are in
+`docs/PROTOCOL.md` §4.4. Outbound legs are themselves transferable too
+(blind or attended), so an outbound bot can hand its callee off the same
+way.
+
 ## 5. Observability
 
 - **Metrics** — `siphon_ai_outbound_calls_total{result}` (`answered`,
@@ -167,7 +183,7 @@ echo WS server ends the call. The same trick works interactively — point a
 `[[gateway]]` at any lab UAS (`proxy = "127.0.0.1:5080"`) and originate
 against it; nothing leaves the machine.
 
-## 7. Limitations (v0.6.0)
+## 7. Limitations (v0.6.1)
 
 - **No early media** — audio before the 200 OK (ringback injected by the
   far end, IVR pre-answer prompts) is not bridged; the WS session starts at
@@ -175,8 +191,6 @@ against it; nothing leaves the machine.
 - **No mid-call progress webhook for ringing** — `outbound_initiated` fires
   at INVITE, the next signal is answered/failed. (180 Ringing is visible in
   HEP/Homer if you need it.)
-- **Attended transfer** (consultation leg as an outbound call) is the 0.6.1
-  fast-follow.
 - **Recording** is not wired for outbound calls in this release.
 - **No STIR/SHAKEN signing** — SiphonAI verifies inbound `Identity` headers
   but does not sign outbound INVITEs; attestation for your calls is the

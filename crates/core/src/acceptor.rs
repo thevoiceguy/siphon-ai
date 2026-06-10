@@ -59,6 +59,7 @@ use parking_lot::RwLock;
 use sip_core::{Request, Response};
 use sip_dialog::session_timer_manager::{SessionTimerEvent, SessionTimerManager};
 use sip_dialog::{DialogId, DialogManager};
+use sip_transaction::{TransportContext, TransportKind};
 use sip_uac::integrated::IntegratedUAC;
 use sip_uas::integrated::{AcceptInviteAsyncOutcome, IntegratedUAS};
 use sip_uas::{NegotiatedSessionTimer, SessionTimerPolicy, UserAgentServer};
@@ -1478,6 +1479,39 @@ struct InstalledTransfer {
 pub struct AcceptedSession {
     pub dialog: sip_dialog::Dialog,
     pub timer: Option<NegotiatedSessionTimer>,
+    /// The inbound connection this dialog arrived on, when the
+    /// transport is connection-oriented. See [`DialogFlow`].
+    pub flow: Option<DialogFlow>,
+}
+
+/// The inbound connection a TCP/TLS dialog rides on: the
+/// per-connection writer channel plus the peer's source address.
+/// Captured at INVITE time because daemon-initiated in-dialog
+/// requests (the cleanup BYE) must reuse the established connection
+/// — the dispatcher is inbound-only and cannot originate a TCP/TLS
+/// connection, and resolving the peer's Contact would dial a fresh
+/// one even if it could (RFC 5626 flow semantics: in-dialog requests
+/// to a connection-oriented peer follow the existing flow). `None`
+/// for datagram transports, where the dispatcher can always send.
+#[derive(Clone)]
+pub struct DialogFlow {
+    pub stream: tokio::sync::mpsc::Sender<bytes::Bytes>,
+    pub peer: std::net::SocketAddr,
+}
+
+impl DialogFlow {
+    /// Capture the flow from the transport context the INVITE
+    /// arrived on. `None` for datagram transports or when the
+    /// listener didn't attach a writer channel.
+    pub fn from_transport(ctx: &TransportContext) -> Option<Self> {
+        match ctx.transport() {
+            TransportKind::Tcp | TransportKind::Tls => ctx.stream().map(|s| DialogFlow {
+                stream: s.clone(),
+                peer: ctx.peer(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// Carried into the post-controller cleanup task. Same Arc'd UAC +
@@ -1487,6 +1521,11 @@ pub struct AcceptedSession {
 struct TeardownContext {
     uac: Arc<IntegratedUAC>,
     dialog_manager: Arc<DialogManager>,
+    /// `Some` on TCP/TLS dialogs: the BYE goes out via
+    /// [`IntegratedUAC::bye_via_flow`] over the inbound connection
+    /// instead of a DNS-resolved fresh one the dispatcher would
+    /// refuse to open.
+    flow: Option<DialogFlow>,
 }
 
 /// Send an outbound BYE on the confirmed dialog for `sip_call_id`,
@@ -1515,17 +1554,27 @@ async fn send_outbound_bye(
         );
         return;
     };
-    match ctx.uac.bye(&dialog).await {
+    let sent = match &ctx.flow {
+        Some(flow) => {
+            ctx.uac
+                .bye_via_flow(&dialog, flow.stream.clone(), flow.peer)
+                .await
+        }
+        None => ctx.uac.bye(&dialog).await,
+    };
+    match sent {
         Ok(resp) => debug!(
             call_id = %bridge_call_id,
             sip_call_id = %sip_call_id,
             status = resp.code(),
+            reused_inbound_connection = ctx.flow.is_some(),
             "outbound BYE sent"
         ),
         Err(e) => warn!(
             call_id = %bridge_call_id,
             sip_call_id = %sip_call_id,
             error = %e,
+            reused_inbound_connection = ctx.flow.is_some(),
             "outbound BYE failed; SIP dialog may linger"
         ),
     }
@@ -2471,6 +2520,7 @@ impl CallAcceptor for BridgingAcceptor {
                     Some(AcceptedSession {
                         dialog,
                         timer: session_timer,
+                        flow: DialogFlow::from_transport(call.transport),
                     }),
                 );
                 Ok(())
@@ -2564,10 +2614,12 @@ impl BridgingAcceptor {
         // events from the manager and looks the handle up in
         // `dialog_handles` to drive teardown. Stopping the timer is
         // the cleanup task's job below.
+        let dialog_flow = accepted.as_ref().and_then(|a| a.flow.clone());
         let session_timer_key = match accepted.as_ref() {
             Some(AcceptedSession {
                 dialog,
                 timer: Some(timer),
+                ..
             }) => {
                 let id = dialog.id().clone();
                 self.dialog_handles
@@ -2638,6 +2690,7 @@ impl BridgingAcceptor {
         let teardown = self.transfer.get().map(|t| TeardownContext {
             uac: Arc::clone(&t.uac),
             dialog_manager: Arc::clone(&t.dialog_manager),
+            flow: dialog_flow,
         });
         let session_timer_manager = Arc::clone(&self.session_timer_manager);
         let dialog_handles = Arc::clone(&self.dialog_handles);
@@ -3052,6 +3105,42 @@ mod tests {
     use sip_core::{Headers as SipHeaders, Method, Request, RequestLine, SipUri};
     use siphon_ai_media_glue::{AnswerOutcome, Codec};
     use siphon_ai_routes::load_from_toml;
+
+    mod dialog_flow {
+        use super::super::{DialogFlow, TransportContext, TransportKind};
+
+        fn peer() -> std::net::SocketAddr {
+            "192.0.2.10:42000".parse().unwrap()
+        }
+
+        #[test]
+        fn udp_yields_no_flow() {
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            let ctx = TransportContext::new(TransportKind::Udp, peer(), Some(tx));
+            assert!(DialogFlow::from_transport(&ctx).is_none());
+        }
+
+        #[test]
+        fn tls_with_stream_captures_flow() {
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            let ctx = TransportContext::new(TransportKind::Tls, peer(), Some(tx));
+            let flow = DialogFlow::from_transport(&ctx).expect("flow");
+            assert_eq!(flow.peer, peer());
+        }
+
+        #[test]
+        fn tcp_with_stream_captures_flow() {
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            let ctx = TransportContext::new(TransportKind::Tcp, peer(), Some(tx));
+            assert!(DialogFlow::from_transport(&ctx).is_some());
+        }
+
+        #[test]
+        fn tls_without_stream_yields_no_flow() {
+            let ctx = TransportContext::new(TransportKind::Tls, peer(), None);
+            assert!(DialogFlow::from_transport(&ctx).is_none());
+        }
+    }
 
     fn invite_with(content_type: Option<&str>, body: &str) -> Request {
         let uri = SipUri::parse("sip:5000@siphon.example.com").expect("uri");

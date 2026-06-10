@@ -29,4 +29,4 @@ pub use outbound::{
 };
 pub use outbound_service::{OutboundGateway, OutboundService};
 pub use registry::{CallEntry, CallRegistry, ConsultRegistry};
-pub use transfer::{TransferContext, TransferOutcome};
+pub use transfer::{DialogSource, TransferContext, TransferOutcome};

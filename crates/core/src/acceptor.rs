@@ -96,7 +96,7 @@ use crate::call::{
 };
 use crate::registry::CallRegistry;
 use crate::registry::ConsultRegistry;
-use crate::transfer::TransferContext;
+use crate::transfer::{DialogSource, TransferContext};
 
 /// Daemon-wide bridge & media defaults. Routes' `[route.bridge]`
 /// and `[route.media]` blocks override individual fields.
@@ -2991,9 +2991,11 @@ impl BridgingAcceptor {
         );
 
         let transfer = self.transfer.get().map(|installed| TransferContext {
-            sip_call_id: sip_call_id.clone(),
             uac: Arc::clone(&installed.uac),
-            dialog_manager: Arc::clone(&installed.dialog_manager),
+            source: DialogSource::Managed {
+                sip_call_id: sip_call_id.clone(),
+                dialog_manager: Arc::clone(&installed.dialog_manager),
+            },
             consult_registry: installed.consult_registry.clone(),
         });
 

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **TLS trunks: daemon-initiated BYE never reached the peer (caller heard dead air
+  after the bot hung up).** The companion to the Contact-port fix below, in the other
+  direction. When the WS server ended the call (`hangup`), or a session timer / admin
+  force-hangup drove teardown, the cleanup BYE was sent via `IntegratedUAC::bye`,
+  which resolves the dialog's remote target and builds a fresh transport context —
+  but the dispatcher is inbound-only and refuses to open a new TCP/TLS connection,
+  so the BYE died with `outbound BYE failed … transport error` and the peer held the
+  call until its own timeout. The acceptor now captures the inbound connection's
+  writer channel at INVITE time (`DialogFlow`) and sends the cleanup BYE through
+  `IntegratedUAC::bye_via_flow` over that same connection (RFC 5626 flow semantics).
+  UDP dialogs keep the existing path. Known remaining gap: REFER (transfer) on a
+  TCP/TLS dialog still fails the same way — `send_refer` has no flow-reuse variant
+  upstream yet; transfers on TLS trunks will return `transfer_failed` to the WS
+  server until that lands.
+
 - **TLS trunks: in-dialog ACK/BYE were lost (silent-tail recordings, wrong CDR cause).**
   When the daemon ran both a UDP and a TLS listener (`[sip].transports = ["udp", "tls"]`),
   the `Contact` on responses advertised the UDP listener's port with `transport=tls`

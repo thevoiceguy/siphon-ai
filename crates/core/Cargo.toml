@@ -39,6 +39,10 @@ sip-dialog.workspace      = true
 sip-uac.workspace         = true
 sip-uas.workspace         = true
 sip-transaction.workspace = true
+# `DialogFlow` carries the inbound connection's writer channel,
+# whose payload type (`bytes::Bytes`) is part of sip-transaction's
+# `TransportContext` API.
+bytes.workspace           = true
 
 # Upstream — forge for constructing CallId/ParticipantId in the acceptor;
 # media-glue owns the session/bridge logic so we only need the type stubs.
@@ -54,7 +58,6 @@ forge-sdp.workspace    = true
 forge-rtp.workspace    = true
 
 [dev-dependencies]
-bytes.workspace                       = true
 sip-parse.workspace                   = true
 tokio-tungstenite.workspace           = true
 futures.workspace                     = true

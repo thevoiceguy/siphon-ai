@@ -389,11 +389,25 @@ pub enum BridgeIn {
         cause: HangupCause,
     },
 
-    /// Initiate a blind transfer (REFER) to `target`.
+    /// Initiate a call transfer (REFER). Without `replaces_call_id`
+    /// this is a blind transfer to `target`. With it, an attended
+    /// transfer (0.6.1): the REFER carries a `Replaces` parameter
+    /// referencing the named consult call's dialog, so the transferee
+    /// connects to the party the server already consulted.
     Transfer {
         call_id: CallId,
-        /// MUST be a SIP or SIPS URI.
-        target: String,
+        /// Refer-To URI (MUST be SIP or SIPS). Required for blind
+        /// transfer. Optional with `replaces_call_id` — the default
+        /// is the consult dialog's remote target (its Contact), which
+        /// is normally what you want; sending it overrides.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        /// Attended transfer: the bridge `call_id` of an ANSWERED
+        /// outbound call (the consult leg, placed via
+        /// `POST /admin/v1/calls`) that the transferee should replace.
+        /// Additive in 0.6.1 — protocol stays version "1".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaces_call_id: Option<String>,
     },
 
     /// Generate an RFC 2833 DTMF event toward the caller.
@@ -823,10 +837,50 @@ mod tests {
     fn bridge_in_transfer() {
         let raw = r#"{ "type": "transfer", "call_id": "c", "target": "sip:agent@example.com" }"#;
         let msg: BridgeIn = assert_round_trip(raw);
-        let BridgeIn::Transfer { target, .. } = msg else {
+        let BridgeIn::Transfer {
+            target,
+            replaces_call_id,
+            ..
+        } = msg
+        else {
             panic!("expected Transfer");
         };
-        assert_eq!(target, "sip:agent@example.com");
+        assert_eq!(target.as_deref(), Some("sip:agent@example.com"));
+        assert_eq!(replaces_call_id, None);
+    }
+
+    #[test]
+    fn bridge_in_transfer_attended() {
+        // 0.6.1: replaces_call_id names the consult call; target is
+        // optional (defaults to the consult dialog's Contact).
+        let raw = r#"{ "type": "transfer", "call_id": "c", "replaces_call_id": "siphon-C" }"#;
+        let msg: BridgeIn = assert_round_trip(raw);
+        let BridgeIn::Transfer {
+            target,
+            replaces_call_id,
+            ..
+        } = msg
+        else {
+            panic!("expected Transfer");
+        };
+        assert_eq!(target, None);
+        assert_eq!(replaces_call_id.as_deref(), Some("siphon-C"));
+
+        // Explicit target alongside replaces_call_id (the override).
+        let raw = r#"{ "type": "transfer", "call_id": "c",
+                       "target": "sip:agent@sbc.example.com",
+                       "replaces_call_id": "siphon-C" }"#;
+        let msg: BridgeIn = serde_json::from_str(raw).unwrap();
+        let BridgeIn::Transfer {
+            target,
+            replaces_call_id,
+            ..
+        } = msg
+        else {
+            panic!("expected Transfer");
+        };
+        assert_eq!(target.as_deref(), Some("sip:agent@sbc.example.com"));
+        assert_eq!(replaces_call_id.as_deref(), Some("siphon-C"));
     }
 
     #[test]

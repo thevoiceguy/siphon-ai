@@ -87,6 +87,14 @@ pub const REGISTER_ATTEMPTS_TOTAL: &str = "siphon_ai_register_attempts_total";
 /// response), `failed` (local media setup error). Bounded cardinality.
 pub const OUTBOUND_CALLS_TOTAL: &str = "siphon_ai_outbound_calls_total";
 
+/// REFER transfers attempted (0.6.1; back-fills blind-transfer
+/// counting, which previously had no metric). Labeled by `mode`
+/// (`blind` / `attended`) and `result`: `accepted` (202, call torn
+/// down), `rejected` (peer non-2xx final), `local_error` (bad target,
+/// unknown consult call, dialog not found, send failure). Bounded
+/// cardinality.
+pub const TRANSFERS_TOTAL: &str = "siphon_ai_transfers_total";
+
 // ─── Gauges ─────────────────────────────────────────────────────────
 
 /// Currently-active calls. Incremented when the controller spawns,
@@ -218,6 +226,10 @@ pub fn register_descriptions() {
     describe_counter!(
         OUTBOUND_CALLS_TOTAL,
         "Outbound calls placed, by result (answered, busy, declined, no_answer, rejected, unreachable, failed)."
+    );
+    describe_counter!(
+        TRANSFERS_TOTAL,
+        "REFER transfers attempted, by mode (blind, attended) and result (accepted, rejected, local_error)."
     );
     describe_gauge!(
         CALLS_ACTIVE,

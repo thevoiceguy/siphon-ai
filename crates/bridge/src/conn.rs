@@ -656,7 +656,8 @@ mod tests {
             },
             BridgeIn::Transfer {
                 call_id: CallId::new("d"),
-                target: "sip:x".into(),
+                target: Some("sip:x".into()),
+                replaces_call_id: None,
             },
             BridgeIn::SendDtmf {
                 call_id: CallId::new("e"),

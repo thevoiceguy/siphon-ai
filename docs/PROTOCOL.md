@@ -394,7 +394,7 @@ SiphonAI emits a SiphonAI→server `mark` (§3.4) with the same `name`.
 After a successful hangup, SiphonAI sends `stop` with
 `reason: "server_hangup"` and closes the connection.
 
-### 4.4 `transfer` — blind transfer (REFER)
+### 4.4 `transfer` — call transfer (REFER), blind or attended
 
 ```json
 { "type": "transfer", "call_id": "...", "target": "sip:agent@example.com" }
@@ -408,6 +408,33 @@ that the PBX sends after the REFER are accepted but not surfaced over
 the WS in v1. On a non-2xx response (or a local failure — bad target
 URI, dialog gone), SiphonAI emits `error { code: "transfer_failed" }`
 and the call continues.
+
+**Attended transfer** (0.6.1, additive — version stays `"1"`): add
+`replaces_call_id` naming an **answered outbound call** (a consult leg
+placed via `POST /admin/v1/calls`, identified by the `call_id` that
+endpoint returned):
+
+```json
+{ "type": "transfer", "call_id": "...", "replaces_call_id": "siphon-..." }
+```
+
+SiphonAI sends a REFER whose `Refer-To` carries a `Replaces` parameter
+built from the consult call's dialog, so the transferee connects
+directly to the consulted party (RFC 5589 §7). With `replaces_call_id`
+set, `target` is **optional** — the default is the consult dialog's
+remote target (the Contact from its 200 OK), which is normally
+correct; send `target` explicitly only to override the reachable URI
+(e.g. through an SBC). The same 2xx / non-2xx semantics as blind
+transfer apply. The consult leg is not torn down by SiphonAI at REFER
+time — the transferee's INVITE-with-Replaces takes it over, and the
+consult call ends through its normal teardown. If `replaces_call_id`
+doesn't name a currently-answered outbound call (unknown, not yet
+answered, or already ended), SiphonAI emits
+`error { code: "transfer_failed" }` and the call continues.
+
+To **cancel** a consultation, simply send `hangup` on the consult
+call's own WS session (or use the admin force-hangup) — no dedicated
+message exists, and the original call is unaffected.
 
 ### 4.5 `send_dtmf` — emit DTMF toward the caller
 

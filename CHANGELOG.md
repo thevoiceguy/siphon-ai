@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **SIPp suite portability to dual-stack hosts** (`test-harness/
+  sipp-scenarios/run-all.sh`): sipp invocations now pin `-i 127.0.0.1`.
+  Without it, sipp's `[local_ip]` can expand to `::1`, so UAS scenarios
+  advertise an IPv6 Contact the IPv4-bound daemon can't reach — the
+  in-dialog BYE fails with a transport error and the outbound /
+  attended-transfer phases hang. The blind-transfer phase also gains
+  the same venv-then-system-python3 fallback the other phases already
+  had, instead of hard-requiring the CI-prepped venv. Harness-only;
+  no daemon changes.
+
 ## [0.6.1] - 2026-06-10
 
 Theme: **attended transfer** — the 0.6.0 fast-follow. The bot consults a

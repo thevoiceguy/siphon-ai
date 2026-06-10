@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-10
+
+Theme: **attended transfer** — the 0.6.0 fast-follow. The bot consults a
+human before handing the caller off: SiphonAI places the consult leg as a
+plain 0.6.0 outbound call (its own WS session), and completion is one
+REFER-with-Replaces on the original call. The WS protocol stays at
+`version: "1"` (one additive field) and the CDR schema is unchanged.
+
+### Added
+
+- **Attended transfer** — `transfer.replaces_call_id` names an answered
+  outbound call (the consult leg, placed via `POST /admin/v1/calls` and
+  identified by the `call_id` that endpoint returned). SiphonAI sends a
+  REFER whose `Refer-To` embeds a `Replaces` built from the consult
+  dialog, so the transferee connects directly to the consulted party
+  (RFC 5589 §7). `target` becomes optional — the default Refer-To is the
+  consult dialog's remote target (its 200 OK Contact); send `target` only
+  to override the reachable URI. The consult leg is **not** torn down at
+  REFER time (the transferee's INVITE-with-Replaces takes it over); to
+  cancel a consultation, just hang up the consult call. Unknown / not-yet-
+  answered / already-ended `replaces_call_id` → `error
+  { code: "transfer_failed" }` and the call continues. `docs/PROTOCOL.md`
+  §4.4.
+- **Outbound legs are transferable** (blind or attended) — an outbound
+  bot can hand its callee off the same way. The REFER goes out through
+  the gateway's own UAC, so its digest credentials answer any 401/407
+  challenge on the REFER.
+- **Metric** — `siphon_ai_transfers_total{mode="blind"|"attended",
+  result="accepted"|"rejected"|"local_error"}`; also back-fills blind
+  transfers, which were previously unmetered.
+- **SIPp coverage** — `attended_transfer_a.xml` + an always-on
+  three-party regression phase (SIPp on both far ends: inbound transferee
+  + consult callee; pass requires the REFER's `Refer-To` to carry
+  `Replaces=` *and* the metric reading attended/accepted), driven by a
+  new `--auto-transfer-replaces` test-harness knob on the echo WS
+  example server.
+
+### Fixed
+
+- **Duplicate BYE after an accepted transfer** on inbound legs: the
+  transfer task sends the post-REFER BYE ("REFER + BYE", RFC 5589 §6.1),
+  but the acceptor's cleanup task then sent a *second* BYE from a fresh
+  CSeq space — a protocol violation that strict peers reject. Affected
+  blind transfer too (latent since 0.2.0; exposed by the new attended
+  SIPp scenario's stricter tail).
+
 ## [0.6.0] - 2026-06-09
 
 Theme: **outbound call origination.** SiphonAI inverts its inbound-only
@@ -641,7 +687,8 @@ the WebSocket server's job.
 - Reference WebSocket servers in `examples/`: echo (Python / Node),
   an OpenAI Realtime bridge, and a Deepgram + LLM voice bot.
 
-[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.4.0...v0.4.1

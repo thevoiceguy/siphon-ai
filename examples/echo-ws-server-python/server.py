@@ -63,6 +63,10 @@ class Options:
     # `hangup`. Lets the outbound SIPp scenario end the call from the
     # WS side (the callee just waits for our BYE). None = disabled.
     auto_hangup_after_ms: int | None
+    # Test-harness knob: after `start`, send an ATTENDED transfer
+    # naming this consult call id (`replaces_call_id`). Reuses
+    # auto_transfer_delay_ms for the pause. None = disabled.
+    auto_transfer_replaces: str | None
 
 
 # ─── HTTP-side concerns: auth + subprotocol ─────────────────────────────────
@@ -187,6 +191,24 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
                         )
                     )
 
+                if opts.auto_transfer_replaces and call_id:
+                    # Test-harness behaviour: complete an attended
+                    # transfer against a consult call the harness
+                    # placed via POST /admin/v1/calls. No `target` —
+                    # SiphonAI derives the Refer-To from the consult
+                    # dialog's Contact (PROTOCOL.md §4.4).
+                    asyncio.create_task(
+                        _send_after(
+                            connection,
+                            opts.auto_transfer_delay_ms,
+                            {
+                                "type": "transfer",
+                                "call_id": call_id,
+                                "replaces_call_id": opts.auto_transfer_replaces,
+                            },
+                        )
+                    )
+
                 if opts.auto_hangup_after_ms is not None and call_id:
                     # Test-harness behaviour: end the call from the WS
                     # side after a beat. Used by the outbound SIPp
@@ -298,6 +320,17 @@ def parse_args(argv: list[str] | None = None) -> Options:
         help="ms to wait after `start` before emitting the transfer (default: 200)",
     )
     p.add_argument(
+        "--auto-transfer-replaces",
+        default=None,
+        metavar="CALL_ID",
+        help=(
+            "test-harness only: after `start`, emit an attended "
+            "`transfer` with this replaces_call_id (the consult "
+            "call's bridge id). Uses --auto-transfer-delay-ms. See "
+            "test-harness/sipp-scenarios/attended_transfer_a.xml."
+        ),
+    )
+    p.add_argument(
         "--auto-hangup-after-ms",
         type=int,
         default=None,
@@ -328,6 +361,7 @@ def parse_args(argv: list[str] | None = None) -> Options:
         auto_transfer_target=args.auto_transfer_target,
         auto_transfer_delay_ms=args.auto_transfer_delay_ms,
         auto_hangup_after_ms=args.auto_hangup_after_ms,
+        auto_transfer_replaces=args.auto_transfer_replaces,
     )
 
 

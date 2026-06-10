@@ -907,15 +907,12 @@ async fn run_transfer_inner(
         Err(msg) => return TransferOutcome::LocalError(msg),
     };
 
-    // The UAS owns the canonical dialog; we operate on a clone so the
-    // local CSeq the REFER consumes doesn't race the next inbound
-    // request on the same dialog. CLAUDE.md §4.4: per-call state is
+    // The leg's owner keeps the canonical dialog; we operate on a
+    // clone so the local CSeq the REFER consumes doesn't race other
+    // requests on the same dialog. CLAUDE.md §4.4: per-call state is
     // not shared across tasks — this is the per-task copy.
-    let Some(mut dialog) = ctx.dialog_manager.find_by_call_id(&ctx.sip_call_id) else {
-        return TransferOutcome::LocalError(format!(
-            "no dialog for sip_call_id {:?}",
-            ctx.sip_call_id
-        ));
+    let Some(mut dialog) = ctx.source.resolve() else {
+        return TransferOutcome::LocalError("dialog for this call is gone".to_string());
     };
 
     let (refer_to, consult) = match &plan {
@@ -935,8 +932,12 @@ async fn run_transfer_inner(
                 // Attended: the consult leg is NOT hung up here — the
                 // transferee's INVITE-with-Replaces takes it over, and
                 // its own teardown path runs when that leg ends.
-                if let Err(e) = ctx.uac.bye(&dialog).await {
-                    warn!(error = %e, "post-REFER BYE failed (dialog may linger)");
+                // Outbound legs skip the BYE too: their run_call
+                // teardown sends it when the controller exits.
+                if ctx.source.bye_after_refer() {
+                    if let Err(e) = ctx.uac.bye(&dialog).await {
+                        warn!(error = %e, "post-REFER BYE failed (dialog may linger)");
+                    }
                 }
                 TransferOutcome::Accepted
             } else {

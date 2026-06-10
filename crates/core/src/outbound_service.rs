@@ -48,6 +48,7 @@ use crate::outbound::{
     OutboundRejection,
 };
 use crate::registry::ConsultRegistry;
+use crate::transfer::{DialogSource, TransferContext};
 
 /// One configured outbound gateway, ready to dial. Built by the daemon from a
 /// compiled `[[gateway]]` (the `siphon-ai-config::Gateway`) plus a per-gateway
@@ -288,12 +289,23 @@ async fn run_call(
         &sip_call_id,
         &accepted.answer,
     );
+    // Outbound legs are transferable too (DEV_PLAN_0.6.1 §2.4): the
+    // bot can consult an agent and hand this callee off. The REFER
+    // goes through this gateway's own UAC (digest credentials), on
+    // the dialog we hold directly — each gateway UAC keeps a private
+    // DialogManager, so the shared lookup the inbound path uses
+    // can't see this dialog.
+    let transfer = TransferContext {
+        uac: originator.uac(),
+        source: DialogSource::Direct(Box::new(dialog.clone())),
+        consult_registry: ctx.consult_registry.clone(),
+    };
     let cfg = CallControllerConfig {
         call_id: ctx.bridge_id.clone(),
         bridge,
         start,
         media_tap: accepted.tap,
-        transfer: None,
+        transfer: Some(transfer),
         recording: None,
     };
     let (controller, _handle) = CallController::new(cfg);

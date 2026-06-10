@@ -36,27 +36,76 @@ use sip_uac::integrated::IntegratedUAC;
 
 use crate::registry::ConsultRegistry;
 
-/// Everything the controller needs to fire a REFER on the dialog
-/// established by the inbound INVITE.
+/// Where the REFER's dialog comes from — the inbound and outbound
+/// legs hold their dialogs differently (DEV_PLAN_0.6.1 §2.4).
+#[derive(Clone)]
+pub enum DialogSource {
+    /// Inbound leg: the UAS owns the canonical dialog; resolve a
+    /// per-task clone from the shared [`DialogManager`] by SIP
+    /// Call-ID at REFER time.
+    Managed {
+        sip_call_id: String,
+        dialog_manager: Arc<DialogManager>,
+    },
+    /// Outbound leg: the originate path holds the confirmed dialog
+    /// directly (each gateway UAC has its own private DialogManager,
+    /// so the shared one can't resolve it). Snapshot taken at answer;
+    /// the CSeq-divergence note below applies the same way.
+    Direct(Box<Dialog>),
+}
+
+impl DialogSource {
+    /// Per-task dialog clone for the REFER. `None` = the dialog is
+    /// gone (inbound leg already torn down) → `LocalError`.
+    pub(crate) fn resolve(&self) -> Option<Dialog> {
+        match self {
+            DialogSource::Managed {
+                sip_call_id,
+                dialog_manager,
+            } => dialog_manager.find_by_call_id(sip_call_id),
+            DialogSource::Direct(dialog) => Some(*dialog.clone()),
+        }
+    }
+
+    /// Whether the transfer task should BYE the leg itself after a
+    /// 202 ("REFER + BYE", RFC 5589 §6.1). True for inbound legs.
+    /// False for outbound legs — their `run_call` teardown already
+    /// sends the BYE when the controller exits, and a second one
+    /// here would just draw a 481 from the peer.
+    pub(crate) fn bye_after_refer(&self) -> bool {
+        matches!(self, DialogSource::Managed { .. })
+    }
+
+    /// The leg's SIP Call-ID, for logging.
+    fn sip_call_id(&self) -> &str {
+        match self {
+            DialogSource::Managed { sip_call_id, .. } => sip_call_id,
+            DialogSource::Direct(dialog) => dialog.id().call_id(),
+        }
+    }
+}
+
+/// Everything the controller needs to fire a REFER on this call's
+/// dialog — inbound (resolved via the shared [`DialogManager`]) or
+/// outbound (held directly, sent through the gateway's own UAC so
+/// its digest credentials answer any challenge).
 ///
-/// One [`TransferContext`] per call: it pins this call's SIP Call-ID
-/// so the per-call dialog lookup is local to the controller, not a
-/// process-wide search. `uac` and `dialog_manager` are `Arc` clones
-/// of the daemon-wide pair installed at startup; `consult_registry`
-/// is the daemon-wide consult-leg lookup for attended transfer
-/// (empty unless `[outbound]` calls are live).
+/// One [`TransferContext`] per call: the dialog source pins this
+/// call's leg, so the lookup is local to the controller, not a
+/// process-wide search. `consult_registry` is the daemon-wide
+/// consult-leg lookup for attended transfer (empty unless
+/// `[outbound]` calls are live).
 #[derive(Clone)]
 pub struct TransferContext {
-    pub sip_call_id: String,
     pub uac: Arc<IntegratedUAC>,
-    pub dialog_manager: Arc<DialogManager>,
+    pub source: DialogSource,
     pub consult_registry: ConsultRegistry,
 }
 
 impl std::fmt::Debug for TransferContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TransferContext")
-            .field("sip_call_id", &self.sip_call_id)
+            .field("sip_call_id", &self.source.sip_call_id())
             .finish_non_exhaustive()
     }
 }
@@ -209,6 +258,30 @@ mod tests {
         // the Replaces identifiers are the point of attended mode.
         let err = plan_refer(&reg, Some("sip:agent@example.com"), Some("siphon-gone")).unwrap_err();
         assert!(err.contains("siphon-gone"), "got: {err}");
+    }
+
+    #[test]
+    fn direct_source_resolves_the_held_dialog_and_skips_bye() {
+        // Outbound legs: the dialog is held directly; run_call's
+        // teardown owns the BYE, so the transfer task must not send
+        // a second one.
+        let src = DialogSource::Direct(Box::new(consult_dialog("out@siphon", "l", "r")));
+        let dialog = src.resolve().expect("direct always resolves");
+        assert_eq!(dialog.id().call_id(), "out@siphon");
+        assert!(!src.bye_after_refer());
+    }
+
+    #[test]
+    fn managed_source_misses_when_dialog_is_gone_and_byes() {
+        // Inbound legs: resolution goes through the shared manager;
+        // an empty manager (call torn down) is a clean miss. The
+        // post-REFER BYE stays on (RFC 5589 §6.1 pattern).
+        let src = DialogSource::Managed {
+            sip_call_id: "gone@pbx".into(),
+            dialog_manager: Arc::new(DialogManager::new()),
+        };
+        assert!(src.resolve().is_none());
+        assert!(src.bye_after_refer());
     }
 
     #[test]

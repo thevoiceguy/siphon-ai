@@ -98,6 +98,14 @@ impl OutboundOriginator {
         Self { media, uac }
     }
 
+    /// This gateway's UAC. The outbound leg's transfer context sends
+    /// its in-dialog REFER through this (not the daemon-wide transfer
+    /// UAC) so the gateway's digest credentials answer any 401/407
+    /// challenge on the REFER (DEV_PLAN_0.6.1 §2.4).
+    pub fn uac(&self) -> Arc<IntegratedUAC> {
+        Arc::clone(&self.uac)
+    }
+
     /// Place an outbound call to `target`: allocate media + an SDP offer,
     /// send the INVITE, await the final response, and on a 2xx bind the
     /// peer's answer. On any non-answer the partially-built session is

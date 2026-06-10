@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **TLS trunks: in-dialog ACK/BYE were lost (silent-tail recordings, wrong CDR cause).**
+  When the daemon ran both a UDP and a TLS listener (`[sip].transports = ["udp", "tls"]`),
+  the `Contact` on responses advertised the UDP listener's port with `transport=tls`
+  (e.g. `<sip:siphon@<ip>:5060;transport=tls>`) regardless of which listener received
+  the INVITE. A secure trunk (e.g. Twilio over TLS) honoured that Contact and dialed
+  TLS to the UDP port, where nothing listens — so the caller's ACK and BYE never
+  arrived and the call only ended when the RTP inactivity watchdog fired ~60 s later.
+  Symptoms: call recordings padded with a ~60 s silent tail, CDR `cause = tap_ended`
+  instead of a clean hangup, and `outbound BYE failed` warnings. Fixed upstream in
+  siphon-rs (the auto-filled Contact port now follows the listener that received the
+  request); this release threads the receiving listener's local address through the
+  packet pump (`TransportContext::with_local_addr`) and bumps the siphon-rs pin.
+  UDP-only deployments were never affected and their Contacts are unchanged.
+
 - **SIPp suite portability to dual-stack hosts** (`test-harness/
   sipp-scenarios/run-all.sh`): sipp invocations now pin `-i 127.0.0.1`.
   Without it, sipp's `[local_ip]` can expand to `::1`, so UAS scenarios

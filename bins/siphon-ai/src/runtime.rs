@@ -1298,6 +1298,12 @@ async fn handle_packet(
     // the same inbound socket instead of opening a fresh outbound
     // connection (or, for TLS, failing outright because the
     // dispatcher has no way to originate one).
+    // Capture the receiving listener's local address before
+    // `into_parts` consumes the packet — it lets the UAS build a
+    // Contact on the same port the request arrived on (so a TLS
+    // request on :5061 advertises `:5061;transport=tls`, not the
+    // UDP listener's port).
+    let local = packet.local();
     let (transport, peer, payload, stream) = packet.into_parts();
 
     let Some(request) = parse_request(&payload) else {
@@ -1316,7 +1322,7 @@ async fn handle_packet(
     };
 
     let tx_kind = map_transport_kind(transport);
-    let ctx = TransportContext::new(tx_kind, peer, stream);
+    let ctx = TransportContext::new(tx_kind, peer, stream).with_local_addr(local);
 
     if request.method().as_str() == "ACK" {
         // ACK doesn't open a server transaction; just notify the

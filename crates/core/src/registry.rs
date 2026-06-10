@@ -39,6 +39,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use sip_dialog::Dialog;
 use siphon_ai_sip_glue::DialogTerminator;
 use tracing::{debug, warn};
 
@@ -161,6 +162,80 @@ impl CallRegistry {
     /// unspecified. Intended for admin / debug introspection.
     pub fn snapshot_call_ids(&self) -> Vec<String> {
         self.inner.read().keys().cloned().collect()
+    }
+}
+
+/// Process-wide map from a bridge `call_id` to that outbound call's
+/// established SIP dialog — the consult-leg lookup for attended
+/// transfer (DEV_PLAN_0.6.1 §2.1).
+///
+/// `BridgeIn::Transfer { replaces_call_id }` runs on call A's
+/// transfer task but needs the *consult* call's dialog identifiers
+/// (Call-ID + tags, for the `Replaces=` parameter) and its remote
+/// target (the Refer-To URI). Both are fixed once the outbound leg
+/// is answered, so the registry stores a snapshot [`Dialog`] clone
+/// taken at answer time — not a live handle into the other call's
+/// task. That keeps this within CLAUDE.md §4.4's spirit the same way
+/// [`CallRegistry`] is: immutable-after-insert data, exact-id
+/// lookup, no enumeration of or reach into running calls. CSeq
+/// divergence on the snapshot is irrelevant — REFER is sent on call
+/// A's dialog; the consult dialog is only *read* for its id/target.
+///
+/// Insert happens in `outbound_service::run_call` once the call is
+/// answered; removal on that task's way out. Lookup happens at most
+/// once per attended-transfer attempt. Never touches the audio path.
+#[derive(Debug, Clone, Default)]
+pub struct ConsultRegistry {
+    inner: Arc<RwLock<HashMap<String, Dialog>>>,
+}
+
+impl ConsultRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of currently-registered consultable calls. For tests
+    /// and debug introspection.
+    pub fn len(&self) -> usize {
+        self.inner.read().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.read().is_empty()
+    }
+
+    /// Register an answered outbound call's dialog snapshot under
+    /// its bridge `call_id`. A collision means the caller reused a
+    /// bridge id (a bug — ids come from `CallIdFactory`); the
+    /// previous snapshot is replaced with a warning, matching
+    /// [`CallRegistry::insert`] semantics.
+    pub fn insert(&self, bridge_call_id: impl Into<String>, dialog: Dialog) {
+        let key = bridge_call_id.into();
+        let mut guard = self.inner.write();
+        if guard.insert(key.clone(), dialog).is_some() {
+            warn!(
+                call_id = %key,
+                "consult registry insert collided with existing entry; previous dialog dropped"
+            );
+        } else {
+            debug!(call_id = %key, "registered consultable outbound call");
+        }
+    }
+
+    /// Snapshot of the dialog for `bridge_call_id`, if that outbound
+    /// call is still up. Returns a clone — the caller (the transfer
+    /// task) only reads `id()` and `remote_target()` from it.
+    pub fn lookup(&self, bridge_call_id: &str) -> Option<Dialog> {
+        self.inner.read().get(bridge_call_id).cloned()
+    }
+
+    /// Drop the entry on the outbound call's way out. Removing an
+    /// unknown id is a no-op (teardown paths may race; last one
+    /// wins harmlessly).
+    pub fn remove(&self, bridge_call_id: &str) {
+        if self.inner.write().remove(bridge_call_id).is_some() {
+            debug!(call_id = %bridge_call_id, "deregistered consultable outbound call");
+        }
     }
 }
 
@@ -375,5 +450,98 @@ mod tests {
     fn terminate_from_bye_unknown_returns_false() {
         let reg = CallRegistry::new();
         assert!(!reg.terminate_from_bye("never-seen@pbx"));
+    }
+
+    /// Build a real UAC-side `Dialog` the way the outbound path does:
+    /// from an INVITE we sent and the 200 OK that answered it. Keeps
+    /// the ConsultRegistry tests honest about what a snapshot carries
+    /// (id + tags + remote target from the answer's Contact).
+    fn consult_dialog(call_id: &str, local_tag: &str, remote_tag: &str) -> Dialog {
+        let invite = format!(
+            "INVITE sip:agent@pbx.example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP siphon.example.com;branch=z9hG4bK-test\r\n\
+             From: <sip:bot@siphon.example.com>;tag={local_tag}\r\n\
+             To: <sip:agent@pbx.example.com>\r\n\
+             Call-ID: {call_id}\r\n\
+             CSeq: 1 INVITE\r\n\
+             Contact: <sip:bot@siphon.example.com:5070>\r\n\
+             Content-Length: 0\r\n\r\n"
+        );
+        let ok = format!(
+            "SIP/2.0 200 OK\r\n\
+             Via: SIP/2.0/UDP siphon.example.com;branch=z9hG4bK-test\r\n\
+             From: <sip:bot@siphon.example.com>;tag={local_tag}\r\n\
+             To: <sip:agent@pbx.example.com>;tag={remote_tag}\r\n\
+             Call-ID: {call_id}\r\n\
+             CSeq: 1 INVITE\r\n\
+             Contact: <sip:agent@10.0.0.5:5080>\r\n\
+             Content-Length: 0\r\n\r\n"
+        );
+        let req = sip_parse::parse_request(&bytes::Bytes::from(invite)).expect("parse INVITE");
+        let resp = sip_parse::parse_response(&bytes::Bytes::from(ok)).expect("parse 200");
+        Dialog::new_uac(
+            &req,
+            &resp,
+            sip_core::SipUri::parse("sip:bot@siphon.example.com").unwrap(),
+            sip_core::SipUri::parse("sip:agent@pbx.example.com").unwrap(),
+        )
+        .expect("dialog from 200")
+    }
+
+    #[test]
+    fn consult_insert_lookup_remove_round_trip() {
+        let reg = ConsultRegistry::new();
+        assert!(reg.is_empty());
+
+        reg.insert("siphon-C", consult_dialog("abc@siphon", "ltag", "rtag"));
+        assert_eq!(reg.len(), 1);
+
+        // The snapshot carries exactly what the attended-transfer
+        // task reads: the Replaces identifiers and the Refer-To URI.
+        let dialog = reg.lookup("siphon-C").expect("present");
+        assert_eq!(dialog.id().call_id(), "abc@siphon");
+        assert_eq!(dialog.id().local_tag(), "ltag");
+        assert_eq!(dialog.id().remote_tag(), "rtag");
+        assert_eq!(dialog.remote_target().as_str(), "sip:agent@10.0.0.5:5080");
+
+        reg.remove("siphon-C");
+        assert!(reg.is_empty());
+        assert!(reg.lookup("siphon-C").is_none());
+        // Double-remove is a harmless no-op (teardown paths may race).
+        reg.remove("siphon-C");
+    }
+
+    #[test]
+    fn consult_lookup_unknown_returns_none() {
+        let reg = ConsultRegistry::new();
+        reg.insert("siphon-C", consult_dialog("abc@siphon", "l", "r"));
+        assert!(reg.lookup("never-seen").is_none());
+    }
+
+    #[test]
+    fn consult_duplicate_insert_replaces() {
+        // A bridge-id collision is a CallIdFactory bug, but the
+        // registry must stay coherent: last insert wins.
+        let reg = ConsultRegistry::new();
+        reg.insert("siphon-C", consult_dialog("first@siphon", "l1", "r1"));
+        reg.insert("siphon-C", consult_dialog("second@siphon", "l2", "r2"));
+        assert_eq!(reg.len(), 1);
+        assert_eq!(
+            reg.lookup("siphon-C").unwrap().id().call_id(),
+            "second@siphon"
+        );
+    }
+
+    #[test]
+    fn consult_cloned_registry_shares_state() {
+        // Same shared-Arc invariant as CallRegistry: the outbound
+        // service's clone and the transfer task's clone must see one
+        // map.
+        let a = ConsultRegistry::new();
+        let b = a.clone();
+        a.insert("siphon-C", consult_dialog("abc@siphon", "l", "r"));
+        assert!(b.lookup("siphon-C").is_some());
+        b.remove("siphon-C");
+        assert!(a.is_empty());
     }
 }

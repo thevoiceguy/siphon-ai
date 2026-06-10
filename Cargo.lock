@@ -2971,6 +2971,7 @@ dependencies = [
  "serde_json",
  "sip-core",
  "sip-dialog",
+ "sip-parse",
  "sip-transaction",
  "sip-uac",
  "sip-uas",

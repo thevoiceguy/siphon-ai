@@ -75,8 +75,8 @@ use siphon_ai_config::{
     ObservabilityConfig, SipConfig, SipTlsConfig, SipTransport, WebhooksConfig,
 };
 use siphon_ai_core::{
-    default_call_id_factory, BridgingAcceptor, CallRegistry, OutboundGateway, OutboundGuard,
-    OutboundOriginator, OutboundService, StaticCredentials,
+    default_call_id_factory, BridgingAcceptor, CallRegistry, ConsultRegistry, OutboundGateway,
+    OutboundGuard, OutboundOriginator, OutboundService, StaticCredentials,
 };
 use siphon_ai_media_glue::MediaSetup;
 use siphon_ai_sip_glue::{
@@ -492,6 +492,10 @@ impl Runtime {
                 );
             }
             let guard = OutboundGuard::new(outbound.max_concurrent, outbound.rate_limit_per_sec);
+            // Attended-transfer consult lookup (DEV_PLAN_0.6.1 §2.1).
+            // Answered outbound calls register here; the transfer task
+            // wiring that reads it lands in 0.6.1 chunk 2.
+            let consult_registry = ConsultRegistry::new();
             let service = OutboundService::new(
                 gateways,
                 guard,
@@ -499,6 +503,7 @@ impl Runtime {
                 default_call_id_factory(),
                 outbound_cdr_sink,
                 outbound_webhook_sink,
+                consult_registry,
             );
             info!(
                 gateways = outbound.gateways.len(),

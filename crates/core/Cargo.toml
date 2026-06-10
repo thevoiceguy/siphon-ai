@@ -55,6 +55,7 @@ forge-rtp.workspace    = true
 
 [dev-dependencies]
 bytes.workspace                       = true
+sip-parse.workspace                   = true
 tokio-tungstenite.workspace           = true
 futures.workspace                     = true
 serde_json.workspace                  = true

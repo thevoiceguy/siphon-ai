@@ -28,5 +28,5 @@ pub use outbound::{
     OutboundPermit, OutboundRejection, StaticCredentials,
 };
 pub use outbound_service::{OutboundGateway, OutboundService};
-pub use registry::{CallEntry, CallRegistry};
+pub use registry::{CallEntry, CallRegistry, ConsultRegistry};
 pub use transfer::{TransferContext, TransferOutcome};

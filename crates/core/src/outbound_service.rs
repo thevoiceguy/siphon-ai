@@ -47,6 +47,7 @@ use crate::outbound::{
     NotAnsweredCause, OutboundCall, OutboundError, OutboundGuard, OutboundOriginator,
     OutboundRejection,
 };
+use crate::registry::ConsultRegistry;
 
 /// One configured outbound gateway, ready to dial. Built by the daemon from a
 /// compiled `[[gateway]]` (the `siphon-ai-config::Gateway`) plus a per-gateway
@@ -68,9 +69,14 @@ pub struct OutboundService {
     call_id_factory: CallIdFactory,
     cdr_sink: CdrSinkHandle,
     webhook_sink: WebhookSinkHandle,
+    /// Attended-transfer lookup (DEV_PLAN_0.6.1 §2.1): answered calls
+    /// register their dialog snapshot here so another call's transfer
+    /// task can build a REFER-with-Replaces against this leg.
+    consult_registry: ConsultRegistry,
 }
 
 impl OutboundService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         gateways: HashMap<String, OutboundGateway>,
         guard: OutboundGuard,
@@ -78,6 +84,7 @@ impl OutboundService {
         call_id_factory: CallIdFactory,
         cdr_sink: CdrSinkHandle,
         webhook_sink: WebhookSinkHandle,
+        consult_registry: ConsultRegistry,
     ) -> Self {
         Self {
             gateways,
@@ -86,6 +93,7 @@ impl OutboundService {
             call_id_factory,
             cdr_sink,
             webhook_sink,
+            consult_registry,
         }
     }
 }
@@ -147,6 +155,7 @@ impl OutboundOriginateHandle for OutboundService {
         let originator = Arc::clone(&gw.originator);
         let cdr_sink = Arc::clone(&self.cdr_sink);
         let webhook_sink = Arc::clone(&self.webhook_sink);
+        let consult_registry = self.consult_registry.clone();
 
         info!(call_id = %bridge_id_str, gateway = %gateway, "originating outbound call");
         let log_id = bridge_id_str.clone();
@@ -176,6 +185,7 @@ impl OutboundOriginateHandle for OutboundService {
                         gateway,
                         cdr_sink,
                         webhook_sink,
+                        consult_registry,
                     };
                     run_call(originator, call, bridge, ctx).await;
                 }
@@ -231,6 +241,9 @@ struct OutboundCallContext {
     gateway: String,
     cdr_sink: CdrSinkHandle,
     webhook_sink: WebhookSinkHandle,
+    /// Register/deregister this leg as an attended-transfer consult
+    /// target for the call's lifetime.
+    consult_registry: ConsultRegistry,
 }
 
 /// Run an answered outbound call's audio bridge to completion, tear it
@@ -249,6 +262,11 @@ async fn run_call(
         call_id,
     } = call;
     let sip_call_id = dialog.id().call_id().to_string();
+    // Answered → this leg is a valid attended-transfer consult target
+    // until it ends. Snapshot is enough: the transfer task only reads
+    // the dialog's id and remote target (DEV_PLAN_0.6.1 §2.1).
+    ctx.consult_registry
+        .insert(ctx.bridge_id.as_str(), dialog.clone());
     ctx.webhook_sink
         .emit(WebhookEvent::OutboundAnswered(OutboundAnsweredEvent {
             version: WEBHOOK_VERSION,
@@ -286,7 +304,9 @@ async fn run_call(
         }
         Err(e) => warn!(sip_call_id = %sip_call_id, error = %e, "outbound controller error"),
     }
-    // The controller's done — BYE the dialog and release the media session.
+    // The controller's done — this leg is no longer a consult target;
+    // then BYE the dialog and release the media session.
+    ctx.consult_registry.remove(ctx.bridge_id.as_str());
     originator.hangup(&dialog).await;
     originator.stop_session(&call_id).await;
     drop(call_handle); // stop keepalives / session-timer tasks
@@ -367,6 +387,7 @@ mod tests {
             gateway: "twilio_main".into(),
             cdr_sink: Arc::new(siphon_ai_cdr::NullSink),
             webhook_sink: Arc::new(siphon_ai_webhooks::NullSink),
+            consult_registry: ConsultRegistry::new(),
         };
         let view = CallTerminationView {
             cause: CdrTerminationCause::ServerHangup,

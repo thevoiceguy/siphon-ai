@@ -78,7 +78,11 @@ run_scenario() {
     # -m 1     run exactly one call
     # -timeout 10s   hard cap on the whole scenario
     # -trace_err     write *_errors.log next to the xml for debugging
-    if sipp -sf "$SCRIPT_DIR/$xml" \
+    # -i 127.0.0.1   pin [local_ip] to IPv4 loopback — on dual-stack hosts
+    #                sipp may resolve ::1, advertising an IPv6 Contact that
+    #                the IPv4-bound daemon can't reach (in-dialog BYE then
+    #                fails with a transport error and UAS scenarios hang)
+    if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/$xml" \
             -m 1 \
             -timeout 10s \
             -trace_err \
@@ -249,7 +253,7 @@ run_scenario stir_shaken_no_identity_428.xml || failures=$((failures + 1))
 run_scenario stir_shaken_attestation_403.xml || failures=$((failures + 1))
 # Run the (generated) passing scenario by absolute path.
 echo "─── stir_shaken_attestation_pass ─────────────────────"
-if sipp -sf "$SS_PASS_XML" -m 1 -timeout 15s -trace_err \
+if sipp -i 127.0.0.1 -sf "$SS_PASS_XML" -m 1 -timeout 15s -trace_err \
         -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1; then
     echo "  OK"
 else
@@ -304,7 +308,7 @@ sleep 1.2
 total=$((total + 1))
 echo "─── recording_writes_valid_wav ───────────────────────"
 rec_ok=0
-if sipp -sf "$SCRIPT_DIR/basic_call_then_bye.xml" -m 1 -timeout 15s -trace_err \
+if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/basic_call_then_bye.xml" -m 1 -timeout 15s -trace_err \
         -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1; then
     sleep 0.6  # let teardown finalize the WAV header
     if python3 - "$REC_DIR" <<'PY'
@@ -396,7 +400,7 @@ echo "─── outbound_uas_answer ──────────────�
 ob_ok=0
 # SIPp listens as the callee; no remote target needed until we make
 # it ring. -bg would detach past our PID bookkeeping, so plain &.
-sipp -sf "$SCRIPT_DIR/outbound_uas_answer.xml" \
+sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/outbound_uas_answer.xml" \
     -m 1 -timeout 15s -trace_err -p "$SIPP_PORT" >/dev/null 2>&1 &
 OB_SIPP_PID=$!
 sleep 0.3
@@ -501,7 +505,7 @@ total=$((total + 1))
 echo "─── attended_transfer ────────────────────────────────"
 at_ok=0
 # Consult callee first, then originate leg C through the gateway.
-sipp -sf "$SCRIPT_DIR/outbound_uas_answer.xml" \
+sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/outbound_uas_answer.xml" \
     -m 1 -timeout 20s -trace_err -p "$AT_CONSULT_PORT" >/dev/null 2>&1 &
 AT_C_SIPP_PID=$!
 sleep 0.3
@@ -530,7 +534,7 @@ if [[ -n "$at_consult_id" ]] && (( at_answered )); then
     AT_A_WS_PID=$!
     sleep 0.5
 
-    if sipp -sf "$SCRIPT_DIR/attended_transfer_a.xml" \
+    if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/attended_transfer_a.xml" \
             -m 1 -timeout 15s -trace_err -p "$SIPP_PORT" -s 1000 \
             "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1 \
         && wait "$AT_C_SIPP_PID"; then
@@ -587,7 +591,12 @@ name = "default"
 any = true
 EOF
 
-    "$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python" \
+    # Same venv-then-system fallback as the outbound/attended phases —
+    # local runs without the CI-prepped venv just need `websockets`
+    # importable by python3.
+    AUX_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+    [[ -x "$AUX_PYTHON" ]] || AUX_PYTHON=python3
+    "$AUX_PYTHON" \
         "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
         --bind "127.0.0.1:$AUX_WS_PORT" \
         --auto-transfer-target "sip:7000@127.0.0.1:$SIPP_PORT" \

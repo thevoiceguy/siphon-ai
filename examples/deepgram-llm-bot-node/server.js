@@ -39,6 +39,10 @@
 //   BOT_BIND                default `0.0.0.0:8080`
 //   BOT_SYSTEM_PROMPT       optional system prompt override
 //   BOT_GREETING            optional greeting override
+//   BOT_TRANSFER_TARGET     SIP URI; enables the transfer keyword hook
+//                           AND the LLM `transfer_call` tool
+//   BOT_TRANSFER_PHRASE     regex fast-path over final utterances
+//   BOT_TRANSFER_ANNOUNCE   line spoken before the handoff
 
 // Hide Node 22's built-in `globalThis.WebSocket` from the
 // Deepgram SDK. The SDK detects native-WebSocket availability
@@ -137,8 +141,44 @@ const TRANSFER_PHRASE = new RegExp(
 );
 const TRANSFER_ANNOUNCE =
   process.env.BOT_TRANSFER_ANNOUNCE || 'One moment while I transfer you.';
+
+// With a target configured, the LLM also gets a `transfer_call` tool
+// (alongside the keyword fast-path above) so natural phrasings the
+// regex misses still hand the call off. The tool only signals intent —
+// the destination is always BOT_TRANSFER_TARGET; the model never
+// chooses a URI.
+const TRANSFER_TOOLS = TRANSFER_TARGET
+  ? [
+      {
+        type: 'function',
+        function: {
+          name: 'transfer_call',
+          description:
+            'Transfer the caller to a human agent. Use when the caller asks to ' +
+            'speak with a person or human agent, or when you cannot help further.',
+          parameters: {
+            type: 'object',
+            properties: {
+              reason: {
+                type: 'string',
+                description: 'One short sentence: why the call is being transferred.',
+              },
+            },
+          },
+        },
+      },
+    ]
+  : undefined;
+const TRANSFER_SYSTEM_ADDENDUM =
+  ' You can transfer the caller to a human agent with the transfer_call tool. ' +
+  'Use it when the caller asks for a person or when you cannot help further. ' +
+  'Never claim to transfer without actually calling the tool.';
+
 if (TRANSFER_TARGET) {
-  console.log(`[transfer] enabled target=${TRANSFER_TARGET} phrase=${TRANSFER_PHRASE}`);
+  console.log(
+    `[transfer] enabled target=${TRANSFER_TARGET} phrase=${TRANSFER_PHRASE} ` +
+      `tool=transfer_call`,
+  );
 }
 
 console.log(
@@ -482,7 +522,12 @@ async function handleCall(ws, req) {
   let dgSttReady = false;
 
   // Conversation state.
-  const conversation = [{ role: 'system', content: SYSTEM_PROMPT }];
+  const conversation = [
+    {
+      role: 'system',
+      content: SYSTEM_PROMPT + (TRANSFER_TARGET ? TRANSFER_SYSTEM_ADDENDUM : ''),
+    },
+  ];
   let speaking = false;
   let pendingUtterance = null;
   let utteranceBuf = '';
@@ -554,33 +599,47 @@ async function handleCall(ws, req) {
   }
 
   /**
-   * Blind-transfer keyword hook. Returns true when the utterance was
-   * consumed by a transfer request — the LLM turn is skipped because
-   * SiphonAI is about to REFER the SIP leg and tear this bridge down.
+   * Announce (optionally) and send the protocol `transfer` frame.
+   * SiphonAI REFERs the SIP leg; on a 202 it tears the bridge down,
+   * on failure we get `error { code: "transfer_failed" }` (logged in
+   * the message handler) and the conversation continues. `detail` is
+   * for the log only.
    */
-  async function maybeTransfer(u) {
-    if (!TRANSFER_TARGET || !TRANSFER_PHRASE.test(u)) return false;
-    log(`transfer requested ("${u}") -> ${TRANSFER_TARGET}`);
+  async function requestTransfer(detail, { announce = true } = {}) {
+    log(`transfer requested (${detail}) -> ${TRANSFER_TARGET}`);
     metrics.emit('transfer_requested');
-    // Announce the handoff BEFORE sending the frame — on a 202 the
-    // daemon closes the bridge, so anything spoken after the send
-    // would never reach the caller.
-    speaking = true;
-    try {
-      await speakStreaming(TRANSFER_ANNOUNCE, null);
-      while (playout.isActive() && !callEnded) {
-        await new Promise((r) => setTimeout(r, 50));
+    if (announce) {
+      // The handoff line must be heard BEFORE the frame is sent —
+      // on a 202 the daemon closes the bridge immediately.
+      speaking = true;
+      try {
+        await speakStreaming(TRANSFER_ANNOUNCE, null);
+        while (playout.isActive() && !callEnded) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      } finally {
+        speaking = false;
       }
-    } finally {
-      speaking = false;
     }
-    if (callEnded) return true;
+    if (callEnded) return;
     try {
       ws.send(JSON.stringify({ type: 'transfer', call_id: callId, target: TRANSFER_TARGET }));
       log('transfer frame sent; awaiting daemon stop (202) or error (transfer_failed)');
     } catch (e) {
       log('transfer send failed:', e?.message || e);
     }
+  }
+
+  /**
+   * Blind-transfer keyword fast-path. Returns true when the utterance
+   * was consumed by a transfer request — the LLM turn is skipped
+   * because SiphonAI is about to REFER the SIP leg and tear this
+   * bridge down. Phrasings the regex misses fall through to the LLM,
+   * which can reach the same handoff via the transfer_call tool.
+   */
+  async function maybeTransfer(u) {
+    if (!TRANSFER_TARGET || !TRANSFER_PHRASE.test(u)) return false;
+    await requestTransfer(`keyword: "${u}"`);
     return true;
   }
 
@@ -720,11 +779,23 @@ async function handleCall(ws, req) {
         model: LLM_MODEL,
         messages: conversation,
         stream: true,
+        ...(TRANSFER_TOOLS ? { tools: TRANSFER_TOOLS } : {}),
         ...(LLM_MAX_TOKENS  != null ? { max_tokens:  LLM_MAX_TOKENS  } : {}),
         ...(LLM_TEMPERATURE != null ? { temperature: LLM_TEMPERATURE } : {}),
       });
+      const toolCalls = [];
       for await (const chunk of stream) {
-        const delta = chunk.choices?.[0]?.delta?.content;
+        const d = chunk.choices?.[0]?.delta;
+        if (!d) continue;
+        // Tool calls stream as fragments keyed by index: the function
+        // name arrives once, the JSON arguments in pieces. Collect
+        // them; they're acted on after the content has been spoken.
+        for (const tc of d.tool_calls || []) {
+          const slot = (toolCalls[tc.index] ??= { name: '', args: '' });
+          if (tc.function?.name) slot.name += tc.function.name;
+          if (tc.function?.arguments) slot.args += tc.function.arguments;
+        }
+        const delta = d.content;
         if (!delta) continue;
         if (turn) turn.markLlmFirstToken();
         phraseBuf += delta;
@@ -754,6 +825,32 @@ async function handleCall(ws, req) {
       while (playout.isActive() && speaking) {
         await new Promise((r) => setTimeout(r, 50));
       }
+
+      // LLM-initiated transfer: the model called transfer_call. Any
+      // content it streamed alongside has been spoken above, so skip
+      // the canned announce in that case. The tool_call itself is NOT
+      // pushed into history — if the transfer fails the conversation
+      // continues, and an unanswered tool_call message would poison
+      // the next completion request.
+      const transfer = toolCalls.find((t) => t?.name === 'transfer_call');
+      if (transfer && !callEnded) {
+        let reason = '';
+        try {
+          reason = JSON.parse(transfer.args || '{}').reason || '';
+        } catch {
+          // arguments are best-effort log detail; a malformed JSON
+          // fragment must not block the handoff
+        }
+        conversation.push({
+          role: 'assistant',
+          content: fullResponse || '(transferring caller to a human agent)',
+        });
+        await requestTransfer(`tool: ${reason || 'no reason given'}`, {
+          announce: !fullResponse.trim(),
+        });
+        return;
+      }
+
       conversation.push({ role: 'assistant', content: fullResponse });
       // Trim context to keep token usage bounded.
       const MAX_TURNS = 10;

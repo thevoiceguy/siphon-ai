@@ -120,6 +120,27 @@ const SYSTEM_PROMPT =
 
 const GREETING = process.env.BOT_GREETING || 'Hi there! How can I help you today?';
 
+// ─── Blind-transfer keyword hook ──────────────────────────────────
+// When the caller's utterance matches BOT_TRANSFER_PHRASE and
+// BOT_TRANSFER_TARGET (a SIP URI) is set, the bot announces the
+// handoff and asks SiphonAI to REFER the call to that target
+// (PROTOCOL.md §4.4) instead of running an LLM turn. On a 202 the
+// daemon BYEs the leg, emits `stop reason=transfer`, and closes this
+// WS; on failure it sends `error { code: "transfer_failed" }` (logged
+// in the message handler) and the call simply continues. Unset
+// BOT_TRANSFER_TARGET disables the hook.
+const TRANSFER_TARGET = process.env.BOT_TRANSFER_TARGET || null;
+const TRANSFER_PHRASE = new RegExp(
+  process.env.BOT_TRANSFER_PHRASE ||
+    'transfer me|(speak|talk) (to|with) (a |an )?(human|person|agent|representative|someone)',
+  'i',
+);
+const TRANSFER_ANNOUNCE =
+  process.env.BOT_TRANSFER_ANNOUNCE || 'One moment while I transfer you.';
+if (TRANSFER_TARGET) {
+  console.log(`[transfer] enabled target=${TRANSFER_TARGET} phrase=${TRANSFER_PHRASE}`);
+}
+
 console.log(
   `[llm] model=${LLM_MODEL} base_url=${LLM_BASE_URL || '(OpenAI default)'} ` +
   `max_tokens=${LLM_MAX_TOKENS ?? '(provider default)'} ` +
@@ -532,6 +553,37 @@ async function handleCall(ws, req) {
     }
   }
 
+  /**
+   * Blind-transfer keyword hook. Returns true when the utterance was
+   * consumed by a transfer request — the LLM turn is skipped because
+   * SiphonAI is about to REFER the SIP leg and tear this bridge down.
+   */
+  async function maybeTransfer(u) {
+    if (!TRANSFER_TARGET || !TRANSFER_PHRASE.test(u)) return false;
+    log(`transfer requested ("${u}") -> ${TRANSFER_TARGET}`);
+    metrics.emit('transfer_requested');
+    // Announce the handoff BEFORE sending the frame — on a 202 the
+    // daemon closes the bridge, so anything spoken after the send
+    // would never reach the caller.
+    speaking = true;
+    try {
+      await speakStreaming(TRANSFER_ANNOUNCE, null);
+      while (playout.isActive() && !callEnded) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    } finally {
+      speaking = false;
+    }
+    if (callEnded) return true;
+    try {
+      ws.send(JSON.stringify({ type: 'transfer', call_id: callId, target: TRANSFER_TARGET }));
+      log('transfer frame sent; awaiting daemon stop (202) or error (transfer_failed)');
+    } catch (e) {
+      log('transfer send failed:', e?.message || e);
+    }
+    return true;
+  }
+
   async function onUtteranceEnd() {
     if (!utteranceBuf.trim()) return;
     const u = utteranceBuf.trim();
@@ -540,6 +592,9 @@ async function handleCall(ws, req) {
     sawFirstFinalThisUtterance = false;
     metrics.emit('utterance_end');
     log(`UTTERANCE: "${u}"`);
+    // Transfer hook runs before the speaking/queue logic so a match
+    // can't get re-routed into a queued LLM turn.
+    if (await maybeTransfer(u)) return;
     if (speaking) {
       // Defer until we're done talking; barge-in handles the
       // interruption case separately.

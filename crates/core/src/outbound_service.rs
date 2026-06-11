@@ -58,6 +58,10 @@ pub struct OutboundGateway {
     pub originator: Arc<OutboundOriginator>,
     pub proxy_host: String,
     pub proxy_port: u16,
+    /// `;transport=…` Request-URI parameter for this trunk, empty
+    /// for UDP (config's `SipTransport::uri_param()` — kept as a
+    /// plain string for the same no-config-dep reason as above).
+    pub transport_uri_param: &'static str,
     /// Default caller-ID `sip:` URI for calls through this gateway.
     pub from: String,
 }
@@ -114,7 +118,10 @@ impl OutboundOriginateHandle for OutboundService {
             .filter(|s| !s.is_empty())
             .ok_or(OriginateRejection::NoWsUrl)?;
 
-        let target_str = format!("sip:{}@{}:{}", req.to, gw.proxy_host, gw.proxy_port);
+        let target_str = format!(
+            "sip:{}@{}:{}{}",
+            req.to, gw.proxy_host, gw.proxy_port, gw.transport_uri_param
+        );
         let target = SipUri::parse(&target_str)
             .map_err(|e| OriginateRejection::BadTarget(format!("{target_str}: {e}")))?;
 

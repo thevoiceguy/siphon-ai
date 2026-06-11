@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Outbound dialing over TCP/TLS (`[[gateway]].transport`).** The transport
+  dispatcher was inbound-only: any request needing a fresh TCP/TLS connection
+  (an originated INVITE to a TLS trunk, a REGISTER to a TLS registrar) died
+  with `outbound … without an existing stream is not supported in v1`. The
+  dispatcher now owns client connection pools (`sip-transport`'s
+  `ConnectionPool`/`TlsPool`, the pattern proven in siphond): outbound TCP/TLS
+  with no established stream dials out through the pool, reuses the connection
+  on subsequent requests, and the pool's reader feeds responses back into the
+  same inbound packet pipeline the listeners use. TLS verifies the peer against
+  the bundled webpki (Mozilla CA) roots — sufficient for public trunks like
+  Twilio — plus an optional `[sip.tls_client].extra_ca` PEM bundle for
+  private-CA deployments and self-signed test rigs (path validated at load).
+  SNI is the gateway's proxy host, threaded through the existing
+  `TransportContext::server_name`.
+  * `[[gateway]]` gains `transport = "udp" | "tcp" | "tls"` (default udp).
+    Non-UDP appends `;transport=…` to the Request-URI so RFC 3263 resolution
+    selects the right transport; `tls` flips the default proxy port to 5061.
+    With `register` set the transport is inherited from the register block and
+    an explicit `transport` is rejected at load. `[[register]]` blocks with
+    `transport = "tls"` — documented since 0.3.0 but broken by the same
+    dispatcher gap — now actually go out over TLS.
+  * Note: media on outbound legs is still plain RTP. Trunks that require SRTP
+    (e.g. Twilio secure trunking) need the follow-up SDES change before
+    outbound calls carry audio — this change is signaling-transport only.
+
 ### Fixed
 
 - **TLS trunks: call transfer (REFER) failed with `transfer_failed` (#159).** The known

@@ -51,12 +51,20 @@ before TOML parsing. Unset variables without a default fail the load.
 | `cert`   | path        | required when TLS on | PEM cert chain on disk. |
 | `key`    | path        | required when TLS on | PEM private key on disk. |
 
-> **Inbound UAS + outbound UAC for REGISTER.** SiphonAI terminates
-> inbound TLS for SIP signaling at this listener (v0.1.0). Outbound
-> TLS is supported for the UAC's `[[register]]` path as of 0.3.0 —
-> registrations with `transport = "tls"` actually go out over TLS
-> (see [`docs/REGISTRATION.md`](REGISTRATION.md)). Outbound TLS for
-> originated INVITEs is post-v1 per CLAUDE.md §8.
+> **Server side only.** `[sip.tls]` is the inbound listener's
+> cert/key. *Outgoing* TLS connections — `[[gateway]]` and
+> `[[register]]` blocks with `transport = "tls"` — verify the peer
+> against the client roots below and need no `[sip.tls]` at all: a
+> UDP-only daemon can still dial a TLS trunk.
+
+### `[sip.tls_client]` (0.7.0+)
+
+| Field      | Type | Default | Notes |
+|------------|------|---------|-------|
+| `extra_ca` | path | unset   | PEM bundle appended to the built-in webpki (Mozilla CA) roots when verifying outgoing TLS. For trunks fronted by a private CA and for test rigs with self-signed certs. Public trunks (e.g. Twilio) verify against the built-in roots without this. |
+
+The path is checked at config load; an unreadable or empty bundle
+fails at startup, not at first dial-out.
 
 ### `[sip.call_progress]`
 
@@ -302,7 +310,8 @@ register = "pbx"            # name of a [[register]] block
 | `max_concurrent` | `[outbound]` | Max simultaneous outbound calls. `0` (default) disables outbound entirely. This + `rate_limit_per_sec` are the **native guardrails** — the originate API itself has no built-in auth (it's fronted by a reverse proxy / trusted network), so **you must restrict access to that endpoint and set a sane cap** to avoid toll fraud. |
 | `rate_limit_per_sec` | `[outbound]` | Optional ceiling on *new* outbound calls per second (token bucket, burst = the rate). `0`/unset = no rate limit. |
 | `name` | `[[gateway]]` | Unique gateway name; the originate request names one. |
-| `proxy` | `[[gateway]]` | `host` or `host:port` of the trunk (resolved per RFC 3263 at INVITE time). Required unless `register` is set. |
+| `proxy` | `[[gateway]]` | `host` or `host:port` of the trunk (resolved per RFC 3263 at INVITE time). Required unless `register` is set. Default port: 5060, or 5061 when `transport = "tls"`. |
+| `transport` | `[[gateway]]` | `"udp"` (default) \| `"tcp"` \| `"tls"`. Non-UDP dials out through the daemon's client connection pools; TLS verifies the trunk's cert against the webpki roots + `[sip.tls_client].extra_ca` and uses the proxy host as SNI. Must be unset when `register` is set — the transport is inherited from the register block. |
 | `from` | `[[gateway]]` | Default caller-ID — a full `sip:`/`sips:` URI. Required for standalone trunks; defaults to the register AOR when `register` is set. |
 | `register` | `[[gateway]]` | Name of a `[[register]]` to dial through, inheriting its server address, digest credentials, and AOR. |
 | `auth_username` / `auth_password` | `[[gateway]]` | Digest credentials for a standalone trunk (both or neither). Answered on any 401/407 challenge the trunk sends. |

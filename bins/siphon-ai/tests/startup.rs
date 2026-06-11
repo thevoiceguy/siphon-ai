@@ -21,6 +21,21 @@ use tokio::sync::oneshot;
 
 const FIXTURE: &str = include_str!("fixtures/local-dev.toml");
 
+/// Install rustls's process-wide crypto provider exactly once.
+/// `main()` does this in the daemon path; tests don't run `main`,
+/// and `Runtime::build` unconditionally constructs the client TLS
+/// verification roots (for outbound `transport = "tls"`), so every
+/// test that builds a runtime needs this first (or rustls panics
+/// with "Could not automatically determine the process-level
+/// CryptoProvider").
+fn install_crypto_provider() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 /// Test env source. Random port allocation lives at the OS layer
 /// (the daemon binds via `UdpSocket::bind`) so we just pin a
 /// `127.0.0.1:0` listen and let the kernel pick a free port.
@@ -43,6 +58,7 @@ impl EnvSource for MapEnv {
 
 #[tokio::test]
 async fn runtime_starts_and_shuts_down_cleanly() {
+    install_crypto_provider();
     let env = MapEnv::new([
         ("TEST_SIP_LISTEN", "127.0.0.1:0"),
         ("TEST_RTP_MIN", "40000"),
@@ -108,6 +124,7 @@ any = true
 
 #[tokio::test]
 async fn runtime_with_udp_and_tcp_transports_binds_both() {
+    install_crypto_provider();
     // The TCP listener uses the same host:port pair as UDP — but
     // UDP and TCP are different namespaces in the kernel, so the
     // "busy" check only enforces uniqueness within a transport.
@@ -197,6 +214,7 @@ any = true
 
 #[tokio::test]
 async fn registrations_seed_into_manager_on_startup() {
+    install_crypto_provider();
     let env = MapEnv::new([
         ("TEST_SIP_LISTEN", "127.0.0.1:0"),
         ("TEST_RTP_MIN", "40600"),
@@ -248,6 +266,7 @@ async fn registrations_seed_into_manager_on_startup() {
 
 #[tokio::test]
 async fn build_fails_when_listen_port_is_busy() {
+    install_crypto_provider();
     // Bind a placeholder UDP socket on an ephemeral port, then ask
     // the runtime to bind the same one — the second bind must
     // surface as a startup error, not a silent succeed-and-overlap.
@@ -317,6 +336,7 @@ any = true
 
 #[tokio::test]
 async fn runtime_with_hep_enabled_binds_and_drains_worker_on_shutdown() {
+    install_crypto_provider();
     // Bind a UDP socket to stand in for Homer; we don't actually
     // need to receive anything for this smoke — the test asserts the
     // daemon brings up the HEP plumbing without failing the build,

@@ -62,6 +62,12 @@ tokio-rustls.workspace = true
 # graph (they do, transitively).
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
 
+# Client-side TLS verification roots for outgoing connections
+# (gateways / registrations with transport = "tls"). Both already
+# in the dependency tree transitively.
+webpki-roots = "1"
+rustls-pemfile = "2"
+
 # SIGHUP cert reload state (W5): the daemon holds an
 # `Arc<ArcSwap<ServerConfig>>` shared between the listener accept
 # loop and the SIGHUP handler. `arc-swap` rides in transitively via

@@ -2633,7 +2633,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 [[package]]
 name = "sip-auth"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a#b9183f53998a0a3f8a30826a9efe7291464a9d83"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3#db45e42251c3dbac2d8b4a2b7632d06f87fc31ff"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2656,7 +2656,7 @@ dependencies = [
 [[package]]
 name = "sip-core"
 version = "0.7.6"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a#b9183f53998a0a3f8a30826a9efe7291464a9d83"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3#db45e42251c3dbac2d8b4a2b7632d06f87fc31ff"
 dependencies = [
  "bytes",
  "httpdate",
@@ -2669,7 +2669,7 @@ dependencies = [
 [[package]]
 name = "sip-dialog"
 version = "0.3.3"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a#b9183f53998a0a3f8a30826a9efe7291464a9d83"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3#db45e42251c3dbac2d8b4a2b7632d06f87fc31ff"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2687,7 +2687,7 @@ dependencies = [
 [[package]]
 name = "sip-dns"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a#b9183f53998a0a3f8a30826a9efe7291464a9d83"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3#db45e42251c3dbac2d8b4a2b7632d06f87fc31ff"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2701,7 +2701,7 @@ dependencies = [
 [[package]]
 name = "sip-hep"
 version = "0.0.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a#b9183f53998a0a3f8a30826a9efe7291464a9d83"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3#db45e42251c3dbac2d8b4a2b7632d06f87fc31ff"
 dependencies = [
  "bytes",
  "hep-rs",
@@ -2712,7 +2712,7 @@ dependencies = [
 [[package]]
 name = "sip-identity"
 version = "0.1.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a#b9183f53998a0a3f8a30826a9efe7291464a9d83"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3#db45e42251c3dbac2d8b4a2b7632d06f87fc31ff"
 dependencies = [
  "base64",
  "ring",
@@ -2725,7 +2725,7 @@ dependencies = [
 [[package]]
 name = "sip-observe"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a#b9183f53998a0a3f8a30826a9efe7291464a9d83"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3#db45e42251c3dbac2d8b4a2b7632d06f87fc31ff"
 dependencies = [
  "once_cell",
  "tracing",
@@ -2734,7 +2734,7 @@ dependencies = [
 [[package]]
 name = "sip-parse"
 version = "0.3.4"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a#b9183f53998a0a3f8a30826a9efe7291464a9d83"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3#db45e42251c3dbac2d8b4a2b7632d06f87fc31ff"
 dependencies = [
  "bytes",
  "httpdate",
@@ -2748,7 +2748,7 @@ dependencies = [
 [[package]]
 name = "sip-ratelimit"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a#b9183f53998a0a3f8a30826a9efe7291464a9d83"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3#db45e42251c3dbac2d8b4a2b7632d06f87fc31ff"
 dependencies = [
  "dashmap 5.5.3",
  "parking_lot",
@@ -2759,7 +2759,7 @@ dependencies = [
 [[package]]
 name = "sip-sdp"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a#b9183f53998a0a3f8a30826a9efe7291464a9d83"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3#db45e42251c3dbac2d8b4a2b7632d06f87fc31ff"
 dependencies = [
  "nom",
  "smol_str",
@@ -2777,7 +2777,7 @@ dependencies = [
 [[package]]
 name = "sip-transaction"
 version = "0.5.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a#b9183f53998a0a3f8a30826a9efe7291464a9d83"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3#db45e42251c3dbac2d8b4a2b7632d06f87fc31ff"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2796,7 +2796,7 @@ dependencies = [
 [[package]]
 name = "sip-transport"
 version = "0.3.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a#b9183f53998a0a3f8a30826a9efe7291464a9d83"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3#db45e42251c3dbac2d8b4a2b7632d06f87fc31ff"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2816,7 +2816,7 @@ dependencies = [
 [[package]]
 name = "sip-uac"
 version = "0.4.2"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a#b9183f53998a0a3f8a30826a9efe7291464a9d83"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3#db45e42251c3dbac2d8b4a2b7632d06f87fc31ff"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2829,7 +2829,7 @@ dependencies = [
  "sip-dialog",
  "sip-dns",
  "sip-parse",
- "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a)",
+ "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3)",
  "sip-transaction",
  "sip-transport",
  "smol_str",
@@ -2841,7 +2841,7 @@ dependencies = [
 [[package]]
 name = "sip-uas"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a#b9183f53998a0a3f8a30826a9efe7291464a9d83"
+source = "git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3#db45e42251c3dbac2d8b4a2b7632d06f87fc31ff"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2851,7 +2851,7 @@ dependencies = [
  "sip-core",
  "sip-dialog",
  "sip-parse",
- "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/siphon-rs?rev=b9183f53998a)",
+ "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/siphon-rs?rev=db45e42251c3)",
  "sip-transaction",
  "sip-transport",
  "smol_str",

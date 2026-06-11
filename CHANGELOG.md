@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **TLS trunks: call transfer (REFER) failed with `transfer_failed` (#159).** The known
+  gap left by the cleanup-BYE fix below: a `transfer` requested by the WS server on a
+  call that arrived over TCP/TLS died with `send_refer: … transport error`, because
+  upstream `send_refer` resolves the dialog's remote target and dials a fresh
+  connection the inbound-only dispatcher refuses to open (and the peer's Contact names
+  an ephemeral source port nothing listens on anyway). The transfer task now reuses the
+  inbound connection captured at INVITE time: `TransferContext` carries the same
+  `DialogFlow` that `TeardownContext` got in the BYE fix (attached in `run_call`, once
+  the accepted session's transport is known), and `run_transfer_inner` sends both the
+  REFER and the post-REFER BYE through the new upstream `send_refer_via_flow` /
+  `bye_via_flow` (siphon-rs#58). `DialogFlow` additionally captures the receiving
+  listener's local address so the auto-filled `Via` on flow-routed requests advertises
+  the TLS listener's port instead of the UDP listener's (the cosmetic nit observed in
+  the #157 verification). UDP dialogs and outbound (gateway-originated) legs keep the
+  existing resolve-and-send path. Pin bumped to siphon-rs `db45e42251c3`, which also
+  changes the `*_via_flow` call convention to the new `Flow` struct.
+
 - **TLS trunks: daemon-initiated BYE never reached the peer (caller heard dead air
   after the bot hung up).** The companion to the Contact-port fix below, in the other
   direction. When the WS server ended the call (`hangup`), or a session timer / admin

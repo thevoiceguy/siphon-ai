@@ -317,6 +317,18 @@ impl CallController {
         )
     }
 
+    /// Attach the inbound connection this call's dialog rides on to
+    /// the transfer context, so a REFER reuses it instead of dialing
+    /// the peer's Contact (TCP/TLS dialogs; see issue #159). Called
+    /// by `run_call` after accept, when the flow is known — the
+    /// `TransferContext` itself is built earlier, in `prepare_call`.
+    /// No-op when transfer isn't installed or `flow` is `None`.
+    pub fn attach_transfer_flow(&mut self, flow: Option<crate::acceptor::DialogFlow>) {
+        if let Some(transfer) = self.cfg.transfer.as_mut() {
+            transfer.flow = flow;
+        }
+    }
+
     pub fn handle(&self) -> &CallHandle {
         &self.handle
     }
@@ -936,9 +948,26 @@ async fn run_transfer_inner(
         ReferPlan::Attended { refer_to, consult } => (refer_to, Some(consult.as_ref())),
     };
 
-    match ctx.uac.send_refer(&mut dialog, refer_to, consult).await {
+    // TCP/TLS dialogs: the REFER must ride the inbound connection —
+    // the dispatcher is inbound-only and the peer's Contact names an
+    // ephemeral source port nothing listens on (issue #159, same
+    // reasoning as the cleanup BYE in #157).
+    let sent = match &ctx.flow {
+        Some(flow) => {
+            ctx.uac
+                .send_refer_via_flow(&mut dialog, refer_to, consult, flow.to_uac_flow())
+                .await
+        }
+        None => ctx.uac.send_refer(&mut dialog, refer_to, consult).await,
+    };
+    match sent {
         Ok((response, _subscription)) => {
             let status = response.code();
+            debug!(
+                status,
+                reused_inbound_connection = ctx.flow.is_some(),
+                "REFER sent"
+            );
             if (200..300).contains(&status) {
                 // RFC 5589 allows either pattern (BYE-after-202 vs.
                 // staying in-dialog to consume NOTIFYs); v1 ships the
@@ -951,7 +980,11 @@ async fn run_transfer_inner(
                 // Outbound legs skip the BYE too: their run_call
                 // teardown sends it when the controller exits.
                 if ctx.source.bye_after_refer() {
-                    if let Err(e) = ctx.uac.bye(&dialog).await {
+                    let bye_sent = match &ctx.flow {
+                        Some(flow) => ctx.uac.bye_via_flow(&dialog, flow.to_uac_flow()).await,
+                        None => ctx.uac.bye(&dialog).await,
+                    };
+                    if let Err(e) = bye_sent {
                         warn!(error = %e, "post-REFER BYE failed (dialog may linger)");
                     }
                 }

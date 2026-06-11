@@ -1497,6 +1497,11 @@ pub struct AcceptedSession {
 pub struct DialogFlow {
     pub stream: tokio::sync::mpsc::Sender<bytes::Bytes>,
     pub peer: std::net::SocketAddr,
+    /// Local address of the listener that owns the connection
+    /// (threaded through `TransportContext` since siphon-rs#56).
+    /// Upstream uses it so the auto-filled `Via` advertises the
+    /// listener's port rather than the default listener's.
+    pub local: Option<std::net::SocketAddr>,
 }
 
 impl DialogFlow {
@@ -1508,8 +1513,18 @@ impl DialogFlow {
             TransportKind::Tcp | TransportKind::Tls => ctx.stream().map(|s| DialogFlow {
                 stream: s.clone(),
                 peer: ctx.peer(),
+                local: ctx.local_addr(),
             }),
             _ => None,
+        }
+    }
+
+    /// The upstream representation, for the `*_via_flow` UAC methods.
+    pub fn to_uac_flow(&self) -> sip_uac::integrated::Flow {
+        let flow = sip_uac::integrated::Flow::new(self.stream.clone(), self.peer);
+        match self.local {
+            Some(local) => flow.with_local_addr(local),
+            None => flow,
         }
     }
 }
@@ -1555,11 +1570,7 @@ async fn send_outbound_bye(
         return;
     };
     let sent = match &ctx.flow {
-        Some(flow) => {
-            ctx.uac
-                .bye_via_flow(&dialog, flow.stream.clone(), flow.peer)
-                .await
-        }
+        Some(flow) => ctx.uac.bye_via_flow(&dialog, flow.to_uac_flow()).await,
         None => ctx.uac.bye(&dialog).await,
     };
     match sent {
@@ -2674,7 +2685,11 @@ impl BridgingAcceptor {
         let bridge_call_id = prepared.bridge_call_id.clone();
         let forge_call_id = prepared.forge_call_id.clone();
         let sip_call_id = prepared.sip_call_id;
-        let controller = prepared.controller;
+        let mut controller = prepared.controller;
+        // prepare_call built the TransferContext before the INVITE's
+        // transport was known; give the REFER path the same inbound
+        // connection the cleanup BYE uses (TCP/TLS dialogs only).
+        controller.attach_transfer_flow(dialog_flow.clone());
         let media = Arc::clone(&self.media);
         let registry = self.registry.clone();
         let cdr_sink = Arc::clone(&self.cdr_sink);
@@ -3050,6 +3065,9 @@ impl BridgingAcceptor {
                 dialog_manager: Arc::clone(&installed.dialog_manager),
             },
             consult_registry: installed.consult_registry.clone(),
+            // The INVITE's transport context isn't threaded down to
+            // prepare; run_call attaches the accepted session's flow.
+            flow: None,
         });
 
         // Recording setup. The matched route's `[route.recording].mode`
@@ -3126,6 +3144,19 @@ mod tests {
             let ctx = TransportContext::new(TransportKind::Tls, peer(), Some(tx));
             let flow = DialogFlow::from_transport(&ctx).expect("flow");
             assert_eq!(flow.peer, peer());
+            // No listener address on the context → none captured;
+            // upstream then falls back to the configured Via port.
+            assert_eq!(flow.local, None);
+        }
+
+        #[test]
+        fn flow_captures_listener_local_addr_for_via() {
+            let listener: std::net::SocketAddr = "0.0.0.0:5061".parse().unwrap();
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            let ctx = TransportContext::new(TransportKind::Tls, peer(), Some(tx))
+                .with_local_addr(Some(listener));
+            let flow = DialogFlow::from_transport(&ctx).expect("flow");
+            assert_eq!(flow.local, Some(listener));
         }
 
         #[test]

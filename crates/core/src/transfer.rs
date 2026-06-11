@@ -34,6 +34,7 @@ use sip_core::SipUri;
 use sip_dialog::{Dialog, DialogManager};
 use sip_uac::integrated::IntegratedUAC;
 
+use crate::acceptor::DialogFlow;
 use crate::registry::ConsultRegistry;
 
 /// Where the REFER's dialog comes from — the inbound and outbound
@@ -100,6 +101,16 @@ pub struct TransferContext {
     pub uac: Arc<IntegratedUAC>,
     pub source: DialogSource,
     pub consult_registry: ConsultRegistry,
+    /// `Some` when this call's dialog arrived over TCP/TLS: the REFER
+    /// (and the post-REFER BYE) must reuse the inbound connection via
+    /// the `*_via_flow` UAC methods — the dispatcher is inbound-only
+    /// and the peer's Contact names an ephemeral port nothing listens
+    /// on. Same plumbing as `TeardownContext.flow` (#157). Attached
+    /// post-prepare in `run_call`, where the accepted session's flow
+    /// is known; `None` on datagram transports and outbound legs
+    /// (their gateway UAC dialed out itself, so its dispatcher can
+    /// reach the peer).
+    pub flow: Option<DialogFlow>,
 }
 
 impl std::fmt::Debug for TransferContext {

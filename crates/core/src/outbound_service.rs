@@ -299,6 +299,9 @@ async fn run_call(
         uac: originator.uac(),
         source: DialogSource::Direct(Box::new(dialog.clone())),
         consult_registry: ctx.consult_registry.clone(),
+        // Outbound legs dialed out themselves, so the gateway UAC's
+        // dispatcher can reach the peer without flow reuse.
+        flow: None,
     };
     let cfg = CallControllerConfig {
         call_id: ctx.bridge_id.clone(),

@@ -99,6 +99,10 @@ pub struct Gateway {
     pub name: String,
     pub proxy_host: String,
     pub proxy_port: u16,
+    /// Transport for calls placed through this trunk. Non-UDP adds a
+    /// `;transport=` URI parameter so the UAC's RFC 3263 resolution
+    /// selects the right transport (and, for TLS, the right SNI).
+    pub transport: SipTransport,
     /// Default caller-ID `sip:` URI.
     pub from: String,
     pub credentials: Option<GatewayCredentials>,
@@ -106,11 +110,14 @@ pub struct Gateway {
 
 impl Gateway {
     /// The Request-URI for dialing `destination` through this gateway —
-    /// `sip:<destination>@<proxy_host>:<proxy_port>`.
+    /// `sip:<destination>@<proxy_host>:<proxy_port>[;transport=…]`.
     pub fn request_uri(&self, destination: &str) -> String {
         format!(
-            "sip:{}@{}:{}",
-            destination, self.proxy_host, self.proxy_port
+            "sip:{}@{}:{}{}",
+            destination,
+            self.proxy_host,
+            self.proxy_port,
+            self.transport.uri_param()
         )
     }
 }
@@ -363,6 +370,10 @@ pub struct SipConfig {
     /// transports list. `None` when TLS isn't enabled. Daemon
     /// loads cert/key from these paths at startup.
     pub tls: Option<SipTlsConfig>,
+    /// `[sip.tls_client].extra_ca` — optional PEM bundle appended to
+    /// the webpki roots when verifying OUTGOING TLS connections
+    /// (gateways / registrations with `transport = "tls"`).
+    pub tls_client_extra_ca: Option<PathBuf>,
     /// RFC 4028 Min-SE for the UAS (`[sip].min_session_expires_secs`).
     /// Defaults to 90 (RFC minimum).
     pub min_session_expires: Duration,
@@ -384,6 +395,19 @@ pub enum SipTransport {
     Udp,
     Tcp,
     Tls,
+}
+
+impl SipTransport {
+    /// The `;transport=` URI parameter for a Request-URI using this
+    /// transport. Empty for UDP — the RFC 3263 default; emitting it
+    /// explicitly would only churn byte-identical configs.
+    pub fn uri_param(&self) -> &'static str {
+        match self {
+            SipTransport::Udp => "",
+            SipTransport::Tcp => ";transport=tcp",
+            SipTransport::Tls => ";transport=tls",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -533,6 +557,18 @@ pub enum CompileError {
 
     #[error("[[gateway]] {name:?} has `auth_username` without `auth_password` (or vice versa)")]
     GatewayIncompleteAuth { name: String },
+
+    #[error("[[gateway]] {name:?} transport {transport:?} is not one of udp, tcp, tls")]
+    GatewayUnknownTransport { name: String, transport: String },
+
+    #[error("[sip.tls_client].extra_ca {0:?} does not exist or is not a file")]
+    TlsClientExtraCaMissing(String),
+
+    #[error(
+        "[[gateway]] {name:?} sets both `register` and `transport`; \
+         the transport is inherited from the register block"
+    )]
+    GatewayTransportWithRegister { name: String },
 
     #[error("[media].rtp_port_range {min}-{max} is invalid (min must be < max and even)")]
     BadRtpPortRange { min: u16, max: u16 },
@@ -762,6 +798,20 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
     let tls_enabled = transports.contains(&SipTransport::Tls);
     let tls = compile_sip_tls(raw.tls, tls_enabled, &listen_addr)?;
 
+    // Client-side roots are independent of the TLS *listener* — a
+    // UDP-only daemon can still dial a TLS trunk. Validate the path
+    // at load per CLAUDE.md §4.6 (fail loud at startup).
+    let tls_client_extra_ca = match raw.tls_client.extra_ca {
+        None => None,
+        Some(p) => {
+            let path = PathBuf::from(&p);
+            if !path.is_file() {
+                return Err(CompileError::TlsClientExtraCaMissing(p));
+            }
+            Some(path)
+        }
+    };
+
     let call_progress = compile_call_progress(raw.call_progress)?;
 
     // RFC 4028: 90 s is the floor (Min-SE). An operator setting
@@ -781,6 +831,7 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
         user_agent: raw.user_agent,
         contact: raw.contact,
         tls,
+        tls_client_extra_ca,
         call_progress,
         min_session_expires,
         preferred_session_expires,
@@ -1031,7 +1082,14 @@ fn compile_outbound(
         }
 
         let gw = if let Some(reg_name) = g.register.as_deref().filter(|s| !s.is_empty()) {
-            // Register reuse — inherit server + credentials + AOR.
+            // Register reuse — inherit server + credentials + AOR +
+            // transport. An explicit `transport` here is a conflict,
+            // not an override: fail loud per CLAUDE.md §4.6.
+            if g.transport.is_some() {
+                return Err(CompileError::GatewayTransportWithRegister {
+                    name: g.name.clone(),
+                });
+            }
             let reg = registrations
                 .iter()
                 .find(|r| r.name == reg_name)
@@ -1049,6 +1107,7 @@ fn compile_outbound(
                 name: g.name.clone(),
                 proxy_host: reg.server_host.clone(),
                 proxy_port: reg.server_addr.port(),
+                transport: reg.transport,
                 from,
                 credentials: Some(GatewayCredentials {
                     username: reg.auth_username.clone(),
@@ -1065,13 +1124,32 @@ fn compile_outbound(
                 .ok_or_else(|| CompileError::GatewayNeedsProxyOrRegister {
                     name: g.name.clone(),
                 })?;
-            let (proxy_host, proxy_port) =
-                parse_register_server(proxy, None, 5060).map_err(|err| {
-                    CompileError::GatewayBadProxy {
+            let transport = match g
+                .transport
+                .as_deref()
+                .unwrap_or("udp")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "udp" => SipTransport::Udp,
+                "tcp" => SipTransport::Tcp,
+                "tls" => SipTransport::Tls,
+                other => {
+                    return Err(CompileError::GatewayUnknownTransport {
                         name: g.name.clone(),
-                        proxy: proxy.to_string(),
-                        err,
-                    }
+                        transport: other.to_string(),
+                    })
+                }
+            };
+            let default_port = match transport {
+                SipTransport::Tls => 5061,
+                _ => 5060,
+            };
+            let (proxy_host, proxy_port) = parse_register_server(proxy, None, default_port)
+                .map_err(|err| CompileError::GatewayBadProxy {
+                    name: g.name.clone(),
+                    proxy: proxy.to_string(),
+                    err,
                 })?;
             let from = g.from.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
                 CompileError::GatewayFromRequired {
@@ -1098,6 +1176,7 @@ fn compile_outbound(
                 name: g.name.clone(),
                 proxy_host,
                 proxy_port,
+                transport,
                 from,
                 credentials,
             }

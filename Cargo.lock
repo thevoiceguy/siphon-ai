@@ -2874,6 +2874,7 @@ dependencies = [
  "forge-rtp",
  "metrics 0.23.1",
  "rustls",
+ "rustls-pemfile",
  "sip-core",
  "sip-dns",
  "sip-parse",
@@ -2895,6 +2896,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]

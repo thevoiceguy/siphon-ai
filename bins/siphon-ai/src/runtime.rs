@@ -62,8 +62,10 @@ use sip_transaction::{
     TransactionManager, TransportContext, TransportDispatcher, TransportKind as TxTransportKind,
 };
 use sip_transport::{
-    load_rustls_server_config, run_tcp, run_tls_with_swappable_config, run_udp, send_stream,
-    send_udp, InboundPacket, TransportKind as TpTransportKind,
+    load_rustls_server_config,
+    pool::{ConnectionPool, TlsClientConfig, TlsPool},
+    run_tcp, run_tls_with_swappable_config, run_udp, send_stream, send_udp, InboundPacket,
+    TransportKind as TpTransportKind,
 };
 use sip_uac::integrated::IntegratedUAC;
 use sip_uas::integrated::{IntegratedUAS, UasRequestHandler};
@@ -316,8 +318,23 @@ impl Runtime {
                 .await
                 .with_context(|| format!("bind UDP {}", sip.listen_addr))?,
         );
-        let dispatcher: Arc<dyn TransportDispatcher> =
-            Arc::new(MultiTransportDispatcher::new(Arc::clone(&udp_socket)));
+        // Client-side connection pools for OUTBOUND TCP/TLS — what lets
+        // a gateway or registration with `transport = "tcp"|"tls"`
+        // actually dial out. Responses arriving on these client
+        // connections are fed back into the inbound packet pipeline in
+        // spawn_listeners (set_inbound_tx). Inbound dialogs are
+        // unaffected: their requests/responses keep riding the
+        // per-connection writer the listener attached.
+        let tcp_client_pool = Arc::new(ConnectionPool::new());
+        let tls_client_pool = Arc::new(TlsPool::new());
+        let tls_client_config = build_tls_client_config(sip.tls_client_extra_ca.as_deref())
+            .with_context(|| "build client TLS verification roots")?;
+        let dispatcher: Arc<dyn TransportDispatcher> = Arc::new(MultiTransportDispatcher::new(
+            Arc::clone(&udp_socket),
+            Arc::clone(&tcp_client_pool),
+            Arc::clone(&tls_client_pool),
+            tls_client_config,
+        ));
         let transaction_mgr = Arc::new(TransactionManager::new(Arc::clone(&dispatcher)));
 
         // System DNS resolver, shared by every per-[[register]] UAC
@@ -462,7 +479,10 @@ impl Runtime {
             Arc::clone(&transaction_mgr),
             Arc::clone(&uas),
             tls_server_config,
-        );
+            &tcp_client_pool,
+            &tls_client_pool,
+        )
+        .await;
 
         // ─── Outbound origination service (0.6.0) ──────────────────
         // One authenticated UAC + originator per `[[gateway]]`, then the
@@ -496,6 +516,7 @@ impl Runtime {
                         originator,
                         proxy_host: gw.proxy_host.clone(),
                         proxy_port: gw.proxy_port,
+                        transport_uri_param: gw.transport.uri_param(),
                         from: gw.from.clone(),
                     },
                 );
@@ -831,6 +852,40 @@ impl siphon_ai_sip_glue::TrunkAllowlist for ConfigTrunkAllowlist {
 }
 
 /// Load the TLS server config (cert + key) from disk paths in
+/// Verification roots for OUTGOING TLS connections: the bundled
+/// webpki (Mozilla CA) roots — sufficient for public trunks like
+/// Twilio — plus the operator's `[sip.tls_client].extra_ca` PEM
+/// bundle for private-CA deployments and self-signed test rigs.
+/// Failure is fatal at startup, same contract as the server side.
+fn build_tls_client_config(extra_ca: Option<&std::path::Path>) -> Result<Arc<TlsClientConfig>> {
+    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if let Some(path) = extra_ca {
+        let pem = std::fs::read(path)
+            .with_context(|| format!("read [sip.tls_client].extra_ca {}", path.display()))?;
+        let mut added = 0usize;
+        for cert in rustls_pemfile::certs(&mut pem.as_slice()) {
+            let cert = cert.with_context(|| format!("parse certificate in {}", path.display()))?;
+            roots
+                .add(cert)
+                .with_context(|| format!("add CA root from {}", path.display()))?;
+            added += 1;
+        }
+        if added == 0 {
+            return Err(anyhow!(
+                "[sip.tls_client].extra_ca {} contains no certificates",
+                path.display()
+            ));
+        }
+        info!(path = %path.display(), added, "client TLS extra CA roots loaded");
+    }
+    Ok(Arc::new(
+        tokio_rustls::rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    ))
+}
+
 /// `[sip.tls]`. Failure here is fatal — operators who set
 /// `transports = ["tls"]` expect SIPS to actually work, not to
 /// silently degrade to cleartext.
@@ -1194,16 +1249,26 @@ fn sip_public_addr(node: &NodeConfig, sip: &SipConfig) -> Option<SocketAddr> {
     candidate.parse().ok()
 }
 
-fn spawn_listeners(
+#[allow(clippy::too_many_arguments)]
+async fn spawn_listeners(
     sip: &SipConfig,
     udp_socket: Arc<UdpSocket>,
     udp_bound_addr: SocketAddr,
     transaction_mgr: Arc<TransactionManager>,
     uas: Arc<IntegratedUAS>,
     tls_server_config: Option<Arc<arc_swap::ArcSwap<tokio_rustls::rustls::ServerConfig>>>,
+    tcp_client_pool: &ConnectionPool,
+    tls_client_pool: &TlsPool,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
     let (packet_tx, packet_rx) = mpsc::channel::<InboundPacket>(1024);
+
+    // Route responses arriving on OUTBOUND client connections (the
+    // dispatcher's TCP/TLS pools) into the same packet pipeline the
+    // listeners feed. Without this the pool opens a connection, sends
+    // the request, and silently drops everything the peer sends back.
+    tcp_client_pool.set_inbound_tx(packet_tx.clone()).await;
+    tls_client_pool.set_inbound_tx(packet_tx.clone()).await;
 
     let want_udp = sip.transports.contains(&SipTransport::Udp);
     let want_tcp = sip.transports.contains(&SipTransport::Tcp);
@@ -1371,17 +1436,33 @@ fn map_transport_kind(kind: TpTransportKind) -> TxTransportKind {
 // response payload through that channel back to the peer over the
 // established socket.
 //
-// Outbound TCP/TLS connect (without a `stream` already set in
-// ctx) is what UAC mode would need — for v1 we error out cleanly
-// rather than silently falling back to UDP.
+// Outbound TCP/TLS connect (no `stream` in ctx) goes through the
+// client pools: `ConnectionPool` / `TlsPool` open (or reuse) a
+// connection to the peer, and their reader tasks feed responses
+// back into the inbound packet pipeline (`set_inbound_tx` in
+// `spawn_listeners`). This is what `[[gateway]]` / `[[register]]`
+// blocks with `transport = "tcp"|"tls"` ride.
 
 struct MultiTransportDispatcher {
     udp_socket: Arc<UdpSocket>,
+    tcp_client_pool: Arc<ConnectionPool>,
+    tls_client_pool: Arc<TlsPool>,
+    tls_client_config: Arc<TlsClientConfig>,
 }
 
 impl MultiTransportDispatcher {
-    fn new(udp_socket: Arc<UdpSocket>) -> Self {
-        Self { udp_socket }
+    fn new(
+        udp_socket: Arc<UdpSocket>,
+        tcp_client_pool: Arc<ConnectionPool>,
+        tls_client_pool: Arc<TlsPool>,
+        tls_client_config: Arc<TlsClientConfig>,
+    ) -> Self {
+        Self {
+            udp_socket,
+            tcp_client_pool,
+            tls_client_pool,
+            tls_client_config,
+        }
     }
 }
 
@@ -1393,6 +1474,9 @@ impl TransportDispatcher for MultiTransportDispatcher {
                 .await
                 .with_context(|| format!("send_udp to {}", ctx.peer())),
             TxTransportKind::Tcp | TxTransportKind::Tls => match ctx.stream() {
+                // Established connection (inbound dialog, or a pooled
+                // client connection threaded back through a flow) —
+                // reply over it.
                 Some(writer) => {
                     let target = match ctx.transport() {
                         TxTransportKind::Tcp => sip_transport::TransportKind::Tcp,
@@ -1403,12 +1487,40 @@ impl TransportDispatcher for MultiTransportDispatcher {
                         .await
                         .with_context(|| format!("send_stream to {}", ctx.peer()))
                 }
-                None => Err(anyhow!(
-                    "outbound {:?} without an existing stream is not supported in v1 \
-                     (peer={}); inbound-only UAS",
-                    ctx.transport(),
-                    ctx.peer()
-                )),
+                // No connection yet — originate one via the client
+                // pools (gateway INVITE, REGISTER to a TLS registrar).
+                None => match ctx.transport() {
+                    TxTransportKind::Tcp => self
+                        .tcp_client_pool
+                        .send_tcp(ctx.peer(), payload)
+                        .await
+                        .with_context(|| format!("outbound TCP connect to {}", ctx.peer())),
+                    TxTransportKind::Tls => {
+                        // SNI: the UAC threads the DNS target's host
+                        // into the ctx; the IP fallback only fires for
+                        // literal-IP targets, where certificate
+                        // verification needs an IP SAN anyway.
+                        let server_name = ctx
+                            .server_name()
+                            .map(String::from)
+                            .unwrap_or_else(|| ctx.peer().ip().to_string());
+                        self.tls_client_pool
+                            .send_tls(
+                                ctx.peer(),
+                                server_name.clone(),
+                                Arc::clone(&self.tls_client_config),
+                                payload,
+                            )
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "outbound TLS connect to {} (sni={server_name})",
+                                    ctx.peer()
+                                )
+                            })
+                    }
+                    _ => unreachable!(),
+                },
             },
             other => Err(anyhow!(
                 "transport {other:?} is not enabled in this build (peer={})",

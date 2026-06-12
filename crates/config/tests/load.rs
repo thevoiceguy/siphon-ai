@@ -1645,3 +1645,185 @@ ws_url = "wss://x/y"
     let err = load_from_str_with_env(toml, &env).unwrap_err();
     assert!(err.to_string().contains("public_address"));
 }
+
+// ─── [[gateway]] transport selection (outbound TLS, PR #163) ──────
+
+#[test]
+fn gateway_transport_tls_defaults_port_5061_and_adds_uri_param() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[outbound]
+max_concurrent = 2
+
+[[gateway]]
+name = "twilio"
+proxy = "siphon.pstn.twilio.com"
+transport = "tls"
+from = "sip:+15551230000@siphon.pstn.twilio.com"
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    let gw = cfg.outbound.gateway("twilio").expect("gateway compiled");
+    assert_eq!(gw.transport, SipTransport::Tls);
+    // TLS flips the default proxy port to 5061 (SIPS standard).
+    assert_eq!(gw.proxy_port, 5061);
+    assert_eq!(
+        gw.request_uri("+15183217034"),
+        "sip:+15183217034@siphon.pstn.twilio.com:5061;transport=tls"
+    );
+}
+
+#[test]
+fn gateway_transport_defaults_to_udp_with_no_uri_param() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[outbound]
+max_concurrent = 2
+
+[[gateway]]
+name = "pbx"
+proxy = "10.0.0.5"
+from = "sip:bot@10.0.0.5"
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    let gw = cfg.outbound.gateway("pbx").expect("gateway compiled");
+    assert_eq!(gw.transport, SipTransport::Udp);
+    assert_eq!(gw.proxy_port, 5060);
+    // UDP is the RFC 3263 default; no param churn on existing configs.
+    assert_eq!(gw.request_uri("7001"), "sip:7001@10.0.0.5:5060");
+}
+
+#[test]
+fn gateway_unknown_transport_is_rejected() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[gateway]]
+name = "bad"
+proxy = "10.0.0.5"
+transport = "sctp"
+from = "sip:bot@10.0.0.5"
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("sctp"), "got: {err}");
+}
+
+#[test]
+fn gateway_transport_conflicts_with_register_reuse() {
+    // With `register` set the transport is inherited; an explicit
+    // `transport` is a conflict, not an override.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[register]]
+name = "pbx-main"
+server = "10.0.0.5"
+transport = "tls"
+username = "bot"
+password = "hunter2"
+
+[[gateway]]
+name = "via-pbx"
+register = "pbx-main"
+transport = "udp"
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("inherited from the register block"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn gateway_register_reuse_inherits_transport() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[register]]
+name = "pbx-main"
+server = "10.0.0.5"
+transport = "tls"
+username = "bot"
+password = "hunter2"
+
+[[gateway]]
+name = "via-pbx"
+register = "pbx-main"
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    let gw = cfg.outbound.gateway("via-pbx").expect("gateway compiled");
+    assert_eq!(gw.transport, SipTransport::Tls);
+    assert_eq!(gw.proxy_port, 5061);
+    assert!(gw.request_uri("100").ends_with(";transport=tls"));
+}
+
+// ─── [sip.tls_client] — outgoing TLS verification roots ───────────
+
+#[test]
+fn tls_client_extra_ca_missing_file_is_rejected_at_load() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[sip.tls_client]
+extra_ca = "/nonexistent/ca.pem"
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("extra_ca"), "got: {err}");
+}
+
+#[test]
+fn tls_client_extra_ca_existing_file_compiles() {
+    let env = MapEnv::new([]);
+    let dir = std::env::temp_dir().join(format!("siphon-ai-ca-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ca = dir.join("ca.pem");
+    std::fs::write(&ca, "not validated at compile time, only at startup").unwrap();
+    let toml = format!(
+        r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[sip.tls_client]
+extra_ca = "{}"
+
+[bridge]
+ws_url = "wss://x/y"
+"#,
+        ca.display()
+    );
+    let cfg = load_from_str_with_env(&toml, &env).unwrap();
+    assert_eq!(cfg.sip.tls_client_extra_ca.as_deref(), Some(ca.as_path()));
+    let _ = std::fs::remove_dir_all(&dir);
+}

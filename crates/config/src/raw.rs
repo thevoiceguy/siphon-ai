@@ -118,6 +118,12 @@ pub struct RawSip {
     /// for UDP-only deployments.
     #[serde(default)]
     pub tls: RawSipTls,
+    /// Client-side TLS sub-block — verification roots for OUTGOING
+    /// TLS connections (gateways / registrations with
+    /// `transport = "tls"`). Independent of `[sip.tls]`, which is
+    /// the server side. Unset = the bundled webpki roots only.
+    #[serde(default)]
+    pub tls_client: RawSipTlsClient,
     /// Call-progress sub-block — how the UAS responds to inbound
     /// INVITEs before the 2xx. Unset = `mode = "instant_answer"`
     /// (v0.1.0 behaviour).
@@ -168,6 +174,17 @@ pub struct RawSipTls {
     /// PEM-encoded private key (path on disk). Required.
     #[serde(default)]
     pub key: Option<String>,
+}
+
+/// `[sip.tls_client]` — verification roots for outgoing TLS.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawSipTlsClient {
+    /// Path to a PEM bundle appended to the bundled webpki roots —
+    /// for trunks fronted by a private CA, and for test rigs with
+    /// self-signed certs.
+    #[serde(default)]
+    pub extra_ca: Option<String>,
 }
 
 fn default_transports() -> Vec<String> {
@@ -295,6 +312,14 @@ pub struct RawGateway {
     /// `host` or `host:port` of the trunk. Required unless `register` is set.
     #[serde(default)]
     pub proxy: Option<String>,
+    /// `udp` (default) | `tcp` | `tls` — transport for calls placed
+    /// through this trunk. With `tls`, the default proxy port becomes
+    /// 5061 and the daemon verifies the trunk's certificate against
+    /// its client TLS roots (webpki + `[sip.tls_client].extra_ca`).
+    /// Must be unset when `register` is set — the transport is
+    /// inherited from the register block.
+    #[serde(default)]
+    pub transport: Option<String>,
     /// Default caller-ID — a full `sip:` URI. Required for standalone
     /// trunks; defaults to the register AOR when `register` is set.
     #[serde(default)]

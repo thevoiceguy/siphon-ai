@@ -5,7 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.2] - 2026-06-12
+
+Theme: **TLS trunk hardening** — the fixes found by running v0.6.1 against a
+production TLS trunk (Twilio secure trunking), plus the dispatcher growing
+outbound TCP/TLS so gateways and registrations can dial secure trunks, not
+just answer them. Everything new is off by default; the WS protocol stays at
+`version: "1"` and the CDR schema is unchanged. A 0.6.1 deployment upgrades
+with zero config changes.
 
 ### Added
 
@@ -33,6 +40,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   * Note: media on outbound legs is still plain RTP. Trunks that require SRTP
     (e.g. Twilio secure trunking) need the follow-up SDES change before
     outbound calls carry audio — this change is signaling-transport only.
+
+- **Deepgram/LLM example bot: human-handoff transfer triggers**
+  (`examples/deepgram-llm-bot-node/`). With `BOT_TRANSFER_TARGET` (a SIP URI)
+  set, the bot hands the caller off via the protocol's `transfer` frame
+  (PROTOCOL.md §4.4) through two routes sharing one announce-then-REFER path:
+  a deterministic keyword fast-path over final utterances
+  (`BOT_TRANSFER_PHRASE`, e.g. "transfer me" / "speak to a human"), and a
+  `transfer_call` tool offered to the LLM so natural phrasings the regex
+  misses still trigger the handoff. The tool only signals intent — the
+  destination is always `BOT_TRANSFER_TARGET`; the model never chooses a URI.
+  Example-only; no daemon changes.
 
 ### Fixed
 
@@ -63,10 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call until its own timeout. The acceptor now captures the inbound connection's
   writer channel at INVITE time (`DialogFlow`) and sends the cleanup BYE through
   `IntegratedUAC::bye_via_flow` over that same connection (RFC 5626 flow semantics).
-  UDP dialogs keep the existing path. Known remaining gap: REFER (transfer) on a
-  TCP/TLS dialog still fails the same way — `send_refer` has no flow-reuse variant
-  upstream yet; transfers on TLS trunks will return `transfer_failed` to the WS
-  server until that lands.
+  UDP dialogs keep the existing path. (The matching REFER gap this fix left open
+  is also closed in this release — see the transfer entry above.)
 
 - **TLS trunks: in-dialog ACK/BYE were lost (silent-tail recordings, wrong CDR cause).**
   When the daemon ran both a UDP and a TLS listener (`[sip].transports = ["udp", "tls"]`),
@@ -772,7 +788,7 @@ the WebSocket server's job.
 - Reference WebSocket servers in `examples/`: echo (Python / Node),
   an OpenAI Realtime bridge, and a Deepgram + LLM voice bot.
 
-[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.6.1...HEAD
+[0.6.2]: https://github.com/thevoiceguy/siphon-ai/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.4.1...v0.5.0

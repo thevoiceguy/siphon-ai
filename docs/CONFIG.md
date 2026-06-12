@@ -57,7 +57,7 @@ before TOML parsing. Unset variables without a default fail the load.
 > against the client roots below and need no `[sip.tls]` at all: a
 > UDP-only daemon can still dial a TLS trunk.
 
-### `[sip.tls_client]` (0.7.0+)
+### `[sip.tls_client]` (0.6.2+)
 
 | Field      | Type | Default | Notes |
 |------------|------|---------|-------|

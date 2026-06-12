@@ -42,6 +42,21 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
+**v0.6.2** — patch release. Theme: **TLS trunk hardening.** Fixes found by
+running v0.6.1 against a production TLS trunk: the `Contact` on dual-listener
+daemons advertised the UDP port for TLS dialogs (losing in-dialog ACK/BYE —
+~60 s silent-tail recordings, wrong CDR cause), and daemon-initiated BYE and
+REFER on TCP/TLS dialogs dialed fresh connections nothing answered — both now
+reuse the inbound connection (RFC 5626 flow semantics). The transport
+dispatcher also grows **outbound TCP/TLS**: `[[gateway]]` / `[[register]]`
+blocks with `transport = "tcp" | "tls"` dial out through client connection
+pools, verifying peers against the bundled webpki roots plus an optional
+`[sip.tls_client].extra_ca` (signaling only — SRTP media is a follow-up). The
+Deepgram/LLM example bot gains human-handoff transfer triggers (keyword
+fast-path + a `transfer_call` LLM tool). Protocol stays `version: "1"`; CDR
+schema unchanged; a 0.6.1 deployment upgrades with zero config changes. Full
+notes: [`CHANGELOG.md`](CHANGELOG.md).
+
 **v0.6.1** — seventh release. Theme: **attended transfer.** The bot
 consults a human before handing the caller off: SiphonAI places the
 consult leg as a plain 0.6.0 outbound call (`POST /admin/v1/calls`, its

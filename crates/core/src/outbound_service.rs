@@ -43,6 +43,7 @@ use crate::acceptor::{
     CallIdFactory, CallTerminationView,
 };
 use crate::call::{CallController, CallControllerConfig};
+use crate::conference::ConferenceRegistry;
 use crate::outbound::{
     NotAnsweredCause, OutboundCall, OutboundError, OutboundGuard, OutboundOriginator,
     OutboundRejection,
@@ -78,6 +79,9 @@ pub struct OutboundService {
     /// register their dialog snapshot here so another call's transfer
     /// task can build a REFER-with-Replaces against this leg.
     consult_registry: ConsultRegistry,
+    /// Conference registry (0.7.0). `Some` when `[conference].enabled`;
+    /// an outbound bot can `conference_join` just like an inbound one.
+    conference: Option<ConferenceRegistry>,
 }
 
 impl OutboundService {
@@ -99,7 +103,16 @@ impl OutboundService {
             cdr_sink,
             webhook_sink,
             consult_registry,
+            conference: None,
         }
+    }
+
+    /// Share the daemon's conference registry so outbound calls can
+    /// join rooms over the WS protocol. Unset → outbound joins are
+    /// rejected with `conference_failed`, same as inbound.
+    pub fn with_conference(mut self, conference: ConferenceRegistry) -> Self {
+        self.conference = Some(conference);
+        self
     }
 }
 
@@ -164,6 +177,7 @@ impl OutboundOriginateHandle for OutboundService {
         let cdr_sink = Arc::clone(&self.cdr_sink);
         let webhook_sink = Arc::clone(&self.webhook_sink);
         let consult_registry = self.consult_registry.clone();
+        let conference = self.conference.clone();
 
         info!(call_id = %bridge_id_str, gateway = %gateway, "originating outbound call");
         let log_id = bridge_id_str.clone();
@@ -194,6 +208,7 @@ impl OutboundOriginateHandle for OutboundService {
                         cdr_sink,
                         webhook_sink,
                         consult_registry,
+                        conference,
                     };
                     run_call(originator, call, bridge, ctx).await;
                 }
@@ -252,6 +267,9 @@ struct OutboundCallContext {
     /// Register/deregister this leg as an attended-transfer consult
     /// target for the call's lifetime.
     consult_registry: ConsultRegistry,
+    /// Conference registry, shared with the controller so an outbound
+    /// bot can `conference_join`. `None` when conferencing is off.
+    conference: Option<ConferenceRegistry>,
 }
 
 /// Run an answered outbound call's audio bridge to completion, tear it
@@ -317,6 +335,7 @@ async fn run_call(
         media_tap: accepted.tap,
         transfer: Some(transfer),
         recording: None,
+        conference: ctx.conference.clone(),
     };
     let (controller, _handle) = CallController::new(cfg);
     let run_result = controller.run().await;
@@ -410,6 +429,7 @@ mod tests {
             cdr_sink: Arc::new(siphon_ai_cdr::NullSink),
             webhook_sink: Arc::new(siphon_ai_webhooks::NullSink),
             consult_registry: ConsultRegistry::new(),
+            conference: None,
         };
         let view = CallTerminationView {
             cause: CdrTerminationCause::ServerHangup,

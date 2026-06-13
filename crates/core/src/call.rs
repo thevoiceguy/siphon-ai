@@ -63,7 +63,9 @@ use siphon_ai_bridge::{
     connect_and_run, BridgeChannels, BridgeConfig, BridgeError, BridgeIn, CallId, DisconnectReason,
     ErrorCode, OutgoingEvent, StartMsg, StopReason,
 };
-use siphon_ai_media_glue::{MediaTap, MediaTapError, TapCommand, TapDisconnect};
+use siphon_ai_media_glue::{MediaTap, MediaTapError, RoomMembership, TapCommand, TapDisconnect};
+
+use crate::conference::{ConferenceError, ConferenceRegistry};
 use siphon_ai_recording::{
     RecControl, RecEvent, RecFrame, RecordingError, RecordingSetup, RecordingStats, RecordingWriter,
 };
@@ -118,6 +120,12 @@ pub struct CallControllerConfig {
     /// task, forks both audio legs to it via the tap, and finalizes the WAV
     /// at teardown. `None` → no recording.
     pub recording: Option<RecordingSetup>,
+
+    /// Conference registry (0.7.0). `Some` when `[conference].enabled`;
+    /// the controller routes `BridgeIn::ConferenceJoin` through it. `None`
+    /// → conferencing off, and a join request is answered with
+    /// `error { code: "conference_failed" }`. Cheap to clone (Arc inside).
+    pub conference: Option<ConferenceRegistry>,
 }
 
 /// Where in its life a call is. State transitions are logged at
@@ -351,7 +359,13 @@ impl CallController {
             media_tap,
             transfer,
             recording,
+            conference,
         } = cfg;
+
+        // Captured before `media_tap` moves into its task — a room
+        // locks to its first joiner's negotiated rate, and a join is
+        // rejected at any other rate (no resampling in 0.7.0).
+        let call_sample_rate = media_tap.sample_rate();
 
         log_state(&call_id, CallState::Initializing);
 
@@ -376,6 +390,13 @@ impl CallController {
         // back-pressure simple if a second BridgeIn::Transfer arrives
         // while the first is still in flight.
         let (transfer_result_tx, mut transfer_result_rx) = mpsc::channel::<TransferOutcome>(1);
+        // conference join task → controller: the outcome of an async
+        // `ConferenceRegistry::join`. Spawned (like REFER) so the
+        // round-trip to the room task never blocks the control loop.
+        // Cap a few deep so back-to-back joins (e.g. room-switch)
+        // don't drop a result.
+        let (conf_join_tx, mut conf_join_rx) =
+            mpsc::channel::<Result<RoomMembership, ConferenceError>>(4);
 
         let channels = BridgeChannels {
             audio_out_rx: caller_audio_rx,
@@ -558,6 +579,52 @@ impl CallController {
                         Some(BridgeIn::ResumeRecording { call_id: cid }) => {
                             route_rec_control(&rec_ctrl_tx, RecControl::Resume, "ResumeRecording", &cid);
                         }
+                        Some(BridgeIn::ConferenceJoin { call_id: cid, room_id }) => {
+                            // Async join (round-trips to the room task)
+                            // is spawned so the control loop never
+                            // blocks — same reasoning as REFER. The
+                            // task reports back on `conf_join_rx`,
+                            // which forwards the membership to the tap
+                            // (or emits `conference_failed`).
+                            match &conference {
+                                Some(registry) => {
+                                    debug!(ws_call_id = %cid, %room_id, "spawning conference join");
+                                    let registry = registry.clone();
+                                    let tx = conf_join_tx.clone();
+                                    let join_call_id = call_id.as_str().to_string();
+                                    tokio::spawn(async move {
+                                        let outcome = registry
+                                            .join(&room_id, &join_call_id, call_sample_rate)
+                                            .await;
+                                        let _ = tx.try_send(outcome);
+                                    });
+                                }
+                                None => {
+                                    warn!(
+                                        ws_call_id = %cid,
+                                        %room_id,
+                                        "ConferenceJoin received but conferencing is disabled; rejecting"
+                                    );
+                                    let _ = control_out_tx
+                                        .send(OutgoingEvent::Error {
+                                            code: ErrorCode::ConferenceFailed,
+                                            message: "conferencing is disabled on this daemon"
+                                                .to_string(),
+                                        })
+                                        .await;
+                                }
+                            }
+                        }
+                        Some(BridgeIn::ConferenceLeave { call_id: cid }) => {
+                            // The tap drops its RoomSender (→ the room
+                            // removes this call) and emits
+                            // `conference_left`. No registry round-trip
+                            // needed: leave is drop-driven (chunk 1).
+                            debug!(ws_call_id = %cid, "forwarding ConferenceLeave to tap");
+                            if let Err(e) = tap_cmd_tx.try_send(TapCommand::LeaveRoom) {
+                                warn!(error = %e, "tap command channel full or closed; dropping ConferenceLeave");
+                            }
+                        }
                         Some(BridgeIn::Mark { call_id: cid, name }) => {
                             debug!(ws_call_id = %cid, %name, "forwarding Mark to tap");
                             // Mark is a notification request — the
@@ -684,6 +751,51 @@ impl CallController {
                                 .send(OutgoingEvent::Error {
                                     code: ErrorCode::TransferFailed,
                                     message: format!("{status} {reason}"),
+                                })
+                                .await;
+                        }
+                    }
+                }
+
+                // Outcome of an async conference join. On success the
+                // membership is handed to the tap (which re-plumbs the
+                // audio and emits `conference_joined`); on failure the
+                // server gets `error { code: "conference_failed" }`
+                // and the call continues on its direct pair.
+                Some(outcome) = conf_join_rx.recv() => {
+                    match outcome {
+                        Ok(membership) => {
+                            let room_id = membership.room_id().to_string();
+                            if let Err(e) =
+                                tap_cmd_tx.try_send(TapCommand::JoinRoom { membership })
+                            {
+                                // The tap command channel is full or
+                                // gone — we can't re-plumb, and the
+                                // membership drops here (its RoomSender
+                                // Drop leaves the room cleanly). Tell
+                                // the server the join didn't take.
+                                warn!(
+                                    call_id = %call_id,
+                                    %room_id,
+                                    error = %e,
+                                    "tap command channel full or closed; conference join aborted"
+                                );
+                                let _ = control_out_tx
+                                    .send(OutgoingEvent::Error {
+                                        code: ErrorCode::ConferenceFailed,
+                                        message: "tap unavailable for conference join".to_string(),
+                                    })
+                                    .await;
+                            } else {
+                                info!(call_id = %call_id, %room_id, "joined conference room");
+                            }
+                        }
+                        Err(e) => {
+                            warn!(call_id = %call_id, error = %e, "conference join rejected");
+                            let _ = control_out_tx
+                                .send(OutgoingEvent::Error {
+                                    code: ErrorCode::ConferenceFailed,
+                                    message: e.to_string(),
                                 })
                                 .await;
                         }

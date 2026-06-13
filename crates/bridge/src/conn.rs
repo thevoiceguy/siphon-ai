@@ -54,7 +54,8 @@ use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStre
 use tracing::{debug, info, instrument, warn};
 
 use crate::protocol::{
-    BridgeIn, BridgeOut, CallId, DtmfMethod, ErrorCode, Seq, StartMsg, StopReason, WS_SUBPROTOCOL,
+    BridgeIn, BridgeOut, CallId, ConferenceLeftReason, DtmfMethod, ErrorCode, Seq, StartMsg,
+    StopReason, WS_SUBPROTOCOL,
 };
 
 /// Maximum size of any single text frame, per PROTOCOL.md §2.1.
@@ -193,6 +194,27 @@ pub enum OutgoingEvent {
     RecordingFailed {
         recording_id: String,
         reason: String,
+    },
+    /// This call joined a conference room → [`BridgeOut::ConferenceJoined`].
+    /// The conn stamps `call_id` + `seq`.
+    ConferenceJoined {
+        room_id: String,
+        participants: usize,
+    },
+    /// This call left a conference room → [`BridgeOut::ConferenceLeft`].
+    ConferenceLeft {
+        room_id: String,
+        reason: ConferenceLeftReason,
+    },
+    /// Another call joined this call's room → [`BridgeOut::ParticipantJoined`].
+    ParticipantJoined {
+        room_id: String,
+        participant_call_id: String,
+    },
+    /// Another call left this call's room → [`BridgeOut::ParticipantLeft`].
+    ParticipantLeft {
+        room_id: String,
+        participant_call_id: String,
     },
 }
 
@@ -591,6 +613,39 @@ fn build_bridge_out(event: OutgoingEvent, call_id: CallId, seq: Seq) -> BridgeOu
             recording_id,
             reason,
         },
+        OutgoingEvent::ConferenceJoined {
+            room_id,
+            participants,
+        } => BridgeOut::ConferenceJoined {
+            call_id,
+            seq,
+            room_id,
+            participants,
+        },
+        OutgoingEvent::ConferenceLeft { room_id, reason } => BridgeOut::ConferenceLeft {
+            call_id,
+            seq,
+            room_id,
+            reason,
+        },
+        OutgoingEvent::ParticipantJoined {
+            room_id,
+            participant_call_id,
+        } => BridgeOut::ParticipantJoined {
+            call_id,
+            seq,
+            room_id,
+            participant_call_id,
+        },
+        OutgoingEvent::ParticipantLeft {
+            room_id,
+            participant_call_id,
+        } => BridgeOut::ParticipantLeft {
+            call_id,
+            seq,
+            room_id,
+            participant_call_id,
+        },
     }
 }
 
@@ -607,6 +662,8 @@ fn bridge_in_call_id(msg: &BridgeIn) -> &str {
         BridgeIn::StopRecording { call_id } => call_id.as_str(),
         BridgeIn::PauseRecording { call_id } => call_id.as_str(),
         BridgeIn::ResumeRecording { call_id } => call_id.as_str(),
+        BridgeIn::ConferenceJoin { call_id, .. } => call_id.as_str(),
+        BridgeIn::ConferenceLeave { call_id } => call_id.as_str(),
     }
 }
 

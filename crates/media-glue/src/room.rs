@@ -46,6 +46,7 @@
 //! sink `try_send` observing a closed channel mid-tick.
 
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use forge_core::{AudioCodec, AudioFormat};
@@ -142,6 +143,28 @@ pub enum RoomEvent {
     ParticipantLeft { call_id: String },
 }
 
+/// Room-lifecycle notification delivered to the optional
+/// [`RoomObserver`] passed to [`spawn_room`]. The daemon wires this to
+/// the `conference_created` / `conference_ended` webhooks (0.7.0 §2.6);
+/// media-glue stays webhook-agnostic by taking a plain callback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomLifecycle {
+    /// The room task started (mixer built). Fires once.
+    Created { room_id: String, sample_rate: u32 },
+    /// The room task is exiting — last member left, or an operator
+    /// force-ended it. Fires once, paired with `Created`.
+    Ended {
+        room_id: String,
+        duration_ms: u64,
+        peak_participants: usize,
+    },
+}
+
+/// Sync callback the room invokes on create/end. Invoked from the room
+/// task, so the implementation must not block (the daemon's impl spawns
+/// the actual webhook send).
+pub type RoomObserver = Arc<dyn Fn(RoomLifecycle) + Send + Sync>;
+
 /// Parameters a room is spawned with. The sample rate is the first
 /// joiner's negotiated rate; the caps come from `[conference]`.
 #[derive(Debug, Clone)]
@@ -171,6 +194,11 @@ enum RoomCtrl {
     ClearInput {
         participant: String,
     },
+    /// Force the room to end now (operator
+    /// `DELETE /admin/v1/conferences/:id`). The task exits, dropping
+    /// every member's sink senders — each tap sees its sinks close and
+    /// reverts to its direct pair (`conference_left { room_closed }`).
+    EndRoom,
 }
 
 /// Cheap-to-clone handle to a running room. Held by the
@@ -180,6 +208,10 @@ pub struct RoomHandle {
     room_id: String,
     sample_rate: u32,
     ctrl_tx: mpsc::Sender<RoomCtrl>,
+    /// Live member call-ids, kept current by the room task on every
+    /// join/leave. Read (sync, off the audio path) by the admin
+    /// `GET /admin/v1/conferences` snapshot.
+    participants: Arc<RwLock<Vec<String>>>,
 }
 
 impl RoomHandle {
@@ -192,11 +224,27 @@ impl RoomHandle {
         self.sample_rate
     }
 
-    /// True once the room task has exited (last member left). A
-    /// closed handle never accepts another join — the registry
-    /// replaces it with a fresh room.
+    /// True once the room task has exited (last member left, or
+    /// force-ended). A closed handle never accepts another join — the
+    /// registry replaces it with a fresh room.
     pub fn is_closed(&self) -> bool {
         self.ctrl_tx.is_closed()
+    }
+
+    /// Snapshot of the member call-ids currently in the room. Sorted
+    /// for stable output. Empty for a closed or just-created room.
+    pub fn participants(&self) -> Vec<String> {
+        self.participants
+            .read()
+            .expect("room participants lock poisoned")
+            .clone()
+    }
+
+    /// Force the room to end (operator action). Best-effort: a full
+    /// ctrl channel or an already-gone room is a no-op (the room is
+    /// ending regardless).
+    pub fn end(&self) {
+        let _ = self.ctrl_tx.try_send(RoomCtrl::EndRoom);
     }
 
     /// Join `call_id` to the room. On success the returned
@@ -374,16 +422,28 @@ fn fan_out(members: &HashMap<String, Member>, event: &RoomEvent, exclude: &str) 
 }
 
 /// Spawn a room task. Returns immediately; the room runs until its
-/// last member leaves.
-pub fn spawn_room(cfg: RoomConfig) -> RoomHandle {
+/// last member leaves (or it's force-ended). `observer`, when set, is
+/// invoked with [`RoomLifecycle::Created`] / `Ended` for the
+/// `conference_*` webhooks.
+pub fn spawn_room(cfg: RoomConfig, observer: Option<RoomObserver>) -> RoomHandle {
     let (ctrl_tx, ctrl_rx) = mpsc::channel(CTRL_CHANNEL_CAPACITY);
     let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_FRAMES);
+    let participants = Arc::new(RwLock::new(Vec::new()));
     let handle = RoomHandle {
         room_id: cfg.room_id.clone(),
         sample_rate: cfg.sample_rate,
         ctrl_tx: ctrl_tx.clone(),
+        participants: Arc::clone(&participants),
     };
-    tokio::spawn(run_room(cfg, ctrl_tx, ctrl_rx, input_tx, input_rx));
+    tokio::spawn(run_room(
+        cfg,
+        ctrl_tx,
+        ctrl_rx,
+        input_tx,
+        input_rx,
+        observer,
+        participants,
+    ));
     handle
 }
 
@@ -401,12 +461,15 @@ impl Drop for GaugeGuard {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_room(
     cfg: RoomConfig,
     ctrl_tx: mpsc::Sender<RoomCtrl>,
     mut ctrl_rx: mpsc::Receiver<RoomCtrl>,
     input_tx: mpsc::Sender<(String, Vec<i16>)>,
     mut input_rx: mpsc::Receiver<(String, Vec<i16>)>,
+    observer: Option<RoomObserver>,
+    shared: Arc<RwLock<Vec<String>>>,
 ) {
     let frame_size = (cfg.sample_rate / 1000) as usize * FRAME_MS as usize;
     let mixer = match AudioMixer::with_options(
@@ -435,6 +498,14 @@ async fn run_room(
     let _active = GaugeGuard::new(METRIC_CONFERENCES_ACTIVE, 1.0);
     let mut participants_gauge: Option<GaugeGuard> = None;
     info!(room_id = %cfg.room_id, sample_rate = cfg.sample_rate, "conference room created");
+    if let Some(obs) = &observer {
+        obs(RoomLifecycle::Created {
+            room_id: cfg.room_id.clone(),
+            sample_rate: cfg.sample_rate,
+        });
+    }
+    let started_at = tokio::time::Instant::now();
+    let mut peak_participants = 0usize;
 
     let mut members: HashMap<String, Member> = HashMap::new();
     let mut ever_joined = false;
@@ -466,7 +537,7 @@ async fn run_room(
                         );
                         if result.is_ok() {
                             ever_joined = true;
-                            bump_participants(&mut participants_gauge, members.len());
+                            refresh_membership(&members, &mut participants_gauge, &shared, &mut peak_participants);
                             if cfg.join_tones {
                                 play_tone(&mixer, JOIN_TONE_HZ, cfg.sample_rate);
                             }
@@ -478,7 +549,7 @@ async fn run_room(
                     }
                     RoomCtrl::Leave { call_id } => {
                         if remove_member(&cfg, &mixer, &mut members, &call_id) {
-                            bump_participants(&mut participants_gauge, members.len());
+                            refresh_membership(&members, &mut participants_gauge, &shared, &mut peak_participants);
                             if cfg.join_tones {
                                 play_tone(&mixer, LEAVE_TONE_HZ, cfg.sample_rate);
                             }
@@ -488,6 +559,14 @@ async fn run_room(
                         // Unknown id just means the member already
                         // left — a harmless race.
                         let _ = mixer.clear_buffer(&participant);
+                    }
+                    RoomCtrl::EndRoom => {
+                        info!(
+                            room_id = %cfg.room_id,
+                            calls = members.len(),
+                            "conference room force-ended"
+                        );
+                        break;
                     }
                 }
             }
@@ -525,7 +604,7 @@ async fn run_room(
                     .collect();
                 for call_id in abandoned {
                     if remove_member(&cfg, &mixer, &mut members, &call_id) {
-                        bump_participants(&mut participants_gauge, members.len());
+                        refresh_membership(&members, &mut participants_gauge, &shared, &mut peak_participants);
                         if cfg.join_tones {
                             play_tone(&mixer, LEAVE_TONE_HZ, cfg.sample_rate);
                         }
@@ -534,11 +613,37 @@ async fn run_room(
 
                 if ever_joined && members.is_empty() {
                     info!(room_id = %cfg.room_id, "last member left; conference room ends");
-                    return;
+                    break;
                 }
             }
         }
     }
+
+    // Single exit point for a room that actually ran (last member left
+    // or force-ended). The early mixer-build failure returns before
+    // this, so a `Created` always pairs with exactly one `Ended`.
+    if let Some(obs) = &observer {
+        obs(RoomLifecycle::Ended {
+            room_id: cfg.room_id.clone(),
+            duration_ms: started_at.elapsed().as_millis() as u64,
+            peak_participants,
+        });
+    }
+}
+
+/// Recompute the participants gauge, the peak-participant high-water
+/// mark, and the shared member-id snapshot after a membership change.
+fn refresh_membership(
+    members: &HashMap<String, Member>,
+    gauge: &mut Option<GaugeGuard>,
+    shared: &RwLock<Vec<String>>,
+    peak: &mut usize,
+) {
+    bump_participants(gauge, members.len());
+    *peak = (*peak).max(members.len());
+    let mut ids: Vec<String> = members.keys().cloned().collect();
+    ids.sort();
+    *shared.write().expect("room participants lock poisoned") = ids;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -789,7 +894,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_calls_hear_each_other_minus_self() {
-        let handle = spawn_room(cfg("r1", 8000, 8, false));
+        let handle = spawn_room(cfg("r1", 8000, 8, false), None);
         let a = handle.join("call-a", 8000).await.expect("join a");
         let b = handle.join("call-b", 8000).await.expect("join b");
         let (a_send, mut a_sip_out, mut a_ws_out, _a_events) = a.split();
@@ -831,7 +936,7 @@ mod tests {
 
     #[tokio::test]
     async fn sample_rate_mismatch_is_rejected() {
-        let handle = spawn_room(cfg("r2", 8000, 8, false));
+        let handle = spawn_room(cfg("r2", 8000, 8, false), None);
         let _a = handle.join("call-a", 8000).await.expect("join a");
         let err = handle.join("call-b", 16000).await.unwrap_err();
         assert_eq!(
@@ -845,7 +950,7 @@ mod tests {
 
     #[tokio::test]
     async fn room_full_rejects_join_beyond_cap() {
-        let handle = spawn_room(cfg("r3", 8000, 2, false));
+        let handle = spawn_room(cfg("r3", 8000, 2, false), None);
         let _a = handle.join("call-a", 8000).await.expect("join a");
         let _b = handle.join("call-b", 8000).await.expect("join b");
         let err = handle.join("call-c", 8000).await.unwrap_err();
@@ -854,7 +959,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_join_is_rejected() {
-        let handle = spawn_room(cfg("r4", 8000, 8, false));
+        let handle = spawn_room(cfg("r4", 8000, 8, false), None);
         let _a = handle.join("call-a", 8000).await.expect("join a");
         let err = handle.join("call-a", 8000).await.unwrap_err();
         assert_eq!(err, RoomJoinError::AlreadyJoined);
@@ -862,7 +967,7 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_leave_closes_sinks_and_last_leave_ends_room() {
-        let handle = spawn_room(cfg("r5", 8000, 8, false));
+        let handle = spawn_room(cfg("r5", 8000, 8, false), None);
         let a = handle.join("call-a", 8000).await.expect("join a");
         let (a_send, mut a_sip_out, _a_ws_out, _a_events) = a.split();
 
@@ -896,7 +1001,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_membership_is_reaped_without_explicit_leave() {
-        let handle = spawn_room(cfg("r6", 8000, 8, false));
+        let handle = spawn_room(cfg("r6", 8000, 8, false), None);
         let a = handle.join("call-a", 8000).await.expect("join a");
         // Simulate a tap teardown that never sends LeaveRoom: drop
         // everything (RoomSender's Drop fires Leave; even without
@@ -915,7 +1020,7 @@ mod tests {
 
     #[tokio::test]
     async fn abandoned_member_reaped_by_tick_even_if_leave_is_lost() {
-        let handle = spawn_room(cfg("r7", 8000, 8, false));
+        let handle = spawn_room(cfg("r7", 8000, 8, false), None);
         let a = handle.join("call-a", 8000).await.expect("join a");
         let (a_send, a_sip_out, a_ws_out, _a_events) = a.split();
         // Drop only the receivers and *forget* the sender's Drop by
@@ -936,7 +1041,7 @@ mod tests {
 
     #[tokio::test]
     async fn join_tone_is_audible_without_any_input() {
-        let handle = spawn_room(cfg("r8", 8000, 8, true));
+        let handle = spawn_room(cfg("r8", 8000, 8, true), None);
         let a = handle.join("call-a", 8000).await.expect("join a");
         let b = handle.join("call-b", 8000).await.expect("join b");
         let (_a_send, mut a_sip_out, _a_ws_out, _a_events) = a.split();
@@ -951,7 +1056,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_ws_input_drops_buffered_bot_audio() {
-        let handle = spawn_room(cfg("r9", 8000, 8, false));
+        let handle = spawn_room(cfg("r9", 8000, 8, false), None);
         let a = handle.join("call-a", 8000).await.expect("join a");
         let b = handle.join("call-b", 8000).await.expect("join b");
         let (a_send, _a_sip_out, _a_ws_out, _a_events) = a.split();

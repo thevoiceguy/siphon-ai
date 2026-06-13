@@ -96,6 +96,7 @@ use crate::call::{
     CallController, CallControllerConfig, CallOutcome, CallTermination, RecordingSummary,
 };
 use crate::conference::ConferenceRegistry;
+use crate::registry::CallControlRegistry;
 use crate::registry::CallRegistry;
 use crate::registry::ConsultRegistry;
 use crate::transfer::{DialogSource, TransferContext};
@@ -1464,6 +1465,10 @@ pub struct BridgingAcceptor {
     /// can `conference_join`. `None` → conferencing off, and joins are
     /// rejected with `conference_failed`. Cheap to clone (Arc inside).
     conference: Option<ConferenceRegistry>,
+    /// Bridge-id → handle table the admin conference API uses to reach
+    /// any active call (0.7.0). Populated for every accepted call,
+    /// drained at teardown. Empty/unused when conferencing is off.
+    control_registry: CallControlRegistry,
 }
 
 /// Daemon-wide REFER plumbing (shared across every accepted call).
@@ -1679,6 +1684,7 @@ impl BridgingAcceptor {
             hep: None,
             recording: RecordingConfig::default(),
             conference: None,
+            control_registry: CallControlRegistry::new(),
         }
     }
 
@@ -1802,10 +1808,25 @@ impl BridgingAcceptor {
         self
     }
 
+    /// Install the bridge-id call-control registry (0.7.0) the admin
+    /// conference API uses to reach accepted calls. Cheap to clone —
+    /// the daemon shares one instance with the outbound service and
+    /// the admin handle.
+    pub fn with_control_registry(mut self, control_registry: CallControlRegistry) -> Self {
+        self.control_registry = control_registry;
+        self
+    }
+
     /// The registry this acceptor populates. Cheap to clone — share
     /// it with the SIP-side BYE/CANCEL handler.
     pub fn registry(&self) -> &CallRegistry {
         &self.registry
+    }
+
+    /// The bridge-id call-control registry. Shared with the admin
+    /// conference handle so it can resolve any accepted call.
+    pub fn control_registry(&self) -> &CallControlRegistry {
+        &self.control_registry
     }
 }
 
@@ -2674,6 +2695,9 @@ impl BridgingAcceptor {
             )
             .with_forge_call_id(prepared.forge_call_id.clone()),
         );
+        // Bridge-id handle table for the admin conference API — every
+        // accepted call is reachable by the id operators see.
+        self.control_registry.insert(cleanup_handle.clone());
 
         // Per-route counter is owned-by-route — bounded cardinality
         // by config (operators have tens of routes, not millions).
@@ -2708,6 +2732,7 @@ impl BridgingAcceptor {
         controller.attach_transfer_flow(dialog_flow.clone());
         let media = Arc::clone(&self.media);
         let registry = self.registry.clone();
+        let control_registry = self.control_registry.clone();
         let cdr_sink = Arc::clone(&self.cdr_sink);
         let webhook_sink = Arc::clone(&self.webhook_sink);
         // Daemon-wide UAC + DialogManager Arc clones so the cleanup
@@ -2753,6 +2778,7 @@ impl BridgingAcceptor {
                 send_outbound_bye(teardown.as_ref(), &sip_call_id, bridge_call_id.as_str()).await;
             }
             registry.remove(&sip_call_id);
+            control_registry.remove(bridge_call_id.as_str());
             if let Err(e) = media.session_manager().stop_session(&forge_call_id).await {
                 warn!(
                     call_id = %bridge_call_id,

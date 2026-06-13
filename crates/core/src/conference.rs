@@ -19,11 +19,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use chrono::Utc;
 use parking_lot::RwLock;
 use thiserror::Error;
 use tracing::debug;
 
-use siphon_ai_media_glue::{spawn_room, RoomConfig, RoomHandle, RoomJoinError, RoomMembership};
+use siphon_ai_media_glue::{
+    spawn_room, RoomConfig, RoomHandle, RoomJoinError, RoomLifecycle, RoomMembership, RoomObserver,
+};
+use siphon_ai_webhooks::{
+    ConferenceCreatedEvent, ConferenceEndedEvent, WebhookEvent, WebhookSinkHandle, WEBHOOK_VERSION,
+};
 
 /// Metric name; the literal must match the const in
 /// `siphon-ai-telemetry::metrics` (same pattern as the tap metrics).
@@ -70,6 +76,9 @@ pub enum ConferenceError {
     #[error("conference room limit reached ({max_rooms})")]
     TooManyRooms { max_rooms: usize },
 
+    #[error("a conference room with that id already exists")]
+    RoomExists,
+
     #[error(transparent)]
     Join(#[from] RoomJoinError),
 }
@@ -80,6 +89,7 @@ impl ConferenceError {
         match self {
             ConferenceError::Disabled => "disabled",
             ConferenceError::TooManyRooms { .. } => "too_many_rooms",
+            ConferenceError::RoomExists => "room_exists",
             ConferenceError::Join(RoomJoinError::RoomFull { .. }) => "room_full",
             ConferenceError::Join(RoomJoinError::SampleRateMismatch { .. }) => "rate_mismatch",
             ConferenceError::Join(RoomJoinError::AlreadyJoined) => "already_joined",
@@ -88,11 +98,36 @@ impl ConferenceError {
     }
 }
 
+/// A live conference room and its members — the
+/// `GET /admin/v1/conferences` view (DEV_PLAN_0.7.0.md §2.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConferenceSnapshot {
+    pub room_id: String,
+    pub sample_rate: u32,
+    /// Member call-ids (bridge ids), sorted.
+    pub participants: Vec<String>,
+}
+
 /// Process-wide room table. Cheap to clone (`Arc` inside).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConferenceRegistry {
     limits: ConferenceLimits,
     inner: Arc<RwLock<HashMap<String, RoomHandle>>>,
+    /// When set, the registry fires `conference_created` /
+    /// `conference_ended` webhooks via a per-room observer. `None` in
+    /// tests / when webhooks aren't configured.
+    webhook_sink: Option<WebhookSinkHandle>,
+}
+
+impl std::fmt::Debug for ConferenceRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `WebhookSinkHandle` is a trait object without Debug; redact it.
+        f.debug_struct("ConferenceRegistry")
+            .field("limits", &self.limits)
+            .field("live_rooms", &self.live_rooms())
+            .field("webhooks", &self.webhook_sink.is_some())
+            .finish()
+    }
 }
 
 impl ConferenceRegistry {
@@ -100,11 +135,108 @@ impl ConferenceRegistry {
         Self {
             limits,
             inner: Arc::new(RwLock::new(HashMap::new())),
+            webhook_sink: None,
         }
+    }
+
+    /// Emit `conference_created` / `conference_ended` webhooks for the
+    /// rooms this registry spawns.
+    pub fn with_webhooks(mut self, sink: WebhookSinkHandle) -> Self {
+        self.webhook_sink = Some(sink);
+        self
     }
 
     pub fn limits(&self) -> &ConferenceLimits {
         &self.limits
+    }
+
+    /// Build the per-room lifecycle observer that fires the
+    /// conference webhooks. `None` when no sink is configured (so
+    /// `spawn_room` skips the callback entirely).
+    fn room_observer(&self) -> Option<RoomObserver> {
+        let sink = self.webhook_sink.clone()?;
+        Some(Arc::new(move |ev: RoomLifecycle| {
+            // The observer runs on the room task; the webhook send is
+            // async + best-effort, so spawn it rather than block.
+            let sink = sink.clone();
+            let event = match ev {
+                RoomLifecycle::Created {
+                    room_id,
+                    sample_rate,
+                } => WebhookEvent::ConferenceCreated(ConferenceCreatedEvent {
+                    version: WEBHOOK_VERSION,
+                    room_id,
+                    sample_rate,
+                    timestamp: Utc::now(),
+                }),
+                RoomLifecycle::Ended {
+                    room_id,
+                    duration_ms,
+                    peak_participants,
+                } => WebhookEvent::ConferenceEnded(ConferenceEndedEvent {
+                    version: WEBHOOK_VERSION,
+                    room_id,
+                    timestamp: Utc::now(),
+                    duration_ms,
+                    peak_participants,
+                }),
+            };
+            tokio::spawn(async move { sink.emit(event).await });
+        }))
+    }
+
+    /// Snapshot of every live room and its members — the admin list
+    /// view. Off the audio path; reads each room's shared member list.
+    pub fn snapshot(&self) -> Vec<ConferenceSnapshot> {
+        let mut rooms: Vec<ConferenceSnapshot> = self
+            .inner
+            .read()
+            .values()
+            .filter(|h| !h.is_closed())
+            .map(|h| ConferenceSnapshot {
+                room_id: h.room_id().to_string(),
+                sample_rate: h.sample_rate(),
+                participants: h.participants(),
+            })
+            .collect();
+        rooms.sort_by(|a, b| a.room_id.cmp(&b.room_id));
+        rooms
+    }
+
+    /// Pre-create an empty room at `sample_rate` (operator
+    /// `POST /admin/v1/conferences`). Errors if conferencing is off, a
+    /// live room with that id already exists, or the room cap is
+    /// reached. The room survives empty until force-ended or its
+    /// first-and-last member leaves.
+    pub fn create_room(&self, room_id: &str, sample_rate: u32) -> Result<(), ConferenceError> {
+        if !self.limits.enabled {
+            return Err(ConferenceError::Disabled);
+        }
+        if self
+            .inner
+            .read()
+            .get(room_id)
+            .is_some_and(|h| !h.is_closed())
+        {
+            return Err(ConferenceError::RoomExists);
+        }
+        // `live_handle_or_create` does the cap check + prune under the
+        // write lock and spawns the room with the webhook observer.
+        self.live_handle_or_create(room_id, sample_rate).map(|_| ())
+    }
+
+    /// Force-end a room (operator `DELETE /admin/v1/conferences/:id`).
+    /// Returns `false` when no live room with that id exists.
+    pub fn end_room(&self, room_id: &str) -> bool {
+        let mut guard = self.inner.write();
+        match guard.get(room_id) {
+            Some(h) if !h.is_closed() => {
+                h.end();
+                guard.remove(room_id);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Join `call_id` (negotiated at `sample_rate`) to `room_id`,
@@ -202,12 +334,15 @@ impl ConferenceRegistry {
                 max_rooms: self.limits.max_rooms,
             });
         }
-        let handle = spawn_room(RoomConfig {
-            room_id: room_id.to_string(),
-            sample_rate,
-            max_calls: self.limits.max_participants_per_room,
-            join_tones: self.limits.join_tones,
-        });
+        let handle = spawn_room(
+            RoomConfig {
+                room_id: room_id.to_string(),
+                sample_rate,
+                max_calls: self.limits.max_participants_per_room,
+                join_tones: self.limits.join_tones,
+            },
+            self.room_observer(),
+        );
         guard.insert(room_id.to_string(), handle.clone());
         Ok(handle)
     }

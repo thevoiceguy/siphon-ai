@@ -67,6 +67,17 @@ pub enum WebhookEvent {
     /// busy / declined / no-answer / rejected / unreachable / setup
     /// failure. Terminal: no `CallEnd` (and no CDR) follows.
     OutboundFailed(OutboundFailedEvent),
+
+    /// Fired when a conference room is created — on the first
+    /// `conference_join` for a `room_id`, or an admin pre-create
+    /// (`POST /admin/v1/conferences`). One `ConferenceEnded` with the
+    /// same `room_id` follows when the room ends. Added in 0.7.0.
+    ConferenceCreated(ConferenceCreatedEvent),
+
+    /// Fired when a conference room ends — its last member left, or an
+    /// operator force-ended it (`DELETE /admin/v1/conferences/:id`).
+    /// Pairs 1:1 with a `ConferenceCreated` for the same `room_id`.
+    ConferenceEnded(ConferenceEndedEvent),
 }
 
 impl WebhookEvent {
@@ -81,6 +92,8 @@ impl WebhookEvent {
             WebhookEvent::OutboundInitiated(_) => "outbound_initiated",
             WebhookEvent::OutboundAnswered(_) => "outbound_answered",
             WebhookEvent::OutboundFailed(_) => "outbound_failed",
+            WebhookEvent::ConferenceCreated(_) => "conference_created",
+            WebhookEvent::ConferenceEnded(_) => "conference_ended",
         }
     }
 
@@ -95,6 +108,9 @@ impl WebhookEvent {
             WebhookEvent::OutboundInitiated(e) => Some(&e.call_id),
             WebhookEvent::OutboundAnswered(e) => Some(&e.call_id),
             WebhookEvent::OutboundFailed(e) => Some(&e.call_id),
+            // Conference events are room-scoped, not call-scoped.
+            WebhookEvent::ConferenceCreated(_) => None,
+            WebhookEvent::ConferenceEnded(_) => None,
         }
     }
 }
@@ -212,6 +228,34 @@ pub struct OutboundFailedEvent {
     /// `declined` / `no_answer` / `rejected` / `unreachable` /
     /// `failed`.
     pub cause: String,
+}
+
+/// A conference room was created (0.7.0).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConferenceCreatedEvent {
+    pub version: u32,
+    /// The room's id (the `room_id` callers name in `conference_join`).
+    pub room_id: String,
+    /// The sample rate the room locked to (8000 or 16000) — its first
+    /// joiner's, or the rate an admin pre-create specified.
+    pub sample_rate: u32,
+    /// When the room was created (UTC).
+    pub timestamp: DateTime<Utc>,
+}
+
+/// A conference room ended (0.7.0). Pairs 1:1 with a
+/// `ConferenceCreated` for the same `room_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConferenceEndedEvent {
+    pub version: u32,
+    pub room_id: String,
+    /// When the room ended (UTC).
+    pub timestamp: DateTime<Utc>,
+    /// How long the room existed, in milliseconds.
+    pub duration_ms: u64,
+    /// The most member calls in the room at any one time over its
+    /// lifetime.
+    pub peak_participants: usize,
 }
 
 #[cfg(test)]

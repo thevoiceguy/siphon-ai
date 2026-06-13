@@ -8,6 +8,7 @@
 pub mod acceptor;
 pub mod call;
 pub mod conference;
+pub mod conference_admin;
 pub mod outbound;
 pub mod outbound_service;
 pub mod registry;
@@ -22,13 +23,14 @@ pub use acceptor::{
 };
 pub use call::{
     CallController, CallControllerConfig, CallError, CallHandle, CallOutcome, CallState,
-    CallTermination,
+    CallTermination, ConferenceCommand,
 };
-pub use conference::{ConferenceError, ConferenceLimits, ConferenceRegistry};
+pub use conference::{ConferenceError, ConferenceLimits, ConferenceRegistry, ConferenceSnapshot};
+pub use conference_admin::ConferenceAdmin;
 pub use outbound::{
     NotAnsweredCause, OutboundCall, OutboundError, OutboundGuard, OutboundOriginator,
     OutboundPermit, OutboundRejection, StaticCredentials,
 };
 pub use outbound_service::{OutboundGateway, OutboundService};
-pub use registry::{CallEntry, CallRegistry, ConsultRegistry};
+pub use registry::{CallControlRegistry, CallEntry, CallRegistry, ConsultRegistry};
 pub use transfer::{DialogSource, TransferContext, TransferOutcome};

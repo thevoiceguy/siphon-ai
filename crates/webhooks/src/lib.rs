@@ -24,8 +24,9 @@ pub mod http;
 pub mod sink;
 
 pub use event::{
-    CallEndEvent, CallStartEvent, OutboundAnsweredEvent, OutboundFailedEvent,
-    OutboundInitiatedEvent, RegistrationStateChangedEvent, WebhookEvent, WEBHOOK_VERSION,
+    CallEndEvent, CallStartEvent, ConferenceCreatedEvent, ConferenceEndedEvent,
+    OutboundAnsweredEvent, OutboundFailedEvent, OutboundInitiatedEvent,
+    RegistrationStateChangedEvent, WebhookEvent, WEBHOOK_VERSION,
 };
 pub use http::{HttpSink, HttpSinkConfig};
 pub use sink::{FilteredSink, NullSink, WebhookSink, WebhookSinkHandle};

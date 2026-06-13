@@ -1418,12 +1418,15 @@ mod tests {
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
         let _join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
 
-        let room = crate::room::spawn_room(crate::room::RoomConfig {
-            room_id: "r-tap".into(),
-            sample_rate: 8000,
-            max_calls: 8,
-            join_tones: false,
-        });
+        let room = crate::room::spawn_room(
+            crate::room::RoomConfig {
+                room_id: "r-tap".into(),
+                sample_rate: 8000,
+                max_calls: 8,
+                join_tones: false,
+            },
+            None,
+        );
         let membership_a = room.join("call-a", 8000).await.expect("join a");
         let membership_b = room.join("call-b", 8000).await.expect("join b");
         let (_b_send, mut b_sip_out, _b_ws_out, _b_events) = membership_b.split();

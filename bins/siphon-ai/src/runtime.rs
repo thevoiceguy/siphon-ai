@@ -77,9 +77,9 @@ use siphon_ai_config::{
     ObservabilityConfig, SipConfig, SipTlsConfig, SipTransport, WebhooksConfig,
 };
 use siphon_ai_core::{
-    default_call_id_factory, BridgingAcceptor, CallRegistry, ConferenceLimits, ConferenceRegistry,
-    ConsultRegistry, OutboundGateway, OutboundGuard, OutboundOriginator, OutboundService,
-    StaticCredentials,
+    default_call_id_factory, BridgingAcceptor, CallControlRegistry, CallRegistry, ConferenceAdmin,
+    ConferenceLimits, ConferenceRegistry, ConsultRegistry, OutboundGateway, OutboundGuard,
+    OutboundOriginator, OutboundService, StaticCredentials,
 };
 use siphon_ai_media_glue::MediaSetup;
 use siphon_ai_sip_glue::{
@@ -87,7 +87,10 @@ use siphon_ai_sip_glue::{
     RoutingHandler,
 };
 use siphon_ai_telemetry::{
-    admin::{AdminCallRegistry, AdminOutbound, AdminState, CallRegistryHandle, RegistrationRow},
+    admin::{
+        AdminCallRegistry, AdminConference, AdminOutbound, AdminState, CallRegistryHandle,
+        RegistrationRow,
+    },
     install_recorder, HepTelemetry, HepTelemetryBuild, HepWorkerHandle, LogFilterHandle,
     ObservabilityServer, ReadinessFlag,
 };
@@ -269,19 +272,28 @@ impl Runtime {
         // `[conference].enabled = false` (the default) — no registry is
         // allocated and joins are rejected with `conference_failed`.
         let conference_registry = if conference.enabled {
-            Some(ConferenceRegistry::new(ConferenceLimits {
-                enabled: true,
-                max_rooms: conference.max_rooms,
-                max_participants_per_room: conference.max_participants_per_room,
-                join_tones: conference.join_tones,
-            }))
+            Some(
+                ConferenceRegistry::new(ConferenceLimits {
+                    enabled: true,
+                    max_rooms: conference.max_rooms,
+                    max_participants_per_room: conference.max_participants_per_room,
+                    join_tones: conference.join_tones,
+                })
+                // conference_created / conference_ended webhooks.
+                .with_webhooks(Arc::clone(&webhook_sink)),
+            )
         } else {
             None
         };
+        // Bridge-id → CallHandle table the admin conference API uses to
+        // reach any active call (inbound or outbound). Shared by the
+        // acceptor, the outbound service, and the ConferenceAdmin.
+        // Cheap and empty when conferencing is off.
+        let control_registry = CallControlRegistry::new();
 
         let mut acceptor_builder = BridgingAcceptor::new(media_setup, bridge_defaults, registry.clone())
             .with_cdr_sink(cdr_sink)
-            .with_webhook_sink(webhook_sink)
+            .with_webhook_sink(Arc::clone(&webhook_sink))
             .with_session_timer_policy(session_timer_policy)
             .with_call_progress(sip.call_progress)
             .with_verifier(verifier)
@@ -289,7 +301,8 @@ impl Runtime {
             // Share the same HEP worker the SIP/RTCP/CDR emitters use so
             // the verstat chunk lands on the same Homer call view.
             .with_hep_telemetry(hep_telemetry.clone())
-            .with_recording(recording);
+            .with_recording(recording)
+            .with_control_registry(control_registry.clone());
         if let Some(reg) = &conference_registry {
             acceptor_builder = acceptor_builder.with_conference(reg.clone());
         }
@@ -552,7 +565,8 @@ impl Runtime {
                 consult_registry.clone(),
             );
             // Outbound bots can join conferences too (§9.1 — a room is
-            // composed of any active calls). Share the same registry.
+            // composed of any active calls). Share the same registries.
+            service = service.with_control_registry(control_registry.clone());
             if let Some(reg) = &conference_registry {
                 service = service.with_conference(reg.clone());
             }
@@ -588,6 +602,11 @@ impl Runtime {
             log_filter: Some(log_filter),
             hep: hep_telemetry.clone(),
             outbound: outbound_handle,
+            // Conference admin CRUD, only when conferencing is on.
+            conference: conference_registry.as_ref().map(|reg| {
+                Arc::new(ConferenceAdmin::new(reg.clone(), control_registry.clone()))
+                    as AdminConference
+            }),
         };
         let observability_server = build_observability(
             observability,

@@ -309,6 +309,11 @@ the listener on a private network.
 | GET    | `/admin/log`                  | —               | Current `tracing` filter directive. |
 | PUT    | `/admin/log`                  | text directive  | Replace the filter (e.g., `siphon_ai=info,siphon_ai_bridge=debug`). Returns the previous filter. |
 | POST   | `/admin/v1/calls`             | JSON (below)    | **Originate an outbound call** (0.6.0). Returns `202 {"call_id": "..."}`; the call proceeds asynchronously. `501` when `[outbound]` is disabled. |
+| GET    | `/admin/v1/conferences`       | —               | **List conference rooms** + members (0.7.0). `501` when `[conference]` is disabled. |
+| POST   | `/admin/v1/conferences`       | JSON (opt.)     | **Pre-create a room** (0.7.0). Body `{room_id?, sample_rate?}`; returns `201 {"room_id": "..."}`. |
+| DELETE | `/admin/v1/conferences/:id`   | —               | **Force-end a room** (0.7.0). Every member reverts to its direct pair (`conference_left { room_closed }`). `404` if unknown. |
+| POST   | `/admin/v1/conferences/:id/participants`          | JSON | **Add a call to a room** (0.7.0). Body `{call_id}`; `202` (dispatched). |
+| DELETE | `/admin/v1/conferences/:id/participants/:call_id` | —    | **Remove a call from a room** (0.7.0). `202` (dispatched). |
 
 ### `POST /admin/v1/calls` — outbound origination
 
@@ -340,6 +345,38 @@ target / no ws_url / invalid JSON), `503` (`max_concurrent` reached), `429`
 out-of-band via lifecycle webhooks: `outbound_initiated`, then exactly one
 of `outbound_answered` (followed by `call_end` + a CDR when the call
 finishes) or `outbound_failed` (see [Lifecycle webhooks](#lifecycle-webhooks)).
+
+### `/admin/v1/conferences` — conference admin (0.7.0)
+
+Requires `[conference].enabled = true` (all routes `501` otherwise). Same
+no-auth posture as the originate API — keep the listener private. A room is
+N calls sharing one mixed audio room; see `docs/CONFIG.md` `[conference]`
+and the WS protocol's `conference_*` messages (`docs/PROTOCOL.md` §3.12 / §4.8).
+
+```sh
+# Who's in which room
+curl -s http://localhost:9091/admin/v1/conferences
+# → {"count":1,"conferences":[{"room_id":"support-7","sample_rate":8000,
+#     "participants":["siphon-a","siphon-b"]}]}
+
+# Pull an active call into a room (creates it if absent)
+curl -X POST http://localhost:9091/admin/v1/conferences/support-7/participants \
+    -d '{"call_id":"siphon-c"}'        # → 202
+
+# Drop one call back to its private bot
+curl -X DELETE http://localhost:9091/admin/v1/conferences/support-7/participants/siphon-c  # → 202
+
+# End the whole room (every member reverts to its direct pair)
+curl -X DELETE http://localhost:9091/admin/v1/conferences/support-7   # → 200
+```
+
+`add`/`remove` participant return **`202` (dispatched)**: the daemon signals
+the target call, which joins/leaves on its own WS session — the actual
+outcome surfaces there as `conference_joined` / `conference_left` / `error`,
+not in this HTTP response. `add` is `404` only when no active call has that
+bridge `call_id`. `create` returns `201 {"room_id"}` (a generated id when the
+body omits `room_id`); `409` if the id is already live; `503` at the
+`max_rooms` cap; `400` for a `sample_rate` other than 8000/16000.
 
 Example: bump bridge logging to debug for an incident, then revert.
 
@@ -440,6 +477,8 @@ CDR webhook. Event types:
 | `outbound_initiated`            | An originated call (`POST /admin/v1/calls`) was admitted and its INVITE is going out. |
 | `outbound_answered`             | The callee answered (2xx) and the WS bridge is starting. |
 | `outbound_failed`               | The originated call ended without an answer. Terminal — no `call_end`/CDR follows. |
+| `conference_created`            | A conference room was created — first `conference_join` for a `room_id`, or an admin pre-create (0.7.0). Carries `room_id`, `sample_rate`. |
+| `conference_ended`              | A conference room ended — last member left, or an operator force-ended it (0.7.0). Carries `room_id`, `duration_ms`, `peak_participants`. Pairs 1:1 with `conference_created`. |
 
 Each delivery is a single JSON object with `version`, `timestamp` (ISO 8601), `type`,
 and per-event fields documented in `crates/webhooks/src/event.rs`.

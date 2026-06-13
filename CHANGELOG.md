@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Conference admin CRUD (0.7.0 chunk 3 of 5).** Operators can compose and
+  inspect rooms over the admin HTTP API; webhooks announce room lifecycle.
+  All endpoints `501` when `[conference].enabled = false`. Same private-bind /
+  no-native-auth posture as the originate API.
+  * `GET /admin/v1/conferences` — list live rooms + their member call-ids.
+  * `POST /admin/v1/conferences` — pre-create an (initially empty) room
+    (`{room_id?, sample_rate?}`; `201 {room_id}`, generated id when omitted).
+  * `DELETE /admin/v1/conferences/:id` — force-end a room; every member
+    reverts to its direct pair (`conference_left { room_closed }`).
+  * `POST /admin/v1/conferences/:id/participants` `{call_id}` — add **any**
+    active call (inbound or outbound) to a room; `DELETE …/:call_id` removes
+    one. Both `202` (dispatched): the daemon signals the target call, which
+    joins/leaves on its own WS session — the outcome surfaces there
+    (`conference_joined` / `conference_left` / `error`), not in the HTTP reply.
+  * Cross-call add/remove respects CLAUDE.md §4.4 — it pushes a
+    `ConferenceCommand` onto the target call's `CallHandle` (via a new
+    daemon-wide bridge-id → handle `CallControlRegistry` populated by both the
+    acceptor and the outbound service); that call's own controller runs the
+    same join/leave path a WS `conference_join` would. No reaching into
+    another call's state.
+  * Webhooks `conference_created` (first join / pre-create) and
+    `conference_ended { duration_ms, peak_participants }` (last leave /
+    force-end), via a room-lifecycle observer. `docs/DEPLOY.md`, `docs/CONFIG.md`.
+
 - **Conference-room core (0.7.0 chunk 1 of 5 — internal API only; the WS
   protocol + admin surfaces land in later chunks).** A room is one daemon
   task owning a `forge-mixer` `AudioMixer` and a 20 ms tick; joined calls

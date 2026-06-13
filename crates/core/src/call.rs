@@ -243,15 +243,39 @@ pub struct CallHandle {
     /// sender the controller and tap push onto, so all three
     /// producers feed one consumer (the bridge task).
     bridge_events_tx: mpsc::Sender<OutgoingEvent>,
+    /// Cross-call conference control (0.7.0). The admin API
+    /// (`/admin/v1/conferences/:id/participants`) signals a call to
+    /// join/leave a room *on its behalf* by pushing here — the
+    /// controller runs the exact same join/leave path as a WS-driven
+    /// `conference_join`, so §4.4 holds (we signal the call; the
+    /// controller mutates its own state). Bounded + `try_send`.
+    conf_cmd_tx: mpsc::Sender<ConferenceCommand>,
+}
+
+/// A cross-call conference request pushed onto a [`CallHandle`] by the
+/// admin API. Mirrors the self-scoped WS `conference_join` /
+/// `conference_leave`, but initiated by an operator against *another*
+/// call.
+#[derive(Debug, Clone)]
+pub enum ConferenceCommand {
+    /// Join (or move to) the named room.
+    Join { room_id: String },
+    /// Leave whatever room the call is in.
+    Leave,
 }
 
 impl CallHandle {
-    fn new(call_id: CallId, bridge_events_tx: mpsc::Sender<OutgoingEvent>) -> Self {
+    fn new(
+        call_id: CallId,
+        bridge_events_tx: mpsc::Sender<OutgoingEvent>,
+        conf_cmd_tx: mpsc::Sender<ConferenceCommand>,
+    ) -> Self {
         Self {
             notify: std::sync::Arc::new(Notify::new()),
             call_id,
             remote_bye: std::sync::Arc::new(AtomicBool::new(false)),
             bridge_events_tx,
+            conf_cmd_tx,
         }
     }
 
@@ -296,6 +320,36 @@ impl CallHandle {
             );
         }
     }
+
+    /// Ask this call to join `room_id` (admin cross-call add). The
+    /// controller runs the same path as a WS `conference_join`; the
+    /// result surfaces on this call's WS (`conference_joined` or
+    /// `error{conference_failed}`). Best-effort `try_send`.
+    pub fn request_conference_join(&self, room_id: impl Into<String>) {
+        let room_id = room_id.into();
+        if let Err(e) = self
+            .conf_cmd_tx
+            .try_send(ConferenceCommand::Join { room_id })
+        {
+            tracing::warn!(
+                call_id = %self.call_id,
+                error = %e,
+                "conf_cmd_tx full or closed; dropping conference join request"
+            );
+        }
+    }
+
+    /// Ask this call to leave its conference room (admin cross-call
+    /// remove). No-op at the controller if the call isn't in a room.
+    pub fn request_conference_leave(&self) {
+        if let Err(e) = self.conf_cmd_tx.try_send(ConferenceCommand::Leave) {
+            tracing::warn!(
+                call_id = %self.call_id,
+                error = %e,
+                "conf_cmd_tx full or closed; dropping conference leave request"
+            );
+        }
+    }
 }
 
 /// The controller itself.
@@ -306,6 +360,9 @@ pub struct CallController {
     /// is on the handle. Lives here until `run()` hands it to the
     /// bridge task.
     control_out_rx: mpsc::Receiver<OutgoingEvent>,
+    /// Receiver for admin cross-call conference commands. Sender is on
+    /// the handle. Consumed by `run()`.
+    conf_cmd_rx: mpsc::Receiver<ConferenceCommand>,
 }
 
 impl CallController {
@@ -314,12 +371,15 @@ impl CallController {
     pub fn new(cfg: CallControllerConfig) -> (Self, CallHandle) {
         let (control_out_tx, control_out_rx) =
             mpsc::channel::<OutgoingEvent>(CONTROL_CHANNEL_CAPACITY);
-        let handle = CallHandle::new(cfg.call_id.clone(), control_out_tx);
+        let (conf_cmd_tx, conf_cmd_rx) =
+            mpsc::channel::<ConferenceCommand>(CONTROL_CHANNEL_CAPACITY);
+        let handle = CallHandle::new(cfg.call_id.clone(), control_out_tx, conf_cmd_tx);
         (
             Self {
                 cfg,
                 handle: handle.clone(),
                 control_out_rx,
+                conf_cmd_rx,
             },
             handle,
         )
@@ -351,6 +411,7 @@ impl CallController {
             cfg,
             handle,
             control_out_rx,
+            mut conf_cmd_rx,
         } = self;
         let CallControllerConfig {
             call_id,
@@ -580,39 +641,27 @@ impl CallController {
                             route_rec_control(&rec_ctrl_tx, RecControl::Resume, "ResumeRecording", &cid);
                         }
                         Some(BridgeIn::ConferenceJoin { call_id: cid, room_id }) => {
+                            debug!(ws_call_id = %cid, %room_id, "conference join requested by WS");
                             // Async join (round-trips to the room task)
                             // is spawned so the control loop never
                             // blocks — same reasoning as REFER. The
-                            // task reports back on `conf_join_rx`,
-                            // which forwards the membership to the tap
-                            // (or emits `conference_failed`).
-                            match &conference {
-                                Some(registry) => {
-                                    debug!(ws_call_id = %cid, %room_id, "spawning conference join");
-                                    let registry = registry.clone();
-                                    let tx = conf_join_tx.clone();
-                                    let join_call_id = call_id.as_str().to_string();
-                                    tokio::spawn(async move {
-                                        let outcome = registry
-                                            .join(&room_id, &join_call_id, call_sample_rate)
-                                            .await;
-                                        let _ = tx.try_send(outcome);
-                                    });
-                                }
-                                None => {
-                                    warn!(
-                                        ws_call_id = %cid,
-                                        %room_id,
-                                        "ConferenceJoin received but conferencing is disabled; rejecting"
-                                    );
-                                    let _ = control_out_tx
-                                        .send(OutgoingEvent::Error {
-                                            code: ErrorCode::ConferenceFailed,
-                                            message: "conferencing is disabled on this daemon"
-                                                .to_string(),
-                                        })
-                                        .await;
-                                }
+                            // task reports back on `conf_join_rx`, which
+                            // forwards the membership to the tap (or
+                            // emits `conference_failed`).
+                            if !spawn_conference_join(
+                                conference.as_ref(),
+                                &call_id,
+                                call_sample_rate,
+                                &conf_join_tx,
+                                room_id,
+                            ) {
+                                let _ = control_out_tx
+                                    .send(OutgoingEvent::Error {
+                                        code: ErrorCode::ConferenceFailed,
+                                        message: "conferencing is disabled on this daemon"
+                                            .to_string(),
+                                    })
+                                    .await;
                             }
                         }
                         Some(BridgeIn::ConferenceLeave { call_id: cid }) => {
@@ -802,6 +851,40 @@ impl CallController {
                     }
                 }
 
+                // Admin cross-call conference command (operator added
+                // or removed this call via the admin API). Runs the
+                // same path as the WS-driven join/leave — §4.4: the
+                // admin signals the call; the controller acts on its
+                // own state.
+                Some(cmd) = conf_cmd_rx.recv() => {
+                    match cmd {
+                        ConferenceCommand::Join { room_id } => {
+                            info!(call_id = %call_id, %room_id, "conference join requested by admin");
+                            if !spawn_conference_join(
+                                conference.as_ref(),
+                                &call_id,
+                                call_sample_rate,
+                                &conf_join_tx,
+                                room_id,
+                            ) {
+                                let _ = control_out_tx
+                                    .send(OutgoingEvent::Error {
+                                        code: ErrorCode::ConferenceFailed,
+                                        message: "conferencing is disabled on this daemon"
+                                            .to_string(),
+                                    })
+                                    .await;
+                            }
+                        }
+                        ConferenceCommand::Leave => {
+                            info!(call_id = %call_id, "conference leave requested by admin");
+                            if let Err(e) = tap_cmd_tx.try_send(TapCommand::LeaveRoom) {
+                                warn!(error = %e, "tap command channel full or closed; dropping admin ConferenceLeave");
+                            }
+                        }
+                    }
+                }
+
                 // Bridge sub-task ended.
                 res = &mut bridge_task => {
                     match res {
@@ -976,6 +1059,32 @@ impl CallController {
 
 fn log_state(call_id: &CallId, state: CallState) {
     info!(call_id = %call_id, ?state, "call state");
+}
+
+/// Spawn the async conference join (round-trips to the room task) off
+/// the control loop, reporting the outcome on `conf_join_tx`. Shared by
+/// the WS `conference_join` path and the admin cross-call command path.
+/// Returns `false` (nothing spawned) when conferencing is disabled — the
+/// caller then emits `error{conference_failed}`.
+fn spawn_conference_join(
+    conference: Option<&ConferenceRegistry>,
+    call_id: &CallId,
+    sample_rate: u32,
+    conf_join_tx: &mpsc::Sender<Result<RoomMembership, ConferenceError>>,
+    room_id: String,
+) -> bool {
+    let Some(registry) = conference else {
+        warn!(call_id = %call_id, %room_id, "conference join requested but conferencing is disabled");
+        return false;
+    };
+    let registry = registry.clone();
+    let tx = conf_join_tx.clone();
+    let join_call_id = call_id.as_str().to_string();
+    tokio::spawn(async move {
+        let outcome = registry.join(&room_id, &join_call_id, sample_rate).await;
+        let _ = tx.try_send(outcome);
+    });
+    true
 }
 
 /// Forward a recording control to the writer (best-effort, non-blocking).

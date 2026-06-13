@@ -239,6 +239,66 @@ impl ConsultRegistry {
     }
 }
 
+/// Process-wide map from a **bridge `call_id`** to that call's
+/// [`CallHandle`], covering inbound *and* outbound calls for their
+/// whole lifetime (DEV_PLAN_0.7.0.md §2.3).
+///
+/// The existing [`CallRegistry`] is keyed by SIP `Call-ID` and only
+/// tracks inbound calls (for BYE/CANCEL). Conference admin
+/// (`/admin/v1/conferences/:id/participants`) needs to reach *any*
+/// active call by the bridge id operators see in conference events,
+/// CDRs, and the originate response — so this is a separate, bridge-id
+/// keyed table populated by both the acceptor and the outbound service.
+///
+/// CLAUDE.md §4.4 holds: it stores a [`CallHandle`] (a bundle of
+/// fire-and-forget signal channels), not call state, and the admin
+/// path only *signals* a call — the controller mutates its own state.
+/// Insert at call setup, remove at teardown (not the hot path); lookup
+/// once per admin request.
+#[derive(Debug, Clone, Default)]
+pub struct CallControlRegistry {
+    inner: Arc<RwLock<HashMap<String, CallHandle>>>,
+}
+
+impl CallControlRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.read().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.read().is_empty()
+    }
+
+    /// Register a call's handle under its bridge `call_id`. A
+    /// collision means the id factory produced a duplicate (a bug);
+    /// last insert wins with a warning, matching [`CallRegistry`].
+    pub fn insert(&self, handle: CallHandle) {
+        let key = handle.call_id().as_str().to_string();
+        if self.inner.write().insert(key.clone(), handle).is_some() {
+            warn!(call_id = %key, "control registry insert collided; previous handle dropped");
+        } else {
+            debug!(call_id = %key, "registered call handle for admin control");
+        }
+    }
+
+    /// Look up a call's handle by bridge `call_id`.
+    pub fn lookup(&self, bridge_call_id: &str) -> Option<CallHandle> {
+        self.inner.read().get(bridge_call_id).cloned()
+    }
+
+    /// Drop the entry on the call's way out. Unknown id is a harmless
+    /// no-op (teardown paths may race).
+    pub fn remove(&self, bridge_call_id: &str) {
+        if self.inner.write().remove(bridge_call_id).is_some() {
+            debug!(call_id = %bridge_call_id, "deregistered call handle");
+        }
+    }
+}
+
 /// `DialogTerminator` impl: BYE / CANCEL look up the handle and
 /// fire its shutdown notification. The actual entry removal happens
 /// inside the spawned controller task on its way out (see

@@ -27,8 +27,10 @@ pub mod metrics;
 pub mod readiness;
 
 pub use admin::{
-    AdminCallRegistry, AdminOutbound, AdminState, CallRegistryHandle, OriginateRejection,
-    OriginateRequest, OutboundOriginateHandle, RegistrationRow,
+    AddParticipantRequest, AdminCallRegistry, AdminConference, AdminOutbound, AdminState,
+    CallRegistryHandle, ConferenceAdminError, ConferenceAdminHandle, ConferenceRow,
+    CreateConferenceRequest, OriginateRejection, OriginateRequest, OutboundOriginateHandle,
+    RegistrationRow,
 };
 pub use hep::{HepBuildError, HepTelemetry, HepTelemetryBuild, HepWorkerHandle};
 pub use http::ObservabilityServer;

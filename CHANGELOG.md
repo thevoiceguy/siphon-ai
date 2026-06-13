@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Conference-room core (0.7.0 chunk 1 of 5 — internal API only; the WS
+  protocol + admin surfaces land in later chunks).** A room is one daemon
+  task owning a `forge-mixer` `AudioMixer` and a 20 ms tick; joined calls
+  contribute their SIP leg *and* their WS session as two mixer participants
+  (DEV_PLAN_0.7.0.md §9.1), and every sink hears the room minus its own
+  input — the caller never hears themselves, each bot still hears its own
+  caller. Pieces:
+  * `[conference]` config block (`enabled` — **off by default**, fail-closed
+    like `[outbound]`; `max_rooms` 16; `max_participants_per_room` 8 calls;
+    `join_tones`), validated at load. A 0.6.x config upgrades with zero
+    behaviour change. `docs/CONFIG.md`.
+  * `ConferenceRegistry` (core): exact-id `room_id → RoomHandle` map in the
+    `CallRegistry`/`ConsultRegistry` §4.4 shape — rooms spawn on first join
+    (locked to the first joiner's sample rate; mismatched joins rejected, no
+    resampling in 0.7.0) and end on last leave.
+  * Tap re-plumbing (`TapCommand::JoinRoom`/`LeaveRoom`): joining swaps the
+    direct caller↔WS pair for room routing inside the tap task (single
+    owner, no locks — the mute/flush pattern); leaving or the room dying
+    always restores the direct pair. `clear`/`mute`/barge-in `auto_clear`
+    also flush the bot's audio buffered in the room. Per-leg recording keeps
+    working (right channel = the room mix the caller actually heard).
+  * Mixing is drain-once + subtract-self: upstream's `mix_excluding` drains
+    per call, so per-sink mix-minus-self is computed from one
+    `get_all_participant_audio` pass per tick with upstream's own
+    auto-gain/clamp semantics (a `mix_all_excluding` upstream API would
+    replace this).
+  * Metrics: `siphon_ai_conferences_active`,
+    `siphon_ai_conference_participants`,
+    `siphon_ai_conference_joins_total{result}`,
+    `siphon_ai_room_tick_lag_seconds`,
+    `siphon_ai_room_frames_dropped_total{stage,side}` (`docs/DEPLOY.md`).
+  * New upstream deps: `forge-mixer`, `forge-injection` (same pinned rev as
+    the rest of forge-media). Deliberately **not** `forge-conference` — its
+    DTMF-IVR/PIN/host-control layer is out of scope per §9.4.
+
 ## [0.6.2] - 2026-06-12
 
 Theme: **TLS trunk hardening** — the fixes found by running v0.6.1 against a
@@ -788,6 +827,7 @@ the WebSocket server's job.
 - Reference WebSocket servers in `examples/`: echo (Python / Node),
   an OpenAI Realtime bridge, and a Deepgram + LLM voice bot.
 
+[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.6.2...HEAD
 [0.6.2]: https://github.com/thevoiceguy/siphon-ai/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.5.0...v0.6.0

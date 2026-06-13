@@ -149,6 +149,10 @@ impl Runtime {
             security,
             recording,
             outbound,
+            // [conference] is compiled + validated since 0.7.0 chunk 1,
+            // but nothing drives joins until the WS protocol surface
+            // (chunk 2) wires a ConferenceRegistry in here.
+            conference: _,
             cdr,
             observability,
             webhooks,

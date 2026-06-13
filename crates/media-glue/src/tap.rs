@@ -60,6 +60,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::idle::{IdleDetector, IdleEvent};
+use crate::room::{RoomMembership, RoomSender};
 use crate::rtp_stats::RtpStatsTracker;
 
 use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, EventBus, ForgeError, ForgeEvent};
@@ -74,7 +75,7 @@ use siphon_ai_bridge::{
 use siphon_ai_recording::RecFrame;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 /// Per-frame WS playout duration. The bridge protocol fixes outbound
 /// audio at 20 ms regardless of sample rate (CLAUDE.md §4.2 / docs/
@@ -116,7 +117,10 @@ pub enum MediaTapError {
 ///
 /// New variants are additive — older controllers / tests building
 /// only `SendDtmf` keep working without any match-arm churn here.
-#[derive(Debug, Clone)]
+/// (Not `Clone` since 0.7.0: `JoinRoom` carries the room sink
+/// receivers, which are single-owner by nature. No call site cloned
+/// commands anyway — they're built in place and `try_send`-ed.)
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum TapCommand {
     /// Server-driven outbound DTMF press. The tap turns it into an
@@ -168,6 +172,25 @@ pub enum TapCommand {
     /// Resume AI-side playout after [`TapCommand::Mute`]. A no-op
     /// if the tap is not currently muted.
     Unmute,
+
+    /// Re-plumb this call into a conference room (0.7.0 §2.1). The
+    /// membership comes from `RoomHandle::join` (driven by core's
+    /// `ConferenceRegistry`). While joined:
+    /// - caller frames go to the room (as the `sip` participant)
+    ///   instead of straight to the WS;
+    /// - WS playout goes to the room (as the `ws` participant)
+    ///   instead of straight to forge/RTP;
+    /// - RTP out is fed the room's mix-minus-`sip` sink;
+    /// - the WS hears the room's mix-minus-`ws` sink.
+    ///
+    /// If the tap is already in a room it leaves it first (the old
+    /// membership drops, which signals the old room). Leaving — or
+    /// the room dying — always restores the direct caller↔WS pair.
+    JoinRoom { membership: RoomMembership },
+
+    /// Leave the current room and restore the direct caller↔WS
+    /// pair. A no-op when not in a room.
+    LeaveRoom,
 }
 
 /// How the tap reacts to forge-vad `SpeechStarted` events. Mirrors
@@ -417,6 +440,16 @@ impl MediaTap {
         let mut frames_sent_to_forge: u64 = 0;
         let mut first_audio_pushed_at: Option<Instant> = None;
 
+        // Conference-room routing (0.7.0 §2.1). `None` = the direct
+        // caller↔WS pair. Three separate locals (not one struct) so
+        // the `select!` arms below can borrow the two sink receivers
+        // independently. Installed by `TapCommand::JoinRoom`; torn
+        // down by `LeaveRoom` or by either sink closing (= the room
+        // died), which always restores the direct pair.
+        let mut room_send: Option<RoomSender> = None;
+        let mut room_sip_out: Option<mpsc::Receiver<Vec<i16>>> = None;
+        let mut room_ws_out: Option<mpsc::Receiver<Vec<i16>>> = None;
+
         // RTP watchdog. Pinned so we can reset the deadline in place
         // every time an inbound frame arrives. When the timeout is
         // `None` we still pin a far-future sleep so the select arm
@@ -497,6 +530,18 @@ impl MediaTap {
                     if self.muted {
                         continue;
                     }
+                    // In a room, bot playout becomes the `ws`
+                    // participant's input — the room mixes it for
+                    // everyone (this caller included, via the
+                    // mix-minus-`sip` sink). The Bot recording fork
+                    // moves to the sip_out arm below: "what the
+                    // caller actually heard" is the room mix there,
+                    // not this leg's raw playout.
+                    if let Some(send) = &room_send {
+                        let samples = unpack_pcm16_le(&bytes)?;
+                        send.send_ws(samples);
+                        continue;
+                    }
                     // Recording fork (right channel): only non-muted playout
                     // is recorded, so a muted span shows as silence on the
                     // bot side — what the caller actually heard.
@@ -553,6 +598,23 @@ impl MediaTap {
                     }
                     reframer.push(&frame.samples);
                     while let Some(samples) = reframer.pop_frame() {
+                        // In a room, caller frames feed the `sip`
+                        // participant; the WS instead receives the
+                        // room's mix-minus-`ws` sink (arm below).
+                        // The Caller recording fork is unchanged —
+                        // the left channel is always this caller's
+                        // own voice.
+                        if let Some(send) = &room_send {
+                            if let Some((rec, drops)) = &self.recording {
+                                if let Err(mpsc::error::TrySendError::Full(_)) =
+                                    rec.try_send(RecFrame::Caller(pack_pcm16_le(&samples)))
+                                {
+                                    drops.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            send.send_sip(samples);
+                            continue;
+                        }
                         let bytes = pack_pcm16_le(&samples);
                         // Recording fork (left channel), best-effort.
                         if let Some((rec, drops)) = &self.recording {
@@ -566,6 +628,64 @@ impl MediaTap {
                             debug!("caller_audio_tx closed; ending tap");
                             return Ok(TapDisconnect::ControllerHungUp);
                         }
+                    }
+                }
+
+                // Room → caller: the mix-minus-`sip` sink, played out
+                // to RTP. A closed sink means the room ended — revert
+                // to the direct pair (§2.1: leave/room-death always
+                // restores it).
+                mixed = recv_opt(&mut room_sip_out), if room_sip_out.is_some() => {
+                    let Some(samples) = mixed else {
+                        info!(call_id = %self.call_id, "room ended; reverting to direct bridge");
+                        room_send = None;
+                        room_sip_out = None;
+                        room_ws_out = None;
+                        continue;
+                    };
+                    // Recording fork (right channel) in room mode:
+                    // the room mix IS what the caller hears.
+                    if let Some((rec, drops)) = &self.recording {
+                        if let Err(mpsc::error::TrySendError::Full(_)) =
+                            rec.try_send(RecFrame::Bot(pack_pcm16_le(&samples)))
+                        {
+                            drops.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    let frame = OutboundMediaFrame {
+                        target: MediaTarget::A,
+                        sample_rate: self.sample_rate,
+                        samples,
+                        playback_id: None,
+                        mode: PlayoutMode::Append,
+                    };
+                    self.handle
+                        .send_audio(frame)
+                        .await
+                        .map_err(|e| MediaTapError::PlayoutFailed(e.to_string()))?;
+                    // Mark bookkeeping keeps counting forge pushes;
+                    // in room mode frames arrive at playout cadence,
+                    // so a Mark estimate degenerates to ≈ now — the
+                    // honest answer while the room owns playout.
+                    if frames_sent_to_forge == 0 {
+                        first_audio_pushed_at = Some(Instant::now());
+                    }
+                    frames_sent_to_forge += 1;
+                }
+
+                // Room → server: the mix-minus-`ws` sink becomes the
+                // "caller audio" the WS session hears.
+                mixed = recv_opt(&mut room_ws_out), if room_ws_out.is_some() => {
+                    let Some(samples) = mixed else {
+                        info!(call_id = %self.call_id, "room ended; reverting to direct bridge");
+                        room_send = None;
+                        room_sip_out = None;
+                        room_ws_out = None;
+                        continue;
+                    };
+                    if caller_audio_tx.send(pack_pcm16_le(&samples)).await.is_err() {
+                        debug!("caller_audio_tx closed; ending tap");
+                        return Ok(TapDisconnect::ControllerHungUp);
                     }
                 }
 
@@ -639,6 +759,11 @@ impl MediaTap {
                                     let mut drained = 0usize;
                                     while let Ok(_bytes) = playout_audio_rx.try_recv() {
                                         drained += 1;
+                                    }
+                                    // In a room, the queued tail also
+                                    // lives in the room's ws buffer.
+                                    if let Some(send) = &room_send {
+                                        send.clear_ws_input();
                                     }
                                     if let Err(e) = self
                                         .handle
@@ -729,6 +854,9 @@ impl MediaTap {
                             while let Ok(_bytes) = playout_audio_rx.try_recv() {
                                 drained += 1;
                             }
+                            if let Some(send) = &room_send {
+                                send.clear_ws_input();
+                            }
                             if let Err(e) = self
                                 .handle
                                 .flush(Some(MediaTarget::A), None)
@@ -773,6 +901,9 @@ impl MediaTap {
                             while let Ok(_bytes) = playout_audio_rx.try_recv() {
                                 drained += 1;
                             }
+                            if let Some(send) = &room_send {
+                                send.clear_ws_input();
+                            }
                             if let Err(e) = self
                                 .handle
                                 .flush(Some(MediaTarget::A), None)
@@ -802,6 +933,38 @@ impl MediaTap {
                                 frames_sent_to_forge,
                                 first_audio_pushed_at,
                             );
+                        }
+                        TapCommand::JoinRoom { membership } => {
+                            if room_send.is_some() {
+                                // Switching rooms: dropping the old
+                                // RoomSender signals the old room to
+                                // remove this call.
+                                info!(
+                                    call_id = %self.call_id,
+                                    room_id = %membership.room_id(),
+                                    "leaving current room to join another"
+                                );
+                            } else {
+                                info!(
+                                    call_id = %self.call_id,
+                                    room_id = %membership.room_id(),
+                                    "tap re-plumbed into conference room"
+                                );
+                            }
+                            let (send, sip_out, ws_out) = membership.split();
+                            room_send = Some(send);
+                            room_sip_out = Some(sip_out);
+                            room_ws_out = Some(ws_out);
+                        }
+                        TapCommand::LeaveRoom => {
+                            if room_send.take().is_some() {
+                                room_sip_out = None;
+                                room_ws_out = None;
+                                info!(
+                                    call_id = %self.call_id,
+                                    "left conference room; direct bridge restored"
+                                );
+                            }
                         }
                     }
                 }
@@ -866,6 +1029,16 @@ impl MediaTap {
                 }
             }
         }
+    }
+}
+
+/// `recv` on an optional receiver. The `select!` arms that use this
+/// carry an `is_some()` guard, so the `pending` branch is never
+/// polled — it exists to keep the future total.
+async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -1107,6 +1280,94 @@ mod tests {
         // straight from the watchdog arm.
         assert!(caller_rx.try_recv().is_err());
         assert!(events_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn join_room_replumbs_ws_playout_and_leave_restores_direct() {
+        // End-to-end against a real room: WS playout pushed into a
+        // joined tap must surface on ANOTHER member's sink (i.e. it
+        // went through the room, not forge), and LeaveRoom must cut
+        // that flow again. The SIP-inbound side needs live RTP and
+        // is covered by the SIPp phase in a later chunk.
+        let manager = Arc::new(MediaBridgeManager::new());
+        let tap = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            CallId::new("call-a"),
+            8000,
+        )
+        .expect("attach");
+
+        let (caller_tx, _caller_rx) = mpsc::channel(16);
+        let (playout_tx, playout_rx) = mpsc::channel(16);
+        let (events_tx, _events_rx) = mpsc::channel(16);
+        let (cmd_tx, cmd_rx) = mpsc::channel(16);
+        let _join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+        let room = crate::room::spawn_room(crate::room::RoomConfig {
+            room_id: "r-tap".into(),
+            sample_rate: 8000,
+            max_calls: 8,
+            join_tones: false,
+        });
+        let membership_a = room.join("call-a", 8000).await.expect("join a");
+        let membership_b = room.join("call-b", 8000).await.expect("join b");
+        let (_b_send, mut b_sip_out, _b_ws_out) = membership_b.split();
+
+        cmd_tx
+            .send(TapCommand::JoinRoom {
+                membership: membership_a,
+            })
+            .await
+            .expect("send join");
+
+        // Stream bot-A playout into the tap; with A's `ws`
+        // participant as the only contributor, member B's SIP sink
+        // must carry it verbatim (single contributor → no auto-gain).
+        let frame = pack_pcm16_le(&vec![1000i16; 160]);
+        let pump_tx = playout_tx.clone();
+        let pump_frame = frame.clone();
+        let pump = tokio::spawn(async move {
+            loop {
+                if pump_tx.send(pump_frame.clone()).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let heard = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let mixed = b_sip_out.recv().await.expect("sink open");
+                if mixed.iter().any(|&s| s != 0) {
+                    return mixed;
+                }
+            }
+        })
+        .await
+        .expect("bot-A playout reaches member B through the room");
+        assert!(heard.iter().all(|&s| s == 1000));
+        pump.abort();
+
+        // Leave: playout reverts to the direct forge path, so B's
+        // sink dries up (drain the in-flight tail, then expect
+        // silence for 300 ms).
+        cmd_tx
+            .send(TapCommand::LeaveRoom)
+            .await
+            .expect("send leave");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                // Keep pushing playout — it must NOT reach the room.
+                let _ = playout_tx.send(frame.clone()).await;
+                match tokio::time::timeout(Duration::from_millis(300), b_sip_out.recv()).await {
+                    Ok(Some(_)) => continue, // tail still draining
+                    Ok(None) => return,      // room reaped member A — also fine
+                    Err(_) => return,        // 300 ms silence = direct mode
+                }
+            }
+        })
+        .await
+        .expect("flow into the room stops after LeaveRoom");
     }
 
     #[tokio::test(start_paused = true)]

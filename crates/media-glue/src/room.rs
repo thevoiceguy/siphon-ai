@@ -70,6 +70,12 @@ const INPUT_CHANNEL_FRAMES: usize = 64;
 /// Control channel: small and bounded like every control channel.
 const CTRL_CHANNEL_CAPACITY: usize = 8;
 
+/// Per-member membership-change event channel (`RoomEvent` fan-out).
+/// Rare control-plane events (a join/leave is human-paced), delivered
+/// best-effort with `try_send` — a member that can't keep up loses a
+/// fan-out notification, never the room. 16 absorbs a burst of joins.
+const EVENT_CHANNEL_CAPACITY: usize = 16;
+
 /// How much audio a participant may buffer inside the mixer before
 /// the oldest samples are dropped. WS bots stream TTS faster than
 /// realtime; 30 s absorbs a long prompt queued at once. (8 calls ×
@@ -121,6 +127,19 @@ pub enum RoomJoinError {
     /// join). The registry retries once with a fresh room.
     #[error("room is gone")]
     RoomClosed,
+}
+
+/// A membership-change notification the room fans out to its OTHER
+/// members (never the call the change is about). The controller maps
+/// these onto the WS protocol's `participant_joined` /
+/// `participant_left` events (DEV_PLAN_0.7.0.md §2.2). Delivered over
+/// the per-member [`RoomMembership::events_rx`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomEvent {
+    /// Another call joined the room.
+    ParticipantJoined { call_id: String },
+    /// Another call left the room (explicit leave, hang-up, or reap).
+    ParticipantLeft { call_id: String },
 }
 
 /// Parameters a room is spawned with. The sample rate is the first
@@ -212,9 +231,9 @@ impl RoomHandle {
 }
 
 /// Everything a joined call holds: the send side (input channel +
-/// participant ids + leave-on-drop) and the two per-sink receivers.
-/// Handed to the call's tap via `TapCommand::JoinRoom`; split with
-/// [`Self::split`] inside the tap.
+/// participant ids + leave-on-drop), the two per-sink receivers, and
+/// the membership-change event stream. Handed to the call's tap via
+/// `TapCommand::JoinRoom`; split with [`Self::split`] inside the tap.
 #[derive(Debug)]
 pub struct RoomMembership {
     pub(crate) sender: RoomSender,
@@ -224,6 +243,15 @@ pub struct RoomMembership {
     /// Mix-minus-`ws` — what the bot hears (its own caller + the
     /// other calls), forwarded to the WS as caller audio.
     pub(crate) ws_out_rx: mpsc::Receiver<Vec<i16>>,
+    /// Membership-change fan-out for THIS member (someone else joined
+    /// or left). The tap maps these onto `participant_joined` /
+    /// `participant_left` WS events.
+    pub(crate) events_rx: mpsc::Receiver<RoomEvent>,
+    /// Member-call count at the moment this call joined (itself
+    /// included) — the `participants` field of the `conference_joined`
+    /// WS event. A point-in-time snapshot; live changes arrive as
+    /// `RoomEvent`s.
+    participants: usize,
 }
 
 impl RoomMembership {
@@ -231,19 +259,28 @@ impl RoomMembership {
         &self.sender.room_id
     }
 
-    /// Split into the send half and the two sink receivers (tap
-    /// keeps them in separate locals so its `select!` arms can
-    /// borrow them independently).
-    pub(crate) fn split(
-        self,
-    ) -> (
-        RoomSender,
-        mpsc::Receiver<Vec<i16>>,
-        mpsc::Receiver<Vec<i16>>,
-    ) {
-        (self.sender, self.sip_out_rx, self.ws_out_rx)
+    /// Member-call count at join time (this call included).
+    pub fn participants(&self) -> usize {
+        self.participants
+    }
+
+    /// Split into the send half, the two sink receivers, and the
+    /// event receiver (the tap keeps them in separate locals so its
+    /// `select!` arms can borrow each independently).
+    pub(crate) fn split(self) -> RoomMembershipParts {
+        (self.sender, self.sip_out_rx, self.ws_out_rx, self.events_rx)
     }
 }
+
+/// The pieces of a [`RoomMembership`] after [`RoomMembership::split`]:
+/// the send half, the SIP-out and WS-out sink receivers, and the
+/// membership-change event receiver.
+pub(crate) type RoomMembershipParts = (
+    RoomSender,
+    mpsc::Receiver<Vec<i16>>,
+    mpsc::Receiver<Vec<i16>>,
+    mpsc::Receiver<RoomEvent>,
+);
 
 /// The send half of a membership. Dropping it tells the room to
 /// remove the call (so every tap exit path — clean or not — leaves
@@ -310,12 +347,29 @@ struct Member {
     ws_id: String,
     sip_out_tx: mpsc::Sender<Vec<i16>>,
     ws_out_tx: mpsc::Sender<Vec<i16>>,
+    /// Fan-out sink: the room pushes `RoomEvent`s here when ANOTHER
+    /// call joins or leaves. The matching receiver rides on this
+    /// member's `RoomMembership`.
+    events_tx: mpsc::Sender<RoomEvent>,
 }
 
 impl Member {
     /// Both sink receivers dropped → the tap is gone; reap.
     fn is_abandoned(&self) -> bool {
         self.sip_out_tx.is_closed() && self.ws_out_tx.is_closed()
+    }
+}
+
+/// Fan a membership-change event out to every member except the one
+/// it's about (`exclude`). Best-effort `try_send`: a member whose
+/// event queue is full loses the notification but never blocks the
+/// room.
+fn fan_out(members: &HashMap<String, Member>, event: &RoomEvent, exclude: &str) {
+    for (id, member) in members.iter() {
+        if id == exclude {
+            continue;
+        }
+        let _ = member.events_tx.try_send(event.clone());
     }
 }
 
@@ -528,6 +582,7 @@ fn handle_join(
 
     let (sip_out_tx, sip_out_rx) = mpsc::channel(SINK_CHANNEL_FRAMES);
     let (ws_out_tx, ws_out_rx) = mpsc::channel(SINK_CHANNEL_FRAMES);
+    let (events_tx, events_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
     members.insert(
         call_id.clone(),
         Member {
@@ -535,13 +590,24 @@ fn handle_join(
             ws_id: ws_id.clone(),
             sip_out_tx,
             ws_out_tx,
+            events_tx,
         },
     );
+    let participants = members.len();
     info!(
         room_id = %cfg.room_id,
         %call_id,
-        calls = members.len(),
+        calls = participants,
         "call joined conference room"
+    );
+    // Tell everyone already in the room that this call arrived. The
+    // new member learns the room size from `participants` instead.
+    fan_out(
+        members,
+        &RoomEvent::ParticipantJoined {
+            call_id: call_id.clone(),
+        },
+        &call_id,
     );
 
     Ok(RoomMembership {
@@ -555,6 +621,8 @@ fn handle_join(
         },
         sip_out_rx,
         ws_out_rx,
+        events_rx,
+        participants,
     })
 }
 
@@ -576,6 +644,15 @@ fn remove_member(
         %call_id,
         calls = members.len(),
         "call left conference room"
+    );
+    // Tell the remaining members this call is gone. (`member` was
+    // already removed, so it won't notify itself.)
+    fan_out(
+        members,
+        &RoomEvent::ParticipantLeft {
+            call_id: call_id.to_string(),
+        },
+        call_id,
     );
     true
 }
@@ -715,8 +792,8 @@ mod tests {
         let handle = spawn_room(cfg("r1", 8000, 8, false));
         let a = handle.join("call-a", 8000).await.expect("join a");
         let b = handle.join("call-b", 8000).await.expect("join b");
-        let (a_send, mut a_sip_out, mut a_ws_out) = a.split();
-        let (b_send, mut b_sip_out, _b_ws_out) = b.split();
+        let (a_send, mut a_sip_out, mut a_ws_out, _a_events) = a.split();
+        let (b_send, mut b_sip_out, _b_ws_out, _b_events) = b.split();
 
         // Feed both SIP legs continuously so every tick has a full
         // frame from each (the WS sides stay silent — like real bots
@@ -787,7 +864,7 @@ mod tests {
     async fn explicit_leave_closes_sinks_and_last_leave_ends_room() {
         let handle = spawn_room(cfg("r5", 8000, 8, false));
         let a = handle.join("call-a", 8000).await.expect("join a");
-        let (a_send, mut a_sip_out, _a_ws_out) = a.split();
+        let (a_send, mut a_sip_out, _a_ws_out, _a_events) = a.split();
 
         handle.leave("call-a");
         // Sink closes when the room removes the member.
@@ -840,7 +917,7 @@ mod tests {
     async fn abandoned_member_reaped_by_tick_even_if_leave_is_lost() {
         let handle = spawn_room(cfg("r7", 8000, 8, false));
         let a = handle.join("call-a", 8000).await.expect("join a");
-        let (a_send, a_sip_out, a_ws_out) = a.split();
+        let (a_send, a_sip_out, a_ws_out, _a_events) = a.split();
         // Drop only the receivers and *forget* the sender's Drop by
         // leaking it — the per-tick is_closed() reap must still
         // remove the member and end the room.
@@ -862,7 +939,7 @@ mod tests {
         let handle = spawn_room(cfg("r8", 8000, 8, true));
         let a = handle.join("call-a", 8000).await.expect("join a");
         let b = handle.join("call-b", 8000).await.expect("join b");
-        let (_a_send, mut a_sip_out, _a_ws_out) = a.split();
+        let (_a_send, mut a_sip_out, _a_ws_out, _a_events) = a.split();
 
         // B's join chime reaches A with no participant ever sending
         // audio (the tone participant is the only contributor).
@@ -877,8 +954,8 @@ mod tests {
         let handle = spawn_room(cfg("r9", 8000, 8, false));
         let a = handle.join("call-a", 8000).await.expect("join a");
         let b = handle.join("call-b", 8000).await.expect("join b");
-        let (a_send, _a_sip_out, _a_ws_out) = a.split();
-        let (_b_send, mut b_sip_out, _b_ws_out) = b.split();
+        let (a_send, _a_sip_out, _a_ws_out, _a_events) = a.split();
+        let (_b_send, mut b_sip_out, _b_ws_out, _b_events) = b.split();
 
         // Queue ~2 s of bot-A audio, then clear it before (most of)
         // it can play out; B should go silent shortly after.

@@ -44,6 +44,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the rest of forge-media). Deliberately **not** `forge-conference` — its
     DTMF-IVR/PIN/host-control layer is out of scope per §9.4.
 
+- **Conference WS protocol surface (0.7.0 chunk 2 of 5).** The WS server can
+  now drive conferencing for its own call (self-scoped, §9.2); the protocol
+  version stays `"1"` (all additions are new messages / a new error code).
+  * Server → SiphonAI: `conference_join { room_id }` (creates the room if
+    absent, subject to caps) and `conference_leave`. `docs/PROTOCOL.md` §4.8.
+  * SiphonAI → server: `conference_joined { room_id, participants }`,
+    `conference_left { room_id, reason }` (`reason` = `left` |
+    `room_closed`), and the fan-out events `participant_joined` /
+    `participant_left { room_id, participant_call_id }` to every *other*
+    member when the room's composition changes. `docs/PROTOCOL.md` §3.12.
+  * New `error` code `conference_failed` — a refused join (disabled, cap
+    reached, sample-rate mismatch, already joined); the call continues on its
+    direct pair.
+  * Wired into both inbound (`BridgingAcceptor::with_conference`) and
+    outbound (`OutboundService::with_conference`) calls; the daemon builds
+    one shared `ConferenceRegistry` from `[conference]` when enabled. The
+    async join runs off the controller's control loop (spawned, like REFER).
+  * Reference echo server (`examples/echo-ws-server-python`) gains
+    `--auto-conference-join ROOM` and logs the new events — the harness hook
+    for the chunk-5 two-caller SIPp scenario.
+
 ## [0.6.2] - 2026-06-12
 
 Theme: **TLS trunk hardening** — the fixes found by running v0.6.1 against a

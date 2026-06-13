@@ -188,6 +188,53 @@ pub enum BridgeOut {
         reason: String,
     },
 
+    /// This call successfully joined a conference room, in response to
+    /// the server's [`BridgeIn::ConferenceJoin`] (0.7.0). The call's
+    /// audio is now mixed into the room; the bot hears the room minus
+    /// its own playout. `participants` is the member-call count at the
+    /// moment of joining (this call included) — a snapshot; subsequent
+    /// changes arrive as [`BridgeOut::ParticipantJoined`] /
+    /// [`BridgeOut::ParticipantLeft`].
+    ConferenceJoined {
+        call_id: CallId,
+        seq: Seq,
+        room_id: String,
+        participants: usize,
+    },
+
+    /// This call left a conference room — either because the server
+    /// sent [`BridgeIn::ConferenceLeave`] (`reason = "left"`) or
+    /// because the room ended underneath it (`reason = "room_closed"`,
+    /// e.g. an operator force-ended the room). The direct caller↔WS
+    /// audio pair is restored; the call continues. Added in 0.7.0.
+    ConferenceLeft {
+        call_id: CallId,
+        seq: Seq,
+        room_id: String,
+        reason: ConferenceLeftReason,
+    },
+
+    /// ANOTHER call joined the room this call is in (0.7.0; fan-out to
+    /// every other member). `participant_call_id` is the bridge
+    /// `call_id` of the call that joined — distinct from the envelope
+    /// `call_id`, which is always this receiving session's own call.
+    ParticipantJoined {
+        call_id: CallId,
+        seq: Seq,
+        room_id: String,
+        participant_call_id: String,
+    },
+
+    /// ANOTHER call left the room this call is in (0.7.0). See
+    /// [`BridgeOut::ParticipantJoined`] for the `participant_call_id`
+    /// vs `call_id` distinction.
+    ParticipantLeft {
+        call_id: CallId,
+        seq: Seq,
+        room_id: String,
+        participant_call_id: String,
+    },
+
     /// Last message SiphonAI sends. Followed by a clean WS close (1000).
     Stop {
         call_id: CallId,
@@ -346,6 +393,17 @@ pub enum StopReason {
     Error,
 }
 
+/// Why a [`BridgeOut::ConferenceLeft`] fired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConferenceLeftReason {
+    /// The server asked to leave via [`BridgeIn::ConferenceLeave`].
+    Left,
+    /// The room ended underneath this call (e.g. operator force-end,
+    /// or the room task stopped). The call reverts to its direct pair.
+    RoomClosed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -355,6 +413,11 @@ pub enum ErrorCode {
     ProtocolError,
     ServerTooSlow,
     TransferFailed,
+    /// A [`BridgeIn::ConferenceJoin`] was refused (conferencing
+    /// disabled, room/participant cap reached, sample-rate mismatch,
+    /// or already joined). The call continues on its direct pair.
+    /// Added in 0.7.0.
+    ConferenceFailed,
     Internal,
 }
 
@@ -451,6 +514,29 @@ pub enum BridgeIn {
 
     /// Resume recording after a [`BridgeIn::PauseRecording`].
     ResumeRecording { call_id: CallId },
+
+    /// Join this call into a conference room (0.7.0, §2.1). Creates
+    /// the room if it doesn't exist yet (subject to
+    /// `[conference]` caps). Self-scoped: a session may only join its
+    /// OWN call — cross-call composition (adding another participant)
+    /// is the admin API's job (§9.2). SiphonAI replies with
+    /// [`BridgeOut::ConferenceJoined`] or
+    /// [`BridgeOut::Error`]`{ code: "conference_failed" }`. While
+    /// joined, the bot hears the room mix minus its own playout and
+    /// speaks into the room.
+    ConferenceJoin {
+        call_id: CallId,
+        /// Operator-meaningful room name; calls naming the same
+        /// `room_id` share a room. The room locks to the first
+        /// joiner's sample rate.
+        room_id: String,
+    },
+
+    /// Leave the conference room this call is in (0.7.0). No-op if the
+    /// call isn't in a room. SiphonAI replies with
+    /// [`BridgeOut::ConferenceLeft`]`{ reason: "left" }` and restores
+    /// the direct caller↔WS audio pair.
+    ConferenceLeave { call_id: CallId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -975,6 +1061,95 @@ mod tests {
             panic!("expected RecordingFailed");
         };
         assert_eq!(reason, "disk full");
+    }
+
+    // ─── Conference (0.7.0) ─────────────────────────────────────────────
+
+    #[test]
+    fn bridge_in_conference_join() {
+        let raw = r#"{ "type": "conference_join", "call_id": "siphon-a", "room_id": "support-7" }"#;
+        let msg: BridgeIn = assert_round_trip(raw);
+        let BridgeIn::ConferenceJoin { call_id, room_id } = msg else {
+            panic!("expected ConferenceJoin");
+        };
+        assert_eq!(call_id.as_str(), "siphon-a");
+        assert_eq!(room_id, "support-7");
+    }
+
+    #[test]
+    fn bridge_in_conference_leave() {
+        let raw = r#"{ "type": "conference_leave", "call_id": "siphon-a" }"#;
+        let msg: BridgeIn = assert_round_trip(raw);
+        assert!(matches!(msg, BridgeIn::ConferenceLeave { .. }));
+    }
+
+    #[test]
+    fn bridge_out_conference_joined() {
+        let raw = r#"{ "type": "conference_joined", "call_id": "siphon-a", "seq": 4, "room_id": "support-7", "participants": 2 }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        let BridgeOut::ConferenceJoined {
+            room_id,
+            participants,
+            ..
+        } = msg
+        else {
+            panic!("expected ConferenceJoined");
+        };
+        assert_eq!(room_id, "support-7");
+        assert_eq!(participants, 2);
+    }
+
+    #[test]
+    fn bridge_out_conference_left_reasons() {
+        let left: BridgeOut = assert_round_trip(
+            r#"{ "type": "conference_left", "call_id": "siphon-a", "seq": 9, "room_id": "support-7", "reason": "left" }"#,
+        );
+        assert!(matches!(
+            left,
+            BridgeOut::ConferenceLeft {
+                reason: ConferenceLeftReason::Left,
+                ..
+            }
+        ));
+        let closed: BridgeOut = assert_round_trip(
+            r#"{ "type": "conference_left", "call_id": "siphon-a", "seq": 9, "room_id": "support-7", "reason": "room_closed" }"#,
+        );
+        assert!(matches!(
+            closed,
+            BridgeOut::ConferenceLeft {
+                reason: ConferenceLeftReason::RoomClosed,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bridge_out_participant_joined_left() {
+        let joined: BridgeOut = assert_round_trip(
+            r#"{ "type": "participant_joined", "call_id": "siphon-a", "seq": 5, "room_id": "support-7", "participant_call_id": "siphon-b" }"#,
+        );
+        let BridgeOut::ParticipantJoined {
+            participant_call_id,
+            ..
+        } = joined
+        else {
+            panic!("expected ParticipantJoined");
+        };
+        assert_eq!(participant_call_id, "siphon-b");
+        let left: BridgeOut = assert_round_trip(
+            r#"{ "type": "participant_left", "call_id": "siphon-a", "seq": 6, "room_id": "support-7", "participant_call_id": "siphon-b" }"#,
+        );
+        assert!(matches!(left, BridgeOut::ParticipantLeft { .. }));
+    }
+
+    #[test]
+    fn bridge_out_error_conference_failed() {
+        let raw = r#"{ "type": "error", "call_id": "siphon-a", "seq": 3, "code": "conference_failed", "message": "room is full (8 calls)" }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        let BridgeOut::Error { code, .. } = msg else {
+            panic!("expected Error");
+        };
+        assert_eq!(code, ErrorCode::ConferenceFailed);
     }
 
     // ─── Negative cases ─────────────────────────────────────────────────

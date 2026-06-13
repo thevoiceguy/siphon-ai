@@ -95,6 +95,7 @@ use uuid::Uuid;
 use crate::call::{
     CallController, CallControllerConfig, CallOutcome, CallTermination, RecordingSummary,
 };
+use crate::conference::ConferenceRegistry;
 use crate::registry::CallRegistry;
 use crate::registry::ConsultRegistry;
 use crate::transfer::{DialogSource, TransferContext};
@@ -1458,6 +1459,11 @@ pub struct BridgingAcceptor {
     /// Recording policy. Default is `Off` (no recording). When `Always`,
     /// every accepted call gets a per-call WAV writer.
     recording: RecordingConfig,
+    /// Conference registry (0.7.0). `Some` when `[conference].enabled`;
+    /// every accepted call's controller gets a clone so the WS server
+    /// can `conference_join`. `None` → conferencing off, and joins are
+    /// rejected with `conference_failed`. Cheap to clone (Arc inside).
+    conference: Option<ConferenceRegistry>,
 }
 
 /// Daemon-wide REFER plumbing (shared across every accepted call).
@@ -1672,6 +1678,7 @@ impl BridgingAcceptor {
             security: AcceptSecurityPolicy::default(),
             hep: None,
             recording: RecordingConfig::default(),
+            conference: None,
         }
     }
 
@@ -1783,6 +1790,15 @@ impl BridgingAcceptor {
     /// accepted call.
     pub fn with_recording(mut self, recording: RecordingConfig) -> Self {
         self.recording = recording;
+        self
+    }
+
+    /// Install the conference registry (0.7.0). The daemon builds one
+    /// from `[conference]` and shares it here; every accepted call's
+    /// controller gets a clone so the WS server can `conference_join`.
+    /// Left unset → conferencing is off and joins are rejected.
+    pub fn with_conference(mut self, conference: ConferenceRegistry) -> Self {
+        self.conference = Some(conference);
         self
     }
 
@@ -3100,6 +3116,7 @@ impl BridgingAcceptor {
             media_tap: tap,
             transfer,
             recording,
+            conference: self.conference.clone(),
         };
         let (controller, handle) = CallController::new(cfg);
 

@@ -326,6 +326,7 @@ then closes the WebSocket cleanly (close code 1000).
 | `protocol_error` | A WS message was malformed JSON, used an unknown `type`, or had a `call_id` that doesn't match the connection. |
 | `server_too_slow` | Server didn't begin sending audio within 5 s of `start`. |
 | `transfer_failed` | A REFER was attempted but the far end rejected it. |
+| `conference_failed` | A `conference_join` (§4.8) was refused: conferencing disabled, room or per-room cap reached, sample-rate mismatch, or already joined. The call continues on its direct pair. |
 | `internal` | SiphonAI internal error. The `message` field has details. |
 
 `error` is always followed by `stop` (with `reason: "error"`) and a
@@ -345,6 +346,41 @@ control on `on_demand`; `recording_stopped` on call end or `stop_recording`.
 
 `recording_id` identifies the recording (one per call in this release).
 Recording is best-effort — `recording_failed` never tears the call down.
+
+### 3.12 `conference_joined` / `conference_left` / `participant_joined` / `participant_left` — conference room events (0.7.0)
+
+Emitted for a call that has joined a conference room (§4.8). Additive —
+the protocol version stays `"1"`; a server that never sends
+`conference_join` never sees these.
+
+```json
+{ "type": "conference_joined",  "call_id": "...", "seq": 14, "room_id": "support-7", "participants": 2 }
+{ "type": "conference_left",    "call_id": "...", "seq": 40, "room_id": "support-7", "reason": "left" }
+{ "type": "participant_joined", "call_id": "...", "seq": 15, "room_id": "support-7", "participant_call_id": "siphon-b" }
+{ "type": "participant_left",   "call_id": "...", "seq": 38, "room_id": "support-7", "participant_call_id": "siphon-b" }
+```
+
+- **`conference_joined`** — the response to *this* session's
+  `conference_join`. `participants` is the member-call count at the
+  moment of joining (this call included); it's a snapshot — live
+  changes arrive as the events below.
+- **`conference_left`** — this call left the room. `reason` is `"left"`
+  (the server sent `conference_leave`) or `"room_closed"` (the room
+  ended underneath it — e.g. an operator force-ended it). Either way
+  the direct caller↔WS audio pair is restored and the call continues.
+- **`participant_joined` / `participant_left`** — fan-out: ANOTHER call
+  joined or left the room this call is in. `participant_call_id` is
+  that other call's bridge `call_id`, distinct from the envelope
+  `call_id`, which is always *your* call. These let a bot track who
+  else is in the room; cross-call control (adding/removing others) is
+  the admin API's job, not the WS surface (a session only acts on its
+  own call).
+
+While joined, every other event (`dtmf`, `speech_*`, `mark`, …) keeps
+flowing for this call's own leg. Audio frames are unchanged on the
+wire: SiphonAI sends the room mix (minus this call's own contribution)
+as the inbound binary frames, and the server's outbound audio is mixed
+into the room.
 
 ---
 
@@ -487,6 +523,45 @@ silenced (e.g. while the caller reads a card number) — and `resume_recording`
 continues. All are no-ops if recording isn't enabled for the call or the
 control is invalid for the current state. (With `mode = "always"` recording
 covers the whole call; these controls aren't needed.)
+
+### 4.8 `conference_join` / `conference_leave` — conference rooms (0.7.0)
+
+```json
+{ "type": "conference_join",  "call_id": "...", "room_id": "support-7" }
+{ "type": "conference_leave", "call_id": "..." }
+```
+
+Join this call into a named conference room, or leave the one it's in.
+Requires `[conference].enabled = true` on the daemon.
+
+- **`conference_join`** creates the room if it doesn't exist yet
+  (subject to `[conference].max_rooms` and
+  `max_participants_per_room`). On success SiphonAI replies
+  `conference_joined` (§3.12) and the call's audio is mixed into the
+  room: the bot hears the room **minus its own playout** and speaks
+  into it. On failure — conferencing off, a cap reached, a sample-rate
+  mismatch (a room locks to its first joiner's rate; no resampling in
+  0.7.0), or already in this room — SiphonAI replies
+  `error { code: "conference_failed" }` and the call continues
+  unchanged on its direct pair. Joining a second room moves the call
+  (it leaves the first).
+- **`conference_leave`** removes the call from its room and restores
+  the direct caller↔WS pair; SiphonAI replies
+  `conference_left { reason: "left" }`. A no-op (no reply) if the call
+  isn't in a room.
+
+**Self-scoped (§5.3):** these act only on the session's *own* call. A
+bot can put itself in or out of a room, but it cannot add or remove
+*another* participant — that's the admin API's job (operator control
+plane). A bot tracks the rest of the room via the `participant_joined`
+/ `participant_left` fan-out events.
+
+The room model: N calls share one mixed room, **every call keeps its
+own WS session** (there is no single "host" bot). For N member calls
+the room mixes 2N streams — each call's SIP caller and its bot — and
+hands each side the mix minus its own input. So a caller never hears
+themselves, a bot never hears its own playout, but a caller hears
+their own bot and a bot hears its own caller (STT keeps working).
 
 ---
 

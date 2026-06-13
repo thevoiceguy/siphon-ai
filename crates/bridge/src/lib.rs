@@ -17,6 +17,7 @@ pub use conn::{
     DisconnectReason, OutgoingEvent,
 };
 pub use protocol::{
-    AudioEncoding, AudioFormat, BridgeIn, BridgeOut, CallId, Direction, DtmfMethod, ErrorCode,
-    HangupCause, Seq, SipMeta, StartMsg, StopReason, PROTOCOL_VERSION, WS_SUBPROTOCOL,
+    AudioEncoding, AudioFormat, BridgeIn, BridgeOut, CallId, ConferenceLeftReason, Direction,
+    DtmfMethod, ErrorCode, HangupCause, Seq, SipMeta, StartMsg, StopReason, PROTOCOL_VERSION,
+    WS_SUBPROTOCOL,
 };

@@ -22,7 +22,9 @@ use siphon_ai_bridge::{
     AudioEncoding, AudioFormat, BridgeConfig, CallId, Direction, DisconnectReason, SipMeta,
     StartMsg,
 };
-use siphon_ai_core::{CallController, CallControllerConfig, CallTermination};
+use siphon_ai_core::{
+    CallController, CallControllerConfig, CallTermination, ConferenceLimits, ConferenceRegistry,
+};
 use siphon_ai_media_glue::MediaTap;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::handshake::server::{
@@ -92,6 +94,14 @@ fn echo_subprotocol(
 }
 
 fn make_controller(port: u16, call_id: &str) -> (CallController, siphon_ai_core::CallHandle) {
+    make_controller_with_conference(port, call_id, None)
+}
+
+fn make_controller_with_conference(
+    port: u16,
+    call_id: &str,
+    conference: Option<ConferenceRegistry>,
+) -> (CallController, siphon_ai_core::CallHandle) {
     let manager = Arc::new(MediaBridgeManager::new());
     let tap = MediaTap::attach(
         &manager,
@@ -117,8 +127,19 @@ fn make_controller(port: u16, call_id: &str) -> (CallController, siphon_ai_core:
         media_tap: tap,
         transfer: None,
         recording: None,
+        conference,
     };
     CallController::new(cfg)
+}
+
+/// An enabled registry for the conference round-trip tests.
+fn enabled_conference() -> ConferenceRegistry {
+    ConferenceRegistry::new(ConferenceLimits {
+        enabled: true,
+        max_rooms: 8,
+        max_participants_per_room: 8,
+        join_tones: false,
+    })
 }
 
 #[tokio::test]
@@ -260,5 +281,110 @@ async fn transfer_without_uac_emits_error() {
     let outcome = controller.run().await.expect("run");
     // Server closed the WS after the error; controller's bridge
     // task is the first to exit.
+    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+}
+
+#[tokio::test]
+async fn conference_join_without_registry_emits_error() {
+    // Conferencing disabled (conference = None): a `conference_join`
+    // must surface as `error { code: conference_failed }`, not a
+    // silent drop. The call continues.
+    let port = one_shot_server(|mut ws| async move {
+        let _ = ws.next().await; // drain start
+        let join = serde_json::json!({
+            "type": "conference_join",
+            "call_id": "conf-1",
+            "room_id": "support-7"
+        });
+        ws.send(Message::Text(join.to_string())).await.unwrap();
+
+        let saw_error = loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    let v: Value = serde_json::from_str(&t).expect("json");
+                    if v["type"] == "error" {
+                        assert_eq!(v["code"], "conference_failed");
+                        break true;
+                    }
+                }
+                Some(Ok(Message::Binary(_))) => {}
+                _ => break false,
+            }
+        };
+        assert!(saw_error, "did not observe conference_failed error");
+        ws.close(None).await.ok();
+    })
+    .await;
+
+    let (controller, _handle) = make_controller_with_conference(port, "conf-1", None);
+    let outcome = controller.run().await.expect("run");
+    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+}
+
+#[tokio::test]
+async fn conference_join_then_leave_round_trip() {
+    // With an enabled registry: `conference_join` → `conference_joined`
+    // (participants = 1, this call alone in a fresh room), then
+    // `conference_leave` → `conference_left { reason: "left" }`.
+    let port = one_shot_server(|mut ws| async move {
+        let _ = ws.next().await; // drain start
+
+        ws.send(Message::Text(
+            serde_json::json!({
+                "type": "conference_join",
+                "call_id": "conf-2",
+                "room_id": "support-7"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+        // Wait for conference_joined.
+        let joined = loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    let v: Value = serde_json::from_str(&t).expect("json");
+                    if v["type"] == "conference_joined" {
+                        break v;
+                    }
+                    assert_ne!(v["type"], "error", "join failed: {v}");
+                }
+                Some(Ok(Message::Binary(_))) => {}
+                other => panic!("ws closed before conference_joined: {other:?}"),
+            }
+        };
+        assert_eq!(joined["room_id"], "support-7");
+        assert_eq!(joined["participants"], 1);
+
+        // Now leave.
+        ws.send(Message::Text(
+            serde_json::json!({ "type": "conference_leave", "call_id": "conf-2" }).to_string(),
+        ))
+        .await
+        .unwrap();
+
+        let left = loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    let v: Value = serde_json::from_str(&t).expect("json");
+                    if v["type"] == "conference_left" {
+                        break v;
+                    }
+                }
+                Some(Ok(Message::Binary(_))) => {}
+                other => panic!("ws closed before conference_left: {other:?}"),
+            }
+        };
+        assert_eq!(left["room_id"], "support-7");
+        assert_eq!(left["reason"], "left");
+
+        ws.close(None).await.ok();
+    })
+    .await;
+
+    let (controller, _handle) =
+        make_controller_with_conference(port, "conf-2", Some(enabled_conference()));
+    let outcome = controller.run().await.expect("run");
     assert_eq!(outcome.termination, CallTermination::BridgeEnded);
 }

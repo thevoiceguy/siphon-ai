@@ -380,6 +380,7 @@ mod tests {
             media_tap: tap,
             transfer: None,
             recording: None,
+            conference: None,
         };
         let (controller, handle) = CallController::new(cfg);
         // Drop the controller without running it; the handle still

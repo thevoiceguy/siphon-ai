@@ -60,7 +60,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::idle::{IdleDetector, IdleEvent};
-use crate::room::{RoomMembership, RoomSender};
+use crate::room::{RoomEvent, RoomMembership, RoomSender};
 use crate::rtp_stats::RtpStatsTracker;
 
 use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, EventBus, ForgeError, ForgeEvent};
@@ -70,7 +70,8 @@ use forge_engine::{
     PlayoutMode,
 };
 use siphon_ai_bridge::{
-    pack_pcm16_le, unpack_pcm16_le, AudioError, DtmfMethod, OutgoingEvent, Reframer,
+    pack_pcm16_le, unpack_pcm16_le, AudioError, ConferenceLeftReason, DtmfMethod, OutgoingEvent,
+    Reframer,
 };
 use siphon_ai_recording::RecFrame;
 use thiserror::Error;
@@ -449,6 +450,9 @@ impl MediaTap {
         let mut room_send: Option<RoomSender> = None;
         let mut room_sip_out: Option<mpsc::Receiver<Vec<i16>>> = None;
         let mut room_ws_out: Option<mpsc::Receiver<Vec<i16>>> = None;
+        // Membership-change fan-out from the room → `participant_joined`
+        // / `participant_left` WS events.
+        let mut room_events: Option<mpsc::Receiver<RoomEvent>> = None;
 
         // RTP watchdog. Pinned so we can reset the deadline in place
         // every time an inbound frame arrives. When the timeout is
@@ -637,10 +641,11 @@ impl MediaTap {
                 // restores it).
                 mixed = recv_opt(&mut room_sip_out), if room_sip_out.is_some() => {
                     let Some(samples) = mixed else {
-                        info!(call_id = %self.call_id, "room ended; reverting to direct bridge");
-                        room_send = None;
-                        room_sip_out = None;
-                        room_ws_out = None;
+                        revert_to_direct(
+                            &events_tx, &self.call_id,
+                            &mut room_send, &mut room_sip_out,
+                            &mut room_ws_out, &mut room_events,
+                        );
                         continue;
                     };
                     // Recording fork (right channel) in room mode:
@@ -677,15 +682,47 @@ impl MediaTap {
                 // "caller audio" the WS session hears.
                 mixed = recv_opt(&mut room_ws_out), if room_ws_out.is_some() => {
                     let Some(samples) = mixed else {
-                        info!(call_id = %self.call_id, "room ended; reverting to direct bridge");
-                        room_send = None;
-                        room_sip_out = None;
-                        room_ws_out = None;
+                        revert_to_direct(
+                            &events_tx, &self.call_id,
+                            &mut room_send, &mut room_sip_out,
+                            &mut room_ws_out, &mut room_events,
+                        );
                         continue;
                     };
                     if caller_audio_tx.send(pack_pcm16_le(&samples)).await.is_err() {
                         debug!("caller_audio_tx closed; ending tap");
                         return Ok(TapDisconnect::ControllerHungUp);
+                    }
+                }
+
+                // Room membership changes (another call joined/left
+                // this room) → `participant_joined` / `participant_left`
+                // WS events. Best-effort try_send like the other tap
+                // events.
+                room_evt = recv_opt(&mut room_events), if room_events.is_some() => {
+                    match room_evt {
+                        Some(RoomEvent::ParticipantJoined { call_id: who }) => {
+                            emit_room_event(
+                                &events_tx, &self.call_id, &room_send,
+                                |room_id| OutgoingEvent::ParticipantJoined {
+                                    room_id,
+                                    participant_call_id: who,
+                                },
+                            );
+                        }
+                        Some(RoomEvent::ParticipantLeft { call_id: who }) => {
+                            emit_room_event(
+                                &events_tx, &self.call_id, &room_send,
+                                |room_id| OutgoingEvent::ParticipantLeft {
+                                    room_id,
+                                    participant_call_id: who,
+                                },
+                            );
+                        }
+                        // Sender closed without the audio sinks closing
+                        // (shouldn't happen — they share the room task's
+                        // lifetime — but don't spin the arm if it does).
+                        None => room_events = None,
                     }
                 }
 
@@ -951,19 +988,50 @@ impl MediaTap {
                                     "tap re-plumbed into conference room"
                                 );
                             }
-                            let (send, sip_out, ws_out) = membership.split();
+                            let room_id = membership.room_id().to_string();
+                            let participants = membership.participants();
+                            let (send, sip_out, ws_out, events) = membership.split();
                             room_send = Some(send);
                             room_sip_out = Some(sip_out);
                             room_ws_out = Some(ws_out);
+                            room_events = Some(events);
+                            // The command response the WS server is
+                            // waiting on for its `conference_join`.
+                            if let Err(e) = events_tx.try_send(OutgoingEvent::ConferenceJoined {
+                                room_id,
+                                participants,
+                            }) {
+                                warn!(
+                                    call_id = %self.call_id,
+                                    error = %e,
+                                    "events_tx full or closed; dropping conference_joined"
+                                );
+                            }
                         }
                         TapCommand::LeaveRoom => {
-                            if room_send.take().is_some() {
+                            if let Some(send) = room_send.take() {
+                                let room_id = send.room_id().to_string();
+                                // Drop the sender first so the room sees
+                                // the leave before we announce it.
+                                drop(send);
                                 room_sip_out = None;
                                 room_ws_out = None;
+                                room_events = None;
                                 info!(
                                     call_id = %self.call_id,
+                                    %room_id,
                                     "left conference room; direct bridge restored"
                                 );
+                                if let Err(e) = events_tx.try_send(OutgoingEvent::ConferenceLeft {
+                                    room_id,
+                                    reason: ConferenceLeftReason::Left,
+                                }) {
+                                    warn!(
+                                        call_id = %self.call_id,
+                                        error = %e,
+                                        "events_tx full or closed; dropping conference_left"
+                                    );
+                                }
                             }
                         }
                     }
@@ -1039,6 +1107,52 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
     match rx {
         Some(rx) => rx.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+/// Tear down room routing and restore the direct caller↔WS pair,
+/// emitting `conference_left { room_closed }` first. Called when a
+/// room sink closes — i.e. the room ended underneath us (last member
+/// left, or an operator force-ended it). Idempotent on the already-
+/// reverted state (no `room_send` → nothing emitted, all cleared).
+fn revert_to_direct(
+    events_tx: &mpsc::Sender<OutgoingEvent>,
+    call_id: &CallId,
+    room_send: &mut Option<RoomSender>,
+    room_sip_out: &mut Option<mpsc::Receiver<Vec<i16>>>,
+    room_ws_out: &mut Option<mpsc::Receiver<Vec<i16>>>,
+    room_events: &mut Option<mpsc::Receiver<RoomEvent>>,
+) {
+    if let Some(send) = room_send.as_ref() {
+        let room_id = send.room_id().to_string();
+        info!(call_id = %call_id, %room_id, "room ended; reverting to direct bridge");
+        if let Err(e) = events_tx.try_send(OutgoingEvent::ConferenceLeft {
+            room_id,
+            reason: ConferenceLeftReason::RoomClosed,
+        }) {
+            warn!(call_id = %call_id, error = %e, "events_tx full or closed; dropping conference_left");
+        }
+    }
+    *room_send = None;
+    *room_sip_out = None;
+    *room_ws_out = None;
+    *room_events = None;
+}
+
+/// Emit a participant-change WS event, tagging it with the current
+/// room id. A `None` `room_send` (we left the room between the event
+/// arriving and being handled) drops it silently.
+fn emit_room_event(
+    events_tx: &mpsc::Sender<OutgoingEvent>,
+    call_id: &CallId,
+    room_send: &Option<RoomSender>,
+    build: impl FnOnce(String) -> OutgoingEvent,
+) {
+    let Some(send) = room_send.as_ref() else {
+        return;
+    };
+    if let Err(e) = events_tx.try_send(build(send.room_id().to_string())) {
+        warn!(call_id = %call_id, error = %e, "events_tx full or closed; dropping participant event");
     }
 }
 
@@ -1312,7 +1426,7 @@ mod tests {
         });
         let membership_a = room.join("call-a", 8000).await.expect("join a");
         let membership_b = room.join("call-b", 8000).await.expect("join b");
-        let (_b_send, mut b_sip_out, _b_ws_out) = membership_b.split();
+        let (_b_send, mut b_sip_out, _b_ws_out, _b_events) = membership_b.split();
 
         cmd_tx
             .send(TapCommand::JoinRoom {

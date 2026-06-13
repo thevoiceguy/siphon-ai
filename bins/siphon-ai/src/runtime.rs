@@ -77,8 +77,9 @@ use siphon_ai_config::{
     ObservabilityConfig, SipConfig, SipTlsConfig, SipTransport, WebhooksConfig,
 };
 use siphon_ai_core::{
-    default_call_id_factory, BridgingAcceptor, CallRegistry, ConsultRegistry, OutboundGateway,
-    OutboundGuard, OutboundOriginator, OutboundService, StaticCredentials,
+    default_call_id_factory, BridgingAcceptor, CallRegistry, ConferenceLimits, ConferenceRegistry,
+    ConsultRegistry, OutboundGateway, OutboundGuard, OutboundOriginator, OutboundService,
+    StaticCredentials,
 };
 use siphon_ai_media_glue::MediaSetup;
 use siphon_ai_sip_glue::{
@@ -149,10 +150,7 @@ impl Runtime {
             security,
             recording,
             outbound,
-            // [conference] is compiled + validated since 0.7.0 chunk 1,
-            // but nothing drives joins until the WS protocol surface
-            // (chunk 2) wires a ConferenceRegistry in here.
-            conference: _,
+            conference,
             cdr,
             observability,
             webhooks,
@@ -265,19 +263,37 @@ impl Runtime {
         let outbound_cdr_sink = Arc::clone(&cdr_sink);
         let outbound_webhook_sink = Arc::clone(&webhook_sink);
 
-        let acceptor = Arc::new(
-            BridgingAcceptor::new(media_setup, bridge_defaults, registry.clone())
-                .with_cdr_sink(cdr_sink)
-                .with_webhook_sink(webhook_sink)
-                .with_session_timer_policy(session_timer_policy)
-                .with_call_progress(sip.call_progress)
-                .with_verifier(verifier)
-                .with_security_policy(security_policy)
-                // Share the same HEP worker the SIP/RTCP/CDR emitters use so
-                // the verstat chunk lands on the same Homer call view.
-                .with_hep_telemetry(hep_telemetry.clone())
-                .with_recording(recording),
-        );
+        // Conference registry (0.7.0). Built once and shared (Clone) by
+        // the inbound acceptor and the outbound service so a bot on
+        // either kind of call can `conference_join`. `None` when
+        // `[conference].enabled = false` (the default) — no registry is
+        // allocated and joins are rejected with `conference_failed`.
+        let conference_registry = if conference.enabled {
+            Some(ConferenceRegistry::new(ConferenceLimits {
+                enabled: true,
+                max_rooms: conference.max_rooms,
+                max_participants_per_room: conference.max_participants_per_room,
+                join_tones: conference.join_tones,
+            }))
+        } else {
+            None
+        };
+
+        let mut acceptor_builder = BridgingAcceptor::new(media_setup, bridge_defaults, registry.clone())
+            .with_cdr_sink(cdr_sink)
+            .with_webhook_sink(webhook_sink)
+            .with_session_timer_policy(session_timer_policy)
+            .with_call_progress(sip.call_progress)
+            .with_verifier(verifier)
+            .with_security_policy(security_policy)
+            // Share the same HEP worker the SIP/RTCP/CDR emitters use so
+            // the verstat chunk lands on the same Homer call view.
+            .with_hep_telemetry(hep_telemetry.clone())
+            .with_recording(recording);
+        if let Some(reg) = &conference_registry {
+            acceptor_builder = acceptor_builder.with_conference(reg.clone());
+        }
+        let acceptor = Arc::new(acceptor_builder);
 
         // ─── Registration manager ──────────────────────────────────
         // Seed the manager up-front so a /metrics scrape during the
@@ -526,7 +542,7 @@ impl Runtime {
                 );
             }
             let guard = OutboundGuard::new(outbound.max_concurrent, outbound.rate_limit_per_sec);
-            let service = OutboundService::new(
+            let mut service = OutboundService::new(
                 gateways,
                 guard,
                 outbound_bridge_defaults,
@@ -535,6 +551,11 @@ impl Runtime {
                 outbound_webhook_sink,
                 consult_registry.clone(),
             );
+            // Outbound bots can join conferences too (§9.1 — a room is
+            // composed of any active calls). Share the same registry.
+            if let Some(reg) = &conference_registry {
+                service = service.with_conference(reg.clone());
+            }
             info!(
                 gateways = outbound.gateways.len(),
                 max_concurrent = outbound.max_concurrent,

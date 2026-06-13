@@ -67,6 +67,11 @@ class Options:
     # naming this consult call id (`replaces_call_id`). Reuses
     # auto_transfer_delay_ms for the pause. None = disabled.
     auto_transfer_replaces: str | None
+    # Test-harness knob: after `start`, wait auto_transfer_delay_ms and
+    # then `conference_join` into this room. Lets two SIPp callers be
+    # mixed in one room without a human driving the control channel.
+    # None = disabled.
+    auto_conference_join: str | None
 
 
 # ─── HTTP-side concerns: auth + subprotocol ─────────────────────────────────
@@ -209,6 +214,22 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
                         )
                     )
 
+                if opts.auto_conference_join and call_id:
+                    # Test-harness behaviour: join a conference room so
+                    # two SIPp callers land in the same mix. The delay
+                    # lets the SIP side reach ESTABLISHED first.
+                    asyncio.create_task(
+                        _send_after(
+                            connection,
+                            opts.auto_transfer_delay_ms,
+                            {
+                                "type": "conference_join",
+                                "call_id": call_id,
+                                "room_id": opts.auto_conference_join,
+                            },
+                        )
+                    )
+
                 if opts.auto_hangup_after_ms is not None and call_id:
                     # Test-harness behaviour: end the call from the WS
                     # side after a beat. Used by the outbound SIPp
@@ -236,6 +257,10 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
                 "hold",
                 "resume",
                 "error",
+                "conference_joined",
+                "conference_left",
+                "participant_joined",
+                "participant_left",
             }:
                 LOG.info("%s: %s", mtype, _redact(msg))
 
@@ -342,6 +367,17 @@ def parse_args(argv: list[str] | None = None) -> Options:
         ),
     )
     p.add_argument(
+        "--auto-conference-join",
+        default=None,
+        metavar="ROOM",
+        help=(
+            "test-harness only: after `start`, emit a `conference_join` "
+            "into this room (uses --auto-transfer-delay-ms for the "
+            "pause). Two callers pointed at the same room get mixed — "
+            "the hook for the 0.7.0 two-caller conference SIPp scenario."
+        ),
+    )
+    p.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -362,6 +398,7 @@ def parse_args(argv: list[str] | None = None) -> Options:
         auto_transfer_delay_ms=args.auto_transfer_delay_ms,
         auto_hangup_after_ms=args.auto_hangup_after_ms,
         auto_transfer_replaces=args.auto_transfer_replaces,
+        auto_conference_join=args.auto_conference_join,
     )
 
 

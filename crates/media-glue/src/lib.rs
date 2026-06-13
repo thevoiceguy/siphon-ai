@@ -8,11 +8,13 @@
 //! mandate, no `unwrap`/`panic`, no `std::sync::Mutex`, no blocking I/O.
 
 pub(crate) mod idle;
+pub mod room;
 pub(crate) mod rtp_stats;
 pub mod sdp;
 pub mod setup;
 pub mod tap;
 
+pub use room::{spawn_room, RoomConfig, RoomHandle, RoomJoinError, RoomMembership};
 pub use sdp::{
     audio_remote_addr, build_answer, generate_offer, negotiate_answer, negotiate_offer_answer,
     parse_offer, AnswerOutcome, Codec, LocalCapabilities, MediaDirection, SdpError,

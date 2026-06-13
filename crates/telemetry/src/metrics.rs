@@ -95,6 +95,20 @@ pub const OUTBOUND_CALLS_TOTAL: &str = "siphon_ai_outbound_calls_total";
 /// cardinality.
 pub const TRANSFERS_TOTAL: &str = "siphon_ai_transfers_total";
 
+/// Conference joins attempted (0.7.0). Labeled by `result`: `joined`,
+/// `disabled`, `too_many_rooms`, `room_full`, `rate_mismatch`,
+/// `already_joined`, `error`. Bounded cardinality; the literal must
+/// match the call site in `siphon-ai-core::conference`.
+pub const CONFERENCE_JOINS_TOTAL: &str = "siphon_ai_conference_joins_total";
+
+/// 20 ms frames a conference room dropped instead of blocking the
+/// audio path (0.7.0). Labeled by `stage` (`input` — the tap→room
+/// channel was full; `sink` — a member's output channel was full)
+/// and `side` (`sip` / `ws`). A healthy room sits at zero; sustained
+/// `sink` drops mean a stalled consumer. Literal must match the call
+/// sites in `siphon-ai-media-glue::room`.
+pub const ROOM_FRAMES_DROPPED_TOTAL: &str = "siphon_ai_room_frames_dropped_total";
+
 // ─── Gauges ─────────────────────────────────────────────────────────
 
 /// Currently-active calls. Incremented when the controller spawns,
@@ -113,6 +127,16 @@ pub const OUTBOUND_CALLS_ACTIVE: &str = "siphon_ai_outbound_calls_active";
 /// `siphon_ai_register_state{state="failed"} == 1` without
 /// stringly-typed comparisons.
 pub const REGISTER_STATE: &str = "siphon_ai_register_state";
+
+/// Live conference rooms (0.7.0). Incremented when a room task
+/// spawns, decremented when it exits (last member left). Literal
+/// must match `siphon-ai-media-glue::room`.
+pub const CONFERENCES_ACTIVE: &str = "siphon_ai_conferences_active";
+
+/// Mixer participants across all rooms (0.7.0). Each member call
+/// contributes 2 (its SIP leg + its WS session) — two calls in one
+/// room read 4. Literal must match `siphon-ai-media-glue::room`.
+pub const CONFERENCE_PARTICIPANTS: &str = "siphon_ai_conference_participants";
 
 // ─── Histograms ─────────────────────────────────────────────────────
 
@@ -134,6 +158,13 @@ pub const CALL_DURATION_SECONDS: &str = "siphon_ai_call_duration_seconds";
 /// literal name must match the `histogram!` call site in
 /// `siphon-ai-media-glue`; the bucket matcher keys on this string.
 pub const RTP_RTT_MS: &str = "siphon_ai_rtp_rtt_ms";
+
+/// How far past its 20 ms cadence a conference room's mix tick fired
+/// (0.7.0), in seconds — the mixer-health signal for the known
+/// upstream per-tick allocation (DEV_PLAN_0.7.0.md §6). A healthy
+/// room sits in the lowest bucket. Literal must match
+/// `siphon-ai-media-glue::room`.
+pub const ROOM_TICK_LAG_SECONDS: &str = "siphon_ai_room_tick_lag_seconds";
 
 #[derive(Debug, Error)]
 pub enum InitError {
@@ -164,6 +195,12 @@ pub fn prometheus_builder() -> Result<PrometheusBuilder, InitError> {
         })
         .and_then(|b| {
             b.set_buckets_for_metric(Matcher::Full(RTP_RTT_MS.to_string()), &RTP_RTT_MS_BUCKETS)
+        })
+        .and_then(|b| {
+            b.set_buckets_for_metric(
+                Matcher::Full(ROOM_TICK_LAG_SECONDS.to_string()),
+                &ROOM_TICK_LAG_BUCKETS,
+            )
         })
         .map_err(|e| InitError::Install(e.to_string()))
 }
@@ -231,6 +268,14 @@ pub fn register_descriptions() {
         TRANSFERS_TOTAL,
         "REFER transfers attempted, by mode (blind, attended) and result (accepted, rejected, local_error)."
     );
+    describe_counter!(
+        CONFERENCE_JOINS_TOTAL,
+        "Conference joins attempted, by result (joined, disabled, too_many_rooms, room_full, rate_mismatch, already_joined, error)."
+    );
+    describe_counter!(
+        ROOM_FRAMES_DROPPED_TOTAL,
+        "20 ms frames a conference room dropped instead of blocking, by stage (input, sink) and side (sip, ws)."
+    );
     describe_gauge!(
         CALLS_ACTIVE,
         Unit::Count,
@@ -245,6 +290,12 @@ pub fn register_descriptions() {
         REGISTER_STATE,
         Unit::Count,
         "Per-[[register]] status. 1 = current state for that name; 0 = other states."
+    );
+    describe_gauge!(CONFERENCES_ACTIVE, Unit::Count, "Live conference rooms.");
+    describe_gauge!(
+        CONFERENCE_PARTICIPANTS,
+        Unit::Count,
+        "Mixer participants across all rooms (2 per member call: SIP leg + WS session)."
     );
     describe_histogram!(
         WS_CONNECT_SECONDS,
@@ -265,6 +316,11 @@ pub fn register_descriptions() {
         RTP_RTT_MS,
         Unit::Milliseconds,
         "RTCP-derived round-trip time (ms) per received Receiver Report (RFC 3550 §A.7)."
+    );
+    describe_histogram!(
+        ROOM_TICK_LAG_SECONDS,
+        Unit::Seconds,
+        "How far past its 20 ms cadence a conference room's mix tick fired."
     );
 }
 
@@ -293,6 +349,13 @@ pub const CALL_DURATION_BUCKETS: [f64; 10] = [
 pub const RTP_RTT_MS_BUCKETS: [f64; 11] = [
     10.0, 20.0, 30.0, 50.0, 75.0, 100.0, 150.0, 200.0, 300.0, 500.0, 1000.0,
 ];
+
+/// `room_tick_lag_seconds`: healthy ticks land at ~0 (the interval
+/// fired on schedule); one full missed frame is 0.02. Buckets stretch
+/// to 0.25 s so a starved runtime is visible, not just clipped into
+/// +Inf.
+pub const ROOM_TICK_LAG_BUCKETS: [f64; 9] =
+    [0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25];
 
 #[cfg(test)]
 mod tests {

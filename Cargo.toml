@@ -144,6 +144,12 @@ forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "e95
 forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "e95a31a959a6" }
 forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "e95a31a959a6" }
 forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "e95a31a959a6" }
+# Conference rooms (0.7.0): forge-mixer is the per-room AudioMixer;
+# forge-injection provides ToneGenerator (join/leave tones now, MOH
+# for park later). Deliberately NOT forge-conference — its DTMF
+# IVR/PIN/host-control layer is unused per DEV_PLAN_0.7.0.md §9.4.
+forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "e95a31a959a6" }
+forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "e95a31a959a6" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.

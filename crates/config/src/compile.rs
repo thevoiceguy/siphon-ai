@@ -35,8 +35,9 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::raw::{
-    RawBridge, RawCdr, RawConfig, RawGateway, RawHep, RawMedia, RawNode, RawObservability,
-    RawOutbound, RawRecording, RawRegister, RawSecurity, RawSip, RawSipTls, RawWebhooks,
+    RawBridge, RawCdr, RawConference, RawConfig, RawGateway, RawHep, RawMedia, RawNode,
+    RawObservability, RawOutbound, RawRecording, RawRegister, RawSecurity, RawSip, RawSipTls,
+    RawWebhooks,
 };
 
 /// Compiled, ready-to-pass daemon config.
@@ -64,10 +65,40 @@ pub struct Config {
     pub security: SecurityConfig,
     pub recording: siphon_ai_recording::RecordingConfig,
     pub outbound: OutboundConfig,
+    pub conference: ConferenceConfig,
     pub cdr: CdrConfig,
     pub observability: ObservabilityConfig,
     pub webhooks: WebhooksConfig,
     pub hep: HepConfig,
+}
+
+/// Compiled `[conference]` — conference rooms (0.7.0). Fail-closed:
+/// `enabled = false` (the default) refuses every join, so a 0.6.x
+/// deployment upgrades with zero behaviour change. The daemon maps
+/// this 1:1 onto `siphon-ai-core`'s `ConferenceLimits`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConferenceConfig {
+    pub enabled: bool,
+    /// Live rooms across the daemon.
+    pub max_rooms: usize,
+    /// Member *calls* per room (each contributes 2 mixer
+    /// participants: its SIP leg and its WS session). Kept small on
+    /// purpose — per-sink mixing is O(N²) in this cap (see
+    /// DEV_PLAN_0.7.0.md §6).
+    pub max_participants_per_room: usize,
+    /// Chime on join/leave.
+    pub join_tones: bool,
+}
+
+impl Default for ConferenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_rooms: 16,
+            max_participants_per_room: 8,
+            join_tones: false,
+        }
+    }
 }
 
 /// Compiled `[outbound]` + `[[gateway]]` — outbound call origination
@@ -570,6 +601,13 @@ pub enum CompileError {
     )]
     GatewayTransportWithRegister { name: String },
 
+    #[error("[conference].{field} = {value} is invalid ({reason})")]
+    ConferenceBadLimit {
+        field: &'static str,
+        value: u32,
+        reason: &'static str,
+    },
+
     #[error("[media].rtp_port_range {min}-{max} is invalid (min must be < max and even)")]
     BadRtpPortRange { min: u16, max: u16 },
 
@@ -677,6 +715,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let security = compile_security(raw.security)?;
     let recording = compile_recording(raw.recording)?;
     let outbound = compile_outbound(raw.outbound, raw.gateways, &registrations)?;
+    let conference = compile_conference(raw.conference)?;
     let cdr = compile_cdr(raw.cdr)?;
     let observability = compile_observability(raw.observability)?;
     let webhooks = compile_webhooks(raw.webhooks)?;
@@ -767,6 +806,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         security,
         recording,
         outbound,
+        conference,
         cdr,
         observability,
         webhooks,
@@ -1692,6 +1732,40 @@ fn compile_hep(raw: RawHep) -> Result<HepConfig, CompileError> {
         // it here rather than depending on hep-rs from this crate
         // (config has a deliberately minimal dep graph).
         queue_capacity: raw.queue_capacity.unwrap_or(256),
+    })
+}
+
+/// Compile `[conference]` (0.7.0). Validation per CLAUDE.md §4.6 —
+/// fail loud at load, not at first join:
+/// - `max_rooms >= 1` (0 would make `enabled = true` a silent no-op);
+/// - `max_participants_per_room >= 2` (a 1-call cap can never
+///   conference — the first joiner waits alone for a peer that can
+///   never be admitted).
+fn compile_conference(raw: RawConference) -> Result<ConferenceConfig, CompileError> {
+    let defaults = ConferenceConfig::default();
+    let max_rooms = raw.max_rooms.unwrap_or(defaults.max_rooms as u32);
+    if max_rooms == 0 {
+        return Err(CompileError::ConferenceBadLimit {
+            field: "max_rooms",
+            value: 0,
+            reason: "must be >= 1",
+        });
+    }
+    let max_participants = raw
+        .max_participants_per_room
+        .unwrap_or(defaults.max_participants_per_room as u32);
+    if max_participants < 2 {
+        return Err(CompileError::ConferenceBadLimit {
+            field: "max_participants_per_room",
+            value: max_participants,
+            reason: "must be >= 2 (a room needs at least two calls to conference)",
+        });
+    }
+    Ok(ConferenceConfig {
+        enabled: raw.enabled,
+        max_rooms: max_rooms as usize,
+        max_participants_per_room: max_participants as usize,
+        join_tones: raw.join_tones,
     })
 }
 

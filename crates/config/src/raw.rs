@@ -63,6 +63,10 @@ pub struct RawConfig {
     #[serde(default)]
     pub outbound: RawOutbound,
 
+    /// `[conference]` — multi-party rooms (0.7.0). Off by default.
+    #[serde(default)]
+    pub conference: RawConference,
+
     #[serde(default)]
     pub cdr: RawCdr,
 
@@ -297,6 +301,27 @@ pub struct RawRecording {
     /// Directory recordings are written to. Required when `mode != "off"`.
     #[serde(default)]
     pub dir: Option<String>,
+}
+
+/// `[conference]` — conference rooms (0.7.0). Fail-closed like
+/// `[outbound]`: with `enabled = false` (the default) every join is
+/// refused and a 0.6.x deployment upgrades with zero behaviour
+/// change.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawConference {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Live rooms across the daemon. Default 16.
+    #[serde(default)]
+    pub max_rooms: Option<u32>,
+    /// Member *calls* per room (each contributes its SIP leg and its
+    /// WS session to the mix). Default 8.
+    #[serde(default)]
+    pub max_participants_per_room: Option<u32>,
+    /// Play a short chime into the room on join/leave. Default false.
+    #[serde(default)]
+    pub join_tones: bool,
 }
 
 /// `[[gateway]]` — one outbound trunk/provider (0.6.0). A gateway is the

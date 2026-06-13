@@ -1827,3 +1827,107 @@ ws_url = "wss://x/y"
     assert_eq!(cfg.sip.tls_client_extra_ca.as_deref(), Some(ca.as_path()));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ─── [conference] — conference rooms (0.7.0) ──────────────────────
+
+#[test]
+fn conference_defaults_off_with_documented_caps() {
+    // A config with no [conference] block at all (every 0.6.x
+    // config) compiles to the fail-closed defaults.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(!cfg.conference.enabled);
+    assert_eq!(cfg.conference.max_rooms, 16);
+    assert_eq!(cfg.conference.max_participants_per_room, 8);
+    assert!(!cfg.conference.join_tones);
+}
+
+#[test]
+fn conference_block_compiles_with_overrides() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[conference]
+enabled = true
+max_rooms = 4
+max_participants_per_room = 3
+join_tones = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(cfg.conference.enabled);
+    assert_eq!(cfg.conference.max_rooms, 4);
+    assert_eq!(cfg.conference.max_participants_per_room, 3);
+    assert!(cfg.conference.join_tones);
+}
+
+#[test]
+fn conference_zero_max_rooms_is_rejected_at_load() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[conference]
+enabled = true
+max_rooms = 0
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(
+        err.to_string().contains("max_rooms"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn conference_single_call_room_cap_is_rejected_at_load() {
+    // max_participants_per_room = 1 can never conference; fail loud
+    // at load (CLAUDE.md §4.6), not silently at first join.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[conference]
+max_participants_per_room = 1
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(
+        err.to_string().contains("max_participants_per_room"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn conference_unknown_key_is_rejected() {
+    // deny_unknown_fields: typos must not silently no-op a cap.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[conference]
+max_partcipants_per_room = 4
+"#;
+    assert!(load_from_str_with_env(toml, &env).is_err());
+}

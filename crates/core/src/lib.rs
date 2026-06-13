@@ -7,6 +7,7 @@
 
 pub mod acceptor;
 pub mod call;
+pub mod conference;
 pub mod outbound;
 pub mod outbound_service;
 pub mod registry;
@@ -23,6 +24,7 @@ pub use call::{
     CallController, CallControllerConfig, CallError, CallHandle, CallOutcome, CallState,
     CallTermination,
 };
+pub use conference::{ConferenceError, ConferenceLimits, ConferenceRegistry};
 pub use outbound::{
     NotAnsweredCause, OutboundCall, OutboundError, OutboundGuard, OutboundOriginator,
     OutboundPermit, OutboundRejection, StaticCredentials,

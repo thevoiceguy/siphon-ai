@@ -21,6 +21,7 @@ before TOML parsing. Unset variables without a default fail the load.
 [[register]]      # zero or more outbound REGISTERs ("registered phone" mode)
 [security]        # STIR/SHAKEN call-authentication policy (0.4.0)
 [security.stir_shaken]  # verification settings
+[conference]      # conference rooms (0.7.0); off by default
 [cdr]             # call detail records: file + webhook sinks
 [observability]   # /metrics, /health, /ready, /admin
 [webhooks]        # lifecycle events (call_start, call_end, …)
@@ -320,6 +321,35 @@ register = "pbx"            # name of a [[register]] block
 All of the above is validated at config load — unknown `register` references,
 a `from` missing the `sip:` scheme, half-set credentials, duplicate names, or
 a bad `proxy` all fail loud at startup.
+
+## `[conference]` — conference rooms (0.7.0)
+
+Multi-party rooms: N calls share one mixed audio room, every leg keeps its
+own WS session, and each sink hears the room minus its own input (the caller
+never hears themselves; each bot still hears its own caller, so STT keeps
+working). Joins are driven over the WS protocol / admin API (0.7.0); this
+block only declares the daemon-level facility.
+
+```toml
+[conference]
+enabled = false                  # fail-closed, like [outbound]
+max_rooms = 16
+max_participants_per_room = 8
+join_tones = false
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `enabled` | `false` | Off = every join refused. A 0.6.x config upgrades with zero behaviour change. |
+| `max_rooms` | `16` | Live rooms across the daemon. Must be ≥ 1. |
+| `max_participants_per_room` | `8` | Member **calls** per room (each contributes 2 mixer participants: its SIP leg and its WS session). Must be ≥ 2. Kept small on purpose — per-sink mixing cost grows quadratically with this cap. |
+| `join_tones` | `false` | Short chime into the room on every join/leave. |
+
+A room locks to its first joiner's negotiated sample rate (8 kHz or 16 kHz);
+a join at a different rate is rejected — no resampling in 0.7.0 (documented
+limitation). Rooms are created on first join and end when the last member
+leaves. Global only — no per-route overrides (rooms are a daemon-level
+facility, like outbound).
 
 ## `[security]` — STIR/SHAKEN call authentication
 

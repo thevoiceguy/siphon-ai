@@ -36,14 +36,16 @@ It accepts inbound voice calls — either from a SIP trunk or as a registered en
 **v1 promise:**
 > "Point your PBX at SiphonAI, point SiphonAI at your WebSocket. Get real-time bidirectional audio with barge-in, DTMF, and call control. Bring your own AI."
 
-**v1 explicitly does NOT include:**
-- AI integration (any kind)
-- Multi-tenancy / per-DID routing (single global config)
-- Outbound originated calls (inbound-only for v1)
-- Conferencing
-- Video
-- Recording (deferred — forge has it, we'll expose it post-v1)
-- WebRTC client support (forge has it, but SiphonAI is SIP-only for v1)
+**The original v1 cut explicitly did NOT include:**
+- AI integration (any kind) — still out of scope, permanently
+- Multi-tenancy / per-DID routing (single global config) — still out of scope
+- Video — still out of scope
+- WebRTC client support (forge has it, but SiphonAI is SIP-only) — still out of scope
+
+**Delivered in later releases** (were deferred at the v1 cut, now shipped — off by default):
+- Recording — 0.5.0 (`docs/CONFIG.md` `[recording]`)
+- Outbound originated calls + attended transfer — 0.6.0 / 0.6.1 (`docs/OUTBOUND.md`)
+- Conferencing / mixing and media-only call park — 0.7.0 (`docs/CONFERENCE.md`, `docs/PARK.md`)
 
 ---
 
@@ -107,9 +109,9 @@ It accepts inbound voice calls — either from a SIP trunk or as a registered en
 ### 3.3 From `forge-media` — explicitly NOT used in v1
 
 - `forge-ai-stream` — SiphonAI is BYO-AI
-- `forge-conference-processor`, `forge-mixer` — 1:1 calls only
+- `forge-conference-processor` — its DTMF-IVR / PIN / host-control layer is out of scope (§9.4 of DEV_PLAN_0.7.0.md). **Update (0.7.0):** `forge-mixer` + `forge-injection` ARE now used — conferencing (mixed rooms) and call park (hold music) consume them directly.
 - `forge-webrtc` — SIP-only
-- `forge-siprec`, `forge-recording` — deferred
+- `forge-siprec` — deferred (note: `forge-recording` is used as of 0.5.0)
 - `forge-api` — we're using forge as a library, not consuming its REST API
 - `forge-ha`, `forge-kernel` — overkill for v1
 

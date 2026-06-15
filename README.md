@@ -42,6 +42,21 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
+**v0.7.0** — eighth release. Theme: **conferencing + media-only call park.**
+Two operator-controllable multi-leg features, both **off by default**.
+Conferencing mixes N calls into one room where *every* leg keeps its own WS
+session (no single "host" bot) and each side hears the mix minus its own
+input; a WS server joins its own call (`conference_join`/`leave`), and
+operators compose rooms over `/admin/v1/conferences` (add/remove **any**
+active call, cross-call via a new bridge-id → `CallHandle` registry that keeps
+CLAUDE §4.4 intact). Call park shelves a call on hold music with **no** WS
+session — `park` detaches the bot, the SIP dialog + RTP stay up, and an
+operator **retrieves** it later onto a *fresh* session (`start.retrieved`),
+or it times out (`hangup`|`keep`). The protocol stays `version: "1"` (new
+messages/events/error codes only); a 0.6.x deployment upgrades with zero
+behaviour change. See [`docs/CONFERENCE.md`](docs/CONFERENCE.md) and
+[`docs/PARK.md`](docs/PARK.md). Full notes: [`CHANGELOG.md`](CHANGELOG.md).
+
 **v0.6.2** — patch release. Theme: **TLS trunk hardening.** Fixes found by
 running v0.6.1 against a production TLS trunk: the `Contact` on dual-listener
 daemons advertised the UDP port for TLS dialogs (losing in-dialog ACK/BYE —

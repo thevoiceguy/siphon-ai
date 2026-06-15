@@ -558,6 +558,271 @@ fi
 at_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: park → timeout → hangup ───────────
+# SIPp calls in; the echo-ws parks the call (--auto-park) → the WS
+# detaches and the caller hears hold music; [park].timeout_secs=1 with
+# timeout_action="hangup" fires and SiphonAI BYEs the caller. Pass =
+# SIPp saw the BYE AND parks_total{result="ok"} ticked.
+echo
+echo "─── auxiliary phase: park_timeout ─────────────────────"
+PK_WS_PORT=8770
+PK_ADMIN_PORT=9091
+PK_WS_LOG=$(mktemp -t echo-ws-pk.XXXXXX.log)
+PK_DAEMON_LOG=$(mktemp -t siphon-ai-pk.XXXXXX.log)
+PK_CONFIG=$(mktemp -t siphon-ai-pk.XXXXXX.toml)
+cat >"$PK_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-pk"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$PK_WS_PORT/"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$PK_ADMIN_PORT"
+[park]
+enabled = true
+timeout_secs = 1
+timeout_action = "hangup"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+PK_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$PK_PYTHON" ]] || PK_PYTHON=python3
+"$PK_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$PK_WS_PORT" \
+    --auto-park \
+    >"$PK_WS_LOG" 2>&1 &
+PK_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$PK_CONFIG" \
+    >"$PK_DAEMON_LOG" 2>&1 &
+PK_DAEMON_PID=$!
+pk_cleanup() {
+    kill "$PK_WS_PID" "$PK_DAEMON_PID" 2>/dev/null || true
+    wait "$PK_WS_PID" "$PK_DAEMON_PID" 2>/dev/null || true
+}
+trap pk_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── park_timeout_hangup ──────────────────────────────"
+pk_ok=0
+if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/park_caller.xml" -m 1 -timeout 15s -trace_err \
+        -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1; then
+    if curl -s "http://127.0.0.1:$PK_ADMIN_PORT/metrics" \
+        | grep -q 'siphon_ai_parks_total{result="ok"} 1'; then
+        pk_ok=1
+    fi
+fi
+if (( pk_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (daemon: $PK_DAEMON_LOG; ws: $PK_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+pk_cleanup
+trap - EXIT
+
+# ─── Always-on auxiliary phase: park → retrieve → hangup ──────────
+# SIPp calls in; echo-ws A parks the call (--auto-park, no timeout). The
+# runner waits until the call shows up in GET /admin/v1/parked, then
+# POSTs a retrieve onto echo-ws B (which auto-hangs-up). SiphonAI opens a
+# fresh WS to B, B hangs up, and SiphonAI BYEs the caller. Pass = SIPp
+# saw the BYE AND retrieves_total{result="ok"} ticked.
+echo
+echo "─── auxiliary phase: park_retrieve ────────────────────"
+PR_WS_A_PORT=8770
+PR_WS_B_PORT=8771
+PR_ADMIN_PORT=9091
+PR_WS_A_LOG=$(mktemp -t echo-ws-pr-a.XXXXXX.log)
+PR_WS_B_LOG=$(mktemp -t echo-ws-pr-b.XXXXXX.log)
+PR_DAEMON_LOG=$(mktemp -t siphon-ai-pr.XXXXXX.log)
+PR_CONFIG=$(mktemp -t siphon-ai-pr.XXXXXX.toml)
+cat >"$PR_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-pr"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$PR_WS_A_PORT/"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$PR_ADMIN_PORT"
+[park]
+enabled = true
+timeout_secs = 0
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+PR_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$PR_PYTHON" ]] || PR_PYTHON=python3
+# A parks the inbound call; B is the retrieve target and hangs up shortly
+# after it receives its (retrieved) start.
+"$PR_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$PR_WS_A_PORT" --auto-park >"$PR_WS_A_LOG" 2>&1 &
+PR_WS_A_PID=$!
+"$PR_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$PR_WS_B_PORT" --auto-hangup-after-ms 1500 >"$PR_WS_B_LOG" 2>&1 &
+PR_WS_B_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$PR_CONFIG" \
+    >"$PR_DAEMON_LOG" 2>&1 &
+PR_DAEMON_PID=$!
+PR_SIPP_PID=""
+pr_cleanup() {
+    kill "$PR_WS_A_PID" "$PR_WS_B_PID" "$PR_DAEMON_PID" $PR_SIPP_PID 2>/dev/null || true
+    wait "$PR_WS_A_PID" "$PR_WS_B_PID" "$PR_DAEMON_PID" $PR_SIPP_PID 2>/dev/null || true
+}
+trap pr_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── park_retrieve_hangup ─────────────────────────────"
+pr_ok=0
+# Caller in the background — it answers and then waits for the BYE.
+sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/park_caller.xml" -m 1 -timeout 20s -trace_err \
+    -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1 &
+PR_SIPP_PID=$!
+sleep 0.3
+
+# Wait until the call is parked, then grab its bridge call_id.
+parked_id=""
+for _ in $(seq 1 25); do
+    parked_id=$(curl -s "http://127.0.0.1:$PR_ADMIN_PORT/admin/v1/parked" \
+        | sed -n 's/.*"call_id":"\([^"]*\)".*/\1/p' | head -1)
+    [[ -n "$parked_id" ]] && break
+    sleep 0.2
+done
+
+if [[ -n "$parked_id" ]]; then
+    curl -s -o /dev/null -X POST \
+        "http://127.0.0.1:$PR_ADMIN_PORT/admin/v1/calls/$parked_id/retrieve" \
+        -d "{\"ws_url\": \"ws://127.0.0.1:$PR_WS_B_PORT/\"}"
+    # echo-ws B hangs up → SiphonAI BYEs the caller → SIPp completes.
+    if wait "$PR_SIPP_PID" && curl -s "http://127.0.0.1:$PR_ADMIN_PORT/metrics" \
+        | grep -q 'siphon_ai_retrieves_total{result="ok"} 1'; then
+        pr_ok=1
+    fi
+fi
+if (( pr_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (parked_id=$parked_id; daemon: $PR_DAEMON_LOG;" \
+         "ws A: $PR_WS_A_LOG; ws B: $PR_WS_B_LOG)"
+    failures=$((failures + 1))
+fi
+
+pr_cleanup
+trap - EXIT
+
+# ─── Always-on auxiliary phase: conference (two callers) ──────────
+# Two SIPp callers (on different ports) both bridge to one echo-ws
+# started with --auto-conference-join, so both legs land in the SAME
+# room. While both are up the runner asserts the daemon mixed them
+# (conference_participants=4 — two calls × SIP leg + WS session); after
+# both hang up the room ends (conferences_active=0).
+echo
+echo "─── auxiliary phase: conference ───────────────────────"
+CF_WS_PORT=8772
+CF_ADMIN_PORT=9091
+CF_SIPP2_PORT=5082
+CF_WS_LOG=$(mktemp -t echo-ws-cf.XXXXXX.log)
+CF_DAEMON_LOG=$(mktemp -t siphon-ai-cf.XXXXXX.log)
+CF_CONFIG=$(mktemp -t siphon-ai-cf.XXXXXX.toml)
+cat >"$CF_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-cf"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$CF_WS_PORT/"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$CF_ADMIN_PORT"
+[conference]
+enabled = true
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+CF_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$CF_PYTHON" ]] || CF_PYTHON=python3
+"$CF_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$CF_WS_PORT" \
+    --auto-conference-join confroom \
+    >"$CF_WS_LOG" 2>&1 &
+CF_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$CF_CONFIG" \
+    >"$CF_DAEMON_LOG" 2>&1 &
+CF_DAEMON_PID=$!
+CF_S1_PID=""
+CF_S2_PID=""
+cf_cleanup() {
+    kill "$CF_WS_PID" "$CF_DAEMON_PID" $CF_S1_PID $CF_S2_PID 2>/dev/null || true
+    wait "$CF_WS_PID" "$CF_DAEMON_PID" $CF_S1_PID $CF_S2_PID 2>/dev/null || true
+}
+trap cf_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── conference_two_callers ───────────────────────────"
+cf_ok=0
+# Two concurrent callers → both join "confroom" via the echo-ws.
+sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/conference_caller.xml" -m 1 -timeout 20s -trace_err \
+    -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1 &
+CF_S1_PID=$!
+sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/conference_caller.xml" -m 1 -timeout 20s -trace_err \
+    -p "$CF_SIPP2_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1 &
+CF_S2_PID=$!
+
+# Wait until both legs are mixed into the room.
+cf_mixed=0
+for _ in $(seq 1 30); do
+    if curl -s "http://127.0.0.1:$CF_ADMIN_PORT/metrics" \
+        | grep -q 'siphon_ai_conference_participants 4'; then
+        cf_mixed=1; break
+    fi
+    sleep 0.2
+done
+
+if (( cf_mixed )) && wait "$CF_S1_PID" && wait "$CF_S2_PID"; then
+    # Both callers hung up; the room ends once both legs tear down — async
+    # after the BYE/200, so poll briefly rather than scraping once.
+    for _ in $(seq 1 15); do
+        if curl -s "http://127.0.0.1:$CF_ADMIN_PORT/metrics" \
+            | grep -q 'siphon_ai_conferences_active 0'; then
+            cf_ok=1; break
+        fi
+        sleep 0.2
+    done
+fi
+if (( cf_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (mixed=$cf_mixed; daemon: $CF_DAEMON_LOG; ws: $CF_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+cf_cleanup
+trap - EXIT
+
 # ─── Optional third phase: blind_transfer ─────────────────────────
 # Needs a WS server that proactively emits BridgeIn::Transfer. The
 # runner stops the daemon, brings up an echo-ws that auto-emits

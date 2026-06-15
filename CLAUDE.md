@@ -392,22 +392,21 @@ Same pattern, but `BridgeOut`. Plus:
 
 ## 8. Things That Are Out of Scope
 
-If asked to do any of these, **stop and confirm with the user before proceeding.** They're explicit non-goals for v1.
+If asked to do any of these, **stop and confirm with the user before proceeding.** They're explicit non-goals.
 
 - AI provider integration of any kind
-- Multi-tenancy (note: route-based dispatch in a single config is in v1; multi-tenant separation is not)
-- Outbound originated calls (inbound + transfer is the v1 set)
-- Conferencing or mixing
+- Multi-tenancy (note: route-based dispatch in a single config is in scope; multi-tenant separation is not)
 - Video
 - WebRTC client support
-- Recording (post-v1)
-- WS reconnect mid-call (post-v1)
-- SRTP (post-v1)
+- WS reconnect mid-call (post-v1). Note: park/retrieve (0.7.0) is **not** this — retrieve opens a *fresh* WS session on an operator action, it does not resume a dropped one.
+- SRTP beyond what's shipped: DTLS-SRTP is produced (0.3.0); SDES and mid-call re-key are not.
 - Custom codec implementations (use forge-codecs)
 - Reimplementing SIP transactions, dialogs, or transports (use siphon-rs)
 - Reimplementing HEP encoding (use hep-rs)
 - YAML/JSON config formats (TOML only)
 - Per-call log files (use structured logs + correlation by call_id)
+
+**Delivered since the original v1 cut** (no longer out of scope — these shipped and have their own docs/config): call recording (0.5.0), outbound origination + attended transfer (0.6.0/0.6.1), conferencing/mixing and media-only call park (0.7.0). Don't refuse work on these as "out of scope"; treat them as supported features.
 
 ---
 

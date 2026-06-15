@@ -51,6 +51,8 @@ sipp -sf basic_call_then_bye.xml -m 1 -p 5070 -s 1000 127.0.0.1:5060
 | `stir_shaken_attestation_403.xml`   | STIR/SHAKEN gate: `Identity` present but unverifiable (unreachable `x5u`) below `min_attestation = "A"` → 403 Forbidden (stir_shaken phase) |
 | `stir_shaken_attestation_pass.xml`  | STIR/SHAKEN happy path: a fully-verifiable `Identity` (fresh PASSporT, real x5u fetch, chain to the test anchor) → **200 admitted** (stir_shaken phase). Templated — `__IDENTITY__` is substituted at run time; does not run standalone. |
 | `outbound_uas_answer.xml`           | 0.6.0 outbound answer path, roles inverted: SiphonAI dials via `POST /admin/v1/calls`, SIPp answers (180 → 200 + SDP), bridge runs, SiphonAI BYEs (outbound phase) |
+| `park_caller.xml`                   | 0.7.0 call park: caller is answered + bridged, the echo-ws parks it (`--auto-park`), and SiphonAI BYEs the caller when the park resolves. Shared by the **park_timeout** and **park_retrieve** phases |
+| `conference_caller.xml`             | 0.7.0 conferencing: a caller that stays up while the echo-ws joins it to a room (`--auto-conference-join`); two run concurrently in the **conference** phase |
 
 `run-all.sh` also has an always-on **recording** auxiliary phase: it starts
 a daemon with `[recording].mode = "always"` writing to a temp dir, runs one
@@ -65,6 +67,28 @@ instance with `--auto-hangup-after-ms 1500` (so the WS side ends the call),
 backgrounds SIPp as the callee, then POSTs `/admin/v1/calls`. Pass = SIPp
 completed INVITE → ACK → BYE **and** the daemon's
 `siphon_ai_outbound_calls_total{result="answered"}` metric reads 1.
+
+`run-all.sh` has two always-on **park** auxiliary phases (0.7.0), both using
+`park_caller.xml` and an echo-ws started with `--auto-park`:
+
+- **park_timeout** — a daemon with `[park]` `timeout_secs = 1`,
+  `timeout_action = "hangup"`. The call is parked, the timeout fires, and
+  SiphonAI BYEs the caller. Pass = SIPp saw the BYE **and**
+  `siphon_ai_parks_total{result="ok"}` reads 1.
+- **park_retrieve** — `[park]` with no timeout. The runner backgrounds the
+  caller, waits until it appears in `GET /admin/v1/parked`, then POSTs
+  `/admin/v1/calls/:id/retrieve` onto a second echo-ws (`--auto-hangup-after-ms`).
+  SiphonAI opens a fresh WS to it, that side hangs up, and SiphonAI BYEs the
+  caller. Pass = SIPp saw the BYE **and**
+  `siphon_ai_retrieves_total{result="ok"}` reads 1.
+
+And an always-on **conference** phase (0.7.0): a daemon with `[conference]`
+enabled and an echo-ws started with `--auto-conference-join`. Two
+`conference_caller.xml` callers (on different ports) bridge to the same room.
+Pass = the daemon mixes both (`siphon_ai_conference_participants` reads 4 —
+two calls × SIP leg + WS session) **and** the room ends after both hang up
+(`siphon_ai_conferences_active` returns to 0). SIPp can't assert mixed audio
+content — that's covered by media-glue unit tests with synthetic PCM.
 
 The `stir_shaken_*` scenarios run in `run-all.sh`'s always-on
 **stir_shaken** auxiliary phase. It builds + runs the

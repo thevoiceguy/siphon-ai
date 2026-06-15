@@ -103,6 +103,39 @@ decision — see `docs/DEV_PLAN_0.6.0.md` §9.5). The intended posture:
 5. **Watch `siphon_ai_outbound_calls_total`.** An unexpected slope on that
    counter is the earliest fraud signal you'll get; alert on it.
 
+### Encrypting the media — SRTP (0.7.x)
+
+By default outbound media is plaintext RTP. To secure it, set
+`[[gateway]].srtp` (the outbound mirror of inbound `[media].srtp`):
+
+```toml
+[[gateway]]
+name      = "twilio"
+proxy     = "siptrunk.example.com"
+from      = "sip:+13125551234@siptrunk.example.com"
+transport = "tls"          # secures the signalling that carries the SDES key
+srtp      = "required"      # "off" (default) | "preferred" | "required"
+```
+
+SiphonAI offers SDES (RFC 4568): it mints an `AES_CM_128_HMAC_SHA1_80` master
+key, sends the INVITE as `RTP/SAVP` with an `a=crypto:` line, and on a 2xx
+that accepts it installs the keys so the trunk leg is encrypted. The mode
+controls the downgrade:
+
+- **`required`** — a trunk that answers plaintext `RTP/AVP` **fails the
+  call** (it counts as `failed` on `siphon_ai_outbound_calls_total`). Use
+  this when the carrier mandates SRTP (e.g. Twilio secure trunking).
+- **`preferred`** — a plaintext answer is accepted and the call continues
+  **unencrypted** (best-effort). `start.srtp` is then absent.
+
+**Always pair `srtp` with `transport = "tls"`.** SDES carries the master key
+in the SDP on the signalling plane; over plaintext SIP the key is exposed
+and SRTP gives no real confidentiality. The daemon warns at load if a
+gateway sets `srtp` without TLS. When SRTP is established, the WS server
+sees it on `start.srtp` (`{ exchange: "sdes", profile: "<suite>" }`, see
+`docs/PROTOCOL.md` §3.1), and the `siphon_ai_outbound_srtp_total{result}`
+metric records `encrypted` vs `downgraded`.
+
 ## 4. Call lifecycle
 
 Progress is reported via lifecycle webhooks (`[webhooks]`, see
@@ -162,8 +195,9 @@ way.
 - **Metrics** — `siphon_ai_outbound_calls_total{result}` (`answered`,
   `busy`, `declined`, `no_answer`, `rejected`, `unreachable`, `failed`) and
   the `siphon_ai_outbound_calls_active` gauge (admitted but not yet
-  settled). Bridged-call mechanics land in the same per-call metrics
-  inbound calls use.
+  settled). When a gateway uses SRTP, `siphon_ai_outbound_srtp_total{result}`
+  records `encrypted` vs `downgraded` (0.7.x). Bridged-call mechanics land
+  in the same per-call metrics inbound calls use.
 - **CDR** — `direction: "outbound"`, see [§4](#4-call-lifecycle) and
   `docs/DEPLOY.md` (CDR consumers).
 - **Webhooks** — the three `outbound_*` events + `call_end`, payloads in

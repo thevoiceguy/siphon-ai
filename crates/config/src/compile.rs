@@ -177,6 +177,11 @@ pub struct Gateway {
     /// Default caller-ID `sip:` URI.
     pub from: String,
     pub credentials: Option<GatewayCredentials>,
+    /// SRTP policy for outbound media on this trunk (0.7.x). `Off` (the
+    /// default) offers plaintext RTP; `Preferred`/`Required` offer SDES
+    /// SRTP. Maps onto `siphon-ai-media-glue::OutboundSrtp` at the
+    /// originate path.
+    pub srtp: siphon_ai_core::SrtpMode,
 }
 
 impl Gateway {
@@ -1172,6 +1177,11 @@ fn compile_outbound(
             return Err(CompileError::GatewayDuplicateName { name: g.name });
         }
 
+        // SRTP policy is independent of register-reuse vs standalone;
+        // resolve it once and stamp it into whichever branch builds the
+        // Gateway. Unknown value fails loud (same as [media].srtp).
+        let srtp = compile_srtp_mode(g.srtp.as_deref())?;
+
         let gw = if let Some(reg_name) = g.register.as_deref().filter(|s| !s.is_empty()) {
             // Register reuse — inherit server + credentials + AOR +
             // transport. An explicit `transport` here is a conflict,
@@ -1205,6 +1215,7 @@ fn compile_outbound(
                     password: reg.password.clone(),
                     realm: reg.realm.clone(),
                 }),
+                srtp,
             }
         } else {
             // Standalone trunk.
@@ -1270,8 +1281,23 @@ fn compile_outbound(
                 transport,
                 from,
                 credentials,
+                srtp,
             }
         };
+
+        // SDES-key-in-the-clear footgun (per-gateway mirror of the inbound
+        // `[media].srtp`-without-SIP/TLS warning): SRTP on a non-TLS trunk
+        // exchanges the master key over plaintext signalling, so it gives
+        // no real confidentiality. Warn once at load.
+        if gw.srtp != siphon_ai_core::SrtpMode::Off && gw.transport != SipTransport::Tls {
+            warn!(
+                target: "siphon_ai_config",
+                gateway = %gw.name,
+                "[[gateway]].srtp is not \"off\" but transport is not \"tls\"; the SDES \
+                 master key would travel in plaintext on the SIP signalling plane — \
+                 SRTP gives no confidentiality. Set transport = \"tls\" on this gateway."
+            );
+        }
         compiled.push(gw);
     }
 
@@ -2126,6 +2152,52 @@ mod outbound_tests {
             (creds.username.as_str(), creds.password.as_str()),
             ("acct", "token")
         );
+        // SRTP defaults to off (unchanged 0.6.x behaviour).
+        assert_eq!(g.srtp, siphon_ai_core::SrtpMode::Off);
+    }
+
+    #[test]
+    fn gateway_srtp_required_compiles_over_tls() {
+        let raw = RawGateway {
+            proxy: Some("twilio.example".into()),
+            from: Some("sip:+13125551234@twilio.example".into()),
+            transport: Some("tls".into()),
+            srtp: Some("required".into()),
+            ..gw("twilio")
+        };
+        let out = compile_outbound(RawOutbound::default(), vec![raw], &[]).unwrap();
+        let g = out.gateway("twilio").expect("gateway present");
+        assert_eq!(g.srtp, siphon_ai_core::SrtpMode::Required);
+        assert_eq!(g.transport, SipTransport::Tls);
+    }
+
+    #[test]
+    fn gateway_srtp_preferred_without_tls_still_compiles() {
+        // The SDES-key-in-the-clear case warns at load but is not an error
+        // (operator may accept the risk on a private network).
+        let raw = RawGateway {
+            proxy: Some("trunk.example".into()),
+            from: Some("sip:+13125551234@trunk.example".into()),
+            srtp: Some("preferred".into()),
+            ..gw("trunk")
+        };
+        let out = compile_outbound(RawOutbound::default(), vec![raw], &[]).unwrap();
+        assert_eq!(
+            out.gateway("trunk").unwrap().srtp,
+            siphon_ai_core::SrtpMode::Preferred
+        );
+    }
+
+    #[test]
+    fn gateway_bad_srtp_value_is_rejected() {
+        let raw = RawGateway {
+            proxy: Some("trunk.example".into()),
+            from: Some("sip:x@trunk.example".into()),
+            srtp: Some("encrypted".into()),
+            ..gw("trunk")
+        };
+        let err = compile_outbound(RawOutbound::default(), vec![raw], &[]).unwrap_err();
+        assert!(matches!(err, CompileError::UnknownSrtpMode(v) if v == "encrypted"));
     }
 
     #[test]

@@ -583,6 +583,20 @@ impl Runtime {
                         proxy_port: gw.proxy_port,
                         transport_uri_param: gw.transport.uri_param(),
                         from: gw.from.clone(),
+                        // Map the config SRTP policy onto the media-glue
+                        // offer mode (core's SrtpMode is the inbound enum;
+                        // OutboundSrtp is its outbound mirror).
+                        srtp: match gw.srtp {
+                            siphon_ai_core::SrtpMode::Off => {
+                                siphon_ai_media_glue::OutboundSrtp::Off
+                            }
+                            siphon_ai_core::SrtpMode::Preferred => {
+                                siphon_ai_media_glue::OutboundSrtp::Preferred
+                            }
+                            siphon_ai_core::SrtpMode::Required => {
+                                siphon_ai_media_glue::OutboundSrtp::Required
+                            }
+                        },
                     },
                 );
             }

@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  outbound_srtp_uas_answer — like outbound_uas_answer, but the trunk
+  accepts SRTP. Roles inverted: SIPp is the CALLEE (UAS); SiphonAI is the
+  UAC placing the call via POST /admin/v1/calls through a gateway with
+  [[gateway]].srtp = "required". SiphonAI's INVITE offers RTP/SAVP with an
+  a=crypto: line (SDES, RFC 4568); this scenario answers RTP/SAVP with its
+  own a=crypto, so SiphonAI installs keys and start.srtp is populated.
+
+  The inline key is 30 zero bytes (16-byte AES_CM_128 master key + 14-byte
+  salt) base64-encoded — a structurally valid SDES key the daemon's
+  `to_srtp_key_material()` accepts. Test media is never decrypted (the echo
+  WS hangs up after a beat), so a fixed key is fine for a signalling test.
+
+  Run via run-all.sh's outbound_srtp auxiliary phase — the scenario alone
+  does nothing until the runner POSTs the originate request.
+-->
+<scenario name="outbound_srtp_uas_answer">
+  <recv request="INVITE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 180 Ringing
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <send retrans="500">
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/SAVP 0
+a=rtpmap:0 PCMU/8000
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+]]>
+  </send>
+
+  <recv request="ACK" rtd="true"/>
+
+  <!-- Call is up + SRTP-secured; the echo WS auto-hangs-up and SiphonAI
+       BYEs us. -->
+  <recv request="BYE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]>
+  </send>
+</scenario>

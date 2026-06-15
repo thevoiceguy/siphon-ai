@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-15
+
+Theme: **outbound SRTP** — SiphonAI could *answer* an inbound SRTP offer but
+only ever *offered* plaintext `RTP/AVP`, so outbound calls couldn't carry
+audio on secure trunks (e.g. Twilio secure trunking). This closes that
+inbound↔outbound asymmetry via SDES (RFC 4568) on the offer. **Off by
+default**; the WS protocol stays `version: "1"` and the CDR schema is
+unchanged. Self-contained in SiphonAI — no upstream forge-media change (the
+crypto primitives are public at the pinned rev). Delivered across three
+chunks (media-glue core → config/protocol/observability → SIPp/release).
+
+### Added
+
+- **Outbound SRTP via SDES (`[[gateway]].srtp`).** A call placed through a
+  gateway with `srtp = "preferred" | "required"` now *offers* SRTP: SiphonAI
+  mints an `AES_CM_128_HMAC_SHA1_80` master key, sends the INVITE as
+  `RTP/SAVP` with an `a=crypto:` line, and on a 2xx that accepts it installs
+  the send/recv keys onto the trunk leg (`session.srtp_a()` —
+  `install_srtp_keys`), so the media is encrypted.
+  * `[[gateway]].srtp` — `"off"` (default) | `"preferred"` | `"required"`,
+    the outbound mirror of `[media].srtp`. `required` fails the call if the
+    trunk answers plaintext; `preferred` continues unencrypted (downgrade).
+    A per-gateway load-time warning fires when `srtp` is set but
+    `transport != "tls"` (the SDES key would travel in cleartext on the
+    signalling plane). `docs/CONFIG.md`, `docs/OUTBOUND.md`.
+  * `start.srtp` (`{ exchange: "sdes", profile }`) is now populated on
+    **outbound** calls too, the same shape inbound uses (this also corrects
+    the stale "SDES not yet produced" note in `docs/PROTOCOL.md` — inbound
+    SDES was already produced; only the outbound offer side was missing).
+  * Metric `siphon_ai_outbound_srtp_total{result=encrypted|downgraded}`
+    (`docs/DEPLOY.md`). A SIPp **outbound_srtp** regression phase exercises
+    the full negotiation: a `required` gateway, SIPp answering `RTP/SAVP` +
+    `a=crypto`, asserting the `encrypted` metric.
+  * Implemented entirely in SiphonAI using public forge-sdp / forge-engine
+    APIs at the current pin — no upstream PR, no pin bump.
+
 ## [0.7.0] - 2026-06-15
 
 Theme: **conferencing + media-only call park** — two operator-controllable

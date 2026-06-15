@@ -42,6 +42,20 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
+**v0.7.1** — patch release. Theme: **outbound SRTP.** SiphonAI could
+*answer* an inbound SRTP offer but only ever *offered* plaintext `RTP/AVP`,
+so outbound calls couldn't carry audio on secure trunks (e.g. Twilio secure
+trunking). A gateway with `[[gateway]].srtp = "preferred" | "required"` now
+*offers* SDES SRTP (RFC 4568): SiphonAI mints the master key, sends the
+INVITE as `RTP/SAVP` + `a=crypto:`, and on acceptance installs the keys so
+the trunk leg is encrypted (`required` fails the call on a plaintext answer;
+`preferred` downgrades). `start.srtp` is now populated on outbound calls
+too, and `siphon_ai_outbound_srtp_total{result}` tracks encrypted vs
+downgraded. Self-contained — no upstream forge-media change. **Off by
+default**; protocol stays `version: "1"`; a 0.7.0 deployment upgrades with
+zero behaviour change. See [`docs/OUTBOUND.md`](docs/OUTBOUND.md). Full
+notes: [`CHANGELOG.md`](CHANGELOG.md).
+
 **v0.7.0** — eighth release. Theme: **conferencing + media-only call park.**
 Two operator-controllable multi-leg features, both **off by default**.
 Conferencing mixes N calls into one room where *every* leg keeps its own WS

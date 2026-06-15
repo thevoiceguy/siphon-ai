@@ -51,6 +51,7 @@ sipp -sf basic_call_then_bye.xml -m 1 -p 5070 -s 1000 127.0.0.1:5060
 | `stir_shaken_attestation_403.xml`   | STIR/SHAKEN gate: `Identity` present but unverifiable (unreachable `x5u`) below `min_attestation = "A"` → 403 Forbidden (stir_shaken phase) |
 | `stir_shaken_attestation_pass.xml`  | STIR/SHAKEN happy path: a fully-verifiable `Identity` (fresh PASSporT, real x5u fetch, chain to the test anchor) → **200 admitted** (stir_shaken phase). Templated — `__IDENTITY__` is substituted at run time; does not run standalone. |
 | `outbound_uas_answer.xml`           | 0.6.0 outbound answer path, roles inverted: SiphonAI dials via `POST /admin/v1/calls`, SIPp answers (180 → 200 + SDP), bridge runs, SiphonAI BYEs (outbound phase) |
+| `outbound_srtp_uas_answer.xml`      | 0.7.1 outbound SRTP: gateway `srtp = "required"` makes SiphonAI offer `RTP/SAVP` + `a=crypto`; SIPp answers SAVP with its own `a=crypto`, keys install, call bridges (outbound_srtp phase) |
 | `park_caller.xml`                   | 0.7.0 call park: caller is answered + bridged, the echo-ws parks it (`--auto-park`), and SiphonAI BYEs the caller when the park resolves. Shared by the **park_timeout** and **park_retrieve** phases |
 | `conference_caller.xml`             | 0.7.0 conferencing: a caller that stays up while the echo-ws joins it to a room (`--auto-conference-join`); two run concurrently in the **conference** phase |
 
@@ -67,6 +68,14 @@ instance with `--auto-hangup-after-ms 1500` (so the WS side ends the call),
 backgrounds SIPp as the callee, then POSTs `/admin/v1/calls`. Pass = SIPp
 completed INVITE → ACK → BYE **and** the daemon's
 `siphon_ai_outbound_calls_total{result="answered"}` metric reads 1.
+
+And an always-on **outbound_srtp** auxiliary phase (0.7.1): the same setup
+but the `[[gateway]]` sets `srtp = "required"`, so SiphonAI's INVITE offers
+`RTP/SAVP` + `a=crypto` (SDES). `outbound_srtp_uas_answer.xml` answers SAVP
+with its own `a=crypto`; SiphonAI installs keys and bridges. Pass = SIPp
+completed the call **and** `siphon_ai_outbound_srtp_total{result="encrypted"}`
+reads 1. (SIPp doesn't carry real SRTP media — it's a signalling/negotiation
+test; the live key-install round-trip is covered by media-glue unit tests.)
 
 `run-all.sh` has two always-on **park** auxiliary phases (0.7.0), both using
 `park_caller.xml` and an echo-ws started with `--auto-park`:

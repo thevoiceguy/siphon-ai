@@ -1291,6 +1291,7 @@ pub fn build_outbound_start_msg(
     to: &str,
     sip_call_id: &str,
     answer: &AnswerOutcome,
+    srtp: Option<siphon_ai_bridge::protocol::SrtpInfo>,
 ) -> StartMsg {
     StartMsg {
         version: PROTOCOL_VERSION.to_string(),
@@ -1309,7 +1310,7 @@ pub fn build_outbound_start_msg(
             call_id: sip_call_id.to_string(),
             headers: std::collections::HashMap::new(),
         },
-        srtp: None,
+        srtp,
         verstat: None,
         retrieved: false,
     }
@@ -4205,6 +4206,7 @@ a=sendrecv\r\n";
             "+15558675309",
             "out-abc@trunk.example",
             &answer,
+            None,
         );
         assert_eq!(start.direction, Direction::Outbound);
         assert_eq!(start.from, "+13125551234");

@@ -160,14 +160,19 @@ so we can't carry the post-handshake choice. Servers that need the
 true negotiated profile should wait for a quality assessment event
 rather than trusting `start.srtp.profile` exactly.
 
-**SDES (`exchange: "sdes"`): not yet produced.** The forge-sdp
-parser primitives shipped in forge-media#56, but the producer
-wiring isn't in forge-engine. SAVP / SAVPF (non-DTLS) offers under
-any non-`off` mode are 488'd; see DEV_PLAN_0.3.0.md §11 slip
-mitigation.
+**SDES (`exchange: "sdes"`): produced.** Inbound, when an offer carries
+`a=crypto:` under a non-`off` `[media].srtp`, SiphonAI answers `RTP/SAVP`
+and `start.srtp` reports `{ exchange: "sdes", profile: <suite> }`.
+**Outbound (0.7.x):** a call placed through a gateway with
+`[[gateway]].srtp = "preferred" | "required"` *offers* SDES — SiphonAI mints
+the master key, sends `RTP/SAVP` + `a=crypto:`, and on a 2xx that accepts it
+populates `start.srtp` the same way (`required` fails the call if the trunk
+answers plaintext; `preferred` continues unencrypted with `start.srtp`
+absent). So `start.srtp` is now populated on both inbound and outbound calls.
 
-See [`docs/CONFIG.md`](CONFIG.md) `[media].srtp` for the
-operator-facing mode switch.
+See [`docs/CONFIG.md`](CONFIG.md) `[media].srtp` (inbound) and
+`[[gateway]].srtp` (outbound) for the operator-facing switches, and
+[`docs/OUTBOUND.md`](OUTBOUND.md) for the outbound SRTP guide.
 
 **`verstat` (0.4.0): produced when verification is enabled.** With
 `[security.stir_shaken].enabled = true`, the accept path verifies each

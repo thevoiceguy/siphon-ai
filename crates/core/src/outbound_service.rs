@@ -27,10 +27,10 @@ use siphon_ai_cdr::{
     AudioInfo as CdrAudioInfo, CdrRecord, CdrSinkHandle, Direction as CdrDirection,
     TerminationInfo as CdrTerminationInfo, CDR_VERSION,
 };
-use siphon_ai_media_glue::{OutboundOfferRequest, TapOptions};
+use siphon_ai_media_glue::{OutboundOfferRequest, OutboundSrtp, TapOptions};
 use siphon_ai_telemetry::{
     OriginateRejection, OriginateRequest, OutboundOriginateHandle, OUTBOUND_CALLS_ACTIVE,
-    OUTBOUND_CALLS_TOTAL,
+    OUTBOUND_CALLS_TOTAL, OUTBOUND_SRTP_TOTAL,
 };
 use siphon_ai_webhooks::{
     CallEndEvent, OutboundAnsweredEvent, OutboundFailedEvent, OutboundInitiatedEvent, WebhookEvent,
@@ -66,6 +66,9 @@ pub struct OutboundGateway {
     pub transport_uri_param: &'static str,
     /// Default caller-ID `sip:` URI for calls through this gateway.
     pub from: String,
+    /// SRTP policy for media on this trunk (0.7.x). The daemon maps the
+    /// config gateway's `SrtpMode` onto this when building the service.
+    pub srtp: OutboundSrtp,
 }
 
 /// Daemon-wide outbound-origination service.
@@ -178,9 +181,8 @@ impl OutboundOriginateHandle for OutboundService {
             participant_b: ParticipantId::generate(),
             from_tag: None,
             to_tag: None,
-            // SRTP wiring from [[gateway]].srtp lands in the next chunk;
-            // plaintext for now (unchanged 0.6.x behaviour).
-            srtp: siphon_ai_media_glue::OutboundSrtp::Off,
+            // Offer SRTP per the gateway's policy.
+            srtp: gw.srtp,
         };
         let tap = TapOptions {
             barge_in_action: barge_in_to_tap_action(&self.defaults.barge_in),
@@ -198,6 +200,7 @@ impl OutboundOriginateHandle for OutboundService {
         let from = req.from.clone().unwrap_or_else(|| gw.from.clone());
         let to = req.to.clone();
         let gateway = req.gateway.clone();
+        let srtp_requested = gw.srtp != OutboundSrtp::Off;
         let originator = Arc::clone(&gw.originator);
         let cdr_sink = Arc::clone(&self.cdr_sink);
         let webhook_sink = Arc::clone(&self.webhook_sink);
@@ -238,6 +241,7 @@ impl OutboundOriginateHandle for OutboundService {
                         conference,
                         control_registry,
                         park,
+                        srtp_requested,
                     };
                     run_call(originator, call, bridge, ctx).await;
                 }
@@ -305,6 +309,9 @@ struct OutboundCallContext {
     /// Park context, shared with the controller so an outbound bot can
     /// park/retrieve. `None` when park is off.
     park: Option<ParkContext>,
+    /// Whether this gateway offered SRTP (`[[gateway]].srtp != off`), so the
+    /// answered-call path can record `encrypted` vs `downgraded`.
+    srtp_requested: bool,
 }
 
 /// Run an answered outbound call's audio bridge to completion, tear it
@@ -342,12 +349,35 @@ async fn run_call(
         sample_rate: accepted.answer.negotiated_audio_sample_rate,
     };
     let ws_url = bridge.ws_url.clone();
+    // Surface negotiated outbound SRTP on `start.srtp` (exchange is always
+    // SDES on the originate path). `None` for a plaintext call or a
+    // `preferred` downgrade.
+    let srtp_info =
+        accepted
+            .srtp_profile
+            .as_ref()
+            .map(|profile| siphon_ai_bridge::protocol::SrtpInfo {
+                exchange: siphon_ai_bridge::protocol::SrtpExchange::Sdes,
+                profile: profile.clone(),
+            });
+    if ctx.srtp_requested {
+        // Encrypted when the peer accepted SRTP; downgraded when the gateway
+        // is `preferred` and the peer answered plaintext. (`required`
+        // downgrades never reach here — they fail in apply_answer.)
+        let result = if accepted.srtp_profile.is_some() {
+            "encrypted"
+        } else {
+            "downgraded"
+        };
+        metrics::counter!(OUTBOUND_SRTP_TOTAL, "result" => result).increment(1);
+    }
     let start = build_outbound_start_msg(
         ctx.bridge_id.clone(),
         &ctx.from,
         &ctx.to,
         &sip_call_id,
         &accepted.answer,
+        srtp_info,
     );
     // Outbound legs are transferable too (DEV_PLAN_0.6.1 §2.4): the
     // bot can consult an agent and hand this callee off. The REFER
@@ -476,6 +506,7 @@ mod tests {
             conference: None,
             control_registry: CallControlRegistry::new(),
             park: None,
+            srtp_requested: false,
         };
         let view = CallTerminationView {
             cause: CdrTerminationCause::ServerHangup,

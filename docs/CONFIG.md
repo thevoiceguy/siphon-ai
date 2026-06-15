@@ -318,6 +318,7 @@ register = "pbx"            # name of a [[register]] block
 | `register` | `[[gateway]]` | Name of a `[[register]]` to dial through, inheriting its server address, digest credentials, and AOR. |
 | `auth_username` / `auth_password` | `[[gateway]]` | Digest credentials for a standalone trunk (both or neither). Answered on any 401/407 challenge the trunk sends. |
 | `realm` | `[[gateway]]` | Optional digest realm hint. |
+| `srtp` | `[[gateway]]` | SRTP policy for media on this trunk (0.7.x): `"off"` (default) \| `"preferred"` \| `"required"` — the outbound mirror of `[media].srtp`. `preferred` offers SDES SRTP (`RTP/SAVP` + `a=crypto:`) but accepts a plaintext downgrade; `required` fails the call if the trunk won't do SRTP. **Pair with `transport = "tls"`** — SDES carries the master key on the signalling plane, so a non-TLS trunk leaks it (warned at load). |
 
 All of the above is validated at config load — unknown `register` references,
 a `from` missing the `sip:` scheme, half-set credentials, duplicate names, or

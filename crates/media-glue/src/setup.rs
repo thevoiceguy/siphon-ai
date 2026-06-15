@@ -237,6 +237,11 @@ pub struct OutboundAccepted {
     pub answer: AnswerOutcome,
     pub session: Arc<MediaSession>,
     pub tap: MediaTap,
+    /// The negotiated SDES crypto-suite when outbound SRTP was established
+    /// (e.g. `"AES_CM_128_HMAC_SHA1_80"`), for `start.srtp.profile`. `None`
+    /// for a plaintext call or a `preferred` downgrade. The exchange is
+    /// always SDES on the outbound origination path.
+    pub srtp_profile: Option<String>,
 }
 
 impl std::fmt::Debug for OutboundAccepted {
@@ -511,6 +516,7 @@ impl MediaSetup {
         //      (forge's SrtpContext is "enabled" once keyed). A peer that
         //      answered plaintext RTP/AVP is a downgrade: fail under
         //      `required`, continue in the clear under `preferred`.
+        let mut srtp_profile: Option<String> = None;
         if let Some(our_key) = &offer_crypto {
             match &answer.peer_srtp {
                 Some(peer_key) => {
@@ -521,6 +527,7 @@ impl MediaSetup {
                         .to_srtp_key_material()
                         .map_err(|e| SetupError::Srtp(format!("peer answer key: {e}")))?;
                     install_srtp_keys(session.srtp_a(), send, recv).await;
+                    srtp_profile = Some(our_key.suite.as_str().to_string());
                     debug!(call_id = %call_id, "outbound SRTP (SDES) keys installed on leg A");
                 }
                 None if srtp == OutboundSrtp::Required => {
@@ -589,6 +596,7 @@ impl MediaSetup {
             answer,
             session,
             tap: media_tap,
+            srtp_profile,
         })
     }
 }

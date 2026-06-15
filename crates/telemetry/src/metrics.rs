@@ -87,6 +87,16 @@ pub const REGISTER_ATTEMPTS_TOTAL: &str = "siphon_ai_register_attempts_total";
 /// response), `failed` (local media setup error). Bounded cardinality.
 pub const OUTBOUND_CALLS_TOTAL: &str = "siphon_ai_outbound_calls_total";
 
+/// Outbound SRTP (SDES) negotiation outcomes for answered calls placed
+/// through a gateway with `[[gateway]].srtp` set (0.7.x). Labeled by
+/// `result`: `encrypted` (peer accepted SRTP; media is SRTP) or
+/// `downgraded` (gateway is `preferred` and the peer answered plaintext —
+/// the call continued unencrypted). A `required` trunk that refuses SRTP
+/// fails the call, counting as `failed` on `siphon_ai_outbound_calls_total`
+/// instead. Bounded cardinality. Literal must match the call site in
+/// `siphon-ai-core::outbound_service`.
+pub const OUTBOUND_SRTP_TOTAL: &str = "siphon_ai_outbound_srtp_total";
+
 /// REFER transfers attempted (0.6.1; back-fills blind-transfer
 /// counting, which previously had no metric). Labeled by `mode`
 /// (`blind` / `attended`) and `result`: `accepted` (202, call torn
@@ -277,6 +287,10 @@ pub fn register_descriptions() {
     describe_counter!(
         OUTBOUND_CALLS_TOTAL,
         "Outbound calls placed, by result (answered, busy, declined, no_answer, rejected, unreachable, failed)."
+    );
+    describe_counter!(
+        OUTBOUND_SRTP_TOTAL,
+        "Outbound SRTP (SDES) outcomes for answered calls, by result (encrypted, downgraded)."
     );
     describe_counter!(
         TRANSFERS_TOTAL,

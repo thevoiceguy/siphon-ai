@@ -389,6 +389,14 @@ pub struct RawGateway {
     /// Optional digest realm hint.
     #[serde(default)]
     pub realm: Option<String>,
+    /// SRTP policy for media on calls placed through this trunk (0.7.x).
+    /// `"off"` (default) | `"preferred"` | `"required"` — the outbound
+    /// mirror of `[media].srtp`. `preferred` offers SDES SRTP but accepts a
+    /// plaintext downgrade; `required` fails the call if the trunk won't do
+    /// SRTP. Pair with `transport = "tls"` — SDES keys travel on the
+    /// signalling plane, so plaintext SIP leaks them (warned at load).
+    #[serde(default)]
+    pub srtp: Option<String>,
 }
 
 /// `[outbound]` — global outbound-origination controls (0.6.0). The native

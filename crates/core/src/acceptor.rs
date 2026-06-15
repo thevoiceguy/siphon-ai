@@ -377,6 +377,9 @@ impl AcceptError {
             }
             AcceptError::Setup(SetupError::Session(_))
             | AcceptError::Setup(SetupError::Tap(_))
+            // SetupError::Srtp only arises on the outbound apply_answer
+            // path (never inbound accept); map it defensively to 500.
+            | AcceptError::Setup(SetupError::Srtp(_))
             | AcceptError::Controller(_) => (500, "Server Internal Error"),
             AcceptError::SrtpModeMismatch { .. } => (488, "Not Acceptable Here"),
             AcceptError::IdentityRequired => (428, "Use Identity Header"),

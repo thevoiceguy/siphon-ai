@@ -178,6 +178,9 @@ impl OutboundOriginateHandle for OutboundService {
             participant_b: ParticipantId::generate(),
             from_tag: None,
             to_tag: None,
+            // SRTP wiring from [[gateway]].srtp lands in the next chunk;
+            // plaintext for now (unchanged 0.6.x behaviour).
+            srtp: siphon_ai_media_glue::OutboundSrtp::Off,
         };
         let tap = TapOptions {
             barge_in_action: barge_in_to_tap_action(&self.defaults.barge_in),

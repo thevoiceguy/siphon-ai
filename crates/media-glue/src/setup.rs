@@ -42,10 +42,12 @@
 use std::sync::Arc;
 
 use forge_core::{CallId, EventBus, ForgeError, ParticipantId};
+use forge_engine::srtp_install::install_srtp_keys;
 use forge_engine::{
     MediaBridgeManager, MediaSession, ParticipantCodecConfig, ParticipantLabel,
     ParticipantMediaUpdate, SessionManager,
 };
+use forge_sdp::sdes::{CryptoAttribute, CryptoSuite};
 use thiserror::Error;
 use tracing::{debug, info, instrument, warn};
 
@@ -171,6 +173,28 @@ pub struct OutboundOfferRequest {
     pub participant_b: ParticipantId,
     pub from_tag: Option<String>,
     pub to_tag: Option<String>,
+    /// SRTP policy for this originated call. The outbound mirror of the
+    /// inbound `[media].srtp` modes; the daemon maps its
+    /// `siphon-ai-core::SrtpMode` onto this (media-glue sits below core,
+    /// so the enum lives here).
+    pub srtp: OutboundSrtp,
+}
+
+/// SRTP policy for an **originated** call (RFC 4568 SDES on the offer).
+/// Plaintext by default; the secure modes offer `RTP/SAVP` with an
+/// `a=crypto:` key we generate, and differ only in how a peer that
+/// answers plaintext `RTP/AVP` is handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutboundSrtp {
+    /// Plaintext `RTP/AVP` offer (the default — unchanged 0.6.x behaviour).
+    #[default]
+    Off,
+    /// Offer SRTP, but accept a plaintext downgrade if the peer answers
+    /// `RTP/AVP` (best-effort encryption).
+    Preferred,
+    /// Offer SRTP and **require** it: a peer that answers plaintext fails
+    /// the call.
+    Required,
 }
 
 /// What [`MediaSetup::originate_offer`] hands back: the allocated session and
@@ -188,6 +212,12 @@ pub struct OutboundOffer {
     /// peer's answer.
     pub offered: LocalCapabilities,
     pub call_id: CallId,
+    /// SRTP policy this offer was built under (decides downgrade handling
+    /// in [`MediaSetup::apply_answer`]).
+    pub(crate) srtp: OutboundSrtp,
+    /// The SDES master key we offered, when `srtp` is a secure mode — our
+    /// *send* key. `None` for a plaintext offer. Consumed at `apply_answer`.
+    pub(crate) offer_crypto: Option<CryptoAttribute>,
 }
 
 impl std::fmt::Debug for OutboundOffer {
@@ -234,6 +264,11 @@ pub enum SetupError {
     /// sample rate isn't supported by the bridge crate.
     #[error(transparent)]
     Tap(#[from] MediaTapError),
+
+    /// Outbound SRTP (SDES) negotiation failed — bad key material, or the
+    /// peer refused SRTP under `[[gateway]].srtp = "required"`.
+    #[error("outbound SRTP negotiation failed: {0}")]
+    Srtp(String),
 }
 
 impl From<ForgeError> for SetupError {
@@ -413,11 +448,24 @@ impl MediaSetup {
             codecs: req.codecs.clone(),
             dtmf_payload_type: req.dtmf_payload_type,
         };
-        let offer_sdp = generate_offer(&offered);
+
+        // SRTP (SDES): mint a master key and offer RTP/SAVP. The key is our
+        // *send* key; the peer's answer carries theirs (our recv key),
+        // bound onto the session at `apply_answer`. AES_CM_128_HMAC_SHA1_80
+        // is the near-universal trunk default (e.g. Twilio).
+        let offer_crypto = match req.srtp {
+            OutboundSrtp::Off => None,
+            OutboundSrtp::Preferred | OutboundSrtp::Required => Some(CryptoAttribute::generate(
+                1,
+                CryptoSuite::Aes128CmHmacSha1_80,
+            )),
+        };
+        let offer_sdp = generate_offer(&offered, offer_crypto.as_ref());
 
         debug!(
             rtp_port = ports.rtp_port,
             codecs = req.codecs.len(),
+            srtp = ?req.srtp,
             "generated outbound offer"
         );
 
@@ -426,6 +474,8 @@ impl MediaSetup {
             offer_sdp,
             offered,
             call_id: req.call_id,
+            srtp: req.srtp,
+            offer_crypto,
         })
     }
 
@@ -444,6 +494,8 @@ impl MediaSetup {
             session,
             offered,
             call_id,
+            srtp,
+            offer_crypto,
             ..
         } = offer;
 
@@ -452,6 +504,38 @@ impl MediaSetup {
 
         // (1) Read the negotiated audio out of the peer's answer.
         let answer = negotiate_offer_answer(answer_sdp, &offered)?;
+
+        // (1a) SRTP (SDES): if we offered it, bind keys onto leg A — our
+        //      offered key for send, the peer's answered key for recv.
+        //      Installing keys is what enables encryption on the leg
+        //      (forge's SrtpContext is "enabled" once keyed). A peer that
+        //      answered plaintext RTP/AVP is a downgrade: fail under
+        //      `required`, continue in the clear under `preferred`.
+        if let Some(our_key) = &offer_crypto {
+            match &answer.peer_srtp {
+                Some(peer_key) => {
+                    let send = our_key
+                        .to_srtp_key_material()
+                        .map_err(|e| SetupError::Srtp(format!("our offer key: {e}")))?;
+                    let recv = peer_key
+                        .to_srtp_key_material()
+                        .map_err(|e| SetupError::Srtp(format!("peer answer key: {e}")))?;
+                    install_srtp_keys(session.srtp_a(), send, recv).await;
+                    debug!(call_id = %call_id, "outbound SRTP (SDES) keys installed on leg A");
+                }
+                None if srtp == OutboundSrtp::Required => {
+                    return Err(SetupError::Srtp(
+                        "peer answered plaintext RTP/AVP but [[gateway]].srtp = required".into(),
+                    ));
+                }
+                None => {
+                    warn!(
+                        call_id = %call_id,
+                        "offered SRTP but peer answered plaintext; continuing unencrypted (srtp = preferred)"
+                    );
+                }
+            }
+        }
 
         // (2) Apply the negotiated codec AND the peer's RTP endpoint to leg A
         //     — same as inbound, but the remote address comes from the answer
@@ -644,6 +728,7 @@ mod tests {
             participant_b: ParticipantId::generate(),
             from_tag: Some("ftag".into()),
             to_tag: None,
+            srtp: OutboundSrtp::Off,
         }
     }
 
@@ -734,5 +819,120 @@ a=sendrecv\r\n"
             result,
             Err(SetupError::Sdp(SdpError::NoCommonCodec))
         ));
+    }
+
+    // ─── Outbound SRTP (SDES) ────────────────────────────────────────────
+
+    fn outbound_req_srtp(
+        call_id: &str,
+        codecs: Vec<Codec>,
+        srtp: OutboundSrtp,
+    ) -> OutboundOfferRequest {
+        let mut req = outbound_req(call_id, codecs);
+        req.srtp = srtp;
+        req
+    }
+
+    /// A peer answer that ACCEPTED our SRTP offer: RTP/SAVP + a=crypto.
+    fn srtp_peer_answer(port: u16, pt: u8, name: &str) -> String {
+        use forge_sdp::sdes::{CryptoAttribute, CryptoSuite, MediaSdesAttributesExt};
+        use forge_sdp::{MediaType, Protocol, SessionDescriptionExt};
+        let crypto = CryptoAttribute::generate(1, CryptoSuite::Aes128CmHmacSha1_80);
+        let mut sdp = crate::sdp::parse_offer(&peer_answer(port, pt, name)).expect("base answer");
+        let audio = sdp.find_media_mut(MediaType::Audio).expect("audio");
+        audio.protocol = Protocol::RtpSavp;
+        audio.add_media_crypto(&crypto);
+        sdp.serialize()
+    }
+
+    #[tokio::test]
+    async fn originate_offer_required_emits_savp_crypto() {
+        let session_mgr = small_session_manager(41600, 41700);
+        let setup = setup_with(&session_mgr);
+        let offer = setup
+            .originate_offer(outbound_req_srtp(
+                "c-srtp-1",
+                vec![Codec::Pcmu],
+                OutboundSrtp::Required,
+            ))
+            .await
+            .expect("offer");
+        assert!(
+            offer.offer_sdp.contains("RTP/SAVP"),
+            "offer is SAVP: {}",
+            offer.offer_sdp
+        );
+        assert!(
+            offer.offer_sdp.contains("a=crypto:"),
+            "offer carries a=crypto"
+        );
+        assert!(offer.offer_crypto.is_some(), "our send key retained");
+    }
+
+    #[tokio::test]
+    async fn apply_answer_srtp_installs_keys_on_accept() {
+        let session_mgr = small_session_manager(41800, 41900);
+        let setup = setup_with(&session_mgr);
+        let offer = setup
+            .originate_offer(outbound_req_srtp(
+                "c-srtp-2",
+                vec![Codec::Pcmu],
+                OutboundSrtp::Required,
+            ))
+            .await
+            .expect("offer");
+        // Peer accepted SRTP — keys install, session survives.
+        let accepted = setup
+            .apply_answer(offer, &srtp_peer_answer(4000, 0, "PCMU"), tap_opts())
+            .await
+            .expect("SRTP answer applied");
+        assert_eq!(accepted.answer.negotiated_codec, Codec::Pcmu);
+        let (allocated, _) = session_mgr.port_pool_stats().await;
+        assert_eq!(allocated, 1, "session retained after SRTP install");
+    }
+
+    #[tokio::test]
+    async fn apply_answer_srtp_required_fails_on_plaintext_downgrade() {
+        let session_mgr = small_session_manager(42000, 42100);
+        let setup = setup_with(&session_mgr);
+        let offer = setup
+            .originate_offer(outbound_req_srtp(
+                "c-srtp-3",
+                vec![Codec::Pcmu],
+                OutboundSrtp::Required,
+            ))
+            .await
+            .expect("offer");
+        // Peer answered plaintext RTP/AVP — required SRTP must reject. (The
+        // SessionGuard rolls the session back on the error return; its
+        // teardown is async, so we assert the rejection, not the timing —
+        // same as `apply_answer_rejects_unoffered_codec`.)
+        let result = setup
+            .apply_answer(offer, &peer_answer(4000, 0, "PCMU"), tap_opts())
+            .await;
+        assert!(
+            matches!(result, Err(SetupError::Srtp(_))),
+            "required downgrade rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_answer_srtp_preferred_allows_plaintext_downgrade() {
+        let session_mgr = small_session_manager(42200, 42300);
+        let setup = setup_with(&session_mgr);
+        let offer = setup
+            .originate_offer(outbound_req_srtp(
+                "c-srtp-4",
+                vec![Codec::Pcmu],
+                OutboundSrtp::Preferred,
+            ))
+            .await
+            .expect("offer");
+        // Preferred: a plaintext answer is accepted, call continues unencrypted.
+        let accepted = setup
+            .apply_answer(offer, &peer_answer(4000, 0, "PCMU"), tap_opts())
+            .await
+            .expect("preferred downgrade accepted");
+        assert_eq!(accepted.answer.negotiated_codec, Codec::Pcmu);
     }
 }

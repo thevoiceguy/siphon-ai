@@ -141,7 +141,16 @@ mode = "session_progress"
 |---------------|--------|---------------|-------|
 | `enabled`     | bool   | `true`        | When `false`, VAD events still flow but `mode` degrades to `notify_only`. |
 | `mode`        | `"auto_clear" \| "notify_only"` | `"auto_clear"` | `auto_clear` drops pending playout the moment forge-vad reports speech. |
-| `debounce_ms` | integer | `100`        | Reserved for the VAD config — currently informational. |
+| `debounce_ms` | integer | `0` (off) | **Playout-gated barge-in debounce (0.7.x).** While the bot is playing out, a speech-started is held for this many ms and only flushes if speech *sustains* past it — an echo / brief-background-noise gate. Crucially it does **not** delay barge-in while the bot is silent, so a caller interrupting between bot phrases is still instant. `0`/unset = off (immediate flush, the original behaviour). Only affects `auto_clear`. Start around `150`–`250` if the bot is hearing its own echo or background noise as barge-in. Per-route override via `[route.bridge.barge_in].debounce_ms`. |
+
+> **When to use `debounce_ms`.** If the bot stops talking because it hears
+> its own audio echoed back (poor far-end echo cancellation) or background
+> noise, a 150–250 ms debounce filters those — they're typically short
+> bursts (quick speech-started → speech-stopped) that never reach the
+> threshold, whereas a real interruption sustains. It's a heuristic, not
+> echo cancellation: a caller who genuinely interrupts *during* bot speech
+> waits up to `debounce_ms` before the bot yields. For full-duplex
+> interruption with no trade-off, server-side AEC is the proper fix.
 
 ### `[bridge.tls]` (0.3.0+)
 

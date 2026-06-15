@@ -274,6 +274,17 @@ pub struct MediaTap {
     /// that don't care about barge-in don't have to thread it
     /// through.
     barge_in_action: BargeInAction,
+    /// Playout-gated barge-in debounce (echo/noise gate). When `Some(d)`,
+    /// a VAD `SpeechStarted` that arrives **while the bot is playing out**
+    /// is held for `d`; it only confirms a real barge-in (flush + forward)
+    /// if speech is still active when `d` elapses. A `SpeechStopped` within
+    /// the window cancels it — the common shape of the bot's own echo or a
+    /// brief background-noise blip. `None` (default) disables the gate:
+    /// every `SpeechStarted` flushes immediately, the pre-0.7.1 behaviour.
+    /// Only affects `AutoClear`; while the bot is silent, barge-in is
+    /// always immediate. Set via [`Self::with_barge_in_debounce`] from
+    /// `[bridge.barge_in].debounce_ms`.
+    barge_in_debounce: Option<Duration>,
     /// RTP watchdog window. `None` disables the watchdog entirely;
     /// `Some(d)` means "if no inbound frame arrives within `d`,
     /// return `TapDisconnect::InactivityTimeout`." Settable on the
@@ -369,6 +380,7 @@ impl MediaTap {
             events_rx,
             events_keepalive: None,
             barge_in_action,
+            barge_in_debounce: None,
             inactivity_timeout: None,
             muted: false,
             idle_detector: IdleDetector::new(None, None, Instant::now()),
@@ -404,6 +416,15 @@ impl MediaTap {
     /// override). `None` disables the event for this call.
     pub fn with_rtp_stats_interval(mut self, interval: Option<Duration>) -> Self {
         self.rtp_stats = RtpStatsTracker::new(interval);
+        self
+    }
+
+    /// Install the playout-gated barge-in debounce from
+    /// `[bridge.barge_in].debounce_ms` (and any per-route override).
+    /// `None`/`Some(0)` disables it (immediate flush, pre-0.7.1 behaviour).
+    /// Acceptor / outbound service call this before `run()`.
+    pub fn with_barge_in_debounce(mut self, debounce: Option<Duration>) -> Self {
+        self.barge_in_debounce = debounce.filter(|d| !d.is_zero());
         self
     }
 
@@ -519,6 +540,16 @@ impl MediaTap {
         let mut moh_tick = tokio::time::interval(Duration::from_millis(PLAYOUT_FRAME_MS));
         moh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         moh_tick.tick().await;
+
+        // Barge-in debounce (echo/noise gate, §barge_in_debounce). Pinned
+        // far-future placeholder; reset to `now + debounce` when a barge-in
+        // is held during playout. `pending_barge_in` holds the deferred
+        // `speech_started` event — `Some` gates the timer arm, and the held
+        // event is forwarded on confirm or dropped on cancel. Same
+        // placeholder-sleep pattern as the watchdog.
+        let barge_debounce = tokio::time::sleep(Duration::from_secs(86_400));
+        tokio::pin!(barge_debounce);
+        let mut pending_barge_in: Option<OutgoingEvent> = None;
 
         loop {
             tokio::select! {
@@ -842,9 +873,39 @@ impl MediaTap {
                                 // dumps forge's encoder queue. Reset the
                                 // Mark bookkeeping so the next `Mark`
                                 // doesn't wait on now-dropped audio.
+                                //
+                                // Playout-gated debounce (echo/noise): if
+                                // the bot is currently talking and a
+                                // debounce is configured, the speech is
+                                // *provisional* — hold the event (no flush,
+                                // no forward) and let the `barge_debounce`
+                                // timer confirm it or a `SpeechStopped`
+                                // cancel it. While the bot is silent,
+                                // barge-in stays immediate.
                                 if matches!(out, OutgoingEvent::SpeechStarted { .. })
                                     && self.barge_in_action == BargeInAction::AutoClear
                                 {
+                                    let gate = self.barge_in_debounce.filter(|_| {
+                                        bot_is_playing(
+                                            first_audio_pushed_at,
+                                            frames_sent_to_forge,
+                                            Instant::now(),
+                                        )
+                                    });
+                                    if let Some(debounce) = gate {
+                                        if pending_barge_in.is_none() {
+                                            barge_debounce
+                                                .as_mut()
+                                                .reset(tokio::time::Instant::now() + debounce);
+                                            pending_barge_in = Some(out);
+                                            debug!(
+                                                call_id = %self.call_id,
+                                                debounce_ms = debounce.as_millis() as u64,
+                                                "barge-in held during playout; awaiting confirm",
+                                            );
+                                        }
+                                        continue; // timer or speech-stopped decides
+                                    }
                                     let mut drained = 0usize;
                                     while let Ok(_bytes) = playout_audio_rx.try_recv() {
                                         drained += 1;
@@ -873,6 +934,21 @@ impl MediaTap {
                                     }
                                     frames_sent_to_forge = 0;
                                     first_audio_pushed_at = None;
+                                }
+                                // A speech-stopped within the debounce
+                                // window cancels the held barge-in — it was
+                                // the bot's own echo or a brief noise blip,
+                                // not the caller. Drop both the held
+                                // speech-started and this speech-stopped
+                                // (the server never saw the pair).
+                                if matches!(out, OutgoingEvent::SpeechStopped { .. })
+                                    && pending_barge_in.take().is_some()
+                                {
+                                    debug!(
+                                        call_id = %self.call_id,
+                                        "barge-in cancelled (speech stopped within debounce)",
+                                    );
+                                    continue;
                                 }
                                 // Best-effort, mirroring
                                 // `CallHandle::push_bridge_event`: a
@@ -1212,6 +1288,45 @@ impl MediaTap {
                             .map_err(|e| MediaTapError::PlayoutFailed(e.to_string()))?;
                     }
                 }
+
+                // Barge-in debounce elapsed with a candidate still held →
+                // the speech sustained past the window, so it's a real
+                // barge-in: flush the bot's playout and forward the held
+                // `speech_started`. (A `SpeechStopped` would have cleared
+                // `pending_barge_in` first, disabling this arm.)
+                _ = &mut barge_debounce, if pending_barge_in.is_some() => {
+                    let mut drained = 0usize;
+                    while let Ok(_bytes) = playout_audio_rx.try_recv() {
+                        drained += 1;
+                    }
+                    if let Some(send) = &room_send {
+                        send.clear_ws_input();
+                    }
+                    if let Err(e) = self.handle.flush(Some(MediaTarget::A), None).await {
+                        warn!(
+                            call_id = %self.call_id,
+                            error = %e,
+                            "forge flush failed during confirmed barge-in",
+                        );
+                    } else {
+                        debug!(
+                            call_id = %self.call_id,
+                            drained,
+                            "barge-in confirmed after debounce; dropped pending playout",
+                        );
+                    }
+                    frames_sent_to_forge = 0;
+                    first_audio_pushed_at = None;
+                    if let Some(out) = pending_barge_in.take() {
+                        if let Err(e) = events_tx.try_send(out) {
+                            warn!(
+                                call_id = %self.call_id,
+                                error = %e,
+                                "events_tx full or closed; dropping confirmed barge-in event"
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -1352,6 +1467,24 @@ async fn handle_send_dtmf(
 
 /// Map a forge `ForgeEvent` to an `OutgoingEvent` the bridge can ship.
 ///
+/// Whether the bot is (estimated to be) still playing audio out to the
+/// caller — i.e. there is queued/playing playout. Used to gate barge-in:
+/// a VAD speech-started while this is `true` is likely the bot's own echo
+/// (or background noise) rather than the caller interrupting.
+///
+/// The estimate is `first_push + frames × 20 ms` — when the last-pushed
+/// frame finishes playing. It's slightly generous (WS audio is pushed
+/// ahead of real playout), which biases toward *more* gating, i.e. fewer
+/// false barge-ins — the safe direction. `first_audio_pushed_at` /
+/// `frames` reset to `None`/`0` on every flush, so this reads `false`
+/// once the bot's current utterance has been cleared or has drained.
+fn bot_is_playing(first_audio_pushed_at: Option<Instant>, frames: u64, now: Instant) -> bool {
+    match first_audio_pushed_at {
+        Some(t0) => now < t0 + Duration::from_millis(PLAYOUT_FRAME_MS.saturating_mul(frames)),
+        None => false,
+    }
+}
+
 /// Returns `None` for events that aren't this call's, that aren't part
 /// of the v1 WS protocol surface, or that don't carry the final
 /// duration we need (DTMF `Start`/`Continue`).
@@ -1417,6 +1550,33 @@ fn forge_attach_err(e: ForgeError) -> MediaTapError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bot_is_playing_tracks_queued_playout() {
+        let t0 = Instant::now();
+        // No audio pushed yet → not playing.
+        assert!(!bot_is_playing(None, 0, t0));
+        // 10 frames pushed at t0 = 200 ms of playout. Mid-playout (100 ms
+        // in) → still playing; past the end (250 ms in) → done.
+        let pushed = Some(t0);
+        assert!(bot_is_playing(pushed, 10, t0 + Duration::from_millis(100)));
+        assert!(!bot_is_playing(pushed, 10, t0 + Duration::from_millis(250)));
+        // Exactly at the estimated end is treated as finished (strict <).
+        assert!(!bot_is_playing(pushed, 10, t0 + Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn with_barge_in_debounce_drops_zero() {
+        let manager = Arc::new(MediaBridgeManager::new());
+        let bus = Arc::new(EventBus::new());
+        let tap = MediaTap::attach(&manager, &bus, CallId::new("c-deb"), 8000)
+            .expect("attach")
+            .with_barge_in_debounce(Some(Duration::ZERO));
+        // Zero is normalized to None (no gate), matching "off".
+        assert!(tap.barge_in_debounce.is_none());
+        let tap = tap.with_barge_in_debounce(Some(Duration::from_millis(200)));
+        assert_eq!(tap.barge_in_debounce, Some(Duration::from_millis(200)));
+    }
 
     #[test]
     fn attach_validates_sample_rate_first() {

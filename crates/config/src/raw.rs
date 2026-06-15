@@ -682,9 +682,11 @@ pub struct RawBargeIn {
     /// `"auto_clear"` (default) or `"notify_only"`.
     #[serde(default)]
     pub mode: Option<String>,
-    /// Reserved for future use (event debouncing). Accepted today
-    /// so configs that set it don't fail validation; not yet read
-    /// by the runtime.
+    /// Playout-gated barge-in debounce (0.7.x). While the bot is playing
+    /// out, a VAD speech-started is held for this many ms and only flushes
+    /// if speech sustains past it — an echo / brief-noise gate that does
+    /// **not** delay barge-in while the bot is silent. `0` / unset = off
+    /// (immediate flush, the original behaviour). Only affects `auto_clear`.
     #[serde(default)]
     pub debounce_ms: Option<u64>,
 }

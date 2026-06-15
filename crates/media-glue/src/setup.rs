@@ -100,6 +100,9 @@ pub struct InboundCall<'a> {
     /// `[BargeInAction::AutoClear]` (drop pending outbound playout
     /// before forwarding). Set from `[bridge].barge_in.mode`.
     pub barge_in_action: BargeInAction,
+    /// Playout-gated barge-in debounce from `[bridge.barge_in].debounce_ms`
+    /// (`None` = immediate flush). Only affects `AutoClear`.
+    pub barge_in_debounce: Option<std::time::Duration>,
     /// Tear the call down after this many seconds of no inbound RTP.
     /// `None` disables the watchdog. Resolved by the acceptor from
     /// `[media].inactivity_timeout_secs` and the route's override.
@@ -151,6 +154,8 @@ impl std::fmt::Debug for InboundAccepted {
 #[derive(Debug, Clone)]
 pub struct TapOptions {
     pub barge_in_action: BargeInAction,
+    /// Playout-gated barge-in debounce (`None` = immediate flush).
+    pub barge_in_debounce: Option<std::time::Duration>,
     pub inactivity_timeout: Option<std::time::Duration>,
     pub silence_threshold: Option<std::time::Duration>,
     pub dead_air_threshold: Option<std::time::Duration>,
@@ -400,6 +405,7 @@ impl MediaSetup {
             answer.negotiated_audio_sample_rate,
             call.barge_in_action,
         )?
+        .with_barge_in_debounce(call.barge_in_debounce)
         .with_inactivity_timeout(call.inactivity_timeout)
         .with_idle_thresholds(call.silence_threshold, call.dead_air_threshold)
         .with_rtp_stats_interval(call.rtp_stats_interval);
@@ -579,6 +585,7 @@ impl MediaSetup {
             answer.negotiated_audio_sample_rate,
             tap.barge_in_action,
         )?
+        .with_barge_in_debounce(tap.barge_in_debounce)
         .with_inactivity_timeout(tap.inactivity_timeout)
         .with_idle_thresholds(tap.silence_threshold, tap.dead_air_threshold)
         .with_rtp_stats_interval(tap.rtp_stats_interval);
@@ -703,6 +710,7 @@ mod tests {
                 from_tag: None,
                 to_tag: None,
                 barge_in_action: BargeInAction::Notify,
+                barge_in_debounce: None,
                 inactivity_timeout: None,
                 silence_threshold: None,
                 dead_air_threshold: None,
@@ -757,6 +765,7 @@ a=sendrecv\r\n"
     fn tap_opts() -> TapOptions {
         TapOptions {
             barge_in_action: BargeInAction::Notify,
+            barge_in_debounce: None,
             inactivity_timeout: None,
             silence_threshold: None,
             dead_air_threshold: None,

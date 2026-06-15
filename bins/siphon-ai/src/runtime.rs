@@ -74,12 +74,14 @@ use siphon_ai_cdr::{
 };
 use siphon_ai_config::{
     CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, HepConfig, MediaConfig, NodeConfig,
-    ObservabilityConfig, SipConfig, SipTlsConfig, SipTransport, WebhooksConfig,
+    ObservabilityConfig, ParkTimeoutAction as ConfigParkTimeoutAction, SipConfig, SipTlsConfig,
+    SipTransport, WebhooksConfig,
 };
 use siphon_ai_core::{
     default_call_id_factory, BridgingAcceptor, CallControlRegistry, CallRegistry, ConferenceAdmin,
     ConferenceLimits, ConferenceRegistry, ConsultRegistry, OutboundGateway, OutboundGuard,
-    OutboundOriginator, OutboundService, StaticCredentials,
+    OutboundOriginator, OutboundService, ParkAdmin, ParkContext, ParkRegistry, ParkSettings,
+    ParkTimeoutAction as CoreParkTimeoutAction, StaticCredentials,
 };
 use siphon_ai_media_glue::MediaSetup;
 use siphon_ai_sip_glue::{
@@ -88,8 +90,8 @@ use siphon_ai_sip_glue::{
 };
 use siphon_ai_telemetry::{
     admin::{
-        AdminCallRegistry, AdminConference, AdminOutbound, AdminState, CallRegistryHandle,
-        RegistrationRow,
+        AdminCallRegistry, AdminConference, AdminOutbound, AdminPark, AdminState,
+        CallRegistryHandle, RegistrationRow,
     },
     install_recorder, HepTelemetry, HepTelemetryBuild, HepWorkerHandle, LogFilterHandle,
     ObservabilityServer, ReadinessFlag,
@@ -158,6 +160,7 @@ impl Runtime {
             observability,
             webhooks,
             hep,
+            park,
         } = config;
 
         // ─── Telemetry: install Prometheus recorder ─────────────────
@@ -291,6 +294,32 @@ impl Runtime {
         // Cheap and empty when conferencing is off.
         let control_registry = CallControlRegistry::new();
 
+        // Park context (0.7.0). Built once and shared (Clone) by the
+        // acceptor and the outbound service so any call — inbound or
+        // outbound — can be parked. `None` when `[park].enabled = false`
+        // (the default): no `ParkRegistry` is allocated and park requests
+        // are rejected. The `ParkRegistry` inside is also handed to the
+        // admin `ParkAdmin` so `GET /admin/v1/parked` and the cap share
+        // one table.
+        let park_context = if park.enabled {
+            let settings = ParkSettings {
+                moh_file: park.moh_file,
+                timeout: park.timeout,
+                timeout_action: match park.timeout_action {
+                    ConfigParkTimeoutAction::Hangup => CoreParkTimeoutAction::Hangup,
+                    ConfigParkTimeoutAction::Keep => CoreParkTimeoutAction::Keep,
+                },
+            };
+            Some(ParkContext {
+                settings,
+                registry: ParkRegistry::new(park.max_parked),
+                // call_parked / call_retrieved / park_timeout webhooks.
+                webhooks: Some(Arc::clone(&webhook_sink)),
+            })
+        } else {
+            None
+        };
+
         let mut acceptor_builder = BridgingAcceptor::new(media_setup, bridge_defaults, registry.clone())
             .with_cdr_sink(cdr_sink)
             .with_webhook_sink(Arc::clone(&webhook_sink))
@@ -305,6 +334,9 @@ impl Runtime {
             .with_control_registry(control_registry.clone());
         if let Some(reg) = &conference_registry {
             acceptor_builder = acceptor_builder.with_conference(reg.clone());
+        }
+        if let Some(ctx) = &park_context {
+            acceptor_builder = acceptor_builder.with_park(ctx.clone());
         }
         let acceptor = Arc::new(acceptor_builder);
 
@@ -570,6 +602,10 @@ impl Runtime {
             if let Some(reg) = &conference_registry {
                 service = service.with_conference(reg.clone());
             }
+            // Outbound bots can park/retrieve too (0.7.0).
+            if let Some(ctx) = &park_context {
+                service = service.with_park(ctx.clone());
+            }
             info!(
                 gateways = outbound.gateways.len(),
                 max_concurrent = outbound.max_concurrent,
@@ -606,6 +642,14 @@ impl Runtime {
             conference: conference_registry.as_ref().map(|reg| {
                 Arc::new(ConferenceAdmin::new(reg.clone(), control_registry.clone()))
                     as AdminConference
+            }),
+            // Park admin CRUD, only when park is on. Shares the same
+            // ParkRegistry the acceptor/outbound legs register into.
+            park: park_context.as_ref().map(|ctx| {
+                Arc::new(ParkAdmin::new(
+                    ctx.registry.clone(),
+                    control_registry.clone(),
+                )) as AdminPark
             }),
         };
         let observability_server = build_observability(

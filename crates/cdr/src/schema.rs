@@ -86,6 +86,21 @@ pub struct CdrRecord {
     /// Filesystem path of the recording, when one was written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_path: Option<String>,
+
+    /// Park summary (0.7.0), present when the call was parked at least
+    /// once. Omitted otherwise. Additive optional field → CDR schema
+    /// stays at version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub park: Option<ParkInfo>,
+}
+
+/// Per-call park accounting on the CDR (0.7.0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkInfo {
+    /// Number of park episodes over the call's lifetime.
+    pub count: u32,
+    /// Cumulative wall-time the call spent parked, in milliseconds.
+    pub total_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +194,7 @@ mod tests {
             verstat_passed: None,
             recording_id: None,
             recording_path: None,
+            park: None,
         }
     }
 

@@ -78,6 +78,16 @@ def _opts(**overrides) -> srv.Options:
         auth_token=None,
         echo_marks=False,
         log_level="WARNING",
+        # Test-harness auto-* knobs all default off; mirrors parse_args
+        # defaults so the dataclass (which has no field defaults) is
+        # constructible here as fields are added across releases.
+        auto_transfer_target=None,
+        auto_transfer_delay_ms=200,
+        auto_hangup_after_ms=None,
+        auto_transfer_replaces=None,
+        auto_conference_join=None,
+        auto_park=False,
+        auto_park_slot=None,
     )
     base.update(overrides)
     return srv.Options(**base)

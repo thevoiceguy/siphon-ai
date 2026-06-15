@@ -192,6 +192,23 @@ pub enum TapCommand {
     /// Leave the current room and restore the direct caller↔WS
     /// pair. A no-op when not in a room.
     LeaveRoom,
+
+    /// Park the call (0.7.0 §2.4): stop using the WS-facing channels
+    /// and play `moh` into the caller leg on a 20 ms tick; drop inbound
+    /// caller frames (there's no WS to forward to). The forge media
+    /// session + RTP stay up. Pairs with [`TapCommand::Unpark`]. A
+    /// `Park` while in a room leaves the room first.
+    Park { moh: Box<crate::moh::MohSource> },
+
+    /// Retrieve a parked call: stop the MOH tick and swap the tap's
+    /// WS-facing endpoints to the fresh ones from the retrieve's new
+    /// bridge, resuming the direct caller↔WS pair. A no-op if not
+    /// parked.
+    Unpark {
+        caller_audio_tx: mpsc::Sender<Vec<u8>>,
+        playout_audio_rx: mpsc::Receiver<Vec<u8>>,
+        events_tx: mpsc::Sender<OutgoingEvent>,
+    },
 }
 
 /// How the tap reacts to forge-vad `SpeechStarted` events. Mirrors
@@ -435,6 +452,16 @@ impl MediaTap {
         events_tx: mpsc::Sender<OutgoingEvent>,
         mut commands_rx: mpsc::Receiver<TapCommand>,
     ) -> Result<TapDisconnect, MediaTapError> {
+        // The WS-facing endpoints are `mut` locals so a park→retrieve
+        // can swap them to a fresh bridge's channels (`TapCommand::Unpark`).
+        let mut caller_audio_tx = caller_audio_tx;
+        let mut events_tx = events_tx;
+        // Park state (0.7.0 §2.4). `Some(moh)` = the WS session is
+        // detached and the caller hears hold music on a 20 ms tick;
+        // caller audio is dropped. Installed by `TapCommand::Park`,
+        // cleared by `TapCommand::Unpark`.
+        let mut parked: Option<crate::moh::MohSource> = None;
+
         let mut reframer = Reframer::new(self.sample_rate)?;
         // Play-out estimation state for `TapCommand::Mark`.
         // Updated in the playout arm; read in the command arm.
@@ -486,14 +513,22 @@ impl MediaTap {
         rtp_stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         rtp_stats_tick.tick().await;
 
+        // MOH playout cadence — 20 ms, monotonic (CLAUDE §4.3), active
+        // only while parked. Same placeholder-interval pattern as the
+        // other optional ticks; the arm guard suppresses it otherwise.
+        let mut moh_tick = tokio::time::interval(Duration::from_millis(PLAYOUT_FRAME_MS));
+        moh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        moh_tick.tick().await;
+
         loop {
             tokio::select! {
                 biased;
 
                 // Controller dropped the caller_audio_tx receiver →
                 // tear down immediately, even if no inbound frame is
-                // pending.
-                _ = caller_audio_tx.closed() => {
+                // pending. Suppressed while parked: the WS bridge (and
+                // thus this channel's receiver) is intentionally gone.
+                _ = caller_audio_tx.closed(), if parked.is_none() => {
                     debug!("caller_audio_tx receiver dropped; ending tap");
                     return Ok(TapDisconnect::ControllerHungUp);
                 }
@@ -513,7 +548,9 @@ impl MediaTap {
                 }
 
                 // Server → caller: bytes from the WS into forge's playout.
-                playout = playout_audio_rx.recv() => {
+                // Suppressed while parked — there's no WS, and the MOH
+                // tick owns playout instead.
+                playout = playout_audio_rx.recv(), if parked.is_none() => {
                     let Some(bytes) = playout else {
                         debug!("playout_audio_rx closed; ending tap");
                         return Ok(TapDisconnect::ControllerHungUp);
@@ -602,6 +639,21 @@ impl MediaTap {
                     }
                     reframer.push(&frame.samples);
                     while let Some(samples) = reframer.pop_frame() {
+                        // Parked: there's no WS to forward to. Keep
+                        // recording the caller's own voice (left
+                        // channel) but drop the frame otherwise — the
+                        // caller hears MOH (the moh_tick arm), not
+                        // themselves.
+                        if parked.is_some() {
+                            if let Some((rec, drops)) = &self.recording {
+                                if let Err(mpsc::error::TrySendError::Full(_)) =
+                                    rec.try_send(RecFrame::Caller(pack_pcm16_le(&samples)))
+                                {
+                                    drops.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            continue;
+                        }
                         // In a room, caller frames feed the `sip`
                         // participant; the WS instead receives the
                         // room's mix-minus-`ws` sink (arm below).
@@ -1034,6 +1086,43 @@ impl MediaTap {
                                 }
                             }
                         }
+                        TapCommand::Park { moh } => {
+                            // Parking while in a room first leaves it
+                            // (drops the RoomSender → the room reaps us).
+                            if let Some(send) = room_send.take() {
+                                drop(send);
+                                room_sip_out = None;
+                                room_ws_out = None;
+                                room_events = None;
+                            }
+                            info!(
+                                call_id = %self.call_id,
+                                "tap parked; playing hold music, WS detached"
+                            );
+                            parked = Some(*moh);
+                            // Align the MOH cadence to now so the first
+                            // frame plays ~20 ms from here, not whenever
+                            // the free-running interval next ticks.
+                            moh_tick.reset();
+                        }
+                        TapCommand::Unpark {
+                            caller_audio_tx: new_caller_tx,
+                            playout_audio_rx: new_playout_rx,
+                            events_tx: new_events_tx,
+                        } => {
+                            if parked.take().is_some() {
+                                // Swap to the fresh bridge's channels.
+                                caller_audio_tx = new_caller_tx;
+                                playout_audio_rx = new_playout_rx;
+                                events_tx = new_events_tx;
+                                frames_sent_to_forge = 0;
+                                first_audio_pushed_at = None;
+                                info!(
+                                    call_id = %self.call_id,
+                                    "tap retrieved; direct bridge restored on fresh WS session"
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -1093,6 +1182,34 @@ impl MediaTap {
                             error = %e,
                             "events_tx full or closed; dropping rtp_stats event"
                         );
+                    }
+                }
+
+                // MOH playout while parked: one hold-music frame per
+                // 20 ms into the caller leg. Active only when parked.
+                _ = moh_tick.tick(), if parked.is_some() => {
+                    if let Some(moh) = parked.as_mut() {
+                        let samples = moh.next_frame();
+                        // Recording right channel = what the caller
+                        // hears = the hold music.
+                        if let Some((rec, drops)) = &self.recording {
+                            if let Err(mpsc::error::TrySendError::Full(_)) =
+                                rec.try_send(RecFrame::Bot(pack_pcm16_le(&samples)))
+                            {
+                                drops.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        let frame = OutboundMediaFrame {
+                            target: MediaTarget::A,
+                            sample_rate: self.sample_rate,
+                            samples,
+                            playback_id: None,
+                            mode: PlayoutMode::Append,
+                        };
+                        self.handle
+                            .send_audio(frame)
+                            .await
+                            .map_err(|e| MediaTapError::PlayoutFailed(e.to_string()))?;
                     }
                 }
             }

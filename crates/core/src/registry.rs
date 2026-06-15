@@ -436,11 +436,13 @@ mod tests {
                 },
                 srtp: None,
                 verstat: None,
+                retrieved: false,
             },
             media_tap: tap,
             transfer: None,
             recording: None,
             conference: None,
+            park: None,
         };
         let (controller, handle) = CallController::new(cfg);
         // Drop the controller without running it; the handle still

@@ -8,12 +8,14 @@
 //! mandate, no `unwrap`/`panic`, no `std::sync::Mutex`, no blocking I/O.
 
 pub(crate) mod idle;
+pub mod moh;
 pub mod room;
 pub(crate) mod rtp_stats;
 pub mod sdp;
 pub mod setup;
 pub mod tap;
 
+pub use moh::MohSource;
 pub use room::{
     spawn_room, RoomConfig, RoomEvent, RoomHandle, RoomJoinError, RoomLifecycle, RoomMembership,
     RoomObserver,

@@ -126,6 +126,7 @@ MAY use it to detect dropped frames in their own logs.
 | `from` | string | E.164 number or SIP user; may be empty if PBX strips it. |
 | `to` | string | The dialed digits / extension / SIP user. |
 | `direction` | string | `"inbound"` (SiphonAI answered the call) or `"outbound"` (SiphonAI placed it — outbound origination, 0.6.0). An outbound bot typically speaks first. Additive; the protocol version stays `"1"`. |
+| `retrieved` | bool \| absent | `true` on the `start` of a session that is picking up a **previously parked** call (park/retrieve, 0.7.0; §4.9). **Absent** (not `false`) on a normal inbound/outbound `start`. A retrieve always opens a *fresh* session — `seq` restarts at 0 and there is no replay of pre-park traffic — so a server that ignores this field simply treats it as a brand-new call. |
 | `audio.encoding` | string | `"pcm16le"` only in v1. |
 | `audio.sample_rate` | int | `8000` or `16000`. Set by the negotiated SIP codec. |
 | `audio.channels` | int | `1` only in v1. |
@@ -304,6 +305,7 @@ on every snapshot.
 | `caller_hangup` | The far-end SIP party sent BYE. |
 | `server_hangup` | The WS server sent `hangup` (§4.3). |
 | `transfer` | A blind transfer (REFER) was accepted; SiphonAI is releasing the leg. |
+| `park` | The call was **parked** (0.7.0; §4.9). The WS session is being detached, **not** the call torn down — the SIP dialog and RTP stay up and the caller hears hold music. The server learns "you were parked, not hung up"; the call may later be retrieved onto a fresh session (with `start.retrieved: true`). |
 | `ws_disconnect` | The WS connection closed unexpectedly mid-call. SiphonAI plays the configured fallback prompt and tears down the SIP leg. |
 | `error` | A fatal error occurred; an `error` message preceded this. |
 
@@ -327,10 +329,13 @@ then closes the WebSocket cleanly (close code 1000).
 | `server_too_slow` | Server didn't begin sending audio within 5 s of `start`. |
 | `transfer_failed` | A REFER was attempted but the far end rejected it. |
 | `conference_failed` | A `conference_join` (§4.8) was refused: conferencing disabled, room or per-room cap reached, sample-rate mismatch, or already joined. The call continues on its direct pair. |
+| `park_failed` | A `park` (§4.9) was refused: park disabled (`[park].enabled = false`) or `[park].max_parked` reached. The call continues unparked on its current WS session — no `stop` follows this `error`. |
 | `internal` | SiphonAI internal error. The `message` field has details. |
 
-`error` is always followed by `stop` (with `reason: "error"`) and a
-clean close.
+A **fatal** `error` is always followed by `stop` (with `reason:
+"error"`) and a clean close. The two **non-fatal** refusals —
+`conference_failed` and `park_failed` — are the exception: they report a
+rejected control request, the call continues, and no `stop` follows.
 
 ### 3.11 `recording_started` / `recording_stopped` / `recording_failed` — recording lifecycle (0.5.0)
 
@@ -562,6 +567,37 @@ the room mixes 2N streams — each call's SIP caller and its bot — and
 hands each side the mix minus its own input. So a caller never hears
 themselves, a bot never hears its own playout, but a caller hears
 their own bot and a bot hears its own caller (STT keeps working).
+
+### 4.9 `park` — park this call (0.7.0)
+
+```json
+{ "type": "park", "call_id": "...", "slot": "lot-3" }
+```
+
+Park this call: detach the WS session and shelve the call playing hold
+music, **without** ending it. Requires `[park].enabled = true` on the
+daemon.
+
+- `slot` is an **optional** human label for the hold lot (e.g. a parking
+  orbit or agent name); it surfaces in `GET /admin/v1/parked` and the
+  `call_parked` webhook. Omit it for an unlabeled park.
+- On success SiphonAI sends `stop { reason: "park" }` (§3.9) and closes
+  **this** WebSocket cleanly. The SIP dialog and RTP stay up and the
+  caller hears hold music (`[park].moh_file`, or comfort noise). The
+  call is **not** torn down.
+- On failure — park disabled, or `[park].max_parked` reached — SiphonAI
+  replies `error { code: "park_failed" }` (§3.10) and the call continues
+  unparked on this session. No `stop` follows.
+
+**Self-scoped (§5.3):** `park` acts only on the session's *own* call.
+
+**Retrieve is operator-only.** There is no WS-server message to retrieve
+a parked call — retrieval is driven by the admin API
+(`POST /admin/v1/calls/:id/retrieve`, see [`docs/DEPLOY.md`](DEPLOY.md)),
+which opens a **fresh** WS session with `start.retrieved: true` (§3.1).
+A parked call with no WS session cannot retrieve itself; that's the
+operator control plane's job, the mirror of why participants are
+removed from conferences by the admin API rather than by a peer.
 
 ---
 

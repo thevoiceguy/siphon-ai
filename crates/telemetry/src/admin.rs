@@ -20,6 +20,9 @@
 //! | DELETE | `/admin/v1/conferences/:id`   | Force-end a room (0.7.0)             |
 //! | POST   | `/admin/v1/conferences/:id/participants`           | Add a call to a room (0.7.0)  |
 //! | DELETE | `/admin/v1/conferences/:id/participants/:call_id`  | Remove a call (0.7.0)         |
+//! | GET    | `/admin/v1/parked`            | List parked calls (0.7.0)            |
+//! | POST   | `/admin/v1/calls/:id/park`    | Park a call (0.7.0)                  |
+//! | POST   | `/admin/v1/calls/:id/retrieve`| Retrieve a parked call (0.7.0)       |
 //!
 //! ## Threat model
 //!
@@ -65,6 +68,9 @@ pub struct AdminState {
     /// Conference admin handle (0.7.0). `None` when `[conference]` is
     /// disabled — the `/admin/v1/conferences` routes then return 501.
     pub conference: Option<AdminConference>,
+    /// Park admin handle (0.7.0). `None` when `[park]` is disabled —
+    /// the park/retrieve/parked routes then return 501.
+    pub park: Option<AdminPark>,
 }
 
 /// Minimal trait surface the admin endpoints need on the call
@@ -194,6 +200,55 @@ pub trait ConferenceAdminHandle: Send + Sync + 'static {
 /// Boxed handle the runtime installs into [`AdminState`].
 pub type AdminConference = Arc<dyn ConferenceAdminHandle>;
 
+/// One parked call in the `GET /admin/v1/parked` response.
+#[derive(Debug, Clone, Serialize)]
+pub struct ParkedRow {
+    pub call_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot: Option<String>,
+    pub parked_secs: u64,
+}
+
+/// `POST /admin/v1/calls/:id/park` body (all optional).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ParkRequest {
+    #[serde(default)]
+    pub slot: Option<String>,
+}
+
+/// `POST /admin/v1/calls/:id/retrieve` body (all optional).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RetrieveRequest {
+    /// Redirect the retrieved session to a different WS server.
+    /// Defaults to the call's original `ws_url`.
+    #[serde(default)]
+    pub ws_url: Option<String>,
+}
+
+/// Why a park-admin op was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParkAdminError {
+    /// Park is off (`[park].enabled = false`) → 501.
+    Disabled,
+    /// No active call with that bridge id → 404.
+    UnknownCall(String),
+    /// Retrieve named a call that isn't parked → 409.
+    NotParked(String),
+}
+
+/// The park admin entry point (0.7.0). Like the conference handle,
+/// `park`/`retrieve` are fire-and-forget: they signal the target call
+/// (which acts on its own state) and return `202`; the outcome surfaces
+/// on the call's WS + the `call_parked` / `call_retrieved` webhooks.
+pub trait ParkAdminHandle: Send + Sync + 'static {
+    fn list(&self) -> Vec<ParkedRow>;
+    fn park(&self, call_id: &str, slot: Option<String>) -> Result<(), ParkAdminError>;
+    fn retrieve(&self, call_id: &str, ws_url: Option<String>) -> Result<(), ParkAdminError>;
+}
+
+/// Boxed handle the runtime installs into [`AdminState`].
+pub type AdminPark = Arc<dyn ParkAdminHandle>;
+
 /// One row of the `GET /admin/registrations` response. Mirrors
 /// `sip_glue::RegistrationState` but defined here so telemetry
 /// doesn't depend on the upstream crate.
@@ -231,6 +286,29 @@ pub async fn dispatch(
         (&hyper::Method::POST, "/admin/v1/calls") => originate_call(state, &body),
         (&hyper::Method::GET, "/admin/v1/conferences") => list_conferences(state),
         (&hyper::Method::POST, "/admin/v1/conferences") => create_conference(state, &body),
+        (&hyper::Method::GET, "/admin/v1/parked") => list_parked(state),
+        (m, p)
+            if *m == hyper::Method::POST
+                && p.starts_with("/admin/v1/calls/")
+                && p.ends_with("/park") =>
+        {
+            let id = p
+                .strip_prefix("/admin/v1/calls/")
+                .and_then(|s| s.strip_suffix("/park"))
+                .unwrap_or("");
+            park_call(state, id, &body)
+        }
+        (m, p)
+            if *m == hyper::Method::POST
+                && p.starts_with("/admin/v1/calls/")
+                && p.ends_with("/retrieve") =>
+        {
+            let id = p
+                .strip_prefix("/admin/v1/calls/")
+                .and_then(|s| s.strip_suffix("/retrieve"))
+                .unwrap_or("");
+            retrieve_call(state, id, &body)
+        }
         (m, p)
             if m == hyper::Method::POST
                 && p.starts_with("/admin/calls/")
@@ -588,6 +666,94 @@ fn conference_error_response(e: ConferenceAdminError) -> Response<Full<Bytes>> {
         ConferenceAdminError::UnknownCall(c) => {
             (StatusCode::NOT_FOUND, format!("no active call: {c}"))
         }
+    };
+    json_response(status, &json!({ "error": msg }))
+}
+
+// ─── Park admin (0.7.0) ────────────────────────────────────────────
+
+fn list_parked(state: &AdminState) -> Response<Full<Bytes>> {
+    let Some(svc) = state.park.as_ref() else {
+        return park_disabled();
+    };
+    let parked = svc.list();
+    json_response(
+        StatusCode::OK,
+        &json!({ "count": parked.len(), "parked": parked }),
+    )
+}
+
+fn park_call(state: &AdminState, call_id: &str, body: &Bytes) -> Response<Full<Bytes>> {
+    let Some(svc) = state.park.as_ref() else {
+        return park_disabled();
+    };
+    if call_id.is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({ "error": "empty call_id" }),
+        );
+    }
+    // Empty body allowed (slot optional).
+    let req: ParkRequest = if body.is_empty() {
+        ParkRequest::default()
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(r) => r,
+            Err(e) => {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "error": format!("invalid park request: {e}") }),
+                )
+            }
+        }
+    };
+    match svc.park(call_id, req.slot) {
+        Ok(()) => json_response(StatusCode::ACCEPTED, &json!({ "call_id": call_id })),
+        Err(e) => park_error_response(e),
+    }
+}
+
+fn retrieve_call(state: &AdminState, call_id: &str, body: &Bytes) -> Response<Full<Bytes>> {
+    let Some(svc) = state.park.as_ref() else {
+        return park_disabled();
+    };
+    if call_id.is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({ "error": "empty call_id" }),
+        );
+    }
+    let req: RetrieveRequest = if body.is_empty() {
+        RetrieveRequest::default()
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(r) => r,
+            Err(e) => {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "error": format!("invalid retrieve request: {e}") }),
+                )
+            }
+        }
+    };
+    match svc.retrieve(call_id, req.ws_url) {
+        Ok(()) => json_response(StatusCode::ACCEPTED, &json!({ "call_id": call_id })),
+        Err(e) => park_error_response(e),
+    }
+}
+
+fn park_disabled() -> Response<Full<Bytes>> {
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        &json!({ "error": "park not enabled ([park].enabled = false)" }),
+    )
+}
+
+fn park_error_response(e: ParkAdminError) -> Response<Full<Bytes>> {
+    let (status, msg) = match e {
+        ParkAdminError::Disabled => return park_disabled(),
+        ParkAdminError::UnknownCall(c) => (StatusCode::NOT_FOUND, format!("no active call: {c}")),
+        ParkAdminError::NotParked(c) => (StatusCode::CONFLICT, format!("call is not parked: {c}")),
     };
     json_response(status, &json!({ "error": msg }))
 }
@@ -1056,6 +1222,164 @@ mod tests {
             "/admin/v1/conferences/r/participants/c/extra",
             "",
             &conf_state(StubConference::default()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ─── Park admin routes (0.7.0) ──────────────────────────────────
+
+    struct StubPark {
+        rows: Vec<ParkedRow>,
+        park: Result<(), ParkAdminError>,
+        retrieve: Result<(), ParkAdminError>,
+    }
+    impl Default for StubPark {
+        fn default() -> Self {
+            Self {
+                rows: vec![],
+                park: Ok(()),
+                retrieve: Ok(()),
+            }
+        }
+    }
+    impl ParkAdminHandle for StubPark {
+        fn list(&self) -> Vec<ParkedRow> {
+            self.rows.clone()
+        }
+        fn park(&self, _call_id: &str, _slot: Option<String>) -> Result<(), ParkAdminError> {
+            self.park.clone()
+        }
+        fn retrieve(&self, _call_id: &str, _ws_url: Option<String>) -> Result<(), ParkAdminError> {
+            self.retrieve.clone()
+        }
+    }
+
+    fn park_state(stub: StubPark) -> AdminState {
+        AdminState {
+            park: Some(Arc::new(stub) as AdminPark),
+            ..AdminState::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn parked_501_when_disabled() {
+        // All three routes return 501 with no park handle installed.
+        for (m, path) in [
+            (hyper::Method::GET, "/admin/v1/parked"),
+            (hyper::Method::POST, "/admin/v1/calls/c/park"),
+            (hyper::Method::POST, "/admin/v1/calls/c/retrieve"),
+        ] {
+            let (status, _) = conf(m, path, "", &empty_state()).await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_parked_returns_rows() {
+        let stub = StubPark {
+            rows: vec![ParkedRow {
+                call_id: "siphon-a".into(),
+                slot: Some("lot-3".into()),
+                parked_secs: 42,
+            }],
+            ..Default::default()
+        };
+        let (status, body) = conf(
+            hyper::Method::GET,
+            "/admin/v1/parked",
+            "",
+            &park_state(stub),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["parked"][0]["call_id"], "siphon-a");
+        assert_eq!(body["parked"][0]["slot"], "lot-3");
+        assert_eq!(body["parked"][0]["parked_secs"], 42);
+    }
+
+    #[tokio::test]
+    async fn park_202_when_dispatched() {
+        let (status, body) = conf(
+            hyper::Method::POST,
+            "/admin/v1/calls/siphon-a/park",
+            r#"{"slot":"lot-1"}"#,
+            &park_state(StubPark::default()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["call_id"], "siphon-a");
+    }
+
+    #[tokio::test]
+    async fn park_202_with_empty_body() {
+        // slot is optional — an empty body is a valid unlabeled park.
+        let (status, _) = conf(
+            hyper::Method::POST,
+            "/admin/v1/calls/siphon-a/park",
+            "",
+            &park_state(StubPark::default()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn park_404_unknown_call() {
+        let stub = StubPark {
+            park: Err(ParkAdminError::UnknownCall("ghost".into())),
+            ..Default::default()
+        };
+        let (status, _) = conf(
+            hyper::Method::POST,
+            "/admin/v1/calls/ghost/park",
+            "",
+            &park_state(stub),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn retrieve_202_when_dispatched() {
+        let (status, _) = conf(
+            hyper::Method::POST,
+            "/admin/v1/calls/siphon-a/retrieve",
+            r#"{"ws_url":"wss://bot.example/retrieve"}"#,
+            &park_state(StubPark::default()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn retrieve_409_when_not_parked() {
+        let stub = StubPark {
+            retrieve: Err(ParkAdminError::NotParked("siphon-a".into())),
+            ..Default::default()
+        };
+        let (status, _) = conf(
+            hyper::Method::POST,
+            "/admin/v1/calls/siphon-a/retrieve",
+            "",
+            &park_state(stub),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn retrieve_404_unknown_call() {
+        let stub = StubPark {
+            retrieve: Err(ParkAdminError::UnknownCall("ghost".into())),
+            ..Default::default()
+        };
+        let (status, _) = conf(
+            hyper::Method::POST,
+            "/admin/v1/calls/ghost/retrieve",
+            "",
+            &park_state(stub),
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);

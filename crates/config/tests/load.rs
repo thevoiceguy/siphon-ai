@@ -1931,3 +1931,118 @@ max_partcipants_per_room = 4
 "#;
     assert!(load_from_str_with_env(toml, &env).is_err());
 }
+
+// ─── [park] — media-only call park (0.7.0) ────────────────────────
+
+#[test]
+fn park_defaults_off() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(!cfg.park.enabled);
+    assert_eq!(cfg.park.max_parked, 32);
+    assert_eq!(cfg.park.timeout, Some(Duration::from_secs(300)));
+    assert!(cfg.park.moh_file.is_none());
+}
+
+#[test]
+fn park_block_compiles_with_overrides() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[park]
+enabled = true
+timeout_secs = 0
+timeout_action = "keep"
+max_parked = 4
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert!(cfg.park.enabled);
+    assert_eq!(cfg.park.timeout, None);
+    assert!(matches!(
+        cfg.park.timeout_action,
+        siphon_ai_config::ParkTimeoutAction::Keep
+    ));
+    assert_eq!(cfg.park.max_parked, 4);
+}
+
+#[test]
+fn park_bad_timeout_action_is_rejected() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[park]
+enabled = true
+timeout_action = "explode"
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("timeout_action"), "got: {err}");
+}
+
+#[test]
+fn park_zero_max_parked_is_rejected() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[park]
+enabled = true
+max_parked = 0
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("max_parked"), "got: {err}");
+}
+
+#[test]
+fn park_missing_moh_file_is_rejected_when_enabled() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[park]
+enabled = true
+moh_file = "/nonexistent/hold.wav"
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("moh_file"), "got: {err}");
+}
+
+#[test]
+fn park_unknown_key_is_rejected() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[park]
+timeut_secs = 60
+"#;
+    assert!(load_from_str_with_env(toml, &env).is_err());
+}

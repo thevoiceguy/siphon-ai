@@ -11,6 +11,8 @@ pub mod conference;
 pub mod conference_admin;
 pub mod outbound;
 pub mod outbound_service;
+pub mod park;
+pub mod park_admin;
 pub mod registry;
 pub mod transfer;
 
@@ -23,7 +25,7 @@ pub use acceptor::{
 };
 pub use call::{
     CallController, CallControllerConfig, CallError, CallHandle, CallOutcome, CallState,
-    CallTermination, ConferenceCommand,
+    CallTermination, ConferenceCommand, ParkCommand, ParkSummary,
 };
 pub use conference::{ConferenceError, ConferenceLimits, ConferenceRegistry, ConferenceSnapshot};
 pub use conference_admin::ConferenceAdmin;
@@ -32,5 +34,9 @@ pub use outbound::{
     OutboundPermit, OutboundRejection, StaticCredentials,
 };
 pub use outbound_service::{OutboundGateway, OutboundService};
+pub use park::{
+    ParkContext, ParkError, ParkRegistry, ParkSettings, ParkSnapshot, ParkTimeoutAction,
+};
+pub use park_admin::ParkAdmin;
 pub use registry::{CallControlRegistry, CallEntry, CallRegistry, ConsultRegistry};
 pub use transfer::{DialogSource, TransferContext, TransferOutcome};

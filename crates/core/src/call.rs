@@ -57,17 +57,26 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use siphon_ai_bridge::{
     connect_and_run, BridgeChannels, BridgeConfig, BridgeError, BridgeIn, CallId, DisconnectReason,
     ErrorCode, OutgoingEvent, StartMsg, StopReason,
 };
-use siphon_ai_media_glue::{MediaTap, MediaTapError, RoomMembership, TapCommand, TapDisconnect};
+use siphon_ai_media_glue::{
+    MediaTap, MediaTapError, MohSource, RoomMembership, TapCommand, TapDisconnect,
+};
 
 use crate::conference::{ConferenceError, ConferenceRegistry};
+use crate::park::{ParkContext, ParkTimeoutAction};
+use chrono::Utc;
+use parking_lot::RwLock;
 use siphon_ai_recording::{
     RecControl, RecEvent, RecFrame, RecordingError, RecordingSetup, RecordingStats, RecordingWriter,
+};
+use siphon_ai_webhooks::{
+    CallParkedEvent, CallRetrievedEvent, ParkTimeoutEvent, WebhookEvent, WebhookSinkHandle,
+    WEBHOOK_VERSION,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, Notify};
@@ -75,7 +84,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 
 use crate::transfer::{plan_refer, ReferPlan, TransferContext, TransferOutcome};
-use siphon_ai_telemetry::TRANSFERS_TOTAL;
+use siphon_ai_telemetry::{PARKED_CALLS_ACTIVE, PARKS_TOTAL, RETRIEVES_TOTAL, TRANSFERS_TOTAL};
 
 /// Bounded channel capacity for audio frames. 10 × 20 ms = 200 ms
 /// of audio; per CLAUDE.md §6.2 audio channels are bounded for
@@ -126,6 +135,13 @@ pub struct CallControllerConfig {
     /// → conferencing off, and a join request is answered with
     /// `error { code: "conference_failed" }`. Cheap to clone (Arc inside).
     pub conference: Option<ConferenceRegistry>,
+
+    /// Park context (0.7.0). `Some` when `[park].enabled`; the
+    /// controller honours `BridgeIn::Park` and admin park/retrieve.
+    /// `None` → park off, a park request answered with
+    /// `error { code: "park_failed" }`. Carries the MOH/timeout
+    /// settings + the daemon-wide `ParkRegistry`.
+    pub park: Option<ParkContext>,
 }
 
 /// Where in its life a call is. State transitions are logged at
@@ -178,6 +194,19 @@ pub struct CallOutcome {
     /// attempted). `None` when recording was off, or on-demand and never
     /// started. Feeds the CDR `recording_path` and the recordings metric.
     pub recording: Option<RecordingSummary>,
+    /// Park outcome, `Some` when the call was parked at least once.
+    /// Feeds the CDR `park { count, total_ms }`. `None` for a call that
+    /// was never parked (the field is omitted from the CDR then).
+    pub park: Option<ParkSummary>,
+}
+
+/// Per-call park outcome surfaced on [`CallOutcome`] → CDR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParkSummary {
+    /// How many times this call was parked over its lifetime.
+    pub count: u32,
+    /// Cumulative wall-time the call spent parked, in milliseconds.
+    pub total_ms: u64,
 }
 
 /// Per-call recording outcome surfaced on [`CallOutcome`].
@@ -239,10 +268,16 @@ pub struct CallHandle {
     /// External-event push channel. The acceptor's `on_reinvite`
     /// uses this to surface mid-dialog state changes (currently
     /// `Hold` / `Resume`) to the WS bridge without going through
-    /// the controller's main select loop. Cloned from the same
-    /// sender the controller and tap push onto, so all three
-    /// producers feed one consumer (the bridge task).
-    bridge_events_tx: mpsc::Sender<OutgoingEvent>,
+    /// the controller's main select loop.
+    ///
+    /// Behind a `Mutex` so a **retrieve** (0.7.0 park) can swap it to
+    /// the fresh bridge's sender — the original bridge is gone after a
+    /// park, and `push_bridge_event` must reach whichever bridge is
+    /// current. This is control-plane only (re-INVITE events, rare),
+    /// never the per-frame audio path, so the lock doesn't violate
+    /// §4.3. `parking_lot::Mutex` (a core dep already) rather than a
+    /// new arc-swap dep.
+    bridge_events_tx: std::sync::Arc<RwLock<mpsc::Sender<OutgoingEvent>>>,
     /// Cross-call conference control (0.7.0). The admin API
     /// (`/admin/v1/conferences/:id/participants`) signals a call to
     /// join/leave a room *on its behalf* by pushing here — the
@@ -250,6 +285,10 @@ pub struct CallHandle {
     /// `conference_join`, so §4.4 holds (we signal the call; the
     /// controller mutates its own state). Bounded + `try_send`.
     conf_cmd_tx: mpsc::Sender<ConferenceCommand>,
+    /// Admin park/retrieve control (0.7.0). Same §4.4 stance as
+    /// `conf_cmd_tx`: the admin API signals; the controller acts on
+    /// its own state.
+    park_cmd_tx: mpsc::Sender<ParkCommand>,
 }
 
 /// A cross-call conference request pushed onto a [`CallHandle`] by the
@@ -264,18 +303,32 @@ pub enum ConferenceCommand {
     Leave,
 }
 
+/// An admin park/retrieve request pushed onto a [`CallHandle`] (0.7.0).
+/// WS-initiated park comes via `BridgeIn::Park` instead; retrieve is
+/// operator-only, so it has no WS variant.
+#[derive(Debug, Clone)]
+pub enum ParkCommand {
+    /// Park this call (optionally tagging a hold lot).
+    Park { slot: Option<String> },
+    /// Retrieve this call onto a fresh WS session (optionally
+    /// redirecting to a different `ws_url`).
+    Retrieve { ws_url: Option<String> },
+}
+
 impl CallHandle {
     fn new(
         call_id: CallId,
         bridge_events_tx: mpsc::Sender<OutgoingEvent>,
         conf_cmd_tx: mpsc::Sender<ConferenceCommand>,
+        park_cmd_tx: mpsc::Sender<ParkCommand>,
     ) -> Self {
         Self {
             notify: std::sync::Arc::new(Notify::new()),
             call_id,
             remote_bye: std::sync::Arc::new(AtomicBool::new(false)),
-            bridge_events_tx,
+            bridge_events_tx: std::sync::Arc::new(RwLock::new(bridge_events_tx)),
             conf_cmd_tx,
+            park_cmd_tx,
         }
     }
 
@@ -312,11 +365,49 @@ impl CallHandle {
     /// dispatch thread. Drop with a warn — re-INVITE events are
     /// informational and a missed Hold/Resume isn't fatal.
     pub fn push_bridge_event(&self, event: OutgoingEvent) {
-        if let Err(e) = self.bridge_events_tx.try_send(event) {
+        if let Err(e) = self.bridge_events_tx.read().try_send(event) {
             tracing::warn!(
                 call_id = %self.call_id,
                 error = %e,
                 "bridge_events_tx full or closed; dropping external event"
+            );
+        }
+    }
+
+    /// Swap the external-event sender to a retrieved call's fresh
+    /// bridge (0.7.0). Called by the controller during retrieve so
+    /// `push_bridge_event` reaches the new WS session.
+    fn swap_bridge_sender(&self, sender: mpsc::Sender<OutgoingEvent>) {
+        *self.bridge_events_tx.write() = sender;
+    }
+
+    /// A clone of the current external-event sender — the controller's
+    /// own send path, kept in sync with the swappable bridge.
+    fn bridge_sender(&self) -> mpsc::Sender<OutgoingEvent> {
+        self.bridge_events_tx.read().clone()
+    }
+
+    /// Ask this call to park (admin). The controller runs the same
+    /// path as a WS `park`. Best-effort `try_send`.
+    pub fn request_park(&self, slot: Option<String>) {
+        if let Err(e) = self.park_cmd_tx.try_send(ParkCommand::Park { slot }) {
+            tracing::warn!(
+                call_id = %self.call_id,
+                error = %e,
+                "park_cmd_tx full or closed; dropping park request"
+            );
+        }
+    }
+
+    /// Ask this call to retrieve onto a fresh WS session (admin),
+    /// optionally redirecting to `ws_url`. No-op at the controller if
+    /// the call isn't parked.
+    pub fn request_retrieve(&self, ws_url: Option<String>) {
+        if let Err(e) = self.park_cmd_tx.try_send(ParkCommand::Retrieve { ws_url }) {
+            tracing::warn!(
+                call_id = %self.call_id,
+                error = %e,
+                "park_cmd_tx full or closed; dropping retrieve request"
             );
         }
     }
@@ -363,6 +454,8 @@ pub struct CallController {
     /// Receiver for admin cross-call conference commands. Sender is on
     /// the handle. Consumed by `run()`.
     conf_cmd_rx: mpsc::Receiver<ConferenceCommand>,
+    /// Receiver for admin park/retrieve commands. Sender on the handle.
+    park_cmd_rx: mpsc::Receiver<ParkCommand>,
 }
 
 impl CallController {
@@ -373,13 +466,20 @@ impl CallController {
             mpsc::channel::<OutgoingEvent>(CONTROL_CHANNEL_CAPACITY);
         let (conf_cmd_tx, conf_cmd_rx) =
             mpsc::channel::<ConferenceCommand>(CONTROL_CHANNEL_CAPACITY);
-        let handle = CallHandle::new(cfg.call_id.clone(), control_out_tx, conf_cmd_tx);
+        let (park_cmd_tx, park_cmd_rx) = mpsc::channel::<ParkCommand>(CONTROL_CHANNEL_CAPACITY);
+        let handle = CallHandle::new(
+            cfg.call_id.clone(),
+            control_out_tx,
+            conf_cmd_tx,
+            park_cmd_tx,
+        );
         (
             Self {
                 cfg,
                 handle: handle.clone(),
                 control_out_rx,
                 conf_cmd_rx,
+                park_cmd_rx,
             },
             handle,
         )
@@ -412,6 +512,7 @@ impl CallController {
             handle,
             control_out_rx,
             mut conf_cmd_rx,
+            mut park_cmd_rx,
         } = self;
         let CallControllerConfig {
             call_id,
@@ -421,7 +522,14 @@ impl CallController {
             transfer,
             recording,
             conference,
+            park,
         } = cfg;
+
+        // Park needs to rebuild the WS bridge on retrieve from the
+        // original call facts + bridge config; clone them before the
+        // first bridge consumes the originals.
+        let start_template = start.clone();
+        let bridge_template = bridge.clone();
 
         // Captured before `media_tap` moves into its task — a room
         // locks to its first joiner's negotiated rate, and a join is
@@ -437,10 +545,11 @@ impl CallController {
         let (playout_audio_tx, playout_audio_rx) = mpsc::channel::<Vec<u8>>(AUDIO_CHANNEL_CAPACITY);
         // controller → bridge: outgoing events (Stop, Mark, …). The
         // sender lives on the CallHandle so external callers
-        // (acceptor's on_reinvite) can push too. The controller
-        // gets its own clone via the handle.
-        let control_out_tx = handle.bridge_events_tx.clone();
-        // bridge → controller: BridgeIn from server
+        // (acceptor's on_reinvite) can push too. `mut` because a
+        // retrieve (park) swaps it to the fresh bridge's sender.
+        let mut control_out_tx = handle.bridge_sender();
+        // bridge → controller: BridgeIn from server. `mut` so a
+        // retrieve can swap in the fresh bridge's receiver.
         let (control_in_tx, mut control_in_rx) =
             mpsc::channel::<BridgeIn>(CONTROL_CHANNEL_CAPACITY);
         // controller → tap: out-of-band commands the controller routes
@@ -537,6 +646,25 @@ impl CallController {
         // bridge_task arm. The flag flips to false on first None
         // and the arm becomes unselectable until we exit the loop.
         let mut control_open = true;
+
+        // ─── Park state (0.7.0 §2.4) ─────────────────────────────
+        // `parked` true between a park and its retrieve/teardown. While
+        // parked the tap plays MOH and the WS bridge is gone (its
+        // `bridge_task` completed) — so the bridge-end arm is guarded by
+        // `bridge_alive` and made non-terminal. Retrieve spawns a fresh
+        // bridge and flips both back.
+        let mut parked = false;
+        let mut bridge_alive = true;
+        // CDR `park { count, total_ms }` accounting.
+        let mut park_count: u32 = 0;
+        let mut park_total = Duration::ZERO;
+        let mut parked_since: Option<Instant> = None;
+        // Park timeout: a pinned far-future sleep, reset on park, only
+        // selected while `parked` AND a deadline is set (same pattern as
+        // the tap's RTP watchdog).
+        let park_timeout_sleep = tokio::time::sleep(Duration::from_secs(86_400));
+        tokio::pin!(park_timeout_sleep);
+        let mut park_deadline_armed = false;
 
         let shutdown = handle.notify.clone();
 
@@ -673,6 +801,13 @@ impl CallController {
                             if let Err(e) = tap_cmd_tx.try_send(TapCommand::LeaveRoom) {
                                 warn!(error = %e, "tap command channel full or closed; dropping ConferenceLeave");
                             }
+                        }
+                        Some(BridgeIn::Park { call_id: cid, slot }) => {
+                            // Funnel WS park through the same channel the
+                            // admin uses, so there's exactly one park
+                            // implementation (the park_cmd_rx arm).
+                            debug!(ws_call_id = %cid, ?slot, "WS park requested");
+                            handle.request_park(slot);
                         }
                         Some(BridgeIn::Mark { call_id: cid, name }) => {
                             debug!(ws_call_id = %cid, %name, "forwarding Mark to tap");
@@ -885,8 +1020,195 @@ impl CallController {
                     }
                 }
 
-                // Bridge sub-task ended.
-                res = &mut bridge_task => {
+                // Park / retrieve (admin, and WS park forwarded here).
+                Some(cmd) = park_cmd_rx.recv() => {
+                    match cmd {
+                        ParkCommand::Park { slot } => {
+                            if parked {
+                                debug!(call_id = %call_id, "park requested but already parked; ignoring");
+                            } else if let Some(park_ctx) = park.as_ref() {
+                                match park_ctx.registry.try_park(call_id.as_str(), slot.clone()) {
+                                    Ok(()) => {
+                                        let moh = MohSource::new(
+                                            park_ctx.settings.moh_file.as_deref(),
+                                            call_sample_rate,
+                                        );
+                                        if let Err(e) = tap_cmd_tx
+                                            .try_send(TapCommand::Park { moh: Box::new(moh) })
+                                        {
+                                            warn!(call_id = %call_id, error = %e,
+                                                "tap command channel full/closed; park aborted");
+                                            park_ctx.registry.remove(call_id.as_str());
+                                            let _ = control_out_tx.send(OutgoingEvent::Error {
+                                                code: ErrorCode::ParkFailed,
+                                                message: "tap unavailable for park".to_string(),
+                                            }).await;
+                                        } else {
+                                            // Detach the WS: the bridge sends
+                                            // `stop{park}` and closes. The
+                                            // bridge-end arm sees `parked` and
+                                            // stays alive.
+                                            let _ = control_out_tx
+                                                .send(OutgoingEvent::Stop { reason: StopReason::Park })
+                                                .await;
+                                            parked = true;
+                                            park_count += 1;
+                                            parked_since = Some(Instant::now());
+                                            if let Some(d) = park_ctx.settings.timeout {
+                                                park_timeout_sleep
+                                                    .as_mut()
+                                                    .reset(tokio::time::Instant::now() + d);
+                                                park_deadline_armed = true;
+                                            }
+                                            metrics::gauge!(PARKED_CALLS_ACTIVE).increment(1.0);
+                                            metrics::counter!(PARKS_TOTAL, "result" => "ok").increment(1);
+                                            info!(call_id = %call_id, ?slot, "call parked");
+                                            spawn_webhook(
+                                                &park_ctx.webhooks,
+                                                WebhookEvent::CallParked(CallParkedEvent {
+                                                    version: WEBHOOK_VERSION,
+                                                    call_id: call_id.as_str().to_string(),
+                                                    timestamp: Utc::now(),
+                                                    slot,
+                                                }),
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(call_id = %call_id, error = %e, "park rejected");
+                                        metrics::counter!(PARKS_TOTAL, "result" => "rejected").increment(1);
+                                        let _ = control_out_tx.send(OutgoingEvent::Error {
+                                            code: ErrorCode::ParkFailed,
+                                            message: e.to_string(),
+                                        }).await;
+                                    }
+                                }
+                            } else {
+                                warn!(call_id = %call_id, "park requested but park is disabled");
+                                let _ = control_out_tx.send(OutgoingEvent::Error {
+                                    code: ErrorCode::ParkFailed,
+                                    message: "park is disabled on this daemon".to_string(),
+                                }).await;
+                            }
+                        }
+                        ParkCommand::Retrieve { ws_url } => {
+                            if !parked {
+                                debug!(call_id = %call_id, "retrieve on a non-parked call; ignoring");
+                                metrics::counter!(RETRIEVES_TOTAL, "result" => "not_parked").increment(1);
+                            } else {
+                                // Account the parked span before flipping back.
+                                if let Some(since) = parked_since.take() {
+                                    park_total += since.elapsed();
+                                }
+                                // Fresh channels for the new bridge.
+                                let (n_caller_tx, n_caller_rx) =
+                                    mpsc::channel::<Vec<u8>>(AUDIO_CHANNEL_CAPACITY);
+                                let (n_playout_tx, n_playout_rx) =
+                                    mpsc::channel::<Vec<u8>>(AUDIO_CHANNEL_CAPACITY);
+                                let (n_ci_tx, n_ci_rx) =
+                                    mpsc::channel::<BridgeIn>(CONTROL_CHANNEL_CAPACITY);
+                                let (n_co_tx, n_co_rx) =
+                                    mpsc::channel::<OutgoingEvent>(CONTROL_CHANNEL_CAPACITY);
+                                // Fresh `start` from the preserved facts.
+                                let mut start2 = start_template.clone();
+                                start2.seq = 0;
+                                start2.retrieved = true;
+                                let ws = ws_url
+                                    .clone()
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or_else(|| bridge_template.ws_url.clone());
+                                let bridge_cfg2 = BridgeConfig {
+                                    ws_url: ws.clone(),
+                                    ..bridge_template.clone()
+                                };
+                                bridge_task = tokio::spawn(connect_and_run(
+                                    bridge_cfg2,
+                                    start2,
+                                    BridgeChannels {
+                                        audio_out_rx: n_caller_rx,
+                                        control_out_rx: n_co_rx,
+                                        audio_in_tx: n_playout_tx,
+                                        control_in_tx: n_ci_tx,
+                                    },
+                                ));
+                                bridge_alive = true;
+                                control_in_rx = n_ci_rx;
+                                control_open = true;
+                                control_out_tx = n_co_tx.clone();
+                                handle.swap_bridge_sender(n_co_tx.clone());
+                                if let Err(e) = tap_cmd_tx.try_send(TapCommand::Unpark {
+                                    caller_audio_tx: n_caller_tx,
+                                    playout_audio_rx: n_playout_rx,
+                                    events_tx: n_co_tx,
+                                }) {
+                                    warn!(call_id = %call_id, error = %e,
+                                        "tap command channel full/closed; retrieve audio may not resume");
+                                }
+                                parked = false;
+                                park_deadline_armed = false;
+                                if let Some(pc) = park.as_ref() {
+                                    pc.registry.remove(call_id.as_str());
+                                }
+                                metrics::gauge!(PARKED_CALLS_ACTIVE).decrement(1.0);
+                                metrics::counter!(RETRIEVES_TOTAL, "result" => "ok").increment(1);
+                                info!(call_id = %call_id, ws_url = %ws, "call retrieved onto fresh WS session");
+                                if let Some(pc) = park.as_ref() {
+                                    spawn_webhook(
+                                        &pc.webhooks,
+                                        WebhookEvent::CallRetrieved(CallRetrievedEvent {
+                                            version: WEBHOOK_VERSION,
+                                            call_id: call_id.as_str().to_string(),
+                                            timestamp: Utc::now(),
+                                            ws_url: ws,
+                                        }),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Park timeout. Armed on park; fires once. Selected only
+                // while parked with a live deadline.
+                _ = &mut park_timeout_sleep, if parked && park_deadline_armed => {
+                    park_deadline_armed = false;
+                    let action = park
+                        .as_ref()
+                        .map(|p| p.settings.timeout_action)
+                        .unwrap_or(ParkTimeoutAction::Hangup);
+                    info!(call_id = %call_id, ?action, "park timeout fired");
+                    if let Some(pc) = park.as_ref() {
+                        spawn_webhook(
+                            &pc.webhooks,
+                            WebhookEvent::ParkTimeout(ParkTimeoutEvent {
+                                version: WEBHOOK_VERSION,
+                                call_id: call_id.as_str().to_string(),
+                                timestamp: Utc::now(),
+                                action: match action {
+                                    ParkTimeoutAction::Hangup => "hangup".to_string(),
+                                    ParkTimeoutAction::Keep => "keep".to_string(),
+                                },
+                            }),
+                        );
+                    }
+                    match action {
+                        ParkTimeoutAction::Hangup => {
+                            termination = CallTermination::LocalShutdown;
+                            break;
+                        }
+                        ParkTimeoutAction::Keep => {
+                            // Stay parked; operator must retrieve or hang up.
+                        }
+                    }
+                }
+
+                // Bridge sub-task ended. Guarded by `bridge_alive` so a
+                // completed handle is never re-polled (it's reassigned on
+                // retrieve). A bridge ending *while parked* is the park's
+                // own `stop{park}` close — non-terminal; the call lives on
+                // MOH until retrieve / timeout / caller-BYE.
+                res = &mut bridge_task, if bridge_alive => {
+                    bridge_alive = false;
                     match res {
                         Ok(inner) => bridge_result = Some(inner),
                         Err(join_err) => {
@@ -894,8 +1216,12 @@ impl CallController {
                             return Err(CallError::TaskJoin(join_err));
                         }
                     }
-                    termination = CallTermination::BridgeEnded;
-                    break;
+                    if parked {
+                        debug!(call_id = %call_id, "WS bridge closed for park; call remains parked");
+                    } else {
+                        termination = CallTermination::BridgeEnded;
+                        break;
+                    }
                 }
 
                 // Tap sub-task ended.
@@ -939,6 +1265,24 @@ impl CallController {
         }
 
         log_state(&call_id, CallState::Terminating);
+
+        // ─── Park teardown ───────────────────────────────────────
+        // If we broke out while still parked (timeout-hangup, or a
+        // caller BYE during park), close the books on the parked span
+        // and free the registry slot + gauge.
+        if parked {
+            if let Some(since) = parked_since.take() {
+                park_total += since.elapsed();
+            }
+            if let Some(pc) = park.as_ref() {
+                pc.registry.remove(call_id.as_str());
+            }
+            metrics::gauge!(PARKED_CALLS_ACTIVE).decrement(1.0);
+        }
+        let park_summary = (park_count > 0).then_some(ParkSummary {
+            count: park_count,
+            total_ms: park_total.as_millis() as u64,
+        });
 
         // ─── Drain remaining sub-tasks with a budget ─────────────
         // The bridge needs to flush its `stop` send + WS close;
@@ -1053,12 +1397,24 @@ impl CallController {
             bridge: bridge_result,
             tap: tap_result,
             recording: recording_summary,
+            park: park_summary,
         })
     }
 }
 
 fn log_state(call_id: &CallId, state: CallState) {
     info!(call_id = %call_id, ?state, "call state");
+}
+
+/// Fire a lifecycle webhook off the control loop (best-effort, like the
+/// acceptor's call_start/end). `None` sink → no-op.
+fn spawn_webhook(sink: &Option<WebhookSinkHandle>, event: WebhookEvent) {
+    if let Some(sink) = sink {
+        let sink = sink.clone();
+        tokio::spawn(async move {
+            sink.emit(event).await;
+        });
+    }
 }
 
 /// Spawn the async conference join (round-trips to the room task) off

@@ -1428,6 +1428,10 @@ fn compile_barge_in_default(
     if let Some(mode) = raw.mode.as_deref() {
         cfg.mode = parse_barge_in_mode(mode)?;
     }
+    if let Some(ms) = raw.debounce_ms {
+        // 0 = explicitly off; any positive value arms the playout gate.
+        cfg.debounce = (ms > 0).then(|| std::time::Duration::from_millis(ms));
+    }
     Ok(cfg)
 }
 
@@ -1973,6 +1977,38 @@ mod call_progress_tests {
             CompileError::UnknownCallProgressMode(s) => assert_eq!(s, "instant-answer"),
             other => panic!("expected UnknownCallProgressMode, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod barge_in_tests {
+    use super::compile_barge_in_default;
+    use crate::raw::RawBargeIn;
+    use std::time::Duration;
+
+    #[test]
+    fn debounce_unset_or_zero_is_none() {
+        // Unset → no gate (immediate flush, unchanged behaviour).
+        let cfg = compile_barge_in_default(&RawBargeIn::default()).unwrap();
+        assert_eq!(cfg.debounce, None);
+        // Explicit 0 → off.
+        let raw = RawBargeIn {
+            debounce_ms: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(compile_barge_in_default(&raw).unwrap().debounce, None);
+    }
+
+    #[test]
+    fn debounce_positive_arms_the_gate() {
+        let raw = RawBargeIn {
+            debounce_ms: Some(200),
+            ..Default::default()
+        };
+        assert_eq!(
+            compile_barge_in_default(&raw).unwrap().debounce,
+            Some(Duration::from_millis(200))
+        );
     }
 }
 

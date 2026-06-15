@@ -186,6 +186,7 @@ impl OutboundOriginateHandle for OutboundService {
         };
         let tap = TapOptions {
             barge_in_action: barge_in_to_tap_action(&self.defaults.barge_in),
+            barge_in_debounce: self.defaults.barge_in.debounce,
             inactivity_timeout: self.defaults.inactivity_timeout,
             silence_threshold: self.defaults.silence_threshold,
             dead_air_threshold: self.defaults.dead_air_threshold,

@@ -187,6 +187,13 @@ pub struct BargeInConfig {
     /// it were `NotifyOnly` and never drives a server-side flush.
     pub enabled: bool,
     pub mode: BargeInMode,
+    /// Playout-gated barge-in debounce. `None`/zero (the default) =
+    /// flush immediately on speech (pre-0.7.1 behaviour). `Some(d)` =
+    /// while the bot is playing out, hold a speech-started for `d` and
+    /// only flush if speech sustains past it — an echo / brief-noise gate
+    /// that doesn't delay barge-in while the bot is silent. From
+    /// `[bridge.barge_in].debounce_ms`.
+    pub debounce: Option<std::time::Duration>,
 }
 
 impl Default for BargeInConfig {
@@ -194,6 +201,7 @@ impl Default for BargeInConfig {
         Self {
             enabled: true,
             mode: BargeInMode::AutoClear,
+            debounce: None,
         }
     }
 }
@@ -650,6 +658,9 @@ pub fn resolve_barge_in(defaults: &BridgeDefaults, route: &CompiledRoute) -> Bar
         if let Some(parsed) = parse_barge_in_mode_route(mode) {
             out.mode = parsed;
         }
+    }
+    if let Some(ms) = route.bridge.barge_in.debounce_ms {
+        out.debounce = (ms > 0).then(|| std::time::Duration::from_millis(ms));
     }
     out
 }
@@ -3066,6 +3077,7 @@ impl BridgingAcceptor {
                 from_tag: None,
                 to_tag: None,
                 barge_in_action: barge_in_to_tap_action(&resolve_barge_in(&self.defaults, route)),
+                barge_in_debounce: resolve_barge_in(&self.defaults, route).debounce,
                 inactivity_timeout: resolve_inactivity_timeout(&self.defaults, route),
                 silence_threshold: resolve_silence_threshold(&self.defaults, route),
                 dead_air_threshold: resolve_dead_air_threshold(&self.defaults, route),

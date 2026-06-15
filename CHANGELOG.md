@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-15
+
+Theme: **conferencing + media-only call park** — two operator-controllable
+multi-leg features, both **off by default** (fail-closed like `[outbound]`,
+so a 0.6.x config upgrades with zero behaviour change). Conferencing mixes
+N calls into one room where *every* leg keeps its own WS session (no single
+"host" bot); call park shelves a call on hold music with **no** WS session,
+to be retrieved later onto a fresh session by an operator. Delivered across
+five chunks (room core → WS surface → conference admin → park → docs/SIPp/
+release). The WS protocol version stays `"1"` — every addition is a new
+message, event, or error code.
+
 ### Added
 
 - **Conference admin CRUD (0.7.0 chunk 3 of 5).** Operators can compose and
@@ -88,6 +100,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   * Reference echo server (`examples/echo-ws-server-python`) gains
     `--auto-conference-join ROOM` and logs the new events — the harness hook
     for the chunk-5 two-caller SIPp scenario.
+
+- **Media-only call park + retrieve (0.7.0 chunk 4 of 5).** Park shelves a
+  call **without** a WS session: the caller hears hold music, the SIP dialog
+  + RTP stay up, and the call is later **retrieved** onto a *fresh* WS session
+  (or times out / hangs up). The one chunk that reworks the per-call
+  controller lifecycle — the media tap becomes the durable owner and the WS
+  bridge becomes swappable. `docs/PARK.md`, `docs/DESIGN_0.7.0_PARK.md`.
+  * `[park]` config block (`enabled` — **off by default**; `moh_file`
+    optional, validated + decoded at load, comfort noise when unset or on a
+    sample-rate mismatch; `timeout_secs` 300 / `0` = indefinite;
+    `timeout_action` `hangup`|`keep`; `max_parked` 32). Global only.
+    `docs/CONFIG.md`.
+  * WS protocol (version stays `"1"`): `park { call_id, slot? }` (server parks
+    its own call, self-scoped), `stop { reason: "park" }`, `start.retrieved`
+    on a retrieved session, and `error` code `park_failed`. `docs/PROTOCOL.md`
+    §3.1 / §3.9 / §3.10 / §4.9.
+  * MOH on a 20 ms monotonic tick into forge playout (looping `FileSource` at
+    the call's rate, else `forge-injection` comfort noise); a parked call's
+    `MediaTap` task stays alive (it owns the forge media handle), while its WS
+    bridge detaches and is re-spawned fresh on retrieve.
+  * Admin API: `GET /admin/v1/parked`, `POST /admin/v1/calls/:id/park`
+    `{slot?}`, `POST /admin/v1/calls/:id/retrieve` `{ws_url?}` (both `202`
+    dispatched; retrieve is operator-only — there is no WS retrieve message).
+    `501` when park is off, `404` unknown call, `409` retrieve of a non-parked
+    call. `docs/DEPLOY.md`.
+  * Observability: webhooks `call_parked` / `call_retrieved` / `park_timeout`;
+    metrics `siphon_ai_parks_total{result}`,
+    `siphon_ai_retrieves_total{result}`, `siphon_ai_parked_calls_active`; CDR
+    `park { count, total_ms }` (additive, schema stays v1). Recording in
+    progress at park keeps writing (records the MOH the caller hears).
+  * Applies to inbound **and** outbound calls (any call in the
+    `CallControlRegistry`). Reference echo server gains `--auto-park[=SLOT]`.
+
+- **0.7.0 docs, SIPp coverage, and release (chunk 5 of 5).** Feature guides
+  `docs/CONFERENCE.md` and `docs/PARK.md` (joining flow, admin control,
+  limits, testing); doc-drift fixes in `CLAUDE.md` §8 and `docs/DEV_PLAN.md`
+  (recording / outbound / conferencing / park are delivered, not "out of
+  scope"; `forge-mixer` + `forge-injection` are now used). SIPp signaling
+  regression gains three live phases — conference two-caller mix, park →
+  retrieve → hangup, and park → timeout → hangup — each cross-checking the
+  feature's metric.
 
 ## [0.6.2] - 2026-06-12
 

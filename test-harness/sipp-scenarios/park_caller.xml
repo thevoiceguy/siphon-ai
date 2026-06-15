@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  park_caller — SIPp acts as the caller (UAC); SiphonAI is the UAS. The
+  call is answered and bridged, the harness echo server parks it (started
+  with --auto-park), and SiphonAI BYEs us when the park resolves:
+    * park → timeout → hangup   ([park].timeout_action = "hangup"), or
+    * park → retrieve → hangup  (the runner retrieves onto a second echo
+      server that auto-hangs-up).
+  Either way the caller's job is the same: answer, then wait for the
+  daemon-initiated BYE. Shared by run-all.sh's two park auxiliary phases;
+  the scenario alone does nothing special — the park behaviour is driven
+  by the echo server + (for retrieve) the runner's admin call.
+
+  SiphonAI does not send 100/180 in v1; those recv lines are optional so
+  the transaction layer's retransmit timing doesn't fail the run.
+-->
+<scenario name="park_caller">
+  <send>
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+
+  <recv response="200" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- Call is up and bridged; the echo server parks it. SiphonAI keeps
+       the dialog + RTP alive (media-only park) and BYEs us when the park
+       resolves (timeout-hangup or retrieve then echo-B hangup). -->
+  <recv request="BYE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]>
+  </send>
+</scenario>

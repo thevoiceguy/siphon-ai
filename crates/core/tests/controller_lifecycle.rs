@@ -24,6 +24,7 @@ use siphon_ai_bridge::{
 };
 use siphon_ai_core::{
     CallController, CallControllerConfig, CallTermination, ConferenceLimits, ConferenceRegistry,
+    ParkContext, ParkRegistry, ParkSettings, ParkTimeoutAction,
 };
 use siphon_ai_media_glue::MediaTap;
 use tokio::net::TcpListener;
@@ -55,6 +56,7 @@ fn start_msg(call_id: &str) -> StartMsg {
         },
         srtp: None,
         verstat: None,
+        retrieved: false,
     }
 }
 
@@ -94,13 +96,30 @@ fn echo_subprotocol(
 }
 
 fn make_controller(port: u16, call_id: &str) -> (CallController, siphon_ai_core::CallHandle) {
-    make_controller_with_conference(port, call_id, None)
+    make_controller_full(port, call_id, None, None)
 }
 
 fn make_controller_with_conference(
     port: u16,
     call_id: &str,
     conference: Option<ConferenceRegistry>,
+) -> (CallController, siphon_ai_core::CallHandle) {
+    make_controller_full(port, call_id, conference, None)
+}
+
+fn make_controller_with_park(
+    port: u16,
+    call_id: &str,
+    park: ParkContext,
+) -> (CallController, siphon_ai_core::CallHandle) {
+    make_controller_full(port, call_id, None, Some(park))
+}
+
+fn make_controller_full(
+    port: u16,
+    call_id: &str,
+    conference: Option<ConferenceRegistry>,
+    park: Option<ParkContext>,
 ) -> (CallController, siphon_ai_core::CallHandle) {
     let manager = Arc::new(MediaBridgeManager::new());
     let tap = MediaTap::attach(
@@ -128,8 +147,24 @@ fn make_controller_with_conference(
         transfer: None,
         recording: None,
         conference,
+        park,
     };
     CallController::new(cfg)
+}
+
+/// A park context for tests: an enabled registry, no MOH file (comfort
+/// noise — no fixture needed), no webhook sink, and a caller-supplied
+/// timeout policy.
+fn test_park_ctx(timeout: Option<Duration>, action: ParkTimeoutAction) -> ParkContext {
+    ParkContext {
+        settings: ParkSettings {
+            moh_file: None,
+            timeout,
+            timeout_action: action,
+        },
+        registry: ParkRegistry::new(8),
+        webhooks: None,
+    }
 }
 
 /// An enabled registry for the conference round-trip tests.
@@ -387,4 +422,136 @@ async fn conference_join_then_leave_round_trip() {
         make_controller_with_conference(port, "conf-2", Some(enabled_conference()));
     let outcome = controller.run().await.expect("run");
     assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+}
+
+// ─── Park / retrieve (0.7.0) ─────────────────────────────────────────
+
+#[tokio::test]
+async fn park_then_retrieve_round_trip() {
+    // Park detaches the WS (the bridge sends `stop{park}` and closes)
+    // while the controller stays alive on MOH; retrieve opens a *fresh*
+    // WS that receives `start{retrieved:true}`. Two one-shot servers
+    // model the pre-park and post-retrieve sessions; the call ends
+    // normally when the retrieved session closes.
+    let (a_done_tx, a_done_rx) = tokio::sync::oneshot::channel::<bool>();
+    let port_a = one_shot_server(move |mut ws| async move {
+        let _ = ws.next().await; // drain start
+                                 // Read until the bridge closes the WS for the park; record
+                                 // whether we saw the `stop{park}` first.
+        let mut saw_park_stop = false;
+        while let Some(msg) = ws.next().await {
+            if let Ok(Message::Text(t)) = msg {
+                let v: Value = serde_json::from_str(&t).expect("json");
+                if v["type"] == "stop" && v["reason"] == "park" {
+                    saw_park_stop = true;
+                }
+            }
+        }
+        let _ = a_done_tx.send(saw_park_stop);
+    })
+    .await;
+
+    let (b_seen_tx, b_seen_rx) = tokio::sync::oneshot::channel::<bool>();
+    let port_b = one_shot_server(move |mut ws| async move {
+        // The retrieved session's `start` must carry `retrieved: true`.
+        let retrieved = match ws.next().await {
+            Some(Ok(Message::Text(t))) => {
+                let v: Value = serde_json::from_str(&t).expect("json");
+                assert_eq!(v["type"], "start");
+                v["retrieved"] == serde_json::json!(true)
+            }
+            other => panic!("retrieved session sent no start: {other:?}"),
+        };
+        let _ = b_seen_tx.send(retrieved);
+        ws.close(None).await.ok();
+    })
+    .await;
+
+    let (controller, handle) = make_controller_with_park(
+        port_a,
+        "park-1",
+        test_park_ctx(None, ParkTimeoutAction::Hangup),
+    );
+    let run = tokio::spawn(controller.run());
+
+    // Park, then wait until server A has actually seen the park stop +
+    // close before retrieving — deterministic ordering, no sleeps.
+    handle.request_park(Some("lot-1".into()));
+    assert!(
+        a_done_rx.await.expect("server A signalled"),
+        "pre-park session should have observed stop{{park}}"
+    );
+
+    handle.request_retrieve(Some(format!("ws://127.0.0.1:{port_b}/")));
+    assert!(
+        b_seen_rx.await.expect("server B signalled"),
+        "retrieved start must set retrieved=true"
+    );
+
+    let outcome = run.await.expect("join").expect("run");
+    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+    let park = outcome.park.expect("park summary present");
+    assert_eq!(park.count, 1, "one park episode");
+}
+
+#[tokio::test]
+async fn park_timeout_hangup_tears_down() {
+    // A parked call with `timeout_action = hangup` tears down when the
+    // deadline fires (no retrieve, no caller BYE) → `LocalShutdown`.
+    //
+    // Timing note: this harness has no real RTP feeding forge, so the
+    // tap's inbound stream ends on its own (`CallEnded`) ~tens of ms
+    // into a sustained park. We use a near-immediate deadline so the
+    // park-timeout arm — which precedes the tap arm in the controller's
+    // `biased` select — fires first, deterministically. A production
+    // call has continuous RTP, so the tap never ends mid-park and any
+    // real `timeout_secs` applies.
+    let port = one_shot_server(|mut ws| async move {
+        let _ = ws.next().await; // drain start
+        while ws.next().await.is_some() {} // until park closes the WS
+    })
+    .await;
+
+    let (controller, handle) = make_controller_with_park(
+        port,
+        "park-timeout",
+        test_park_ctx(Some(Duration::from_millis(1)), ParkTimeoutAction::Hangup),
+    );
+    let run = tokio::spawn(controller.run());
+
+    handle.request_park(None);
+
+    let outcome = run.await.expect("join").expect("run");
+    assert_eq!(outcome.termination, CallTermination::LocalShutdown);
+    assert_eq!(outcome.park.expect("park summary").count, 1);
+}
+
+#[tokio::test]
+async fn caller_bye_while_parked_tears_down() {
+    // A caller BYE (modelled as handle.shutdown()) while the call is
+    // parked tears it down cleanly, with the park episode still
+    // accounted on the outcome.
+    let (a_done_tx, a_done_rx) = tokio::sync::oneshot::channel::<()>();
+    let port = one_shot_server(move |mut ws| async move {
+        let _ = ws.next().await; // drain start
+        while ws.next().await.is_some() {} // until park closes the WS
+        let _ = a_done_tx.send(());
+    })
+    .await;
+
+    let (controller, handle) = make_controller_with_park(
+        port,
+        "park-bye",
+        test_park_ctx(None, ParkTimeoutAction::Hangup),
+    );
+    let run = tokio::spawn(controller.run());
+
+    handle.request_park(None);
+    a_done_rx.await.expect("park detached the WS");
+    // Now the SIP side hangs up while parked.
+    handle.shutdown();
+
+    let outcome = run.await.expect("join").expect("run");
+    assert_eq!(outcome.termination, CallTermination::LocalShutdown);
+    assert_eq!(outcome.park.expect("park summary").count, 1);
 }

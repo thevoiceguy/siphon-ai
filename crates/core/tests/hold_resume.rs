@@ -103,11 +103,13 @@ async fn push_bridge_event_emits_hold_and_resume_on_ws() {
             },
             srtp: None,
             verstat: None,
+            retrieved: false,
         },
         media_tap: tap,
         transfer: None,
         recording: None,
         conference: None,
+        park: None,
     };
     let (controller, handle) = CallController::new(cfg);
     let run = tokio::spawn(async move { controller.run().await });

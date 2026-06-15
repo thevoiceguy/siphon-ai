@@ -297,6 +297,20 @@ pub struct StartMsg {
     /// `Box<T>` is serde-transparent — the wire JSON is identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verstat: Option<Box<VerificationResult>>,
+    /// `true` when this `start` opens a *retrieve* session on a
+    /// previously-parked call (0.7.0, §2.4) — the WS server is picking
+    /// the call back up, not handling a fresh inbound one. `seq` still
+    /// restarts at 0 (a fresh session, no replay). Additive — omitted
+    /// (and `false`) on every non-retrieve `start`, so a pre-0.7.0
+    /// server sees the exact shape it always did.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retrieved: bool,
+}
+
+/// serde `skip_serializing_if` helper — keep `retrieved: false` off the
+/// wire so the `start` shape is byte-identical for non-retrieve calls.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// SRTP details surfaced on [`StartMsg::srtp`].
@@ -390,6 +404,11 @@ pub enum StopReason {
     ServerHangup,
     Transfer,
     WsDisconnect,
+    /// The call was parked (0.7.0): the WS session is being detached but
+    /// the call stays alive (caller hears hold music). A later retrieve
+    /// opens a *fresh* WS session — this `stop` is the last message on
+    /// *this* session, not the end of the call.
+    Park,
     Error,
 }
 
@@ -418,6 +437,10 @@ pub enum ErrorCode {
     /// or already joined). The call continues on its direct pair.
     /// Added in 0.7.0.
     ConferenceFailed,
+    /// A [`BridgeIn::Park`] was refused (park disabled or
+    /// `[park].max_parked` reached). The call continues unparked.
+    /// Added in 0.7.0.
+    ParkFailed,
     Internal,
 }
 
@@ -514,6 +537,19 @@ pub enum BridgeIn {
 
     /// Resume recording after a [`BridgeIn::PauseRecording`].
     ResumeRecording { call_id: CallId },
+
+    /// Park this call (0.7.0, §2.4): detach the WS session and shelve
+    /// the call playing hold music, keeping the SIP dialog + RTP alive.
+    /// Self-scoped. SiphonAI replies `stop { reason: "park" }` and
+    /// closes this WS; the call is later retrieved (operator action)
+    /// onto a fresh WS session. `slot` is an optional human label for
+    /// the hold lot. Refused (`error { code: "park_failed" }`, call
+    /// continues) when park is disabled or `[park].max_parked` is hit.
+    Park {
+        call_id: CallId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slot: Option<String>,
+    },
 
     /// Join this call into a conference room (0.7.0, §2.1). Creates
     /// the room if it doesn't exist yet (subject to
@@ -1152,6 +1188,91 @@ mod tests {
         assert_eq!(code, ErrorCode::ConferenceFailed);
     }
 
+    // ─── Park (0.7.0) ────────────────────────────────────────────────────
+
+    #[test]
+    fn bridge_in_park_with_slot() {
+        let raw = r#"{ "type": "park", "call_id": "siphon-a", "slot": "lot-3" }"#;
+        let msg: BridgeIn = assert_round_trip(raw);
+        let BridgeIn::Park { slot, .. } = msg else {
+            panic!("expected Park");
+        };
+        assert_eq!(slot.as_deref(), Some("lot-3"));
+    }
+
+    #[test]
+    fn bridge_in_park_slot_optional() {
+        let raw = r#"{ "type": "park", "call_id": "siphon-a" }"#;
+        let msg: BridgeIn = assert_round_trip(raw);
+        assert!(matches!(msg, BridgeIn::Park { slot: None, .. }));
+    }
+
+    #[test]
+    fn stop_reason_park_round_trips() {
+        let raw = r#"{ "type": "stop", "call_id": "c", "seq": 9, "reason": "park" }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        assert!(matches!(
+            msg,
+            BridgeOut::Stop {
+                reason: StopReason::Park,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn start_retrieved_omitted_when_false_present_when_true() {
+        // false ⇒ field absent (byte-identical to pre-0.7.0 start).
+        let start_false = StartMsg {
+            version: "1".into(),
+            call_id: CallId::new("c"),
+            seq: 0,
+            from: "+1".into(),
+            to: "5000".into(),
+            direction: Direction::Inbound,
+            audio: AudioFormat {
+                encoding: AudioEncoding::Pcm16le,
+                sample_rate: 8000,
+                channels: 1,
+                frame_ms: 20,
+            },
+            sip: SipMeta {
+                call_id: "x@y".into(),
+                headers: HashMap::new(),
+            },
+            srtp: None,
+            verstat: None,
+            retrieved: false,
+        };
+        let v = serde_json::to_value(&start_false).unwrap();
+        assert!(
+            v.get("retrieved").is_none(),
+            "retrieved must be absent when false"
+        );
+
+        // true ⇒ present.
+        let start_true = StartMsg {
+            retrieved: true,
+            ..start_false
+        };
+        let v = serde_json::to_value(&start_true).unwrap();
+        assert_eq!(v["retrieved"], serde_json::json!(true));
+        // And a retrieve-session start round-trips through BridgeOut.
+        let _ = assert_round_trip::<BridgeOut>(
+            &serde_json::to_string(&BridgeOut::Start(start_true)).unwrap(),
+        );
+    }
+
+    #[test]
+    fn bridge_out_error_park_failed() {
+        let raw = r#"{ "type": "error", "call_id": "c", "seq": 3, "code": "park_failed", "message": "max_parked reached" }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        let BridgeOut::Error { code, .. } = msg else {
+            panic!("expected Error");
+        };
+        assert_eq!(code, ErrorCode::ParkFailed);
+    }
+
     // ─── Negative cases ─────────────────────────────────────────────────
 
     #[test]
@@ -1250,6 +1371,7 @@ mod tests {
             },
             srtp: None,
             verstat: None,
+            retrieved: false,
         });
         let v: Value = serde_json::to_value(&start).unwrap();
         let obj = v.as_object().unwrap();
@@ -1305,6 +1427,7 @@ mod tests {
                 },
                 srtp,
                 verstat: None,
+                retrieved: false,
             })
         };
 
@@ -1366,6 +1489,7 @@ mod tests {
                 },
                 srtp: None,
                 verstat: verstat.map(Box::new),
+                retrieved: false,
             })
         };
 

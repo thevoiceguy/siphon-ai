@@ -96,6 +96,7 @@ use crate::call::{
     CallController, CallControllerConfig, CallOutcome, CallTermination, RecordingSummary,
 };
 use crate::conference::ConferenceRegistry;
+use crate::park::ParkContext;
 use crate::registry::CallControlRegistry;
 use crate::registry::CallRegistry;
 use crate::registry::ConsultRegistry;
@@ -1268,6 +1269,9 @@ pub fn build_start_msg(
         // wired (a later 0.4.0 chunk); the surface is in place now so the
         // WS shape is pinned before any code path produces a value.
         verstat,
+        // The acceptor only builds fresh inbound sessions; a retrieve
+        // session is built by the controller on park-retrieve.
+        retrieved: false,
     }
 }
 
@@ -1304,6 +1308,7 @@ pub fn build_outbound_start_msg(
         },
         srtp: None,
         verstat: None,
+        retrieved: false,
     }
 }
 
@@ -1469,6 +1474,10 @@ pub struct BridgingAcceptor {
     /// any active call (0.7.0). Populated for every accepted call,
     /// drained at teardown. Empty/unused when conferencing is off.
     control_registry: CallControlRegistry,
+    /// Park context (0.7.0). `Some` when `[park].enabled`; every
+    /// accepted call's controller gets a clone so a WS `park` (or admin
+    /// park) works. `None` → park off, requests rejected.
+    park: Option<ParkContext>,
 }
 
 /// Daemon-wide REFER plumbing (shared across every accepted call).
@@ -1685,6 +1694,7 @@ impl BridgingAcceptor {
             recording: RecordingConfig::default(),
             conference: None,
             control_registry: CallControlRegistry::new(),
+            park: None,
         }
     }
 
@@ -1817,6 +1827,14 @@ impl BridgingAcceptor {
         self
     }
 
+    /// Install the park context (0.7.0). The daemon builds it from
+    /// `[park]` + the shared `ParkRegistry`; every accepted call's
+    /// controller gets a clone. Left unset → park is off.
+    pub fn with_park(mut self, park: ParkContext) -> Self {
+        self.park = Some(park);
+        self
+    }
+
     /// The registry this acceptor populates. Cheap to clone — share
     /// it with the SIP-side BYE/CANCEL handler.
     pub fn registry(&self) -> &CallRegistry {
@@ -1887,6 +1905,10 @@ impl CallStart {
                 .recording
                 .as_ref()
                 .map(|r| r.path.display().to_string()),
+            park: outcome.park.map(|p| siphon_ai_cdr::ParkInfo {
+                count: p.count,
+                total_ms: p.total_ms,
+            }),
         }
     }
 }
@@ -1902,6 +1924,9 @@ pub(crate) struct CallTerminationView {
     /// Recording outcome, when the call was recorded. Feeds the CDR
     /// `recording_path` and the `siphon_ai_recordings_total` metric.
     pub(crate) recording: Option<RecordingSummary>,
+    /// Park accounting, when the call was parked at least once. Feeds
+    /// the CDR `park { count, total_ms }`.
+    pub(crate) park: Option<crate::call::ParkSummary>,
 }
 
 impl CallTerminationView {
@@ -1912,6 +1937,7 @@ impl CallTerminationView {
                 bridge_detail: bridge_detail(o.bridge),
                 tap_detail: tap_detail(o.tap),
                 recording: o.recording,
+                park: o.park,
             },
             Err(e) => Self {
                 // Treat a panic / join error as "bridge ended" —
@@ -1921,6 +1947,7 @@ impl CallTerminationView {
                 bridge_detail: format!("controller error: {e}"),
                 tap_detail: String::new(),
                 recording: None,
+                park: None,
             },
         }
     }
@@ -3143,6 +3170,7 @@ impl BridgingAcceptor {
             transfer,
             recording,
             conference: self.conference.clone(),
+            park: self.park.clone(),
         };
         let (controller, handle) = CallController::new(cfg);
 

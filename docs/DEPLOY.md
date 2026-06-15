@@ -314,6 +314,9 @@ the listener on a private network.
 | DELETE | `/admin/v1/conferences/:id`   | —               | **Force-end a room** (0.7.0). Every member reverts to its direct pair (`conference_left { room_closed }`). `404` if unknown. |
 | POST   | `/admin/v1/conferences/:id/participants`          | JSON | **Add a call to a room** (0.7.0). Body `{call_id}`; `202` (dispatched). |
 | DELETE | `/admin/v1/conferences/:id/participants/:call_id` | —    | **Remove a call from a room** (0.7.0). `202` (dispatched). |
+| GET    | `/admin/v1/parked`            | —               | **List parked calls** (0.7.0). `501` when `[park]` is disabled. |
+| POST   | `/admin/v1/calls/:id/park`    | JSON (opt.)     | **Park an active call** (0.7.0). Body `{slot?}`; `202` (dispatched). `404` if no active call has that id. `501` when `[park]` is disabled. |
+| POST   | `/admin/v1/calls/:id/retrieve`| JSON (opt.)     | **Retrieve a parked call** (0.7.0). Body `{ws_url?}`; `202` (dispatched). `404` unknown call, `409` if the call isn't parked. `501` when `[park]` is disabled. |
 
 ### `POST /admin/v1/calls` — outbound origination
 
@@ -388,6 +391,36 @@ curl -X PUT --data 'siphon_ai=info,siphon_ai_bridge=debug' \
 curl -X PUT --data "$prev" http://localhost:9091/admin/log
 ```
 
+### `/admin/v1/parked` — park admin (0.7.0)
+
+Requires `[park].enabled = true` (all routes `501` otherwise). Same no-auth
+posture as the other v1 admin routes — keep the listener private. Park
+shelves a call playing hold music with **no** WS session; see
+`docs/CONFIG.md` `[park]` and the WS protocol (`docs/PROTOCOL.md` §4.9).
+
+```sh
+# What's parked, and for how long
+curl -s http://localhost:9091/admin/v1/parked
+# → {"count":1,"parked":[{"call_id":"siphon-a","slot":"lot-3","parked_secs":42}]}
+
+# Park an active call (slot label optional)
+curl -X POST http://localhost:9091/admin/v1/calls/siphon-a/park \
+    -d '{"slot":"lot-3"}'        # → 202
+
+# Retrieve it onto a fresh WS session (ws_url optional — defaults to the
+# call's original bridge ws_url)
+curl -X POST http://localhost:9091/admin/v1/calls/siphon-a/retrieve \
+    -d '{"ws_url":"wss://my-bot.example/retrieve"}'   # → 202
+```
+
+`park`/`retrieve` return **`202` (dispatched)**: the daemon signals the
+target call and its own controller does the work — the outcome surfaces on
+the call's (old/new) WS session and the `call_parked` / `call_retrieved`
+webhooks, not in this HTTP response. A park refused by the `[park].max_parked`
+cap is **not** a `503` here — the cap is enforced in the call's controller and
+surfaces as `error { code: "park_failed" }` on its WS while the call continues
+unparked. `retrieve` is `409` when the named call exists but isn't parked.
+
 ## CDR consumers
 
 When `[cdr.file]` is enabled, the daemon appends one JSON record per ended
@@ -446,6 +479,14 @@ Two optional recording fields appear when the call was recorded (added in
   recording `failed` (it points at where the file would be); cross-check
   with the `siphon_ai_recordings_total` metric for the outcome.
 
+One optional park object appears when the call was parked at least once
+(added in 0.7.0; schema stays at version 1 — omitted when the call was
+never parked):
+
+- `park` — `{ "count": <episodes>, "total_ms": <cumulative parked ms> }`.
+  A call can park/retrieve repeatedly, so `count` is the number of park
+  episodes and `total_ms` is the summed parked wall-time across them.
+
 Outbound originated calls (0.6.0, `POST /admin/v1/calls`) produce the same
 record with `direction: "outbound"` — the schema stays at version 1 (the
 field was reserved for this since v1). Two outbound-specific readings:
@@ -479,6 +520,9 @@ CDR webhook. Event types:
 | `outbound_failed`               | The originated call ended without an answer. Terminal — no `call_end`/CDR follows. |
 | `conference_created`            | A conference room was created — first `conference_join` for a `room_id`, or an admin pre-create (0.7.0). Carries `room_id`, `sample_rate`. |
 | `conference_ended`              | A conference room ended — last member left, or an operator force-ended it (0.7.0). Carries `room_id`, `duration_ms`, `peak_participants`. Pairs 1:1 with `conference_created`. |
+| `call_parked`                   | A call was parked — WS `park` or `POST /admin/v1/calls/:id/park` (0.7.0). Carries `call_id` and the optional `slot` label. |
+| `call_retrieved`                | A parked call was retrieved onto a fresh WS session — `POST /admin/v1/calls/:id/retrieve` (0.7.0). Carries `call_id` and the `ws_url` the new session connected to. |
+| `park_timeout`                  | A parked call hit `[park].timeout_secs` (0.7.0). Carries `call_id` and `action` (`"hangup"` or `"keep"`, per `[park].timeout_action`). |
 
 Each delivery is a single JSON object with `version`, `timestamp` (ISO 8601), `type`,
 and per-event fields documented in `crates/webhooks/src/event.rs`.
@@ -497,6 +541,18 @@ mirrors the `siphon_ai_outbound_calls_total{result}` metric labels:
   "sip_call_id": "f81d4fae…@10.0.0.5", "timestamp": "2026-06-09T10:00:06Z" }
 { "type": "outbound_failed", "version": 1, "call_id": "siphon-…",
   "timestamp": "2026-06-09T10:00:30Z", "cause": "no_answer" }
+```
+
+A parked call emits `call_parked`, then (when retrieved) `call_retrieved`,
+or (on timeout) `park_timeout`. A call may park/retrieve repeatedly.
+
+```json
+{ "type": "call_parked", "version": 1, "call_id": "siphon-…",
+  "timestamp": "2026-06-14T10:00:00Z", "slot": "lot-3" }
+{ "type": "call_retrieved", "version": 1, "call_id": "siphon-…",
+  "timestamp": "2026-06-14T10:02:30Z", "ws_url": "wss://my-bot.example/retrieve" }
+{ "type": "park_timeout", "version": 1, "call_id": "siphon-…",
+  "timestamp": "2026-06-14T10:05:00Z", "action": "hangup" }
 ```
 
 ## HEP / Homer
@@ -545,6 +601,9 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_conference_participants`     | gauge     | —                                     | Mixer participants across all rooms (0.7.0). Each member call contributes 2 — its SIP leg and its WS session; two calls in one room read 4. |
 | `siphon_ai_room_tick_lag_seconds`       | histogram | —                                     | How far past its 20 ms cadence a room's mix tick fired (0.7.0). Healthy rooms sit in the lowest bucket; sustained lag means the mixer (which allocates per tick upstream — DEV_PLAN_0.7.0.md §6) or the runtime is starved. Buckets 0.5 ms – 250 ms. |
 | `siphon_ai_room_frames_dropped_total`   | counter   | `stage=input\|sink`, `side=sip\|ws` | 20 ms frames a room dropped instead of blocking the audio path (0.7.0). `input` = the tap→room channel was full; `sink` = a member's output channel was full (stalled consumer). Healthy rooms sit at zero. |
+| `siphon_ai_parks_total`                 | counter   | `result=ok\|rejected`                 | Park requests (0.7.0). `rejected` = park disabled or `[park].max_parked` reached; the call continues unparked. |
+| `siphon_ai_retrieves_total`             | counter   | `result=ok\|not_parked`               | Retrieve requests (0.7.0). `not_parked` = a retrieve signalled a call that wasn't parked (ignored). |
+| `siphon_ai_parked_calls_active`         | gauge     | —                                     | Currently-parked calls (0.7.0). Incremented on park, decremented on retrieve or teardown. |
 | `forge_rtcp_*`                          | various   | per-call (forge-side)                 | RTP/RTCP quality. See forge-media's own metric inventory. |
 | `heplify_*`                             | various   | from the HEP collector                | Only visible if you scrape heplify too. |
 

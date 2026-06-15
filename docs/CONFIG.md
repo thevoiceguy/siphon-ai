@@ -22,6 +22,7 @@ before TOML parsing. Unset variables without a default fail the load.
 [security]        # STIR/SHAKEN call-authentication policy (0.4.0)
 [security.stir_shaken]  # verification settings
 [conference]      # conference rooms (0.7.0); off by default
+[park]            # media-only call park (0.7.0); off by default
 [cdr]             # call detail records: file + webhook sinks
 [observability]   # /metrics, /health, /ready, /admin
 [webhooks]        # lifecycle events (call_start, call_end, …)
@@ -351,6 +352,36 @@ limitation). Rooms are created on first join and end when the last member
 leaves. Global only — no per-route overrides (rooms are a daemon-level
 facility, like outbound).
 
+## `[park]` — media-only call park (0.7.0)
+
+Park shelves a call **without** a WS session: the caller hears hold music,
+the SIP dialog and RTP stay up, and the call is later **retrieved** onto a
+*fresh* WS session (or times out / hangs up). Park is initiated by the WS
+server (`park`, see `docs/PROTOCOL.md` §4.9) or an operator
+(`POST /admin/v1/calls/:id/park`); retrieve is **operator-only**
+(`POST /admin/v1/calls/:id/retrieve`). This block only declares the
+daemon-level facility.
+
+```toml
+[park]
+enabled = false                       # fail-closed, like [conference]
+moh_file = "/etc/siphon-ai/moh.wav"   # optional; comfort noise if unset
+timeout_secs = 300                    # 0 = park indefinitely
+timeout_action = "hangup"             # "hangup" | "keep"
+max_parked = 32
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `enabled` | `false` | Off = every park refused (`error { code: "park_failed" }`). A 0.6.x config upgrades with zero behaviour change. |
+| `moh_file` | unset | Hold-music file looped while a call is parked. **Existence and decodability are checked at load** — a missing or garbage file fails startup loud. Unset → comfort noise. The file's native sample rate is resolved per-park; a call negotiated at a *different* rate falls back to comfort noise (no resampling in 0.7.0) — logged once, **not** a park failure. |
+| `timeout_secs` | `300` | How long a call may stay parked before `timeout_action` fires. `0` disables the timeout (park indefinitely). |
+| `timeout_action` | `"hangup"` | At timeout: `"hangup"` tears the call down; `"keep"` leaves it parked (the operator must retrieve or hang up). Any other value fails load. |
+| `max_parked` | `32` | Max simultaneously-parked calls across the daemon. Must be ≥ 1. A park beyond the cap is refused (`park_failed`); the call continues unparked. |
+
+Global only — no per-route overrides (park is a daemon-level facility, like
+conference and outbound). Applies to inbound **and** outbound calls.
+
 ## `[security]` — STIR/SHAKEN call authentication
 
 Verifies the RFC 8224 `Identity` header (RFC 8225 PASSporT, SHAKEN profile)
@@ -505,7 +536,7 @@ regardless of sub-block state. Adding fields to the CDR schema bumps the
 | `enabled`     | bool     | `false`                | |
 | `url`         | URL      | required if on         | POST target. |
 | `auth_header` | string   | unset                  | Sent verbatim. `${VAR}` expansion works. |
-| `events`      | string[] | all                    | Allowlist. Valid today: `"call_start"`, `"call_end"`, `"registration_state_changed"`, `"outbound_initiated"`, `"outbound_answered"`, `"outbound_failed"`, `"conference_created"`, `"conference_ended"`. |
+| `events`      | string[] | all                    | Allowlist. Valid today: `"call_start"`, `"call_end"`, `"registration_state_changed"`, `"outbound_initiated"`, `"outbound_answered"`, `"outbound_failed"`, `"conference_created"`, `"conference_ended"`, `"call_parked"`, `"call_retrieved"`, `"park_timeout"`. |
 | `retry_max`   | integer  | `3`                    | |
 | `timeout_ms`  | integer  | `5000`                 | |
 

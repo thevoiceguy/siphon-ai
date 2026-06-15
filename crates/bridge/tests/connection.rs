@@ -221,6 +221,7 @@ fn fixture_start(call_id: &str) -> StartMsg {
         },
         srtp: None,
         verstat: None,
+        retrieved: false,
     }
 }
 

@@ -48,6 +48,7 @@ use crate::outbound::{
     NotAnsweredCause, OutboundCall, OutboundError, OutboundGuard, OutboundOriginator,
     OutboundRejection,
 };
+use crate::park::ParkContext;
 use crate::registry::{CallControlRegistry, ConsultRegistry};
 use crate::transfer::{DialogSource, TransferContext};
 
@@ -85,6 +86,9 @@ pub struct OutboundService {
     /// Bridge-id → handle table so the admin conference API can reach
     /// answered outbound calls too (§9.1). Shared with the acceptor.
     control_registry: CallControlRegistry,
+    /// Park context (0.7.0). `Some` when `[park].enabled`; outbound
+    /// bots can park/retrieve just like inbound calls.
+    park: Option<ParkContext>,
 }
 
 impl OutboundService {
@@ -108,6 +112,7 @@ impl OutboundService {
             consult_registry,
             conference: None,
             control_registry: CallControlRegistry::new(),
+            park: None,
         }
     }
 
@@ -123,6 +128,12 @@ impl OutboundService {
     /// conference API can reach answered outbound calls.
     pub fn with_control_registry(mut self, control_registry: CallControlRegistry) -> Self {
         self.control_registry = control_registry;
+        self
+    }
+
+    /// Share the park context so outbound bots can park/retrieve.
+    pub fn with_park(mut self, park: ParkContext) -> Self {
+        self.park = Some(park);
         self
     }
 }
@@ -190,6 +201,7 @@ impl OutboundOriginateHandle for OutboundService {
         let consult_registry = self.consult_registry.clone();
         let conference = self.conference.clone();
         let control_registry = self.control_registry.clone();
+        let park = self.park.clone();
 
         info!(call_id = %bridge_id_str, gateway = %gateway, "originating outbound call");
         let log_id = bridge_id_str.clone();
@@ -222,6 +234,7 @@ impl OutboundOriginateHandle for OutboundService {
                         consult_registry,
                         conference,
                         control_registry,
+                        park,
                     };
                     run_call(originator, call, bridge, ctx).await;
                 }
@@ -286,6 +299,9 @@ struct OutboundCallContext {
     /// Bridge-id handle table — this leg registers in it for its
     /// lifetime so the admin conference API can reach it.
     control_registry: CallControlRegistry,
+    /// Park context, shared with the controller so an outbound bot can
+    /// park/retrieve. `None` when park is off.
+    park: Option<ParkContext>,
 }
 
 /// Run an answered outbound call's audio bridge to completion, tear it
@@ -352,6 +368,7 @@ async fn run_call(
         transfer: Some(transfer),
         recording: None,
         conference: ctx.conference.clone(),
+        park: ctx.park.clone(),
     };
     let (controller, handle) = CallController::new(cfg);
     // Reachable by the admin conference API for this leg's lifetime.
@@ -428,6 +445,11 @@ fn build_outbound_record(
         verstat_passed: None,
         recording_id: None,
         recording_path: None,
+        // Outbound bots can park too (0.7.0); carry the accounting.
+        park: view.park.map(|p| siphon_ai_cdr::ParkInfo {
+            count: p.count,
+            total_ms: p.total_ms,
+        }),
     }
 }
 
@@ -450,12 +472,14 @@ mod tests {
             consult_registry: ConsultRegistry::new(),
             conference: None,
             control_registry: CallControlRegistry::new(),
+            park: None,
         };
         let view = CallTerminationView {
             cause: CdrTerminationCause::ServerHangup,
             bridge_detail: "stop_sent".into(),
             tap_detail: "controller_hung_up".into(),
             recording: None,
+            park: None,
         };
         let audio = CdrAudioInfo {
             codec: "PCMU".into(),

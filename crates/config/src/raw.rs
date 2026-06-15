@@ -67,6 +67,10 @@ pub struct RawConfig {
     #[serde(default)]
     pub conference: RawConference,
 
+    /// `[park]` — media-only call park (0.7.0). Off by default.
+    #[serde(default)]
+    pub park: RawPark,
+
     #[serde(default)]
     pub cdr: RawCdr,
 
@@ -322,6 +326,30 @@ pub struct RawConference {
     /// Play a short chime into the room on join/leave. Default false.
     #[serde(default)]
     pub join_tones: bool,
+}
+
+/// `[park]` — media-only call park (0.7.0). Fail-closed like
+/// `[conference]`: with `enabled = false` (the default) park is refused
+/// and a 0.6.x deployment upgrades with zero behaviour change.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawPark {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Optional hold-music file (WAV/MP3/OGG/…). Looped while parked.
+    /// Unset → comfort noise. Existence + decodability checked at load.
+    #[serde(default)]
+    pub moh_file: Option<String>,
+    /// Seconds a call may stay parked before `timeout_action` fires.
+    /// Default 300. `0` disables the timeout (park indefinitely).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// What happens at timeout: `"hangup"` (default) or `"keep"`.
+    #[serde(default)]
+    pub timeout_action: Option<String>,
+    /// Max simultaneously-parked calls across the daemon. Default 32.
+    #[serde(default)]
+    pub max_parked: Option<u32>,
 }
 
 /// `[[gateway]]` — one outbound trunk/provider (0.6.0). A gateway is the

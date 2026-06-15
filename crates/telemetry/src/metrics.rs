@@ -109,6 +109,16 @@ pub const CONFERENCE_JOINS_TOTAL: &str = "siphon_ai_conference_joins_total";
 /// sites in `siphon-ai-media-glue::room`.
 pub const ROOM_FRAMES_DROPPED_TOTAL: &str = "siphon_ai_room_frames_dropped_total";
 
+/// Calls parked (0.7.0). Labeled by `result`: `ok` / `rejected` (park
+/// disabled or `[park].max_parked` reached). Literal must match the
+/// call site in `siphon-ai-core::call`.
+pub const PARKS_TOTAL: &str = "siphon_ai_parks_total";
+
+/// Parked calls retrieved (0.7.0). Labeled by `result`: `ok` /
+/// `not_parked`. Literal must match the call site in
+/// `siphon-ai-core::call`.
+pub const RETRIEVES_TOTAL: &str = "siphon_ai_retrieves_total";
+
 // ─── Gauges ─────────────────────────────────────────────────────────
 
 /// Currently-active calls. Incremented when the controller spawns,
@@ -137,6 +147,10 @@ pub const CONFERENCES_ACTIVE: &str = "siphon_ai_conferences_active";
 /// contributes 2 (its SIP leg + its WS session) — two calls in one
 /// room read 4. Literal must match `siphon-ai-media-glue::room`.
 pub const CONFERENCE_PARTICIPANTS: &str = "siphon_ai_conference_participants";
+
+/// Currently-parked calls (0.7.0). Incremented on park, decremented on
+/// retrieve / teardown. Literal must match `siphon-ai-core::call`.
+pub const PARKED_CALLS_ACTIVE: &str = "siphon_ai_parked_calls_active";
 
 // ─── Histograms ─────────────────────────────────────────────────────
 
@@ -276,6 +290,11 @@ pub fn register_descriptions() {
         ROOM_FRAMES_DROPPED_TOTAL,
         "20 ms frames a conference room dropped instead of blocking, by stage (input, sink) and side (sip, ws)."
     );
+    describe_counter!(PARKS_TOTAL, "Calls parked, by result (ok, rejected).");
+    describe_counter!(
+        RETRIEVES_TOTAL,
+        "Parked calls retrieved, by result (ok, not_parked)."
+    );
     describe_gauge!(
         CALLS_ACTIVE,
         Unit::Count,
@@ -297,6 +316,7 @@ pub fn register_descriptions() {
         Unit::Count,
         "Mixer participants across all rooms (2 per member call: SIP leg + WS session)."
     );
+    describe_gauge!(PARKED_CALLS_ACTIVE, Unit::Count, "Currently-parked calls.");
     describe_histogram!(
         WS_CONNECT_SECONDS,
         Unit::Seconds,

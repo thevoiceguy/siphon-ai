@@ -78,6 +78,19 @@ pub enum WebhookEvent {
     /// operator force-ended it (`DELETE /admin/v1/conferences/:id`).
     /// Pairs 1:1 with a `ConferenceCreated` for the same `room_id`.
     ConferenceEnded(ConferenceEndedEvent),
+
+    /// Fired when a call is parked (WS `park` or
+    /// `POST /admin/v1/calls/:id/park`) — the WS session detached and
+    /// the caller is on hold music (0.7.0).
+    CallParked(CallParkedEvent),
+
+    /// Fired when a parked call is retrieved onto a fresh WS session
+    /// (`POST /admin/v1/calls/:id/retrieve`).
+    CallRetrieved(CallRetrievedEvent),
+
+    /// Fired when a parked call hits `[park].timeout_secs`. `action` is
+    /// what happened next (`hangup` / `keep`).
+    ParkTimeout(ParkTimeoutEvent),
 }
 
 impl WebhookEvent {
@@ -94,6 +107,9 @@ impl WebhookEvent {
             WebhookEvent::OutboundFailed(_) => "outbound_failed",
             WebhookEvent::ConferenceCreated(_) => "conference_created",
             WebhookEvent::ConferenceEnded(_) => "conference_ended",
+            WebhookEvent::CallParked(_) => "call_parked",
+            WebhookEvent::CallRetrieved(_) => "call_retrieved",
+            WebhookEvent::ParkTimeout(_) => "park_timeout",
         }
     }
 
@@ -111,6 +127,9 @@ impl WebhookEvent {
             // Conference events are room-scoped, not call-scoped.
             WebhookEvent::ConferenceCreated(_) => None,
             WebhookEvent::ConferenceEnded(_) => None,
+            WebhookEvent::CallParked(e) => Some(&e.call_id),
+            WebhookEvent::CallRetrieved(e) => Some(&e.call_id),
+            WebhookEvent::ParkTimeout(e) => Some(&e.call_id),
         }
     }
 }
@@ -256,6 +275,40 @@ pub struct ConferenceEndedEvent {
     /// The most member calls in the room at any one time over its
     /// lifetime.
     pub peak_participants: usize,
+}
+
+/// A call was parked (0.7.0).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallParkedEvent {
+    pub version: u32,
+    pub call_id: String,
+    /// When the call was parked (UTC).
+    pub timestamp: DateTime<Utc>,
+    /// Optional hold-lot label the parker supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<String>,
+}
+
+/// A parked call was retrieved onto a fresh WS session (0.7.0).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallRetrievedEvent {
+    pub version: u32,
+    pub call_id: String,
+    /// When the retrieve happened (UTC).
+    pub timestamp: DateTime<Utc>,
+    /// The WS URL the retrieved session connected to.
+    pub ws_url: String,
+}
+
+/// A parked call hit its timeout (0.7.0).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkTimeoutEvent {
+    pub version: u32,
+    pub call_id: String,
+    /// When the timeout fired (UTC).
+    pub timestamp: DateTime<Utc>,
+    /// What the daemon did: `"hangup"` or `"keep"`.
+    pub action: String,
 }
 
 #[cfg(test)]

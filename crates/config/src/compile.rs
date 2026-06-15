@@ -36,8 +36,8 @@ use tracing::warn;
 
 use crate::raw::{
     RawBridge, RawCdr, RawConference, RawConfig, RawGateway, RawHep, RawMedia, RawNode,
-    RawObservability, RawOutbound, RawRecording, RawRegister, RawSecurity, RawSip, RawSipTls,
-    RawWebhooks,
+    RawObservability, RawOutbound, RawPark, RawRecording, RawRegister, RawSecurity, RawSip,
+    RawSipTls, RawWebhooks,
 };
 
 /// Compiled, ready-to-pass daemon config.
@@ -66,6 +66,7 @@ pub struct Config {
     pub recording: siphon_ai_recording::RecordingConfig,
     pub outbound: OutboundConfig,
     pub conference: ConferenceConfig,
+    pub park: ParkConfig,
     pub cdr: CdrConfig,
     pub observability: ObservabilityConfig,
     pub webhooks: WebhooksConfig,
@@ -97,6 +98,45 @@ impl Default for ConferenceConfig {
             max_rooms: 16,
             max_participants_per_room: 8,
             join_tones: false,
+        }
+    }
+}
+
+/// What happens when a parked call hits `[park].timeout_secs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkTimeoutAction {
+    /// Tear the call down (the default).
+    Hangup,
+    /// Leave it parked; the operator must retrieve or hang up.
+    Keep,
+}
+
+/// Compiled `[park]` — media-only call park (0.7.0). Fail-closed:
+/// `enabled = false` (the default) refuses every park, so a 0.6.x
+/// deployment upgrades with zero behaviour change. The daemon maps this
+/// 1:1 onto `siphon-ai-core`'s `ParkLimits`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParkConfig {
+    pub enabled: bool,
+    /// Validated hold-music path (exists + decodes at load). `None` →
+    /// comfort noise. The native rate is resolved per-park; a call at a
+    /// different rate falls back to comfort noise (no resampling in v1).
+    pub moh_file: Option<PathBuf>,
+    /// Seconds before `timeout_action` fires. `None` = no timeout.
+    pub timeout: Option<Duration>,
+    pub timeout_action: ParkTimeoutAction,
+    /// Max simultaneously-parked calls across the daemon.
+    pub max_parked: usize,
+}
+
+impl Default for ParkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            moh_file: None,
+            timeout: Some(Duration::from_secs(300)),
+            timeout_action: ParkTimeoutAction::Hangup,
+            max_parked: 32,
         }
     }
 }
@@ -608,6 +648,15 @@ pub enum CompileError {
         reason: &'static str,
     },
 
+    #[error("[park].max_parked must be >= 1")]
+    ParkBadMaxParked,
+
+    #[error("[park].timeout_action {0:?} is not one of \"hangup\", \"keep\"")]
+    ParkBadTimeoutAction(String),
+
+    #[error("[park].moh_file {0:?} does not exist or is not a file")]
+    ParkMohMissing(String),
+
     #[error("[media].rtp_port_range {min}-{max} is invalid (min must be < max and even)")]
     BadRtpPortRange { min: u16, max: u16 },
 
@@ -716,6 +765,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let recording = compile_recording(raw.recording)?;
     let outbound = compile_outbound(raw.outbound, raw.gateways, &registrations)?;
     let conference = compile_conference(raw.conference)?;
+    let park = compile_park(raw.park)?;
     let cdr = compile_cdr(raw.cdr)?;
     let observability = compile_observability(raw.observability)?;
     let webhooks = compile_webhooks(raw.webhooks)?;
@@ -807,6 +857,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         recording,
         outbound,
         conference,
+        park,
         cdr,
         observability,
         webhooks,
@@ -1766,6 +1817,50 @@ fn compile_conference(raw: RawConference) -> Result<ConferenceConfig, CompileErr
         max_rooms: max_rooms as usize,
         max_participants_per_room: max_participants as usize,
         join_tones: raw.join_tones,
+    })
+}
+
+/// Compile `[park]` (0.7.0). Validation per CLAUDE.md §4.6 — fail loud
+/// at load: `timeout_action` is a known value, `max_parked >= 1`, and
+/// (when set + enabled) `moh_file` exists. Decodability is probed by the
+/// daemon at startup (config deliberately doesn't dep on the media
+/// stack — same split as `[sip.tls_client].extra_ca`).
+fn compile_park(raw: RawPark) -> Result<ParkConfig, CompileError> {
+    let defaults = ParkConfig::default();
+    let max_parked = raw.max_parked.unwrap_or(defaults.max_parked as u32);
+    if max_parked == 0 {
+        return Err(CompileError::ParkBadMaxParked);
+    }
+    let timeout_action = match raw.timeout_action.as_deref() {
+        None => defaults.timeout_action,
+        Some("hangup") => ParkTimeoutAction::Hangup,
+        Some("keep") => ParkTimeoutAction::Keep,
+        Some(other) => return Err(CompileError::ParkBadTimeoutAction(other.to_string())),
+    };
+    let timeout = match raw.timeout_secs {
+        None => defaults.timeout,
+        Some(0) => None,
+        Some(secs) => Some(Duration::from_secs(secs)),
+    };
+    // Existence check only when park is on — a disabled block shouldn't
+    // fail a boot over a stale path. (A moh_file on a disabled block is
+    // retained but unchecked; it's inert.)
+    let moh_file = match raw.moh_file.filter(|s| !s.is_empty()) {
+        None => None,
+        Some(p) => {
+            let path = PathBuf::from(&p);
+            if raw.enabled && !path.is_file() {
+                return Err(CompileError::ParkMohMissing(p));
+            }
+            Some(path)
+        }
+    };
+    Ok(ParkConfig {
+        enabled: raw.enabled,
+        moh_file,
+        timeout,
+        timeout_action,
+        max_parked: max_parked as usize,
     })
 }
 

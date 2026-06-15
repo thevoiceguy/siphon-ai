@@ -141,6 +141,7 @@ mod tests {
             verstat_passed: None,
             recording_id: None,
             recording_path: None,
+            park: None,
         }
     }
 

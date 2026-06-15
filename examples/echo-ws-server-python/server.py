@@ -72,6 +72,14 @@ class Options:
     # mixed in one room without a human driving the control channel.
     # None = disabled.
     auto_conference_join: str | None
+    # Test-harness knob: after `start`, wait auto_transfer_delay_ms and
+    # then `park` this call (optionally labelling the lot). SiphonAI
+    # replies `stop { reason: "park" }` and closes the WS; an operator
+    # retrieves the call later via the admin API. None = disabled.
+    auto_park_slot: str | None
+    # Sentinel distinguishing "--auto-park with no slot" (park, unlabeled)
+    # from "--auto-park absent" (don't park). Set alongside auto_park_slot.
+    auto_park: bool
 
 
 # ─── HTTP-side concerns: auth + subprotocol ─────────────────────────────────
@@ -167,6 +175,10 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
                     LOG.error("unsupported protocol version %r; closing", version)
                     await connection.close(code=1003, reason="unsupported version")
                     return
+                if msg.get("retrieved"):
+                    # This session is picking up a previously parked call
+                    # (PROTOCOL.md §3.1 / §4.9), not a fresh inbound one.
+                    LOG.info("start call_id=%s is a retrieved (parked) call", call_id)
                 if opts.echo_marks:
                     # Optional behavior used by SiphonAI's protocol smoke
                     # tests: round-trip a `mark` to verify the control
@@ -228,6 +240,19 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
                                 "room_id": opts.auto_conference_join,
                             },
                         )
+                    )
+
+                if opts.auto_park and call_id:
+                    # Test-harness behaviour: park the call from the WS
+                    # side. SiphonAI detaches this session (`stop{park}`
+                    # + close); the call lives on hold music until an
+                    # operator retrieves it. The hook for the 0.7.0
+                    # park→retrieve SIPp scenario.
+                    park_msg: dict[str, Any] = {"type": "park", "call_id": call_id}
+                    if opts.auto_park_slot:
+                        park_msg["slot"] = opts.auto_park_slot
+                    asyncio.create_task(
+                        _send_after(connection, opts.auto_transfer_delay_ms, park_msg)
                     )
 
                 if opts.auto_hangup_after_ms is not None and call_id:
@@ -378,6 +403,20 @@ def parse_args(argv: list[str] | None = None) -> Options:
         ),
     )
     p.add_argument(
+        "--auto-park",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="SLOT",
+        help=(
+            "test-harness only: after `start`, emit a `park` (uses "
+            "--auto-transfer-delay-ms for the pause). Optional value is "
+            "the hold-lot label. SiphonAI replies `stop{park}` and "
+            "closes the WS — the hook for the 0.7.0 park→retrieve SIPp "
+            "scenario."
+        ),
+    )
+    p.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -399,6 +438,8 @@ def parse_args(argv: list[str] | None = None) -> Options:
         auto_hangup_after_ms=args.auto_hangup_after_ms,
         auto_transfer_replaces=args.auto_transfer_replaces,
         auto_conference_join=args.auto_conference_join,
+        auto_park=args.auto_park is not None,
+        auto_park_slot=args.auto_park or None,
     )
 
 

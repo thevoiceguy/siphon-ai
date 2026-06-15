@@ -86,6 +86,14 @@ use tracing::{debug, info, instrument, warn};
 /// of frame K is therefore `first_audio_pushed_at + K * 20ms`.
 const PLAYOUT_FRAME_MS: u64 = 20;
 
+/// Grace margin on the barge-in playout clock (§`bot_is_playing`). The
+/// caller's acoustic tail (handset/speaker + far-end jitter buffer)
+/// outlasts our local playout cursor by a few frames, and VAD/scheduling
+/// add jitter; this margin absorbs both. Biased toward *more* gating —
+/// fewer false barge-ins — which is the safe direction for an echo/noise
+/// gate.
+const BARGE_IN_PLAYOUT_GRACE: Duration = Duration::from_millis(60);
+
 #[derive(Debug, Error)]
 pub enum MediaTapError {
     /// `MediaBridgeManager::attach_call` rejected (already attached).
@@ -488,6 +496,13 @@ impl MediaTap {
         // Updated in the playout arm; read in the command arm.
         let mut frames_sent_to_forge: u64 = 0;
         let mut first_audio_pushed_at: Option<Instant> = None;
+        // Playout clock for barge-in gating (§`bot_is_playing`) — distinct
+        // from the Mark bookkeeping above. Estimated wallclock at which the
+        // most recently queued playout frame finishes. Advances 20 ms per
+        // pushed frame from `max(now, cursor)` so it re-anchors after a
+        // silence gap between bot phrases instead of drifting behind `now`.
+        // `None` = nothing queued / just flushed.
+        let mut playout_until: Option<Instant> = None;
 
         // Conference-room routing (0.7.0 §2.1). `None` = the direct
         // caller↔WS pair. Three separate locals (not one struct) so
@@ -640,10 +655,18 @@ impl MediaTap {
                     // frames pushed to forge and stamp the wallclock
                     // of the first push so we can estimate when the
                     // Nth queued frame finishes playing.
+                    let push_now = Instant::now();
                     if frames_sent_to_forge == 0 {
-                        first_audio_pushed_at = Some(Instant::now());
+                        first_audio_pushed_at = Some(push_now);
                     }
                     frames_sent_to_forge += 1;
+                    // Advance the barge-in playout clock: from the later of
+                    // `now` and the current cursor (re-anchors after a gap),
+                    // plus one frame of playout.
+                    playout_until = Some(
+                        playout_until.map_or(push_now, |c| c.max(push_now))
+                            + Duration::from_millis(PLAYOUT_FRAME_MS),
+                    );
                 }
 
                 // Caller → server: PCM16 samples from forge, reframed and packed.
@@ -755,10 +778,15 @@ impl MediaTap {
                     // in room mode frames arrive at playout cadence,
                     // so a Mark estimate degenerates to ≈ now — the
                     // honest answer while the room owns playout.
+                    let push_now = Instant::now();
                     if frames_sent_to_forge == 0 {
-                        first_audio_pushed_at = Some(Instant::now());
+                        first_audio_pushed_at = Some(push_now);
                     }
                     frames_sent_to_forge += 1;
+                    playout_until = Some(
+                        playout_until.map_or(push_now, |c| c.max(push_now))
+                            + Duration::from_millis(PLAYOUT_FRAME_MS),
+                    );
                 }
 
                 // Room → server: the mix-minus-`ws` sink becomes the
@@ -885,13 +913,9 @@ impl MediaTap {
                                 if matches!(out, OutgoingEvent::SpeechStarted { .. })
                                     && self.barge_in_action == BargeInAction::AutoClear
                                 {
-                                    let gate = self.barge_in_debounce.filter(|_| {
-                                        bot_is_playing(
-                                            first_audio_pushed_at,
-                                            frames_sent_to_forge,
-                                            Instant::now(),
-                                        )
-                                    });
+                                    let gate = self
+                                        .barge_in_debounce
+                                        .filter(|_| bot_is_playing(playout_until, Instant::now()));
                                     if let Some(debounce) = gate {
                                         if pending_barge_in.is_none() {
                                             barge_debounce
@@ -934,6 +958,7 @@ impl MediaTap {
                                     }
                                     frames_sent_to_forge = 0;
                                     first_audio_pushed_at = None;
+                                    playout_until = None;
                                 }
                                 // A speech-stopped within the debounce
                                 // window cancels the held barge-in — it was
@@ -1044,6 +1069,7 @@ impl MediaTap {
                             // satisfy a pending Mark estimate.
                             frames_sent_to_forge = 0;
                             first_audio_pushed_at = None;
+                            playout_until = None;
                         }
                         TapCommand::Unmute => {
                             // Just lift the gate. No flush — there's
@@ -1086,6 +1112,10 @@ impl MediaTap {
                                     "cleared pending outbound playout",
                                 );
                             }
+                            // Playout dropped → the bot is no longer talking
+                            // for barge-in gating. (Mark bookkeeping is left
+                            // as-is, matching prior behaviour.)
+                            playout_until = None;
                         }
                         TapCommand::SendDtmf { digit, duration_ms } => {
                             handle_send_dtmf(&self.call_id, &self.handle, digit, duration_ms).await;
@@ -1193,6 +1223,7 @@ impl MediaTap {
                                 events_tx = new_events_tx;
                                 frames_sent_to_forge = 0;
                                 first_audio_pushed_at = None;
+                                playout_until = None;
                                 info!(
                                     call_id = %self.call_id,
                                     "tap retrieved; direct bridge restored on fresh WS session"
@@ -1317,6 +1348,7 @@ impl MediaTap {
                     }
                     frames_sent_to_forge = 0;
                     first_audio_pushed_at = None;
+                    playout_until = None;
                     if let Some(out) = pending_barge_in.take() {
                         if let Err(e) = events_tx.try_send(out) {
                             warn!(
@@ -1472,15 +1504,17 @@ async fn handle_send_dtmf(
 /// a VAD speech-started while this is `true` is likely the bot's own echo
 /// (or background noise) rather than the caller interrupting.
 ///
-/// The estimate is `first_push + frames × 20 ms` — when the last-pushed
-/// frame finishes playing. It's slightly generous (WS audio is pushed
-/// ahead of real playout), which biases toward *more* gating, i.e. fewer
-/// false barge-ins — the safe direction. `first_audio_pushed_at` /
-/// `frames` reset to `None`/`0` on every flush, so this reads `false`
-/// once the bot's current utterance has been cleared or has drained.
-fn bot_is_playing(first_audio_pushed_at: Option<Instant>, frames: u64, now: Instant) -> bool {
-    match first_audio_pushed_at {
-        Some(t0) => now < t0 + Duration::from_millis(PLAYOUT_FRAME_MS.saturating_mul(frames)),
+/// Reads the `playout_until` clock — the estimated wallclock at which the
+/// most recently queued frame finishes — plus [`BARGE_IN_PLAYOUT_GRACE`].
+/// The clock advances 20 ms per pushed frame from `max(now, cursor)`, so
+/// it re-anchors after a silence gap between bot phrases rather than
+/// drifting behind `now` (the bug in the original `first_push + frames ×
+/// 20 ms` form, which used a cumulative frame count and so under-read once
+/// any inter-phrase gap had elapsed). Resets to `None` on every flush, so
+/// this reads `false` once the bot's utterance is cleared or has drained.
+fn bot_is_playing(playout_until: Option<Instant>, now: Instant) -> bool {
+    match playout_until {
+        Some(end) => now < end + BARGE_IN_PLAYOUT_GRACE,
         None => false,
     }
 }
@@ -1554,15 +1588,22 @@ mod tests {
     #[test]
     fn bot_is_playing_tracks_queued_playout() {
         let t0 = Instant::now();
-        // No audio pushed yet → not playing.
-        assert!(!bot_is_playing(None, 0, t0));
-        // 10 frames pushed at t0 = 200 ms of playout. Mid-playout (100 ms
-        // in) → still playing; past the end (250 ms in) → done.
-        let pushed = Some(t0);
-        assert!(bot_is_playing(pushed, 10, t0 + Duration::from_millis(100)));
-        assert!(!bot_is_playing(pushed, 10, t0 + Duration::from_millis(250)));
-        // Exactly at the estimated end is treated as finished (strict <).
-        assert!(!bot_is_playing(pushed, 10, t0 + Duration::from_millis(200)));
+        // Nothing queued → not playing.
+        assert!(!bot_is_playing(None, t0));
+        // Cursor 200 ms out. Mid-playout → playing. Within the grace
+        // margin past the cursor → still counted as playing (biased toward
+        // gating). Well past cursor + grace → done.
+        let until = Some(t0 + Duration::from_millis(200));
+        assert!(bot_is_playing(until, t0 + Duration::from_millis(100)));
+        assert!(bot_is_playing(until, t0 + Duration::from_millis(200)));
+        assert!(bot_is_playing(
+            until,
+            t0 + Duration::from_millis(200) + BARGE_IN_PLAYOUT_GRACE - Duration::from_millis(1)
+        ));
+        assert!(!bot_is_playing(
+            until,
+            t0 + Duration::from_millis(200) + BARGE_IN_PLAYOUT_GRACE + Duration::from_millis(1)
+        ));
     }
 
     #[test]

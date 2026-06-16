@@ -127,7 +127,7 @@ MAY use it to detect dropped frames in their own logs.
 | `to` | string | The dialed digits / extension / SIP user. |
 | `direction` | string | `"inbound"` (SiphonAI answered the call) or `"outbound"` (SiphonAI placed it — outbound origination, 0.6.0). An outbound bot typically speaks first. Additive; the protocol version stays `"1"`. |
 | `retrieved` | bool \| absent | `true` on the `start` of a session that is picking up a **previously parked** call (park/retrieve, 0.7.0; §4.9). **Absent** (not `false`) on a normal inbound/outbound `start`. A retrieve always opens a *fresh* session — `seq` restarts at 0 and there is no replay of pre-park traffic — so a server that ignores this field simply treats it as a brand-new call. |
-| `reconnected` | bool \| absent | `true` on the `start` of a session that **resumes a call after an unexpected WS drop** (0.7.3, opt-in via `[bridge].ws_reconnect_enabled`; §5.7). SiphonAI re-dialed the same `ws_url` for the same `call_id`; the server should drop any handler it still holds for this call and treat this socket as the live one. Like `retrieved`, a fresh session — `seq` restarts at 0, no replay of pre-drop audio/events — and **absent** (not `false`) otherwise, so a server that ignores it treats the call as brand-new. Distinct from `retrieved` (operator picking up a *parked* call). The reconnect *drive* lands across the 0.7.3 chunks; the field is part of the protocol surface. |
+| `reconnected` | bool \| absent | `true` on the `start` of a session that **resumes a call after an unexpected WS drop** (0.7.3, opt-in via `[bridge].ws_reconnect_enabled`; §5.7). SiphonAI re-dialed the same `ws_url` for the same `call_id`; the server should drop any handler it still holds for this call and treat this socket as the live one. Like `retrieved`, a fresh session — `seq` restarts at 0, no replay of pre-drop audio/events — and **absent** (not `false`) otherwise, so a server that ignores it treats the call as brand-new. Distinct from `retrieved` (operator picking up a *parked* call). See §5.7 for the reconnect behaviour. |
 | `audio.encoding` | string | `"pcm16le"` only in v1. |
 | `audio.sample_rate` | int | `8000` or `16000`. Set by the negotiated SIP codec. |
 | `audio.channels` | int | `1` only in v1. |
@@ -714,8 +714,9 @@ down. Servers MAY ping SiphonAI; SiphonAI always pongs.
 
 ### 5.7 WS disconnect mid-call
 
-If the WS connection closes (cleanly or otherwise) before SiphonAI has
-sent `stop`, SiphonAI:
+**Default (`[bridge].ws_reconnect_enabled = false`).** If the WS
+connection closes (cleanly or otherwise) before SiphonAI has sent
+`stop`, SiphonAI:
 
 1. Stops sending audio frames over the (now-closed) WS.
 2. Plays the configured `bridge.fallback_prompt_path` audio file (or
@@ -723,7 +724,27 @@ sent `stop`, SiphonAI:
 3. Sends SIP BYE.
 4. Emits a CDR with `stop_reason = "ws_disconnect"`.
 
-WS reconnect mid-call is **post-v1** and not supported in this version.
+**Opt-in reconnect (`[bridge].ws_reconnect_enabled = true`, 0.7.3).** An
+**unexpected** drop instead triggers automatic reconnect: SiphonAI keeps
+the SIP call up on hold music (`[media].moh_file`, or comfort silence),
+re-dials the **same** `ws_url`, and resumes the call on a fresh session —
+a new `start` carrying `reconnected: true` (§3.1), with `seq` restarting
+at 0 and **no replay** of pre-drop audio or events. The server should
+drop any handler it still holds for that `call_id` and treat the new
+socket as the live one. If no redial succeeds within
+`[bridge].ws_reconnect_max_secs` (default 30 s), SiphonAI falls back to
+the teardown above (`ws_disconnect`).
+
+> **Ending a call with reconnect on:** send the `hangup` control message
+> (§4) — that's an explicit end and is never reconnected. A bare WS
+> socket close (even a clean `1000`) is treated as an unexpected drop and
+> reconnected. With reconnect **off**, the v1 behaviour is unchanged: any
+> close ends the call.
+
+What counts as "unexpected": a server-side close before `stop`/`hangup`,
+a connection/TLS error, or a keepalive timeout (§5.6). A `stop` SiphonAI
+already sent, or a `hangup` from the server, is the call ending — never
+reconnected.
 
 ### 5.8 No fragmentation
 

@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  bot_hold_caller — SIPp acts as the caller (UAC); SiphonAI is the UAS.
+  This is the INVERSE of reinvite_hold_resume.xml: there SIPp *sends* the
+  hold/resume re-INVITEs (peer-hold); here the WS server (echo, started
+  with --auto-hold) drives a BOT-initiated hold, so SiphonAI becomes the
+  re-INVITE *offerer* and SIPp must *receive* the re-INVITEs (0.7.2).
+
+  Sequence:
+    1. INVITE  (PCMU + sendrecv)            → 200 OK
+    2. ACK
+    3. (echo server sends `hold`)
+       ← re-INVITE from SiphonAI; MUST carry a=sendonly
+       → 200 OK with a=recvonly (RFC 3264 §6.1 mirror)
+       ← ACK
+    4. (echo server sends `resume`)
+       ← re-INVITE from SiphonAI; MUST carry a=sendrecv
+       → 200 OK with a=sendrecv
+       ← ACK
+    5. (echo server sends `hangup`)
+       ← BYE                                → 200 OK
+
+  SiphonAI does not send 100/180 in v1; those recv lines are optional so
+  the transaction layer's retransmit timing doesn't fail the run.
+-->
+<scenario name="bot_hold_caller">
+  <!-- Initial INVITE (caller). -->
+  <send>
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp-bothold@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp-bothold@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+  <recv response="200" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp-bothold@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- HOLD: SiphonAI re-INVITEs us; the offer MUST be sendonly. -->
+  <recv request="INVITE" crlf="true">
+    <action>
+      <ereg regexp="a=sendonly"
+            search_in="msg"
+            check_it="true"
+            assign_to="hold_offer_dir"/>
+      <log message="bot hold offer captured: a=[$hold_offer_dir]"/>
+    </action>
+  </recv>
+
+  <!-- Answer the hold offer with recvonly (we keep receiving their MOH;
+       our send is paused). [last_*] echoes the re-INVITE's dialog
+       headers + CSeq so the 200 matches the transaction. -->
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:sipp-bothold@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687638 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=recvonly
+]]>
+  </send>
+
+  <recv request="ACK" optional="true"/>
+
+  <!-- RESUME: SiphonAI re-INVITEs us back; the offer MUST be sendrecv. -->
+  <recv request="INVITE" crlf="true">
+    <action>
+      <ereg regexp="a=sendrecv"
+            search_in="msg"
+            check_it="true"
+            assign_to="resume_offer_dir"/>
+      <log message="bot resume offer captured: a=[$resume_offer_dir]"/>
+    </action>
+  </recv>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:sipp-bothold@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687639 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+]]>
+  </send>
+
+  <recv request="ACK" optional="true"/>
+
+  <!-- The echo server hangs up once the resume completes. -->
+  <recv request="BYE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]>
+  </send>
+
+  <ResponseTimeRepartition value="200, 500, 1000"/>
+</scenario>

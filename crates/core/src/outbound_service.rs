@@ -491,6 +491,13 @@ fn build_outbound_record(
             count: p.count,
             total_ms: p.total_ms,
         }),
+        // Bot-hold accounting (0.7.2). Always `None` for outbound legs in
+        // this release (outbound bot-hold is a follow-up), but mapped for
+        // forward-compatibility once it's wired.
+        hold: view.hold.map(|h| siphon_ai_cdr::HoldInfo {
+            count: h.count,
+            total_ms: h.total_ms,
+        }),
     }
 }
 
@@ -522,6 +529,7 @@ mod tests {
             tap_detail: "controller_hung_up".into(),
             recording: None,
             park: None,
+            hold: None,
         };
         let audio = CdrAudioInfo {
             codec: "PCMU".into(),

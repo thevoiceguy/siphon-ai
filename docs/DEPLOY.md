@@ -487,6 +487,15 @@ never parked):
   A call can park/retrieve repeatedly, so `count` is the number of park
   episodes and `total_ms` is the summed parked wall-time across them.
 
+One optional hold object appears when the bot held its own caller at least
+once (added in 0.7.2; schema stays at version 1 — omitted when the call was
+never bot-held):
+
+- `hold` — `{ "count": <episodes>, "total_ms": <cumulative held ms> }`.
+  Same shape as `park`. Counts only **bot-initiated** holds (the WS server
+  sent `hold`; see PROTOCOL.md §4.10) — a far-end hold is the peer's
+  business and is not tallied here.
+
 Outbound originated calls (0.6.0, `POST /admin/v1/calls`) produce the same
 record with `direction: "outbound"` — the schema stays at version 1 (the
 field was reserved for this since v1). Two outbound-specific readings:
@@ -605,6 +614,7 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_parks_total`                 | counter   | `result=ok\|rejected`                 | Park requests (0.7.0). `rejected` = park disabled or `[park].max_parked` reached; the call continues unparked. |
 | `siphon_ai_retrieves_total`             | counter   | `result=ok\|not_parked`               | Retrieve requests (0.7.0). `not_parked` = a retrieve signalled a call that wasn't parked (ignored). |
 | `siphon_ai_parked_calls_active`         | gauge     | —                                     | Currently-parked calls (0.7.0). Incremented on park, decremented on retrieve or teardown. |
+| `siphon_ai_holds_total`                 | counter   | `result=ok\|failed`                   | Bot-initiated hold/resume re-INVITEs (0.7.2 — the WS server sends `hold`/`resume`). Covers both directions. `failed` = the re-INVITE was rejected / timed out / glared, or hold was rejected (already held by the far end, tap unavailable, not configured); the call stays in its prior media state. Does **not** count far-end (peer-initiated) holds. |
 | `forge_rtcp_*`                          | various   | per-call (forge-side)                 | RTP/RTCP quality. See forge-media's own metric inventory. |
 | `heplify_*`                             | various   | from the HEP collector                | Only visible if you scrape heplify too. |
 

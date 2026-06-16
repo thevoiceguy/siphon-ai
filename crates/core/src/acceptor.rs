@@ -1940,6 +1940,10 @@ impl CallStart {
                 count: p.count,
                 total_ms: p.total_ms,
             }),
+            hold: outcome.hold.map(|h| siphon_ai_cdr::HoldInfo {
+                count: h.count,
+                total_ms: h.total_ms,
+            }),
         }
     }
 }
@@ -1958,6 +1962,9 @@ pub(crate) struct CallTerminationView {
     /// Park accounting, when the call was parked at least once. Feeds
     /// the CDR `park { count, total_ms }`.
     pub(crate) park: Option<crate::call::ParkSummary>,
+    /// Bot-hold accounting, when the call was held at least once. Feeds
+    /// the CDR `hold { count, total_ms }`.
+    pub(crate) hold: Option<crate::call::HoldSummary>,
 }
 
 impl CallTerminationView {
@@ -1969,6 +1976,7 @@ impl CallTerminationView {
                 tap_detail: tap_detail(o.tap),
                 recording: o.recording,
                 park: o.park,
+                hold: o.hold,
             },
             Err(e) => Self {
                 // Treat a panic / join error as "bridge ended" —
@@ -1979,6 +1987,7 @@ impl CallTerminationView {
                 tap_detail: String::new(),
                 recording: None,
                 park: None,
+                hold: None,
             },
         }
     }

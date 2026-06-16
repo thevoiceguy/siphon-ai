@@ -207,6 +207,10 @@ pub struct CallOutcome {
     /// Feeds the CDR `park { count, total_ms }`. `None` for a call that
     /// was never parked (the field is omitted from the CDR then).
     pub park: Option<ParkSummary>,
+    /// Hold outcome (0.7.2), `Some` when the bot held its own caller at
+    /// least once. Feeds the CDR `hold { count, total_ms }`. `None` for
+    /// a call that was never bot-held (the field is omitted then).
+    pub hold: Option<HoldSummary>,
 }
 
 /// Per-call park outcome surfaced on [`CallOutcome`] → CDR.
@@ -215,6 +219,16 @@ pub struct ParkSummary {
     /// How many times this call was parked over its lifetime.
     pub count: u32,
     /// Cumulative wall-time the call spent parked, in milliseconds.
+    pub total_ms: u64,
+}
+
+/// Per-call bot-hold outcome surfaced on [`CallOutcome`] → CDR (0.7.2).
+/// Counts only bot-initiated holds; a far-end hold isn't tallied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HoldSummary {
+    /// How many times the bot held this call over its lifetime.
+    pub count: u32,
+    /// Cumulative wall-time the call spent bot-held, in milliseconds.
     pub total_ms: u64,
 }
 
@@ -708,6 +722,10 @@ impl CallController {
         // attached (no durable-task rework — that's park's job). No hold
         // timeout: an abandoned hold is handled by the WS disconnecting.
         let mut held = false;
+        // CDR `hold { count, total_ms }` accounting (mirrors park).
+        let mut hold_count: u32 = 0;
+        let mut hold_total = Duration::ZERO;
+        let mut held_since: Option<Instant> = None;
         // Re-INVITE glare backoff (RFC 3261 §14.1): if the peer sends
         // its own re-INVITE at the same moment, our offer draws a 491 —
         // we wait this long, then retry once.
@@ -908,6 +926,8 @@ impl CallController {
                                         {
                                             Ok(()) => {
                                                 held = true;
+                                                hold_count += 1;
+                                                held_since = Some(Instant::now());
                                                 metrics::counter!(HOLDS_TOTAL, "result" => "ok").increment(1);
                                                 info!(call_id = %call_id, "call held (bot-initiated)");
                                                 let _ = control_out_tx.send(OutgoingEvent::Held).await;
@@ -951,6 +971,10 @@ impl CallController {
                                 {
                                     Ok(()) => {
                                         held = false;
+                                        // Close the books on this hold episode.
+                                        if let Some(since) = held_since.take() {
+                                            hold_total += since.elapsed();
+                                        }
                                         // Restore the direct caller↔WS bridge
                                         // on the existing WS session.
                                         if let Err(e) = tap_cmd_tx.try_send(TapCommand::Unhold) {
@@ -1455,6 +1479,19 @@ impl CallController {
             total_ms: park_total.as_millis() as u64,
         });
 
+        // ─── Hold teardown ───────────────────────────────────────
+        // If the call ended while still held (caller BYE / WS close
+        // mid-hold), close the books on the open hold span.
+        if held {
+            if let Some(since) = held_since.take() {
+                hold_total += since.elapsed();
+            }
+        }
+        let hold_summary = (hold_count > 0).then_some(HoldSummary {
+            count: hold_count,
+            total_ms: hold_total.as_millis() as u64,
+        });
+
         // ─── Drain remaining sub-tasks with a budget ─────────────
         // The bridge needs to flush its `stop` send + WS close;
         // 250 ms is plenty for a healthy connection. We don't want
@@ -1569,6 +1606,7 @@ impl CallController {
             tap: tap_result,
             recording: recording_summary,
             park: park_summary,
+            hold: hold_summary,
         })
     }
 }

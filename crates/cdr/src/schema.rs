@@ -92,6 +92,12 @@ pub struct CdrRecord {
     /// stays at version 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub park: Option<ParkInfo>,
+
+    /// Hold summary (0.7.2), present when the bot held its own caller at
+    /// least once. Omitted otherwise. Additive optional field → CDR
+    /// schema stays at version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<HoldInfo>,
 }
 
 /// Per-call park accounting on the CDR (0.7.0).
@@ -100,6 +106,17 @@ pub struct ParkInfo {
     /// Number of park episodes over the call's lifetime.
     pub count: u32,
     /// Cumulative wall-time the call spent parked, in milliseconds.
+    pub total_ms: u64,
+}
+
+/// Per-call hold accounting on the CDR (0.7.2). Counts only
+/// bot-initiated holds (`BridgeIn::Hold`); a far-end hold is the peer's
+/// business and isn't tallied here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HoldInfo {
+    /// Number of bot-initiated hold episodes over the call's lifetime.
+    pub count: u32,
+    /// Cumulative wall-time the call spent held, in milliseconds.
     pub total_ms: u64,
 }
 
@@ -195,6 +212,7 @@ mod tests {
             recording_id: None,
             recording_path: None,
             park: None,
+            hold: None,
         }
     }
 
@@ -249,6 +267,27 @@ mod tests {
         assert_eq!(CDR_VERSION, 1);
         let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
         assert_eq!(v["version"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn hold_field_is_additive_and_stays_at_v1() {
+        // Never bot-held → omitted, schema still v1.
+        let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("hold"));
+        assert_eq!(v["version"], serde_json::json!(1));
+
+        // Held → nested {count, total_ms}; version unchanged.
+        let mut rec = sample();
+        rec.hold = Some(HoldInfo {
+            count: 2,
+            total_ms: 4500,
+        });
+        let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
+        assert_eq!(v["hold"]["count"], serde_json::json!(2));
+        assert_eq!(v["hold"]["total_ms"], serde_json::json!(4500));
+        assert_eq!(v["version"], serde_json::json!(1));
+        let back: CdrRecord = serde_json::from_value(v).unwrap();
+        assert_eq!(back.hold, rec.hold);
     }
 
     #[test]

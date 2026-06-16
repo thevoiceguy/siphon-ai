@@ -92,6 +92,13 @@ pub struct BridgeOverride {
     pub audio_direction: Option<String>,
     pub on_ws_failure: Option<String>,
     pub ws_connect_timeout_ms: Option<u64>,
+    /// Per-route override of `[bridge].ws_reconnect_enabled` (0.7.3).
+    /// `None` = inherit the global.
+    pub ws_reconnect_enabled: Option<bool>,
+    /// Per-route override of `[bridge].ws_reconnect_max_secs` (0.7.3).
+    /// `None` = inherit the global. Must be `> 0` when reconnect is
+    /// enabled for the route.
+    pub ws_reconnect_max_secs: Option<u64>,
 
     #[serde(default)]
     pub barge_in: BargeInOverride,

@@ -657,6 +657,22 @@ pub struct RawBridge {
     /// and optional SPKI pin.
     #[serde(default)]
     pub tls: Option<RawBridgeTls>,
+    /// Opt-in automatic WS reconnect mid-call (0.7.3). When `true`, an
+    /// **unexpected** WS drop (server closed without a `hangup`, IO/TLS
+    /// error, keepalive timeout) doesn't tear the call down: SiphonAI
+    /// keeps the caller on hold music and re-dials the same `ws_url`,
+    /// resuming on a fresh session (`start.reconnected: true`). `None`
+    /// (unset) / `false` = the v1 behaviour (PROTOCOL.md §5.7 teardown).
+    /// Per-route override via `[route.bridge].ws_reconnect_enabled`.
+    #[serde(default)]
+    pub ws_reconnect_enabled: Option<bool>,
+    /// Total wall-clock window (seconds) a call may spend reconnecting
+    /// before falling back to §5.7 teardown — i.e. how long the caller
+    /// hears hold music before we give up. `None` (unset) = 30 s default.
+    /// Must be `> 0` when `ws_reconnect_enabled = true`. Per-route
+    /// override via `[route.bridge].ws_reconnect_max_secs`.
+    #[serde(default)]
+    pub ws_reconnect_max_secs: Option<u64>,
 }
 
 /// `[bridge.tls]` — mTLS settings for the bridge WS leg.

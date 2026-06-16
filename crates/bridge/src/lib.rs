@@ -13,8 +13,8 @@ pub use audio::{
     FRAME_DURATION_MS,
 };
 pub use conn::{
-    connect_and_run, normalize_auth_header, BridgeChannels, BridgeConfig, BridgeError,
-    DisconnectReason, OutgoingEvent,
+    connect_and_run, connect_and_run_with_ready, normalize_auth_header, BridgeChannels,
+    BridgeConfig, BridgeError, DisconnectReason, OutgoingEvent,
 };
 pub use protocol::{
     AudioEncoding, AudioFormat, BridgeIn, BridgeOut, CallId, ConferenceLeftReason, Direction,

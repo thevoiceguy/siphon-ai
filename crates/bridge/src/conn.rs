@@ -43,7 +43,7 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest,
     http::{HeaderValue, Request},
@@ -278,8 +278,23 @@ impl From<WsError> for BridgeError {
 #[instrument(skip_all, fields(call_id = %start.call_id, ws_url = %config.ws_url))]
 pub async fn connect_and_run(
     config: BridgeConfig,
+    start: StartMsg,
+    channels: BridgeChannels,
+) -> Result<DisconnectReason, BridgeError> {
+    connect_and_run_with_ready(config, start, channels, None).await
+}
+
+/// [`connect_and_run`] plus an optional readiness signal: `ready_tx` (when
+/// `Some`) fires **once** the WS handshake has succeeded and the `start`
+/// message has been written to the socket. The reconnect drive (0.7.3)
+/// uses it to keep the caller on hold music until a redial is actually
+/// live, rather than dropping MOH optimistically on a socket that may
+/// still fail. A dropped receiver is ignored (the send is best-effort).
+pub async fn connect_and_run_with_ready(
+    config: BridgeConfig,
     mut start: StartMsg,
     channels: BridgeChannels,
+    ready_tx: Option<oneshot::Sender<()>>,
 ) -> Result<DisconnectReason, BridgeError> {
     start.seq = 0;
     let call_id = start.call_id.clone();
@@ -326,7 +341,7 @@ pub async fn connect_and_run(
     }
     info!("bridge connected");
 
-    run_loop(ws, start, channels, call_id).await
+    run_loop(ws, start, channels, call_id, ready_tx).await
 }
 
 fn build_upgrade_request(
@@ -403,6 +418,7 @@ async fn run_loop(
     start: StartMsg,
     channels: BridgeChannels,
     call_id: CallId,
+    ready_tx: Option<oneshot::Sender<()>>,
 ) -> Result<DisconnectReason, BridgeError> {
     let BridgeChannels {
         mut audio_out_rx,
@@ -417,6 +433,12 @@ async fn run_loop(
     let start_json = serde_json::to_string(&BridgeOut::Start(start))
         .map_err(|e| BridgeError::Internal(format!("serialize start: {e}")))?;
     sink.send(Message::Text(start_json)).await?;
+
+    // Handshake done and `start` is on the wire — signal readiness so a
+    // reconnect drive can drop hold music now (0.7.3). Best-effort.
+    if let Some(tx) = ready_tx {
+        let _ = tx.send(());
+    }
 
     // Subsequent SiphonAI→server messages use seq starting at 1.
     let mut seq: Seq = 1;

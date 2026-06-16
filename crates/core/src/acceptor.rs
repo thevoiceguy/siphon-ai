@@ -164,6 +164,17 @@ pub struct BridgeDefaults {
     /// client cert — bridge uses the existing plaintext or webpki
     /// path. Per-route override is a follow-up.
     pub bridge_tls: Option<siphon_ai_bridge::tls::BridgeTlsConfig>,
+    /// Opt-in automatic WS reconnect mid-call (0.7.3), from
+    /// `[bridge].ws_reconnect_enabled`. `false` (default) = the v1
+    /// §5.7 teardown on an unexpected WS drop. Per-route override via
+    /// `[route.bridge].ws_reconnect_enabled`. Consumed by the
+    /// controller's reconnect drive (chunk 2).
+    pub ws_reconnect_enabled: bool,
+    /// Total reconnect window from `[bridge].ws_reconnect_max_secs`
+    /// (default 30 s) — how long the caller hears hold music before
+    /// reconnect gives up and §5.7 teardown runs. Only meaningful when
+    /// `ws_reconnect_enabled`.
+    pub ws_reconnect_max: Duration,
 }
 
 /// What the daemon does when forge-vad reports speech-started.
@@ -278,6 +289,8 @@ impl Default for BridgeDefaults {
             rtp_stats_interval: Some(Duration::from_millis(5000)),
             srtp_mode: SrtpMode::Off,
             bridge_tls: None,
+            ws_reconnect_enabled: false,
+            ws_reconnect_max: Duration::from_secs(30),
         }
     }
 }
@@ -1287,6 +1300,9 @@ pub fn build_start_msg(
         // The acceptor only builds fresh inbound sessions; a retrieve
         // session is built by the controller on park-retrieve.
         retrieved: false,
+        // Reconnect resume sessions are built by the controller's
+        // reconnect drive (0.7.3 chunk 2); a fresh accept is never one.
+        reconnected: false,
     }
 }
 
@@ -1325,6 +1341,9 @@ pub fn build_outbound_start_msg(
         srtp,
         verstat: None,
         retrieved: false,
+        // Reconnect resume sessions are built by the controller's
+        // reconnect drive (0.7.3 chunk 2); a fresh accept is never one.
+        reconnected: false,
     }
 }
 

@@ -437,6 +437,7 @@ mod tests {
                 srtp: None,
                 verstat: None,
                 retrieved: false,
+                reconnected: false,
             },
             media_tap: tap,
             transfer: None,

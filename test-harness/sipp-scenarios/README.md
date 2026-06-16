@@ -54,6 +54,8 @@ sipp -sf basic_call_then_bye.xml -m 1 -p 5070 -s 1000 127.0.0.1:5060
 | `outbound_srtp_uas_answer.xml`      | 0.7.1 outbound SRTP: gateway `srtp = "required"` makes SiphonAI offer `RTP/SAVP` + `a=crypto`; SIPp answers SAVP with its own `a=crypto`, keys install, call bridges (outbound_srtp phase) |
 | `park_caller.xml`                   | 0.7.0 call park: caller is answered + bridged, the echo-ws parks it (`--auto-park`), and SiphonAI BYEs the caller when the park resolves. Shared by the **park_timeout** and **park_retrieve** phases |
 | `conference_caller.xml`             | 0.7.0 conferencing: a caller that stays up while the echo-ws joins it to a room (`--auto-conference-join`); two run concurrently in the **conference** phase |
+| `reinvite_hold_resume.xml`          | Peer-initiated hold: SIPp **sends** a sendonly re-INVITE then a sendrecv one; SiphonAI mirrors recvonly/sendrecv (RFC 3264 §6.1) |
+| `bot_hold_caller.xml`               | 0.7.2 bot-initiated hold: the inverse — the echo-ws (`--auto-hold`) drives `hold`/`resume`, so SiphonAI **sends** the re-INVITEs and SIPp asserts it receives sendonly then sendrecv (**bot_hold** phase) |
 
 `run-all.sh` also has an always-on **recording** auxiliary phase: it starts
 a daemon with `[recording].mode = "always"` writing to a temp dir, runs one
@@ -98,6 +100,15 @@ Pass = the daemon mixes both (`siphon_ai_conference_participants` reads 4 —
 two calls × SIP leg + WS session) **and** the room ends after both hang up
 (`siphon_ai_conferences_active` returns to 0). SIPp can't assert mixed audio
 content — that's covered by media-glue unit tests with synthetic PCM.
+
+And an always-on **bot_hold** phase (0.7.2): a daemon and an echo-ws started
+with `--auto-hold`, which drives a full bot-initiated hold cycle —
+`hold` → ~1s → `resume` → `hangup`. SiphonAI is the re-INVITE *offerer*
+(the inverse of `reinvite_hold_resume.xml`), so `bot_hold_caller.xml`
+asserts it **receives** a sendonly re-INVITE then a sendrecv one and answers
+each (recvonly / sendrecv). Pass = the SIPp scenario completed (both
+`check_it` direction asserts held) **and** `siphon_ai_holds_total{result="ok"}`
+reads 2 (one tick for hold, one for resume).
 
 The `stir_shaken_*` scenarios run in `run-all.sh`'s always-on
 **stir_shaken** auxiliary phase. It builds + runs the

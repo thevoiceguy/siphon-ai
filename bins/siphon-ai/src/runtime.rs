@@ -331,6 +331,7 @@ impl Runtime {
             // the verstat chunk lands on the same Homer call view.
             .with_hep_telemetry(hep_telemetry.clone())
             .with_recording(recording)
+            .with_hold_moh_file(media.moh_file.clone())
             .with_control_registry(control_registry.clone());
         if let Some(reg) = &conference_registry {
             acceptor_builder = acceptor_builder.with_conference(reg.clone());

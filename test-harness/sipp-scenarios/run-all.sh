@@ -906,6 +906,77 @@ fi
 obs_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: bot-initiated hold/resume ─────────
+# SIPp calls in; the echo-ws (--auto-hold) drives a full bot-hold cycle:
+# `hold` → ~1s → `resume` → `hangup`. SiphonAI becomes the re-INVITE
+# offerer, so the caller scenario asserts it RECEIVES a sendonly re-INVITE
+# then a sendrecv one (the inverse of reinvite_hold_resume, which sends
+# them). Pass = the SIPp scenario completed (both check_it asserts held)
+# AND holds_total{result="ok"} == 2 (hold + resume).
+echo
+echo "─── auxiliary phase: bot_hold ─────────────────────────"
+BH_WS_PORT=8774
+BH_ADMIN_PORT=9091
+BH_WS_LOG=$(mktemp -t echo-ws-bh.XXXXXX.log)
+BH_DAEMON_LOG=$(mktemp -t siphon-ai-bh.XXXXXX.log)
+BH_CONFIG=$(mktemp -t siphon-ai-bh.XXXXXX.toml)
+cat >"$BH_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-bh"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$BH_WS_PORT/"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$BH_ADMIN_PORT"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+BH_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$BH_PYTHON" ]] || BH_PYTHON=python3
+"$BH_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$BH_WS_PORT" \
+    --auto-hold \
+    >"$BH_WS_LOG" 2>&1 &
+BH_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$BH_CONFIG" \
+    >"$BH_DAEMON_LOG" 2>&1 &
+BH_DAEMON_PID=$!
+bh_cleanup() {
+    kill "$BH_WS_PID" "$BH_DAEMON_PID" 2>/dev/null || true
+    wait "$BH_WS_PID" "$BH_DAEMON_PID" 2>/dev/null || true
+}
+trap bh_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── bot_hold_resume ──────────────────────────────────"
+bh_ok=0
+if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/bot_hold_caller.xml" -m 1 -timeout 15s -trace_err \
+        -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1; then
+    # Both directions succeeded → holds_total{result="ok"} ticked twice.
+    if curl -s "http://127.0.0.1:$BH_ADMIN_PORT/metrics" \
+        | grep -q 'siphon_ai_holds_total{result="ok"} 2'; then
+        bh_ok=1
+    fi
+fi
+if (( bh_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (daemon: $BH_DAEMON_LOG; ws: $BH_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+bh_cleanup
+trap - EXIT
+
 # ─── Optional third phase: blind_transfer ─────────────────────────
 # Needs a WS server that proactively emits BridgeIn::Transfer. The
 # runner stops the daemon, brings up an echo-ws that auto-emits

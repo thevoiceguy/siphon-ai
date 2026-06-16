@@ -142,6 +142,7 @@ mod tests {
             recording_id: None,
             recording_path: None,
             park: None,
+            hold: None,
         }
     }
 

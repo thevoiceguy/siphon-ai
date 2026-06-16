@@ -143,6 +143,13 @@ pub enum OutgoingEvent {
     },
     /// Direction returned to `sendrecv` after a [`Self::Hold`].
     Resume,
+    /// A bot-initiated [`BridgeIn::Hold`] re-INVITE succeeded (0.7.2).
+    /// The conn stamps `seq` and emits [`BridgeOut::Held`]. Distinct
+    /// from [`Self::Hold`], which reports that the *far end* held us.
+    Held,
+    /// A bot-initiated [`BridgeIn::Resume`] re-INVITE restored two-way
+    /// audio (0.7.2) → [`BridgeOut::Resumed`].
+    Resumed,
     /// Caller has been silent (no VAD speech) for at least
     /// `duration_ms`. Configurable via `[bridge].silence_threshold_ms`;
     /// `0` disables. Fires once per silence stretch — the next event
@@ -562,6 +569,8 @@ fn build_bridge_out(event: OutgoingEvent, call_id: CallId, seq: Seq) -> BridgeOu
             direction,
         },
         OutgoingEvent::Resume => BridgeOut::Resume { call_id, seq },
+        OutgoingEvent::Held => BridgeOut::Held { call_id, seq },
+        OutgoingEvent::Resumed => BridgeOut::Resumed { call_id, seq },
         OutgoingEvent::SilenceDetected { duration_ms } => BridgeOut::SilenceDetected {
             call_id,
             seq,
@@ -698,6 +707,16 @@ mod tests {
         assert_eq!(call_id.as_str(), "c");
         assert_eq!(seq, 7);
         assert_eq!(digit, '5');
+    }
+
+    #[test]
+    fn build_bridge_out_maps_held_and_resumed() {
+        // The bot-initiated hold acks (0.7.2) — distinct from the
+        // peer-hold Hold/Resume events — stamp call_id + seq.
+        let held = build_bridge_out(OutgoingEvent::Held, CallId::new("c"), 3);
+        assert!(matches!(held, BridgeOut::Held { seq: 3, .. }));
+        let resumed = build_bridge_out(OutgoingEvent::Resumed, CallId::new("c"), 4);
+        assert!(matches!(resumed, BridgeOut::Resumed { seq: 4, .. }));
     }
 
     #[test]

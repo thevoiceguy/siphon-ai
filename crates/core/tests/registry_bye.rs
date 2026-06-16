@@ -132,6 +132,7 @@ async fn dispatch_bye_wakes_running_controller_via_registry() {
         recording: None,
         conference: None,
         park: None,
+        hold: None,
     };
     let (controller, handle) = CallController::new(cfg);
 
@@ -221,6 +222,7 @@ async fn bye_drives_wire_stop_with_caller_hangup_reason() {
         recording: None,
         conference: None,
         park: None,
+        hold: None,
     };
     let (controller, handle) = CallController::new(cfg);
 

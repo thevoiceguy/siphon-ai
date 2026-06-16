@@ -22,7 +22,8 @@ pub use room::{
 };
 pub use sdp::{
     audio_remote_addr, build_answer, generate_offer, negotiate_answer, negotiate_offer_answer,
-    parse_offer, AnswerOutcome, Codec, LocalCapabilities, MediaDirection, SdpError,
+    parse_offer, rewrite_sdp_direction, AnswerOutcome, Codec, LocalCapabilities, MediaDirection,
+    SdpError,
 };
 pub use setup::{
     InboundAccepted, InboundCall, MediaSetup, OutboundAccepted, OutboundOffer,

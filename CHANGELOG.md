@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-06-16
+
+Theme: **bot-initiated hold/resume** — the WS server can now put its own
+caller on hold and bring them back, with SiphonAI driving a true SIP
+re-INVITE. Until now `hold`/`resume` existed only as inbound *events* (the
+far end held *us*, §3.3); the bot could drive every other call-control
+primitive (transfer, hangup, park, record, mute, DTMF, conference) but not
+hold. This closes that gap. **No config flag** — hold is always available on
+inbound legs; `[media].moh_file` only chooses what the held caller hears.
+The WS protocol stays `version: "1"` (additive) and the CDR schema stays at
+version 1. Delivered across three chunks (protocol surface → re-INVITE drive
+→ observability/docs/SIPp/release).
+
+### Added
+
+- **`hold` / `resume` (server → SiphonAI).** The WS server puts *its own*
+  caller on hold (`{ "type": "hold", "call_id": … }`) and resumes them
+  (`resume`). SiphonAI becomes the re-INVITE **offerer** (`a=sendonly` to
+  hold, `a=sendrecv` to resume), plays hold music to the caller, and stops
+  forwarding caller audio to the server while held (no barge-in during
+  hold). On success it replies `held` / `resumed` (§3.13) — past-tense acks,
+  deliberately distinct from the §3.3 peer-hold events. `docs/PROTOCOL.md`
+  §4.10, §3.13, §3.10.
+- **`error { code: "hold_failed" }`.** A re-INVITE that's rejected, times
+  out, can't resolve glare (RFC 3261 §14.1 — backoff + retry-once), or is
+  refused because the far end already holds us (no hold-stacking in this
+  first cut) fails the hold without dropping the call — it stays in its
+  prior media state.
+- **`[media].moh_file`.** Hold music for bot-initiated hold (shared shape
+  with `[park].moh_file`): a WAV at the call's negotiated rate, validated to
+  exist at load. Unset → generated comfort silence. `docs/CONFIG.md`.
+- **CDR `hold { count, total_ms }`.** Per-call bot-hold accounting, mirroring
+  `park`. Present only when the bot held the call at least once; omitted
+  otherwise, so the CDR schema stays at version 1. Counts bot-initiated
+  holds only — a far-end hold isn't tallied. `docs/DEPLOY.md`.
+- **Metric `siphon_ai_holds_total{result=ok|failed}`.** Covers both
+  directions (hold and resume). `docs/DEPLOY.md`.
+- **SIPp `bot_hold` regression phase.** The inverse of
+  `reinvite_hold_resume.xml`: an echo-ws started with `--auto-hold` drives
+  `hold` → `resume` → `hangup`, and `bot_hold_caller.xml` asserts it
+  *receives* a sendonly re-INVITE then a sendrecv one (SiphonAI is the
+  offerer), with `siphon_ai_holds_total{result="ok"}` reading 2.
+- **Playout-gated barge-in debounce (`[bridge.barge_in].debounce_ms`)**
+  (#173 — merged between 0.7.1 and this release, so 0.7.2 is its first
+  tagged release). While the bot is playing out, a `speech_started` is held
+  for `debounce_ms` and only flushes if speech *sustains* past it — an
+  echo / brief-background-noise gate that stops the bot cutting itself off
+  on its own echo. Barge-in stays **immediate while the bot is silent**, so
+  a caller interrupting between phrases is unaffected. `0`/unset = off
+  (original immediate-flush behaviour); only affects `auto_clear`. Per-route
+  override via `[route.bridge.barge_in].debounce_ms`. `docs/CONFIG.md`.
+
+### Changed
+
+- **Upstream siphon-rs pin `db45e42` → `8f3fd80`.** Adds
+  `IntegratedUAC::send_reinvite_via_flow` — the flow-aware counterpart of
+  `send_reinvite`, mirroring `send_refer_via_flow` over the INVITE
+  transaction. Bot-hold needs it: on a TCP/TLS inbound dialog (e.g. Twilio
+  TLS trunking) the peer's `Contact` names an ephemeral port nothing listens
+  on, so the re-INVITE must reuse the inbound connection — the same fix
+  `#157`/`#159` applied to BYE and REFER.
+- **`TransferContext` refactored to embed a shared `DialogControl`**
+  (`{ uac, source, flow }`), so hold and transfer share one dialog-resolution
+  + connection-reuse path instead of duplicating it.
+
+### Notes
+
+- Inbound legs only this release. Outbound bot-hold needs the originated
+  offer SDP plumbed through `apply_answer` to build the hold/resume offers;
+  it's a follow-up.
+
 ## [0.7.1] - 2026-06-15
 
 Theme: **outbound SRTP** — SiphonAI could *answer* an inbound SRTP offer but

@@ -80,6 +80,11 @@ class Options:
     # Sentinel distinguishing "--auto-park with no slot" (park, unlabeled)
     # from "--auto-park absent" (don't park). Set alongside auto_park_slot.
     auto_park: bool
+    # Test-harness knob: after `start`, wait auto_transfer_delay_ms and then
+    # `hold` this call, hold it for ~1s, `resume` it, then `hangup`. Drives
+    # the bot-initiated hold/resume SIPp scenario (the caller asserts it
+    # receives a sendonly re-INVITE then a sendrecv one). None = disabled.
+    auto_hold: bool
 
 
 # ─── HTTP-side concerns: auth + subprotocol ─────────────────────────────────
@@ -255,6 +260,15 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
                         _send_after(connection, opts.auto_transfer_delay_ms, park_msg)
                     )
 
+                if opts.auto_hold and call_id:
+                    # Test-harness behaviour: drive a full bot-initiated
+                    # hold cycle — hold the caller, keep them held for ~1s,
+                    # resume, then hang up. SiphonAI re-INVITEs the caller
+                    # sendonly then sendrecv; the SIPp scenario asserts both
+                    # and replies `held`/`resumed` come back. The hangup at
+                    # the end lets the caller's scenario complete.
+                    asyncio.create_task(_auto_hold_cycle(connection, call_id, opts))
+
                 if opts.auto_hangup_after_ms is not None and call_id:
                     # Test-harness behaviour: end the call from the WS
                     # side after a beat. Used by the outbound SIPp
@@ -281,6 +295,8 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
                 "mark",
                 "hold",
                 "resume",
+                "held",
+                "resumed",
                 "error",
                 "conference_joined",
                 "conference_left",
@@ -322,6 +338,26 @@ async def _send_after(
         LOG.info("test-harness sent: %s", _redact(payload))
     except websockets.exceptions.ConnectionClosed:
         LOG.debug("auto-send dropped: connection closed before delay elapsed")
+
+
+async def _auto_hold_cycle(
+    connection: ServerConnection, call_id: str, opts: Options
+) -> None:
+    """Test-harness only: hold → wait → resume → hangup. Drives the
+    bot-initiated hold/resume SIPp scenario. Swallows close errors."""
+    try:
+        await asyncio.sleep(opts.auto_transfer_delay_ms / 1000.0)
+        await connection.send(json.dumps({"type": "hold", "call_id": call_id}))
+        LOG.info("test-harness sent: hold")
+        await asyncio.sleep(1.0)
+        await connection.send(json.dumps({"type": "resume", "call_id": call_id}))
+        LOG.info("test-harness sent: resume")
+        # Give the resume re-INVITE a beat to complete, then end the call.
+        await asyncio.sleep(0.5)
+        await connection.send(json.dumps({"type": "hangup", "call_id": call_id}))
+        LOG.info("test-harness sent: hangup")
+    except websockets.exceptions.ConnectionClosed:
+        LOG.debug("auto-hold dropped: connection closed mid-cycle")
 
 
 # ─── Entrypoint ──────────────────────────────────────────────────────────────
@@ -417,6 +453,17 @@ def parse_args(argv: list[str] | None = None) -> Options:
         ),
     )
     p.add_argument(
+        "--auto-hold",
+        action="store_true",
+        help=(
+            "test-harness only: after `start`, run a full bot-initiated "
+            "hold cycle — `hold` (uses --auto-transfer-delay-ms for the "
+            "pause), hold ~1s, `resume`, then `hangup`. SiphonAI re-INVITEs "
+            "the caller sendonly then sendrecv — the hook for the 0.7.2 "
+            "bot-hold SIPp scenario."
+        ),
+    )
+    p.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -440,6 +487,7 @@ def parse_args(argv: list[str] | None = None) -> Options:
         auto_conference_join=args.auto_conference_join,
         auto_park=args.auto_park is not None,
         auto_park_slot=args.auto_park or None,
+        auto_hold=args.auto_hold,
     )
 
 

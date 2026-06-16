@@ -129,6 +129,12 @@ pub const PARKS_TOTAL: &str = "siphon_ai_parks_total";
 /// `siphon-ai-core::call`.
 pub const RETRIEVES_TOTAL: &str = "siphon_ai_retrieves_total";
 
+/// Bot-initiated hold/resume re-INVITE attempts (0.7.2). Labeled by
+/// `result`: `ok` / `failed`. Covers both directions (hold and resume);
+/// a failed attempt leaves the call in its prior media state. Literal
+/// must match the call site in `siphon-ai-core::call`.
+pub const HOLDS_TOTAL: &str = "siphon_ai_holds_total";
+
 // ─── Gauges ─────────────────────────────────────────────────────────
 
 /// Currently-active calls. Incremented when the controller spawns,
@@ -308,6 +314,10 @@ pub fn register_descriptions() {
     describe_counter!(
         RETRIEVES_TOTAL,
         "Parked calls retrieved, by result (ok, not_parked)."
+    );
+    describe_counter!(
+        HOLDS_TOTAL,
+        "Bot-initiated hold/resume re-INVITEs, by result (ok, failed)."
     );
     describe_gauge!(
         CALLS_ACTIVE,

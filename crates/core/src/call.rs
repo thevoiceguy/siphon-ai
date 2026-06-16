@@ -60,8 +60,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use siphon_ai_bridge::{
-    connect_and_run, BridgeChannels, BridgeConfig, BridgeError, BridgeIn, CallId, DisconnectReason,
-    ErrorCode, OutgoingEvent, StartMsg, StopReason,
+    connect_and_run, connect_and_run_with_ready, BridgeChannels, BridgeConfig, BridgeError,
+    BridgeIn, CallId, DisconnectReason, ErrorCode, OutgoingEvent, StartMsg, StopReason,
 };
 use siphon_ai_media_glue::{
     MediaTap, MediaTapError, MohSource, RoomMembership, TapCommand, TapDisconnect,
@@ -80,7 +80,7 @@ use siphon_ai_webhooks::{
     WEBHOOK_VERSION,
 };
 use thiserror::Error;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 
@@ -93,6 +93,15 @@ use siphon_ai_telemetry::{
 /// of audio; per CLAUDE.md §6.2 audio channels are bounded for
 /// roughly that span.
 const AUDIO_CHANNEL_CAPACITY: usize = 10;
+
+/// Tap-side channels staged during a reconnect redial (0.7.3) and handed
+/// to the tap via [`TapCommand::Unpark`] once the new socket signals
+/// ready: `(caller_audio_tx, playout_audio_rx, events_tx)`.
+type PendingUnpark = (
+    mpsc::Sender<Vec<u8>>,
+    mpsc::Receiver<Vec<u8>>,
+    mpsc::Sender<OutgoingEvent>,
+);
 
 /// Bounded capacity for the recording fork — generous (≈2 s) slack so the
 /// writer keeps up; a full channel drops frames best-effort rather than
@@ -151,6 +160,20 @@ pub struct CallControllerConfig {
     /// request is answered with `error { code: "hold_failed" }`. Carries
     /// the precomputed hold/resume re-INVITE offers + MOH file.
     pub hold: Option<HoldContext>,
+
+    /// WS reconnect (0.7.3). When `true`, an unexpected WS drop keeps the
+    /// caller on hold music and re-dials the same `ws_url` instead of
+    /// tearing the call down (PROTOCOL.md §5.7). Resolved from
+    /// `[bridge].ws_reconnect_enabled` + the route override. `false` =
+    /// the v1 teardown.
+    pub ws_reconnect_enabled: bool,
+    /// Total reconnect window (`[bridge].ws_reconnect_max_secs`): how long
+    /// the caller hears hold music before reconnect gives up and §5.7
+    /// teardown runs. Only consulted when `ws_reconnect_enabled`.
+    pub ws_reconnect_max: Duration,
+    /// MOH file for the reconnect gap — the same shared `[media].moh_file`
+    /// hold/park use. `None` → generated comfort silence.
+    pub ws_reconnect_moh_file: Option<std::path::PathBuf>,
 }
 
 /// Where in its life a call is. State transitions are logged at
@@ -572,6 +595,9 @@ impl CallController {
             conference,
             park,
             hold,
+            ws_reconnect_enabled,
+            ws_reconnect_max,
+            ws_reconnect_moh_file,
         } = cfg;
 
         // Park needs to rebuild the WS bridge on retrieve from the
@@ -730,6 +756,29 @@ impl CallController {
         // its own re-INVITE at the same moment, our offer draws a 491 —
         // we wait this long, then retry once.
         const HOLD_GLARE_BACKOFF: Duration = Duration::from_millis(250);
+
+        // ─── Reconnect state (0.7.3 §6) ──────────────────────────
+        // `reconnecting` true between an eligible WS drop and a
+        // successful redial (or the deadline). While reconnecting the
+        // tap plays MOH (reusing `TapCommand::Park`) and `bridge_alive`
+        // is false until the backoff timer spawns a fresh redial. The
+        // redial's readiness signal (`reconnect_ready_rx`) drives the
+        // `Unpark`, so MOH only drops once the new socket is live; the
+        // deadline ends the whole effort and falls through to §5.7.
+        let mut reconnecting = false;
+        let mut reconnect_attempt: u32 = 0;
+        let mut reconnect_since: Option<Instant> = None;
+        // Tap-side channels of the in-flight redial, handed to the tap
+        // on `ready` (not at dial) so a redial that fails fast doesn't
+        // flap the caller's audio.
+        let mut pending_unpark: Option<PendingUnpark> = None;
+        let mut reconnect_ready_rx: Option<oneshot::Receiver<()>> = None;
+        let reconnect_backoff_sleep = tokio::time::sleep(Duration::from_secs(86_400));
+        tokio::pin!(reconnect_backoff_sleep);
+        let mut reconnect_backoff_armed = false;
+        let reconnect_deadline_sleep = tokio::time::sleep(Duration::from_secs(86_400));
+        tokio::pin!(reconnect_deadline_sleep);
+        let mut reconnect_deadline_armed = false;
 
         let shutdown = handle.notify.clone();
 
@@ -1397,6 +1446,87 @@ impl CallController {
                     }
                 }
 
+                // ─── Reconnect: backoff elapsed → (re)dial (0.7.3 §6) ───
+                // Build fresh channels + a readiness signal and spawn a
+                // redial to the same ws_url with `start.reconnected = true`.
+                // We swap the control channels in now (sends queue on the
+                // bounded channel until the socket is live) but DON'T drop
+                // MOH yet — that waits for `ready`.
+                _ = &mut reconnect_backoff_sleep, if reconnecting && reconnect_backoff_armed => {
+                    reconnect_backoff_armed = false;
+                    let (n_caller_tx, n_caller_rx) =
+                        mpsc::channel::<Vec<u8>>(AUDIO_CHANNEL_CAPACITY);
+                    let (n_playout_tx, n_playout_rx) =
+                        mpsc::channel::<Vec<u8>>(AUDIO_CHANNEL_CAPACITY);
+                    let (n_ci_tx, n_ci_rx) = mpsc::channel::<BridgeIn>(CONTROL_CHANNEL_CAPACITY);
+                    let (n_co_tx, n_co_rx) =
+                        mpsc::channel::<OutgoingEvent>(CONTROL_CHANNEL_CAPACITY);
+                    let (ready_tx, ready_rx) = oneshot::channel();
+                    // Fresh `start` from the preserved facts, flagged as a
+                    // reconnect resume (seq restarts at 0, no replay).
+                    let mut start2 = start_template.clone();
+                    start2.seq = 0;
+                    start2.reconnected = true;
+                    bridge_task = tokio::spawn(connect_and_run_with_ready(
+                        bridge_template.clone(),
+                        start2,
+                        BridgeChannels {
+                            audio_out_rx: n_caller_rx,
+                            control_out_rx: n_co_rx,
+                            audio_in_tx: n_playout_tx,
+                            control_in_tx: n_ci_tx,
+                        },
+                        Some(ready_tx),
+                    ));
+                    bridge_alive = true;
+                    control_in_rx = n_ci_rx;
+                    control_open = true;
+                    control_out_tx = n_co_tx.clone();
+                    handle.swap_bridge_sender(n_co_tx.clone());
+                    pending_unpark = Some((n_caller_tx, n_playout_rx, n_co_tx));
+                    reconnect_ready_rx = Some(ready_rx);
+                    debug!(call_id = %call_id, attempt = reconnect_attempt, "redialing ws bridge");
+                }
+
+                // ─── Reconnect: redial connected (`ready` fired) ────────
+                // The new socket is live and `start` is on the wire — drop
+                // MOH and restore the direct caller↔WS pair on the fresh
+                // channels. An `Err` means the bridge died before ready;
+                // the bridge-end arm handles that (backoff/give-up).
+                ready = recv_ready(&mut reconnect_ready_rx),
+                    if reconnecting && reconnect_ready_rx.is_some() =>
+                {
+                    reconnect_ready_rx = None;
+                    if ready.is_ok() {
+                        if let Some((caller_tx, playout_rx, events_tx)) = pending_unpark.take() {
+                            if let Err(e) = tap_cmd_tx.try_send(TapCommand::Unpark {
+                                caller_audio_tx: caller_tx,
+                                playout_audio_rx: playout_rx,
+                                events_tx,
+                            }) {
+                                warn!(call_id = %call_id, error = %e,
+                                    "tap command channel full/closed; reconnect audio may not resume");
+                            }
+                        }
+                        reconnecting = false;
+                        reconnect_deadline_armed = false;
+                        reconnect_backoff_armed = false;
+                        let gap_ms = reconnect_since
+                            .take()
+                            .map(|s| s.elapsed().as_millis() as u64)
+                            .unwrap_or(0);
+                        info!(call_id = %call_id, gap_ms, "ws reconnected; call resumed on a fresh session");
+                    }
+                }
+
+                // ─── Reconnect: window elapsed → give up (0.7.3 §6) ─────
+                _ = &mut reconnect_deadline_sleep, if reconnecting && reconnect_deadline_armed => {
+                    warn!(call_id = %call_id, window_secs = ws_reconnect_max.as_secs(),
+                        "ws reconnect window elapsed; tearing down (ws_disconnect)");
+                    termination = CallTermination::BridgeEnded;
+                    break;
+                }
+
                 // Bridge sub-task ended. Guarded by `bridge_alive` so a
                 // completed handle is never re-polled (it's reassigned on
                 // retrieve). A bridge ending *while parked* is the park's
@@ -1404,15 +1534,71 @@ impl CallController {
                 // MOH until retrieve / timeout / caller-BYE.
                 res = &mut bridge_task, if bridge_alive => {
                     bridge_alive = false;
-                    match res {
-                        Ok(inner) => bridge_result = Some(inner),
+                    let inner = match res {
+                        Ok(inner) => inner,
                         Err(join_err) => {
                             warn!(?join_err, "bridge task panicked");
                             return Err(CallError::TaskJoin(join_err));
                         }
-                    }
+                    };
+                    // Remember the most recent disconnect reason for the
+                    // CDR (a give-up reconnect surfaces as ws_disconnect).
+                    bridge_result = Some(inner);
+                    let inner_ref = bridge_result.as_ref().expect("just set");
                     if parked {
                         debug!(call_id = %call_id, "WS bridge closed for park; call remains parked");
+                    } else if reconnecting {
+                        // A staged redial ended before signalling `ready`
+                        // → it failed (a success would have flipped
+                        // `reconnecting` off in the ready arm). Drop the
+                        // stale staging and either back off again or, if
+                        // the window has closed, give up.
+                        reconnect_ready_rx = None;
+                        pending_unpark = None;
+                        if reconnect_deadline_armed {
+                            reconnect_attempt += 1;
+                            let backoff = reconnect_backoff(reconnect_attempt);
+                            reconnect_backoff_sleep
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + backoff);
+                            reconnect_backoff_armed = true;
+                            debug!(call_id = %call_id, attempt = reconnect_attempt,
+                                backoff_ms = backoff.as_millis() as u64,
+                                "ws redial failed; backing off");
+                        } else {
+                            warn!(call_id = %call_id, "ws reconnect window closed; tearing down");
+                            termination = CallTermination::BridgeEnded;
+                            break;
+                        }
+                    } else if ws_reconnect_enabled && reconnect_eligible(inner_ref) {
+                        // First eligible unexpected drop → hold the caller
+                        // on MOH and start redialing the same ws_url
+                        // (0.7.3 §6). A failed hold (tap gone) means we
+                        // can't reconnect cleanly → tear down.
+                        let moh = MohSource::new(ws_reconnect_moh_file.as_deref(), call_sample_rate);
+                        if tap_cmd_tx
+                            .try_send(TapCommand::Park { moh: Box::new(moh) })
+                            .is_err()
+                        {
+                            warn!(call_id = %call_id,
+                                "tap unavailable; cannot hold for reconnect; tearing down");
+                            termination = CallTermination::BridgeEnded;
+                            break;
+                        }
+                        reconnecting = true;
+                        reconnect_attempt = 0;
+                        reconnect_since = Some(Instant::now());
+                        reconnect_deadline_sleep
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + ws_reconnect_max);
+                        reconnect_deadline_armed = true;
+                        let backoff = reconnect_backoff(0);
+                        reconnect_backoff_sleep
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + backoff);
+                        reconnect_backoff_armed = true;
+                        warn!(call_id = %call_id, window_secs = ws_reconnect_max.as_secs(),
+                            "ws bridge dropped unexpectedly; reconnecting");
                     } else {
                         termination = CallTermination::BridgeEnded;
                         break;
@@ -1613,6 +1799,43 @@ impl CallController {
 
 fn log_state(call_id: &CallId, state: CallState) {
     info!(call_id = %call_id, ?state, "call state");
+}
+
+/// Whether a finished bridge's outcome is an **unexpected** drop that WS
+/// reconnect (0.7.3) should try to recover from. A clean `stop` we sent
+/// (`StopSent`) or our own teardown (`ControllerHungUp`) is the call
+/// ending — never reconnect. A server-side close before `stop`
+/// (`ServerClosed`, incl. a bare socket close without `hangup`) or any
+/// connect/IO/keepalive error is a drop → reconnect.
+fn reconnect_eligible(outcome: &Result<DisconnectReason, BridgeError>) -> bool {
+    match outcome {
+        Ok(DisconnectReason::ServerClosed) => true,
+        Ok(DisconnectReason::StopSent | DisconnectReason::ControllerHungUp) => false,
+        Err(_) => true,
+    }
+}
+
+/// Exponential reconnect backoff: 250 ms × 2^attempt, capped at 5 s
+/// (0.7.3 §4). No jitter in the first cut — attempts are few and bounded
+/// by the reconnect window; a thundering herd across calls isn't a
+/// concern at SiphonAI's per-node scale.
+fn reconnect_backoff(attempt: u32) -> Duration {
+    let shift = attempt.min(5);
+    let ms = 250u64.saturating_mul(1u64 << shift);
+    Duration::from_millis(ms.min(5_000))
+}
+
+/// Await an optional reconnect readiness signal. `None` parks forever
+/// (the select arm's guard keeps it unselectable then) — same pattern as
+/// [`recv_rec_evt`]. `&mut Receiver` is itself a `Future` (oneshot's
+/// receiver is `Unpin`), so this doesn't consume the option.
+async fn recv_ready(
+    rx: &mut Option<oneshot::Receiver<()>>,
+) -> Result<(), oneshot::error::RecvError> {
+    match rx.as_mut() {
+        Some(r) => r.await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Fire a lifecycle webhook off the control loop (best-effort, like the

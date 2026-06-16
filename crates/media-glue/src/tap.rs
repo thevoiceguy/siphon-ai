@@ -344,6 +344,17 @@ pub struct MediaTap {
     /// `Closed` channel (writer already stopped) is ignored. Set by the
     /// `CallController` before `run()`.
     recording: Option<(mpsc::Sender<RecFrame>, Arc<AtomicU64>)>,
+    /// WS reconnect survival (0.7.3). When `true`, the WS-facing channels
+    /// closing (the bridge task ending on an unexpected drop) is **not**
+    /// fatal — the tap waits on hold music for the controller to redial
+    /// (`TapCommand::Park` then `Unpark`) instead of tearing down. With
+    /// this set, the authoritative "controller is gone" teardown signal
+    /// becomes `commands_rx` closing (the controller dropping its
+    /// `tap_cmd_tx`), not the audio channels. `false` (default) = the v1
+    /// behaviour where a closed WS channel ends the tap. Set by the
+    /// acceptor from `[bridge].ws_reconnect_enabled` via
+    /// [`Self::with_ws_reconnect`].
+    survive_ws_drop: bool,
 }
 
 impl std::fmt::Debug for MediaTap {
@@ -410,6 +421,7 @@ impl MediaTap {
             idle_detector: IdleDetector::new(None, None, Instant::now()),
             rtp_stats: RtpStatsTracker::new(None),
             recording: None,
+            survive_ws_drop: false,
         })
     }
 
@@ -464,6 +476,16 @@ impl MediaTap {
         self
     }
 
+    /// Enable WS-reconnect survival (0.7.3): a closed WS-facing channel
+    /// becomes non-fatal (the tap waits for the controller to redial)
+    /// and teardown routes through `commands_rx` closing instead. See
+    /// [`Self::survive_ws_drop`]. The acceptor sets this from the call's
+    /// resolved `[bridge].ws_reconnect_enabled`.
+    pub fn with_ws_reconnect(mut self, enabled: bool) -> Self {
+        self.survive_ws_drop = enabled;
+        self
+    }
+
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
@@ -515,6 +537,14 @@ impl MediaTap {
         // practice (a parked call has no WS to drive a hold), but the
         // arms below treat them independently for clarity.
         let mut held: Option<crate::moh::MohSource> = None;
+        // WS-reconnect survival (0.7.3). When `survive_ws_drop` is set and
+        // the WS-facing channels close (bridge task ended on an unexpected
+        // drop), we set `ws_dropped` to suppress the close-driven teardown
+        // arms and wait for the controller to redial (`Park` then
+        // `Unpark`); teardown then comes from `commands_rx` closing. Reset
+        // on `Unpark` (the fresh channels are live again).
+        let survive_ws_drop = self.survive_ws_drop;
+        let mut ws_dropped = false;
 
         let mut reframer = Reframer::new(self.sample_rate)?;
         // Play-out estimation state for `TapCommand::Mark`.
@@ -599,9 +629,20 @@ impl MediaTap {
                 // tear down immediately, even if no inbound frame is
                 // pending. Suppressed while parked: the WS bridge (and
                 // thus this channel's receiver) is intentionally gone.
-                _ = caller_audio_tx.closed(), if parked.is_none() => {
-                    debug!("caller_audio_tx receiver dropped; ending tap");
-                    return Ok(TapDisconnect::ControllerHungUp);
+                _ = caller_audio_tx.closed(), if parked.is_none() && !ws_dropped => {
+                    if survive_ws_drop {
+                        // Reconnect-enabled: the bridge dropping its
+                        // receiver is a WS drop, not a teardown. Stop
+                        // polling this arm and wait for the controller to
+                        // redial (Park → Unpark). Teardown comes from
+                        // `commands_rx` closing.
+                        debug!(call_id = %self.call_id,
+                            "caller_audio_tx receiver dropped; holding for reconnect");
+                        ws_dropped = true;
+                    } else {
+                        debug!("caller_audio_tx receiver dropped; ending tap");
+                        return Ok(TapDisconnect::ControllerHungUp);
+                    }
                 }
 
                 // RTP watchdog. `if inactivity.is_some()` makes the
@@ -621,8 +662,16 @@ impl MediaTap {
                 // Server → caller: bytes from the WS into forge's playout.
                 // Suppressed while parked — there's no WS, and the MOH
                 // tick owns playout instead.
-                playout = playout_audio_rx.recv(), if parked.is_none() => {
+                playout = playout_audio_rx.recv(), if parked.is_none() && !ws_dropped => {
                     let Some(bytes) = playout else {
+                        if survive_ws_drop {
+                            // WS drop with reconnect on — hold, don't tear
+                            // down (mirrors the caller_audio_tx arm).
+                            debug!(call_id = %self.call_id,
+                                "playout_audio_rx closed; holding for reconnect");
+                            ws_dropped = true;
+                            continue;
+                        }
                         debug!("playout_audio_rx closed; ending tap");
                         return Ok(TapDisconnect::ControllerHungUp);
                     };
@@ -1058,11 +1107,20 @@ impl MediaTap {
                 // Controller-driven commands (currently only SendDtmf).
                 cmd = commands_rx.recv() => {
                     let Some(cmd) = cmd else {
-                        // Controller dropped its sender. The audio
-                        // arms still drive the call; treat command
-                        // closure as a non-fatal "no more commands"
-                        // and stop polling this arm by recreating the
-                        // receiver against a dropped sender.
+                        if survive_ws_drop {
+                            // Reconnect-enabled calls treat the audio-close
+                            // arms as non-fatal WS drops, so the controller
+                            // dropping its `tap_cmd_tx` is the authoritative
+                            // teardown signal (it happens when the
+                            // controller exits its loop and drains).
+                            debug!(call_id = %self.call_id,
+                                "commands_rx closed; ending tap (reconnect mode)");
+                            return Ok(TapDisconnect::ControllerHungUp);
+                        }
+                        // Default: the audio arms still drive the call;
+                        // treat command closure as a non-fatal "no more
+                        // commands" and stop polling this arm by recreating
+                        // the receiver against a dropped sender.
                         debug!("commands_rx closed; tap continues without commands");
                         let (_drop_tx, replacement) = mpsc::channel::<TapCommand>(1);
                         commands_rx = replacement;
@@ -1260,6 +1318,10 @@ impl MediaTap {
                                 frames_sent_to_forge = 0;
                                 first_audio_pushed_at = None;
                                 playout_until = None;
+                                // The fresh channels are live — clear the
+                                // WS-drop hold so the audio arms poll again
+                                // (0.7.3 reconnect resume / park retrieve).
+                                ws_dropped = false;
                                 info!(
                                     call_id = %self.call_id,
                                     "tap retrieved; direct bridge restored on fresh WS session"

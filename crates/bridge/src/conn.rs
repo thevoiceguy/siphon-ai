@@ -665,6 +665,8 @@ fn bridge_in_call_id(msg: &BridgeIn) -> &str {
         BridgeIn::ConferenceJoin { call_id, .. } => call_id.as_str(),
         BridgeIn::ConferenceLeave { call_id } => call_id.as_str(),
         BridgeIn::Park { call_id, .. } => call_id.as_str(),
+        BridgeIn::Hold { call_id } => call_id.as_str(),
+        BridgeIn::Resume { call_id } => call_id.as_str(),
     }
 }
 

@@ -809,6 +809,22 @@ impl CallController {
                             debug!(ws_call_id = %cid, ?slot, "WS park requested");
                             handle.request_park(slot);
                         }
+                        Some(BridgeIn::Hold { call_id: cid })
+                        | Some(BridgeIn::Resume { call_id: cid }) => {
+                            // Protocol surface only (0.7.2 chunk 1). The
+                            // re-INVITE drive lands in chunk 2; until then
+                            // reply hold_failed so an intermediate build
+                            // doesn't silently swallow the request. The call
+                            // is untouched (a failed hold never drops it).
+                            debug!(ws_call_id = %cid, "hold/resume received but not yet wired (chunk 2)");
+                            let _ = control_out_tx
+                                .send(OutgoingEvent::Error {
+                                    code: ErrorCode::HoldFailed,
+                                    message: "hold/resume not yet supported on this build"
+                                        .to_string(),
+                                })
+                                .await;
+                        }
                         Some(BridgeIn::Mark { call_id: cid, name }) => {
                             debug!(ws_call_id = %cid, %name, "forwarding Mark to tap");
                             // Mark is a notification request — the

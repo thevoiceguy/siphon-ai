@@ -687,6 +687,28 @@ fn parse_barge_in_mode_route(s: &str) -> Option<BargeInMode> {
     }
 }
 
+/// Resolve the WS reconnect plan for one call (0.7.3) by merging
+/// `[bridge].ws_reconnect_*` (global) with the `[route.bridge]` override.
+/// Returns `(enabled, max_window)`. An enabled route with a zero window
+/// is rejected at config load (`compile_dialplan`), so `Some(0)` can't
+/// reach here; the `.filter(|d| !d.is_zero())` is belt-and-braces.
+pub fn resolve_ws_reconnect(
+    defaults: &BridgeDefaults,
+    route: &CompiledRoute,
+) -> (bool, std::time::Duration) {
+    let enabled = route
+        .bridge
+        .ws_reconnect_enabled
+        .unwrap_or(defaults.ws_reconnect_enabled);
+    let max = route
+        .bridge
+        .ws_reconnect_max_secs
+        .map(std::time::Duration::from_secs)
+        .filter(|d| !d.is_zero())
+        .unwrap_or(defaults.ws_reconnect_max);
+    (enabled, max)
+}
+
 /// Resolve the inactivity watchdog for one call. Route value wins
 /// when set, with `Some(0)` meaning "disabled for this route";
 /// otherwise the daemon default applies.
@@ -3233,16 +3255,25 @@ impl BridgingAcceptor {
             RecordingMode::Off => None,
         };
 
+        let (ws_reconnect_enabled, ws_reconnect_max) = resolve_ws_reconnect(&self.defaults, route);
         let cfg = CallControllerConfig {
             call_id: bridge_call_id.clone(),
             bridge: bridge_config.clone(),
             start: start.clone(),
-            media_tap: tap,
+            // Reconnect-enabled calls put the tap in survive-WS-drop mode
+            // so an unexpected bridge drop doesn't tear it down before the
+            // controller can redial (0.7.3).
+            media_tap: tap.with_ws_reconnect(ws_reconnect_enabled),
             transfer,
             recording,
             conference: self.conference.clone(),
             park: self.park.clone(),
             hold,
+            ws_reconnect_enabled,
+            ws_reconnect_max,
+            // Reconnect MOH reuses the shared [media].moh_file (same source
+            // park and hold use).
+            ws_reconnect_moh_file: self.hold_moh_file.clone(),
         };
         let (controller, handle) = CallController::new(cfg);
 

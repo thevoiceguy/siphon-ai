@@ -134,6 +134,9 @@ async fn dispatch_bye_wakes_running_controller_via_registry() {
         conference: None,
         park: None,
         hold: None,
+        ws_reconnect_enabled: false,
+        ws_reconnect_max: std::time::Duration::from_secs(30),
+        ws_reconnect_moh_file: None,
     };
     let (controller, handle) = CallController::new(cfg);
 
@@ -225,6 +228,9 @@ async fn bye_drives_wire_stop_with_caller_hangup_reason() {
         conference: None,
         park: None,
         hold: None,
+        ws_reconnect_enabled: false,
+        ws_reconnect_max: std::time::Duration::from_secs(30),
+        ws_reconnect_moh_file: None,
     };
     let (controller, handle) = CallController::new(cfg);
 

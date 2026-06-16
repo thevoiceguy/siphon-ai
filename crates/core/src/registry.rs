@@ -445,6 +445,9 @@ mod tests {
             conference: None,
             park: None,
             hold: None,
+            ws_reconnect_enabled: false,
+            ws_reconnect_max: std::time::Duration::from_secs(30),
+            ws_reconnect_moh_file: None,
         };
         let (controller, handle) = CallController::new(cfg);
         // Drop the controller without running it; the handle still

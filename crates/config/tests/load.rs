@@ -108,6 +108,12 @@ fn representative_config_compiles_into_consumable_pieces() {
         cfg.bridge_defaults.forward_headers,
         vec!["User-Agent".to_string(), "X-Tenant-Id".to_string()],
     );
+    // WS reconnect (0.7.3): off by default, 30 s window, when unset.
+    assert!(!cfg.bridge_defaults.ws_reconnect_enabled);
+    assert_eq!(
+        cfg.bridge_defaults.ws_reconnect_max,
+        Duration::from_secs(30)
+    );
 
     // [[route]] — handed off to siphon-ai-routes; just confirm both
     // routes survived and the trailing default is present.
@@ -120,6 +126,54 @@ fn missing_env_var_without_default_fails_load() {
     let env = MapEnv::new([]); // no BRIDGE_TOKEN
     let err = load_from_str_with_env(REPRESENTATIVE_TOML, &env).unwrap_err();
     assert!(matches!(err, LoadError::Env(_)));
+}
+
+const RECONNECT_TOML: &str = r#"
+[node]
+id = "siphon-ai-reconnect-test"
+public_address = "203.0.113.10"
+[sip]
+listen = "127.0.0.1:5060"
+[bridge]
+ws_url = "wss://default.example.com/sip-bridge"
+ws_reconnect_enabled = true
+WS_RECONNECT_MAX
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+
+#[test]
+fn ws_reconnect_enabled_with_default_window_compiles() {
+    let toml = RECONNECT_TOML.replace("WS_RECONNECT_MAX\n", ""); // window unset → 30 s
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    assert!(cfg.bridge_defaults.ws_reconnect_enabled);
+    assert_eq!(
+        cfg.bridge_defaults.ws_reconnect_max,
+        Duration::from_secs(30)
+    );
+}
+
+#[test]
+fn ws_reconnect_custom_window_compiles() {
+    let toml = RECONNECT_TOML.replace("WS_RECONNECT_MAX", "ws_reconnect_max_secs = 45");
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    assert_eq!(
+        cfg.bridge_defaults.ws_reconnect_max,
+        Duration::from_secs(45)
+    );
+}
+
+#[test]
+fn ws_reconnect_enabled_with_zero_window_fails() {
+    // Enabling reconnect with a zero window is a fail-loud config error.
+    let toml = RECONNECT_TOML.replace("WS_RECONNECT_MAX", "ws_reconnect_max_secs = 0");
+    let err = load_from_str_with_env(&toml, &MapEnv::new([])).unwrap_err();
+    assert!(
+        matches!(err, LoadError::Compile(_)),
+        "expected a compile error, got {err:?}"
+    );
 }
 
 #[test]

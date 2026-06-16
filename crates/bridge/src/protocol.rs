@@ -317,6 +317,17 @@ pub struct StartMsg {
     /// server sees the exact shape it always did.
     #[serde(default, skip_serializing_if = "is_false")]
     pub retrieved: bool,
+    /// `true` when this `start` *resumes* a call after an unexpected WS
+    /// drop (0.7.3, `[bridge].ws_reconnect_enabled`) — SiphonAI re-dialed
+    /// the same `ws_url` for the same `call_id`; the server should tear
+    /// down whatever handler it still has for this call and treat this
+    /// socket as the live one. `seq` restarts at 0 (a fresh session, no
+    /// replay of pre-drop audio/events). Distinct from [`retrieved`] (an
+    /// operator picking up a *parked* call). Additive — omitted (and
+    /// `false`) on every non-reconnect `start`, so a server that ignores
+    /// it safely treats the call as brand-new.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reconnected: bool,
 }
 
 /// serde `skip_serializing_if` helper — keep `retrieved: false` off the
@@ -1274,6 +1285,7 @@ mod tests {
             srtp: None,
             verstat: None,
             retrieved: false,
+            reconnected: false,
         };
         let v = serde_json::to_value(&start_false).unwrap();
         assert!(
@@ -1284,6 +1296,7 @@ mod tests {
         // true ⇒ present.
         let start_true = StartMsg {
             retrieved: true,
+            reconnected: false,
             ..start_false
         };
         let v = serde_json::to_value(&start_true).unwrap();
@@ -1291,6 +1304,51 @@ mod tests {
         // And a retrieve-session start round-trips through BridgeOut.
         let _ = assert_round_trip::<BridgeOut>(
             &serde_json::to_string(&BridgeOut::Start(start_true)).unwrap(),
+        );
+    }
+
+    #[test]
+    fn start_reconnected_omitted_when_false_present_when_true() {
+        // Mirror of `retrieved` (0.7.3): absent on the wire when false,
+        // present when true, and independent of `retrieved`.
+        let base = StartMsg {
+            version: "1".into(),
+            call_id: CallId::new("c"),
+            seq: 0,
+            from: "+1".into(),
+            to: "5000".into(),
+            direction: Direction::Inbound,
+            audio: AudioFormat {
+                encoding: AudioEncoding::Pcm16le,
+                sample_rate: 8000,
+                channels: 1,
+                frame_ms: 20,
+            },
+            sip: SipMeta {
+                call_id: "x@y".into(),
+                headers: HashMap::new(),
+            },
+            srtp: None,
+            verstat: None,
+            retrieved: false,
+            reconnected: false,
+        };
+        let v = serde_json::to_value(&base).unwrap();
+        assert!(
+            v.get("reconnected").is_none(),
+            "reconnected must be absent when false"
+        );
+
+        let reconnected = StartMsg {
+            reconnected: true,
+            ..base
+        };
+        let v = serde_json::to_value(&reconnected).unwrap();
+        assert_eq!(v["reconnected"], serde_json::json!(true));
+        // `retrieved` stays absent — the two flags are independent.
+        assert!(v.get("retrieved").is_none());
+        let _ = assert_round_trip::<BridgeOut>(
+            &serde_json::to_string(&BridgeOut::Start(reconnected)).unwrap(),
         );
     }
 
@@ -1451,6 +1509,7 @@ mod tests {
             srtp: None,
             verstat: None,
             retrieved: false,
+            reconnected: false,
         });
         let v: Value = serde_json::to_value(&start).unwrap();
         let obj = v.as_object().unwrap();
@@ -1507,6 +1566,7 @@ mod tests {
                 srtp,
                 verstat: None,
                 retrieved: false,
+                reconnected: false,
             })
         };
 
@@ -1569,6 +1629,7 @@ mod tests {
                 srtp: None,
                 verstat: verstat.map(Box::new),
                 retrieved: false,
+                reconnected: false,
             })
         };
 

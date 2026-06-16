@@ -554,6 +554,18 @@ pub enum CompileError {
     #[error("[bridge.barge_in].mode is {0:?}; expected \"auto_clear\" or \"notify_only\"")]
     UnknownBargeInMode(String),
 
+    #[error(
+        "ws_reconnect_max_secs must be > 0 when ws_reconnect_enabled = true \
+         (a zero window gives up before the first reconnect attempt)"
+    )]
+    BadWsReconnectWindow,
+
+    #[error(
+        "route {route:?} sets [route.bridge].ws_reconnect_enabled = true with \
+         ws_reconnect_max_secs = 0; the window must be > 0"
+    )]
+    RouteBadWsReconnectWindow { route: String },
+
     #[error("[media].srtp is {0:?}; expected \"off\", \"preferred\", or \"required\"")]
     UnknownSrtpMode(String),
 
@@ -1373,6 +1385,16 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
 
     let barge_in = compile_barge_in_default(&raw.barge_in)?;
 
+    // WS reconnect (0.7.3). Off unless explicitly enabled; the window
+    // defaults to 30 s. Enabling with a zero window is a config mistake
+    // (it would give up before the first backoff) — fail loud per §4.6.
+    let ws_reconnect_enabled = raw.ws_reconnect_enabled.unwrap_or(false);
+    let ws_reconnect_secs = raw.ws_reconnect_max_secs.unwrap_or(30);
+    if ws_reconnect_enabled && ws_reconnect_secs == 0 {
+        return Err(CompileError::BadWsReconnectWindow);
+    }
+    let ws_reconnect_max = Duration::from_secs(ws_reconnect_secs);
+
     // `None` → 60 s default; `Some(0)` → watchdog off. The merge
     // step in `resolve_inactivity_timeout` handles per-route 0 →
     // disabled the same way.
@@ -1433,6 +1455,8 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         rtp_stats_interval,
         srtp_mode,
         bridge_tls,
+        ws_reconnect_enabled,
+        ws_reconnect_max,
     })
 }
 
@@ -1512,6 +1536,16 @@ fn compile_dialplan(routes: Vec<siphon_ai_routes::RawRoute>) -> Result<RouteSet,
                     value: mode.to_string(),
                 });
             }
+        }
+        // A route enabling reconnect with a zero window is the same
+        // mistake as the global (0.7.3). `Some(0)` only — `None`
+        // inherits the (validated, non-zero) global.
+        if route.bridge.ws_reconnect_enabled == Some(true)
+            && route.bridge.ws_reconnect_max_secs == Some(0)
+        {
+            return Err(CompileError::RouteBadWsReconnectWindow {
+                route: route.name.clone(),
+            });
         }
         // Validate the per-route attestation override at load time so a typo
         // is a startup failure, not a silent runtime fall-back. The

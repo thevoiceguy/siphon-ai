@@ -49,6 +49,15 @@ version 1. Delivered across three chunks (protocol surface → re-INVITE drive
   `hold` → `resume` → `hangup`, and `bot_hold_caller.xml` asserts it
   *receives* a sendonly re-INVITE then a sendrecv one (SiphonAI is the
   offerer), with `siphon_ai_holds_total{result="ok"}` reading 2.
+- **Playout-gated barge-in debounce (`[bridge.barge_in].debounce_ms`)**
+  (#173 — merged between 0.7.1 and this release, so 0.7.2 is its first
+  tagged release). While the bot is playing out, a `speech_started` is held
+  for `debounce_ms` and only flushes if speech *sustains* past it — an
+  echo / brief-background-noise gate that stops the bot cutting itself off
+  on its own echo. Barge-in stays **immediate while the bot is silent**, so
+  a caller interrupting between phrases is unaffected. `0`/unset = off
+  (original immediate-flush behaviour); only affects `auto_clear`. Per-route
+  override via `[route.bridge.barge_in].debounce_ms`. `docs/CONFIG.md`.
 
 ### Changed
 

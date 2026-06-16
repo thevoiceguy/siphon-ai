@@ -108,19 +108,19 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # main branch and replace the rev hashes here (see CLAUDE.md §7.5).
 
 # siphon-rs — RFC 3261 SIP stack
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "8f3fd80dc5c5" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "8f3fd80dc5c5" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "8f3fd80dc5c5", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "8f3fd80dc5c5" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "8f3fd80dc5c5" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "8f3fd80dc5c5" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "8f3fd80dc5c5" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "8f3fd80dc5c5" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "8f3fd80dc5c5" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "8f3fd80dc5c5" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "8f3fd80dc5c5" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #

@@ -96,11 +96,12 @@ use crate::call::{
     CallController, CallControllerConfig, CallOutcome, CallTermination, RecordingSummary,
 };
 use crate::conference::ConferenceRegistry;
+use crate::hold::HoldContext;
 use crate::park::ParkContext;
 use crate::registry::CallControlRegistry;
 use crate::registry::CallRegistry;
 use crate::registry::ConsultRegistry;
-use crate::transfer::{DialogSource, TransferContext};
+use crate::transfer::{DialogControl, DialogSource, TransferContext};
 
 /// Daemon-wide bridge & media defaults. Routes' `[route.bridge]`
 /// and `[route.media]` blocks override individual fields.
@@ -1493,6 +1494,11 @@ pub struct BridgingAcceptor {
     /// accepted call's controller gets a clone so a WS `park` (or admin
     /// park) works. `None` → park off, requests rejected.
     park: Option<ParkContext>,
+    /// `[media].moh_file` — hold music for bot-initiated hold (0.7.2).
+    /// Built into each inbound call's `HoldContext`. `None` → generated
+    /// comfort silence. Hold itself is always available on inbound legs
+    /// (no enable flag); this only chooses what the caller hears.
+    hold_moh_file: Option<std::path::PathBuf>,
 }
 
 /// Daemon-wide REFER plumbing (shared across every accepted call).
@@ -1710,6 +1716,7 @@ impl BridgingAcceptor {
             conference: None,
             control_registry: CallControlRegistry::new(),
             park: None,
+            hold_moh_file: None,
         }
     }
 
@@ -1847,6 +1854,15 @@ impl BridgingAcceptor {
     /// controller gets a clone. Left unset → park is off.
     pub fn with_park(mut self, park: ParkContext) -> Self {
         self.park = Some(park);
+        self
+    }
+
+    /// Install the hold-music file (`[media].moh_file`) for bot-initiated
+    /// hold (0.7.2). Left unset → the caller hears generated comfort
+    /// silence while held. Does not gate hold itself — that's always
+    /// available on inbound legs.
+    pub fn with_hold_moh_file(mut self, moh_file: Option<std::path::PathBuf>) -> Self {
+        self.hold_moh_file = moh_file;
         self
     }
 
@@ -2218,35 +2234,10 @@ fn mirror_direction(
 /// initial answer we cache always emits `a=sendrecv`) but keeps
 /// the helper total.
 fn rewrite_sdp_direction(sdp: &str, new_dir: siphon_ai_media_glue::MediaDirection) -> String {
-    let mut out = String::with_capacity(sdp.len());
-    let mut replaced = false;
-    for line in sdp.split_inclusive('\n') {
-        let trimmed = line.trim_end();
-        let is_direction = matches!(
-            trimmed,
-            "a=sendrecv" | "a=sendonly" | "a=recvonly" | "a=inactive"
-        );
-        if is_direction && !replaced {
-            // Preserve CRLF vs LF: take the trailing newline bytes
-            // off the original line and re-attach them.
-            let nl = &line[trimmed.len()..];
-            out.push_str("a=");
-            out.push_str(new_dir.as_attr());
-            out.push_str(nl);
-            replaced = true;
-        } else {
-            out.push_str(line);
-        }
-    }
-    if !replaced {
-        // Append. Caller's responsibility to ensure the audio
-        // media section is the last thing — true for our cached
-        // answers (built by `build_answer`).
-        out.push_str("a=");
-        out.push_str(new_dir.as_attr());
-        out.push_str("\r\n");
-    }
-    out
+    // Single implementation lives in media-glue (shared with the
+    // bot-initiated hold/resume offer builder); this is the peer-hold
+    // answer side of the same flip.
+    siphon_ai_media_glue::rewrite_sdp_direction(sdp, new_dir)
 }
 
 #[async_trait]
@@ -2407,6 +2398,10 @@ impl CallAcceptor for BridgingAcceptor {
                         direction = new_direction.as_attr(),
                         "emitting Hold on WS bridge"
                     );
+                    // Mark the leg peer-held so a concurrent
+                    // bot-initiated hold is rejected (0.7.2 no-stacking
+                    // policy).
+                    entry.handle.set_peer_held(true);
                     entry.handle.push_bridge_event(OutgoingEvent::Hold {
                         direction: new_direction.as_attr().to_string(),
                     });
@@ -2416,6 +2411,7 @@ impl CallAcceptor for BridgingAcceptor {
                         sip_call_id = %call.sip_call_id,
                         "emitting Resume on WS bridge"
                     );
+                    entry.handle.set_peer_held(false);
                     entry.handle.push_bridge_event(OutgoingEvent::Resume);
                 }
                 _ => {
@@ -3144,15 +3140,46 @@ impl BridgingAcceptor {
         );
 
         let transfer = self.transfer.get().map(|installed| TransferContext {
-            uac: Arc::clone(&installed.uac),
-            source: DialogSource::Managed {
-                sip_call_id: sip_call_id.clone(),
-                dialog_manager: Arc::clone(&installed.dialog_manager),
+            control: DialogControl {
+                uac: Arc::clone(&installed.uac),
+                source: DialogSource::Managed {
+                    sip_call_id: sip_call_id.clone(),
+                    dialog_manager: Arc::clone(&installed.dialog_manager),
+                },
+                // The INVITE's transport context isn't threaded down to
+                // prepare; run_call attaches the accepted session's flow.
+                flow: None,
             },
             consult_registry: installed.consult_registry.clone(),
-            // The INVITE's transport context isn't threaded down to
-            // prepare; run_call attaches the accepted session's flow.
-            flow: None,
+        });
+
+        // Bot-initiated hold (0.7.2). Reuses the transfer install's UAC
+        // + shared DialogManager (hold drives a re-INVITE the same way
+        // transfer drives a REFER). The hold/resume offers are our cached
+        // answer SDP with the direction flipped — reusing the negotiated
+        // media (port / codec / crypto) verbatim, since mid-call
+        // renegotiation is out of scope. `flow` is attached in run_call
+        // alongside transfer's, so TCP/TLS legs reuse the inbound
+        // connection. `None` when no IntegratedUAC is installed (hold,
+        // like transfer, needs one).
+        let hold = self.transfer.get().map(|installed| HoldContext {
+            control: DialogControl {
+                uac: Arc::clone(&installed.uac),
+                source: DialogSource::Managed {
+                    sip_call_id: sip_call_id.clone(),
+                    dialog_manager: Arc::clone(&installed.dialog_manager),
+                },
+                flow: None,
+            },
+            hold_offer_sdp: siphon_ai_media_glue::rewrite_sdp_direction(
+                &answer.answer_text,
+                siphon_ai_media_glue::MediaDirection::SendOnly,
+            ),
+            resume_offer_sdp: siphon_ai_media_glue::rewrite_sdp_direction(
+                &answer.answer_text,
+                siphon_ai_media_glue::MediaDirection::SendRecv,
+            ),
+            moh_file: self.hold_moh_file.clone(),
         });
 
         // Recording setup. The matched route's `[route.recording].mode`
@@ -3187,6 +3214,7 @@ impl BridgingAcceptor {
             recording,
             conference: self.conference.clone(),
             park: self.park.clone(),
+            hold,
         };
         let (controller, handle) = CallController::new(cfg);
 

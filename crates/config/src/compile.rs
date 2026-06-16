@@ -497,6 +497,10 @@ pub struct MediaConfig {
     /// field exists in W1 so per-route override merging and the
     /// `start.srtp` event field have a stable type to bind to.
     pub srtp: siphon_ai_core::SrtpMode,
+    /// `[media].moh_file` — hold music for bot-initiated hold (0.7.2).
+    /// `None` → generated comfort silence. Validated to exist at load
+    /// time (same check as `[park].moh_file`).
+    pub moh_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -661,6 +665,9 @@ pub enum CompileError {
 
     #[error("[park].moh_file {0:?} does not exist or is not a file")]
     ParkMohMissing(String),
+
+    #[error("[media].moh_file {0:?} does not exist or is not a file")]
+    MediaMohMissing(String),
 
     #[error("[media].rtp_port_range {min}-{max} is invalid (min must be < max and even)")]
     BadRtpPortRange { min: u16, max: u16 },
@@ -1016,9 +1023,24 @@ fn compile_media(raw: &RawMedia) -> Result<MediaConfig, CompileError> {
         }
     }
     let srtp = compile_srtp_mode(raw.srtp.as_deref())?;
+    // Hold music: validate existence at load time (fail loud, §4.6).
+    // Unlike `[park].moh_file`, hold has no enable flag — it's always
+    // available on inbound legs — so an empty/absent value just means
+    // comfort silence, but a *set* path that doesn't exist is an error.
+    let moh_file = match raw.moh_file.as_deref().filter(|s| !s.is_empty()) {
+        None => None,
+        Some(p) => {
+            let path = PathBuf::from(p);
+            if !path.is_file() {
+                return Err(CompileError::MediaMohMissing(p.to_string()));
+            }
+            Some(path)
+        }
+    };
     Ok(MediaConfig {
         rtp_port_range: raw.rtp_port_range,
         srtp,
+        moh_file,
     })
 }
 

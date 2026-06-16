@@ -86,37 +86,81 @@ impl DialogSource {
     }
 }
 
-/// Everything the controller needs to fire a REFER on this call's
-/// dialog — inbound (resolved via the shared [`DialogManager`]) or
-/// outbound (held directly, sent through the gateway's own UAC so
-/// its digest credentials answer any challenge).
+/// The shared handle for driving an **in-dialog request** (REFER for
+/// transfer, re-INVITE for hold/resume) on this call's leg, factored
+/// out of [`TransferContext`] so hold (0.7.2) reuses the same dialog
+/// resolution and the 0.6.x `*_via_flow` TCP/TLS connection-reuse
+/// without duplicating it.
 ///
-/// One [`TransferContext`] per call: the dialog source pins this
-/// call's leg, so the lookup is local to the controller, not a
-/// process-wide search. `consult_registry` is the daemon-wide
-/// consult-leg lookup for attended transfer (empty unless
-/// `[outbound]` calls are live).
+/// `source` pins this call's dialog — inbound (resolved via the shared
+/// [`DialogManager`]) or outbound (held directly, sent through the
+/// gateway's own UAC so its digest credentials answer any challenge).
+/// `flow` is `Some` when the dialog arrived over an inbound TCP/TLS
+/// connection: the request (and any follow-up BYE) must reuse it via
+/// the `*_via_flow` UAC methods, because the dispatcher is inbound-only
+/// and the peer's Contact names an ephemeral port nothing listens on
+/// (same plumbing as `TeardownContext.flow`, #157).
 #[derive(Clone)]
-pub struct TransferContext {
+pub struct DialogControl {
     pub uac: Arc<IntegratedUAC>,
     pub source: DialogSource,
-    pub consult_registry: ConsultRegistry,
-    /// `Some` when this call's dialog arrived over TCP/TLS: the REFER
-    /// (and the post-REFER BYE) must reuse the inbound connection via
-    /// the `*_via_flow` UAC methods — the dispatcher is inbound-only
-    /// and the peer's Contact names an ephemeral port nothing listens
-    /// on. Same plumbing as `TeardownContext.flow` (#157). Attached
-    /// post-prepare in `run_call`, where the accepted session's flow
-    /// is known; `None` on datagram transports and outbound legs
-    /// (their gateway UAC dialed out itself, so its dispatcher can
-    /// reach the peer).
     pub flow: Option<DialogFlow>,
+}
+
+impl DialogControl {
+    /// Per-task dialog clone, or `None` if the dialog is gone.
+    pub(crate) fn resolve(&self) -> Option<sip_dialog::Dialog> {
+        self.source.resolve()
+    }
+
+    /// Drive a re-INVITE with `sdp` as the offer (e.g. `a=sendonly` to
+    /// hold, `a=sendrecv` to resume), reusing the inbound TCP/TLS
+    /// connection when `flow` is set. The 2xx is auto-ACKed by the
+    /// stack. Used by bot-initiated hold/resume (0.7.2).
+    pub(crate) async fn send_reinvite(
+        &self,
+        dialog: &mut sip_dialog::Dialog,
+        sdp: &str,
+    ) -> anyhow::Result<sip_core::Response> {
+        match &self.flow {
+            Some(flow) => {
+                self.uac
+                    .send_reinvite_via_flow(dialog, Some(sdp), flow.to_uac_flow())
+                    .await
+            }
+            None => self.uac.send_reinvite(dialog, Some(sdp)).await,
+        }
+    }
+
+    /// The leg's SIP Call-ID, for logging.
+    pub(crate) fn sip_call_id(&self) -> &str {
+        self.source.sip_call_id()
+    }
+}
+
+impl std::fmt::Debug for DialogControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DialogControl")
+            .field("sip_call_id", &self.source.sip_call_id())
+            .field("via_flow", &self.flow.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Everything the controller needs to fire a REFER on this call's
+/// dialog. Wraps a [`DialogControl`] (the dialog + flow drive, shared
+/// with hold) plus the daemon-wide `consult_registry` for attended
+/// transfer (empty unless `[outbound]` calls are live).
+#[derive(Clone)]
+pub struct TransferContext {
+    pub control: DialogControl,
+    pub consult_registry: ConsultRegistry,
 }
 
 impl std::fmt::Debug for TransferContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TransferContext")
-            .field("sip_call_id", &self.source.sip_call_id())
+            .field("sip_call_id", &self.control.sip_call_id())
             .finish_non_exhaustive()
     }
 }

@@ -68,6 +68,7 @@ use siphon_ai_media_glue::{
 };
 
 use crate::conference::{ConferenceError, ConferenceRegistry};
+use crate::hold::HoldContext;
 use crate::park::{ParkContext, ParkTimeoutAction};
 use chrono::Utc;
 use parking_lot::RwLock;
@@ -84,7 +85,9 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 
 use crate::transfer::{plan_refer, ReferPlan, TransferContext, TransferOutcome};
-use siphon_ai_telemetry::{PARKED_CALLS_ACTIVE, PARKS_TOTAL, RETRIEVES_TOTAL, TRANSFERS_TOTAL};
+use siphon_ai_telemetry::{
+    HOLDS_TOTAL, PARKED_CALLS_ACTIVE, PARKS_TOTAL, RETRIEVES_TOTAL, TRANSFERS_TOTAL,
+};
 
 /// Bounded channel capacity for audio frames. 10 × 20 ms = 200 ms
 /// of audio; per CLAUDE.md §6.2 audio channels are bounded for
@@ -142,6 +145,12 @@ pub struct CallControllerConfig {
     /// `error { code: "park_failed" }`. Carries the MOH/timeout
     /// settings + the daemon-wide `ParkRegistry`.
     pub park: Option<ParkContext>,
+
+    /// Hold context (0.7.2). `Some` for inbound legs (the bot can hold
+    /// its own caller via `BridgeIn::Hold` / `Resume`). `None` → a hold
+    /// request is answered with `error { code: "hold_failed" }`. Carries
+    /// the precomputed hold/resume re-INVITE offers + MOH file.
+    pub hold: Option<HoldContext>,
 }
 
 /// Where in its life a call is. State transitions are logged at
@@ -289,6 +298,14 @@ pub struct CallHandle {
     /// `conf_cmd_tx`: the admin API signals; the controller acts on
     /// its own state.
     park_cmd_tx: mpsc::Sender<ParkCommand>,
+    /// Set while the **far end** has us on hold (0.7.2). The acceptor's
+    /// `on_reinvite` flips it on the peer's sendonly/inactive →
+    /// sendrecv transitions; the controller reads it to reject a
+    /// *bot*-initiated hold while peer-held (first-cut policy — no hold
+    /// stacking). Atomic so the SIP-dispatch side and the controller's
+    /// own loop can touch it without a lock (§4.4: per-call state on the
+    /// handle, not a global registry).
+    peer_held: std::sync::Arc<AtomicBool>,
 }
 
 /// A cross-call conference request pushed onto a [`CallHandle`] by the
@@ -329,7 +346,20 @@ impl CallHandle {
             bridge_events_tx: std::sync::Arc::new(RwLock::new(bridge_events_tx)),
             conf_cmd_tx,
             park_cmd_tx,
+            peer_held: std::sync::Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Record whether the far end currently has us on hold (0.7.2).
+    /// Called by the acceptor's `on_reinvite` on peer hold/resume
+    /// transitions.
+    pub fn set_peer_held(&self, held: bool) {
+        self.peer_held.store(held, Ordering::Release);
+    }
+
+    /// Whether the far end currently has us on hold.
+    pub fn peer_held(&self) -> bool {
+        self.peer_held.load(Ordering::Acquire)
     }
 
     /// Ask the controller to shut down cleanly. The controller
@@ -485,15 +515,19 @@ impl CallController {
         )
     }
 
-    /// Attach the inbound connection this call's dialog rides on to
-    /// the transfer context, so a REFER reuses it instead of dialing
-    /// the peer's Contact (TCP/TLS dialogs; see issue #159). Called
-    /// by `run_call` after accept, when the flow is known — the
-    /// `TransferContext` itself is built earlier, in `prepare_call`.
-    /// No-op when transfer isn't installed or `flow` is `None`.
+    /// Attach the inbound connection this call's dialog rides on to the
+    /// transfer **and** hold contexts, so an in-dialog REFER (#159) or a
+    /// bot-initiated hold/resume re-INVITE (0.7.2) reuses it instead of
+    /// dialing the peer's Contact (TCP/TLS dialogs). Called by `run_call`
+    /// after accept, when the flow is known — the contexts themselves are
+    /// built earlier, in `prepare_call`. No-op when neither is installed
+    /// or `flow` is `None`.
     pub fn attach_transfer_flow(&mut self, flow: Option<crate::acceptor::DialogFlow>) {
         if let Some(transfer) = self.cfg.transfer.as_mut() {
-            transfer.flow = flow;
+            transfer.control.flow = flow.clone();
+        }
+        if let Some(hold) = self.cfg.hold.as_mut() {
+            hold.control.flow = flow;
         }
     }
 
@@ -523,6 +557,7 @@ impl CallController {
             recording,
             conference,
             park,
+            hold,
         } = cfg;
 
         // Park needs to rebuild the WS bridge on retrieve from the
@@ -665,6 +700,18 @@ impl CallController {
         let park_timeout_sleep = tokio::time::sleep(Duration::from_secs(86_400));
         tokio::pin!(park_timeout_sleep);
         let mut park_deadline_armed = false;
+
+        // ─── Hold state (0.7.2) ──────────────────────────────────
+        // `held` true between a bot-initiated `Hold` and its `Resume`.
+        // While held the tap plays MOH to the caller and drops the
+        // caller↔WS bridge in both directions, but the WS session stays
+        // attached (no durable-task rework — that's park's job). No hold
+        // timeout: an abandoned hold is handled by the WS disconnecting.
+        let mut held = false;
+        // Re-INVITE glare backoff (RFC 3261 §14.1): if the peer sends
+        // its own re-INVITE at the same moment, our offer draws a 491 —
+        // we wait this long, then retry once.
+        const HOLD_GLARE_BACKOFF: Duration = Duration::from_millis(250);
 
         let shutdown = handle.notify.clone();
 
@@ -809,21 +856,129 @@ impl CallController {
                             debug!(ws_call_id = %cid, ?slot, "WS park requested");
                             handle.request_park(slot);
                         }
-                        Some(BridgeIn::Hold { call_id: cid })
-                        | Some(BridgeIn::Resume { call_id: cid }) => {
-                            // Protocol surface only (0.7.2 chunk 1). The
-                            // re-INVITE drive lands in chunk 2; until then
-                            // reply hold_failed so an intermediate build
-                            // doesn't silently swallow the request. The call
-                            // is untouched (a failed hold never drops it).
-                            debug!(ws_call_id = %cid, "hold/resume received but not yet wired (chunk 2)");
-                            let _ = control_out_tx
-                                .send(OutgoingEvent::Error {
+                        Some(BridgeIn::Hold { call_id: cid }) => {
+                            // Bot-initiated hold: SiphonAI becomes the
+                            // re-INVITE offerer (a=sendonly) and switches
+                            // the caller to MOH. A failed hold never drops
+                            // the call (PROTOCOL.md §4.10) — it just stays
+                            // in its prior media state.
+                            debug!(ws_call_id = %cid, "WS hold requested");
+                            match hold.as_ref() {
+                                _ if held => {
+                                    // Idempotent: already held → re-ack.
+                                    debug!(call_id = %call_id, "hold requested but already held; re-acking");
+                                    let _ = control_out_tx.send(OutgoingEvent::Held).await;
+                                }
+                                _ if handle.peer_held() => {
+                                    // No stacking (0.7.2 first cut): the far
+                                    // end already holds us.
+                                    warn!(call_id = %call_id, "hold rejected: call is already held by the far end");
+                                    metrics::counter!(HOLDS_TOTAL, "result" => "failed").increment(1);
+                                    let _ = control_out_tx.send(OutgoingEvent::Error {
+                                        code: ErrorCode::HoldFailed,
+                                        message: "call is already held by the far end".to_string(),
+                                    }).await;
+                                }
+                                Some(hctx) => {
+                                    // Switch the caller to MOH now (the bot
+                                    // stops hearing the caller, the caller
+                                    // hears hold music), then confirm at the
+                                    // SIP layer with a sendonly re-INVITE.
+                                    let moh = MohSource::new(
+                                        hctx.moh_file.as_deref(),
+                                        call_sample_rate,
+                                    );
+                                    if let Err(e) = tap_cmd_tx
+                                        .try_send(TapCommand::Hold { moh: Box::new(moh) })
+                                    {
+                                        warn!(call_id = %call_id, error = %e,
+                                            "tap command channel full/closed; hold aborted");
+                                        metrics::counter!(HOLDS_TOTAL, "result" => "failed").increment(1);
+                                        let _ = control_out_tx.send(OutgoingEvent::Error {
+                                            code: ErrorCode::HoldFailed,
+                                            message: "tap unavailable for hold".to_string(),
+                                        }).await;
+                                    } else {
+                                        match drive_hold_reinvite(
+                                            hctx,
+                                            &hctx.hold_offer_sdp,
+                                            HOLD_GLARE_BACKOFF,
+                                        )
+                                        .await
+                                        {
+                                            Ok(()) => {
+                                                held = true;
+                                                metrics::counter!(HOLDS_TOTAL, "result" => "ok").increment(1);
+                                                info!(call_id = %call_id, "call held (bot-initiated)");
+                                                let _ = control_out_tx.send(OutgoingEvent::Held).await;
+                                            }
+                                            Err(e) => {
+                                                // Revert the optimistic MOH switch.
+                                                let _ = tap_cmd_tx.try_send(TapCommand::Unhold);
+                                                warn!(call_id = %call_id, error = %e, "hold re-INVITE failed");
+                                                metrics::counter!(HOLDS_TOTAL, "result" => "failed").increment(1);
+                                                let _ = control_out_tx.send(OutgoingEvent::Error {
+                                                    code: ErrorCode::HoldFailed,
+                                                    message: e,
+                                                }).await;
+                                            }
+                                        }
+                                    }
+                                }
+                                None => {
+                                    warn!(call_id = %call_id, "hold requested but hold is unavailable on this leg");
+                                    metrics::counter!(HOLDS_TOTAL, "result" => "failed").increment(1);
+                                    let _ = control_out_tx.send(OutgoingEvent::Error {
+                                        code: ErrorCode::HoldFailed,
+                                        message: "hold is not available on this call".to_string(),
+                                    }).await;
+                                }
+                            }
+                        }
+                        Some(BridgeIn::Resume { call_id: cid }) => {
+                            debug!(ws_call_id = %cid, "WS resume requested");
+                            if !held {
+                                // Not held → no-op success (PROTOCOL.md §4.10).
+                                debug!(call_id = %call_id, "resume on a call that isn't held; acking no-op");
+                                let _ = control_out_tx.send(OutgoingEvent::Resumed).await;
+                            } else if let Some(hctx) = hold.as_ref() {
+                                match drive_hold_reinvite(
+                                    hctx,
+                                    &hctx.resume_offer_sdp,
+                                    HOLD_GLARE_BACKOFF,
+                                )
+                                .await
+                                {
+                                    Ok(()) => {
+                                        held = false;
+                                        // Restore the direct caller↔WS bridge
+                                        // on the existing WS session.
+                                        if let Err(e) = tap_cmd_tx.try_send(TapCommand::Unhold) {
+                                            warn!(call_id = %call_id, error = %e,
+                                                "tap command channel full/closed; resume audio may not restore");
+                                        }
+                                        metrics::counter!(HOLDS_TOTAL, "result" => "ok").increment(1);
+                                        info!(call_id = %call_id, "call resumed (bot-initiated)");
+                                        let _ = control_out_tx.send(OutgoingEvent::Resumed).await;
+                                    }
+                                    Err(e) => {
+                                        // Stay held; the WS server can retry.
+                                        warn!(call_id = %call_id, error = %e, "resume re-INVITE failed");
+                                        metrics::counter!(HOLDS_TOTAL, "result" => "failed").increment(1);
+                                        let _ = control_out_tx.send(OutgoingEvent::Error {
+                                            code: ErrorCode::HoldFailed,
+                                            message: e,
+                                        }).await;
+                                    }
+                                }
+                            } else {
+                                // Held but no hold ctx — shouldn't happen.
+                                metrics::counter!(HOLDS_TOTAL, "result" => "failed").increment(1);
+                                let _ = control_out_tx.send(OutgoingEvent::Error {
                                     code: ErrorCode::HoldFailed,
-                                    message: "hold/resume not yet supported on this build"
-                                        .to_string(),
-                                })
-                                .await;
+                                    message: "resume is not available on this call".to_string(),
+                                }).await;
+                            }
                         }
                         Some(BridgeIn::Mark { call_id: cid, name }) => {
                             debug!(ws_call_id = %cid, %name, "forwarding Mark to tap");
@@ -922,7 +1077,7 @@ impl CallController {
                             // the same UAC and fail the same way, and
                             // the task already warned that the dialog
                             // may linger.
-                            if transfer.as_ref().is_some_and(|t| t.source.bye_after_refer()) {
+                            if transfer.as_ref().is_some_and(|t| t.control.source.bye_after_refer()) {
                                 handle.mark_remote_bye();
                             }
                             termination = CallTermination::LocalShutdown;
@@ -1532,7 +1687,7 @@ async fn run_transfer_inner(
     // clone so the local CSeq the REFER consumes doesn't race other
     // requests on the same dialog. CLAUDE.md §4.4: per-call state is
     // not shared across tasks — this is the per-task copy.
-    let Some(mut dialog) = ctx.source.resolve() else {
+    let Some(mut dialog) = ctx.control.source.resolve() else {
         return TransferOutcome::LocalError("dialog for this call is gone".to_string());
     };
 
@@ -1545,20 +1700,26 @@ async fn run_transfer_inner(
     // the dispatcher is inbound-only and the peer's Contact names an
     // ephemeral source port nothing listens on (issue #159, same
     // reasoning as the cleanup BYE in #157).
-    let sent = match &ctx.flow {
+    let sent = match &ctx.control.flow {
         Some(flow) => {
-            ctx.uac
+            ctx.control
+                .uac
                 .send_refer_via_flow(&mut dialog, refer_to, consult, flow.to_uac_flow())
                 .await
         }
-        None => ctx.uac.send_refer(&mut dialog, refer_to, consult).await,
+        None => {
+            ctx.control
+                .uac
+                .send_refer(&mut dialog, refer_to, consult)
+                .await
+        }
     };
     match sent {
         Ok((response, _subscription)) => {
             let status = response.code();
             debug!(
                 status,
-                reused_inbound_connection = ctx.flow.is_some(),
+                reused_inbound_connection = ctx.control.flow.is_some(),
                 "REFER sent"
             );
             if (200..300).contains(&status) {
@@ -1572,10 +1733,15 @@ async fn run_transfer_inner(
                 // its own teardown path runs when that leg ends.
                 // Outbound legs skip the BYE too: their run_call
                 // teardown sends it when the controller exits.
-                if ctx.source.bye_after_refer() {
-                    let bye_sent = match &ctx.flow {
-                        Some(flow) => ctx.uac.bye_via_flow(&dialog, flow.to_uac_flow()).await,
-                        None => ctx.uac.bye(&dialog).await,
+                if ctx.control.source.bye_after_refer() {
+                    let bye_sent = match &ctx.control.flow {
+                        Some(flow) => {
+                            ctx.control
+                                .uac
+                                .bye_via_flow(&dialog, flow.to_uac_flow())
+                                .await
+                        }
+                        None => ctx.control.uac.bye(&dialog).await,
                     };
                     if let Err(e) = bye_sent {
                         warn!(error = %e, "post-REFER BYE failed (dialog may linger)");
@@ -1590,5 +1756,50 @@ async fn run_transfer_inner(
             }
         }
         Err(e) => TransferOutcome::LocalError(format!("send_refer: {e}")),
+    }
+}
+
+/// Drive one bot-initiated hold/resume re-INVITE with `offer_sdp` (our
+/// cached media with the direction flipped — `a=sendonly` to hold,
+/// `a=sendrecv` to resume), reusing the inbound TCP/TLS connection when
+/// the leg arrived over one. On 491 glare (RFC 3261 §14.1 — the peer
+/// offered at the same instant) we back off once and retry on the same
+/// dialog (its CSeq has already advanced). Returns `Ok(())` on a 2xx
+/// (the stack auto-ACKs), `Err(reason)` on a non-2xx / network failure
+/// / missing dialog — the caller maps that to `hold_failed` and leaves
+/// the call in its prior media state (a failed hold never drops it).
+async fn drive_hold_reinvite(
+    ctx: &HoldContext,
+    offer_sdp: &str,
+    glare_backoff: Duration,
+) -> Result<(), String> {
+    let Some(mut dialog) = ctx.control.resolve() else {
+        return Err("dialog for this call is gone".to_string());
+    };
+    let mut glare_retried = false;
+    loop {
+        match ctx.control.send_reinvite(&mut dialog, offer_sdp).await {
+            Ok(response) => {
+                let status = response.code();
+                if (200..300).contains(&status) {
+                    return Ok(());
+                }
+                if status == 491 && !glare_retried {
+                    glare_retried = true;
+                    debug!(
+                        status,
+                        "hold re-INVITE glare (491); backing off and retrying once"
+                    );
+                    tokio::time::sleep(glare_backoff).await;
+                    continue;
+                }
+                return Err(format!(
+                    "re-INVITE rejected: {} {}",
+                    status,
+                    response.reason()
+                ));
+            }
+            Err(e) => return Err(format!("re-INVITE failed: {e}")),
+        }
     }
 }

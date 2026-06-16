@@ -350,6 +350,51 @@ impl MediaDirection {
     }
 }
 
+/// Replace the `a=sendrecv|sendonly|recvonly|inactive` line in an SDP
+/// body with `new_dir`, re-using every other line (port / codec /
+/// rtpmap / fmtp / crypto) verbatim. The first direction line wins and
+/// nothing else is touched; CRLF vs LF on the rewritten line is
+/// preserved. If no direction line exists, one is appended.
+///
+/// This is the single direction-flip primitive for both sides of a
+/// re-INVITE: the acceptor uses it to mirror a *peer's* hold offer onto
+/// the cached answer (RFC 3264 §6.1), and the call layer uses it to
+/// build a *bot-initiated* hold/resume offer from the cached local SDP
+/// (`sendonly` to hold, `sendrecv` to resume) without re-running codec
+/// negotiation — mid-call codec/port change is out of scope, so reusing
+/// the original media lines verbatim is exactly right.
+pub fn rewrite_sdp_direction(sdp: &str, new_dir: MediaDirection) -> String {
+    let mut out = String::with_capacity(sdp.len());
+    let mut replaced = false;
+    for line in sdp.split_inclusive('\n') {
+        let trimmed = line.trim_end();
+        let is_direction = matches!(
+            trimmed,
+            "a=sendrecv" | "a=sendonly" | "a=recvonly" | "a=inactive"
+        );
+        if is_direction && !replaced {
+            // Preserve the trailing newline bytes (CRLF vs LF) of the
+            // original line.
+            let nl = &line[trimmed.len()..];
+            out.push_str("a=");
+            out.push_str(new_dir.as_attr());
+            out.push_str(nl);
+            replaced = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    if !replaced {
+        // Append. The caller's SDP must end with the audio media
+        // section for this to land in the right place — true for the
+        // answers/offers SiphonAI builds via `LocalCapabilities::to_sdp`.
+        out.push_str("a=");
+        out.push_str(new_dir.as_attr());
+        out.push_str("\r\n");
+    }
+    out
+}
+
 /// Parse an offer SDP string. Surfaces parse errors as
 /// [`SdpError::Parse`].
 pub fn parse_offer(sdp: &str) -> Result<SessionDescription, SdpError> {
@@ -700,5 +745,52 @@ a=sendrecv\r\n"
             negotiate_offer_answer(&answer_sdp(4000, 0, "PCMU", 8000), &caps(vec![Codec::Pcmu]))
                 .unwrap();
         assert!(outcome.peer_srtp.is_none());
+    }
+
+    #[test]
+    fn rewrite_sdp_direction_flips_the_line_only() {
+        // The bot-hold offer = our cached sendrecv answer with the
+        // direction flipped to sendonly; every other line is verbatim.
+        let answer = generate_offer(&caps(vec![Codec::Pcmu]), None);
+        assert!(answer.contains("a=sendrecv"), "baseline is sendrecv");
+        let hold = rewrite_sdp_direction(&answer, MediaDirection::SendOnly);
+        assert!(hold.contains("a=sendonly"));
+        assert!(!hold.contains("a=sendrecv"));
+        // Port / codec lines untouched (same media, only direction).
+        let baseline_audio = answer.lines().find(|l| l.starts_with("m=audio")).unwrap();
+        let hold_audio = hold.lines().find(|l| l.starts_with("m=audio")).unwrap();
+        assert_eq!(baseline_audio, hold_audio);
+        // CRLF preserved.
+        assert!(hold.contains("a=sendonly\r\n"));
+        // Resume flips back to sendrecv; round-trips to the original.
+        let resume = rewrite_sdp_direction(&hold, MediaDirection::SendRecv);
+        assert_eq!(resume, answer);
+    }
+
+    #[test]
+    fn rewrite_sdp_direction_preserves_srtp_crypto() {
+        // A hold offer on an SRTP call must keep the a=crypto line so the
+        // media stays encrypted across the re-INVITE (no re-key in v1).
+        let crypto = a_crypto();
+        let answer = generate_offer(&caps(vec![Codec::Pcmu]), Some(&crypto));
+        let hold = rewrite_sdp_direction(&answer, MediaDirection::SendOnly);
+        assert!(hold.contains("a=crypto:"), "crypto retained through flip");
+        assert!(hold.contains("a=sendonly"));
+    }
+
+    #[test]
+    fn rewrite_sdp_direction_appends_when_absent() {
+        // SDP with no direction line gets one appended (total function).
+        let no_dir = "\
+v=0\r\n\
+o=- 1 1 IN IP4 198.51.100.10\r\n\
+s=-\r\n\
+c=IN IP4 198.51.100.10\r\n\
+t=0 0\r\n\
+m=audio 27492 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n";
+        let held = rewrite_sdp_direction(no_dir, MediaDirection::SendOnly);
+        assert!(held.ends_with("a=sendonly\r\n"));
+        assert!(held.starts_with(no_dir));
     }
 }

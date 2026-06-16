@@ -148,6 +148,7 @@ fn make_controller_full(
         recording: None,
         conference,
         park,
+        hold: None,
     };
     CallController::new(cfg)
 }

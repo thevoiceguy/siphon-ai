@@ -50,7 +50,7 @@ use crate::outbound::{
 };
 use crate::park::ParkContext;
 use crate::registry::{CallControlRegistry, ConsultRegistry};
-use crate::transfer::{DialogSource, TransferContext};
+use crate::transfer::{DialogControl, DialogSource, TransferContext};
 
 /// One configured outbound gateway, ready to dial. Built by the daemon from a
 /// compiled `[[gateway]]` (the `siphon-ai-config::Gateway`) plus a per-gateway
@@ -387,12 +387,14 @@ async fn run_call(
     // DialogManager, so the shared lookup the inbound path uses
     // can't see this dialog.
     let transfer = TransferContext {
-        uac: originator.uac(),
-        source: DialogSource::Direct(Box::new(dialog.clone())),
+        control: DialogControl {
+            uac: originator.uac(),
+            source: DialogSource::Direct(Box::new(dialog.clone())),
+            // Outbound legs dialed out themselves, so the gateway UAC's
+            // dispatcher can reach the peer without flow reuse.
+            flow: None,
+        },
         consult_registry: ctx.consult_registry.clone(),
-        // Outbound legs dialed out themselves, so the gateway UAC's
-        // dispatcher can reach the peer without flow reuse.
-        flow: None,
     };
     let cfg = CallControllerConfig {
         call_id: ctx.bridge_id.clone(),
@@ -403,6 +405,11 @@ async fn run_call(
         recording: None,
         conference: ctx.conference.clone(),
         park: ctx.park.clone(),
+        // Bot-initiated hold on outbound legs is a 0.7.2 follow-up: it
+        // needs our original offer SDP plumbed through `apply_answer`
+        // to build the hold/resume re-INVITE offer. Inbound legs (the
+        // primary bot-answers-the-call path) carry it today.
+        hold: None,
     };
     let (controller, handle) = CallController::new(cfg);
     // Reachable by the admin conference API for this leg's lifetime.

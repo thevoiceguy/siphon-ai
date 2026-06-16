@@ -237,6 +237,13 @@ pub struct RawMedia {
     /// fail-loud error per CLAUDE.md §4.6.
     #[serde(default)]
     pub srtp: Option<String>,
+    /// Hold-music file played to the caller during a bot-initiated hold
+    /// (0.7.2) — a WAV whose native rate matches the call's negotiated
+    /// rate (no resampling in v1; a mismatch falls back to generated
+    /// comfort silence, same rule as `[park].moh_file`). `None` (unset)
+    /// → comfort silence. Validated to exist at load time.
+    #[serde(default)]
+    pub moh_file: Option<String>,
 }
 
 /// `[security]` — call-authentication policy (STIR/SHAKEN, 0.4.0).

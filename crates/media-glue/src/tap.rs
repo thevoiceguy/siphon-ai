@@ -217,6 +217,22 @@ pub enum TapCommand {
         playout_audio_rx: mpsc::Receiver<Vec<u8>>,
         events_tx: mpsc::Sender<OutgoingEvent>,
     },
+
+    /// Bot-initiated hold (0.7.2): play `moh` into the caller leg on a
+    /// 20 ms tick and pause the caller↔WS bridge, while **keeping the WS
+    /// session attached** (unlike [`Park`](Self::Park), which detaches
+    /// it). Reuses park's MOH machinery; the difference is that the WS
+    /// stays open, so the chatty bot keeps streaming playout — the tap
+    /// drains-and-drops it (the caller hears MOH, not the bot) rather
+    /// than letting it back-pressure the bridge. Caller audio is dropped
+    /// (the caller is on hold), but still recorded. Pairs with
+    /// [`Unhold`](Self::Unhold).
+    Hold { moh: Box<crate::moh::MohSource> },
+
+    /// Resume a held call (0.7.2): stop the MOH tick and restore the
+    /// direct caller↔WS pair on the **existing** channels (no swap, the
+    /// WS never went away). A no-op if not held.
+    Unhold,
 }
 
 /// How the tap reacts to forge-vad `SpeechStarted` events. Mirrors
@@ -490,6 +506,15 @@ impl MediaTap {
         // caller audio is dropped. Installed by `TapCommand::Park`,
         // cleared by `TapCommand::Unpark`.
         let mut parked: Option<crate::moh::MohSource> = None;
+        // Bot-hold state (0.7.2). `Some(moh)` = the caller is on hold
+        // (MOH on the 20 ms tick, caller audio dropped) but the WS
+        // session is STILL attached — so bot playout is drained-and-
+        // dropped rather than suppressed (it would back-pressure the
+        // open bridge). Installed by `TapCommand::Hold`, cleared by
+        // `TapCommand::Unhold`. Mutually exclusive with `parked` in
+        // practice (a parked call has no WS to drive a hold), but the
+        // arms below treat them independently for clarity.
+        let mut held: Option<crate::moh::MohSource> = None;
 
         let mut reframer = Reframer::new(self.sample_rate)?;
         // Play-out estimation state for `TapCommand::Mark`.
@@ -607,6 +632,16 @@ impl MediaTap {
                     // the WS server keeps streaming is NOT dead air,
                     // it's intentional silence.
                     self.idle_detector.note_ws_audio(Instant::now());
+                    // Bot-hold: the WS stays attached and a chatty bot
+                    // keeps streaming, but the caller is hearing MOH (the
+                    // moh_tick arm). Drain-and-drop the playout — routing
+                    // it to forge would talk over the hold music, and
+                    // leaving it un-recv'd would back-pressure the open
+                    // bridge. A genuine WS disconnect still tears down via
+                    // the `None` branch above.
+                    if held.is_some() {
+                        continue;
+                    }
                     // `TapCommand::Mute` gates AI-side playout. We
                     // still recv (draining the channel keeps WS
                     // backpressure away) but skip unpack + forge so
@@ -693,12 +728,13 @@ impl MediaTap {
                     }
                     reframer.push(&frame.samples);
                     while let Some(samples) = reframer.pop_frame() {
-                        // Parked: there's no WS to forward to. Keep
-                        // recording the caller's own voice (left
-                        // channel) but drop the frame otherwise — the
-                        // caller hears MOH (the moh_tick arm), not
+                        // Parked or held: don't forward the caller to
+                        // the WS (parked = no WS; held = caller is on
+                        // hold). Keep recording the caller's own voice
+                        // (left channel) but drop the frame otherwise —
+                        // the caller hears MOH (the moh_tick arm), not
                         // themselves.
-                        if parked.is_some() {
+                        if parked.is_some() || held.is_some() {
                             if let Some((rec, drops)) = &self.recording {
                                 if let Err(mpsc::error::TrySendError::Full(_)) =
                                     rec.try_send(RecFrame::Caller(pack_pcm16_le(&samples)))
@@ -1230,6 +1266,46 @@ impl MediaTap {
                                 );
                             }
                         }
+                        TapCommand::Hold { moh } => {
+                            // Holding while in a room first leaves it
+                            // (drops the RoomSender → the room reaps us),
+                            // same as Park.
+                            if let Some(send) = room_send.take() {
+                                drop(send);
+                                room_sip_out = None;
+                                room_ws_out = None;
+                                room_events = None;
+                            }
+                            info!(
+                                call_id = %self.call_id,
+                                "tap held; playing hold music, WS attached but paused"
+                            );
+                            held = Some(*moh);
+                            // Align the MOH cadence to now (same as Park).
+                            moh_tick.reset();
+                        }
+                        TapCommand::Unhold => {
+                            if held.take().is_some() {
+                                // The WS channels never changed — just
+                                // flush any MOH tail out of forge's leg-A
+                                // queue so the resumed bot audio doesn't
+                                // play behind leftover hold music, and
+                                // reset the Mark bookkeeping.
+                                if let Err(e) = self.handle.flush(Some(MediaTarget::A), None).await {
+                                    warn!(
+                                        call_id = %self.call_id,
+                                        error = %e,
+                                        "forge flush failed on unhold",
+                                    );
+                                }
+                                frames_sent_to_forge = 0;
+                                first_audio_pushed_at = None;
+                                info!(
+                                    call_id = %self.call_id,
+                                    "tap resumed; direct bridge restored on existing WS session"
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -1292,10 +1368,11 @@ impl MediaTap {
                     }
                 }
 
-                // MOH playout while parked: one hold-music frame per
-                // 20 ms into the caller leg. Active only when parked.
-                _ = moh_tick.tick(), if parked.is_some() => {
-                    if let Some(moh) = parked.as_mut() {
+                // MOH playout while parked or held: one hold-music frame
+                // per 20 ms into the caller leg. Active in either state;
+                // both share the same MohSource-driven tick.
+                _ = moh_tick.tick(), if parked.is_some() || held.is_some() => {
+                    if let Some(moh) = parked.as_mut().or(held.as_mut()) {
                         let samples = moh.next_frame();
                         // Recording right channel = what the caller
                         // hears = the hold music.

@@ -443,6 +443,7 @@ mod tests {
             recording: None,
             conference: None,
             park: None,
+            hold: None,
         };
         let (controller, handle) = CallController::new(cfg);
         // Drop the controller without running it; the handle still

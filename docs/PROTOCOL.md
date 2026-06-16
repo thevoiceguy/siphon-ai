@@ -335,12 +335,14 @@ then closes the WebSocket cleanly (close code 1000).
 | `transfer_failed` | A REFER was attempted but the far end rejected it. |
 | `conference_failed` | A `conference_join` (§4.8) was refused: conferencing disabled, room or per-room cap reached, sample-rate mismatch, or already joined. The call continues on its direct pair. |
 | `park_failed` | A `park` (§4.9) was refused: park disabled (`[park].enabled = false`) or `[park].max_parked` reached. The call continues unparked on its current WS session — no `stop` follows this `error`. |
+| `hold_failed` | A `hold` / `resume` (§4.10) re-INVITE was rejected by the peer, timed out, or lost glare resolution. The call stays in its **prior** media state (a failed hold never drops it) — no `stop` follows this `error`. |
 | `internal` | SiphonAI internal error. The `message` field has details. |
 
 A **fatal** `error` is always followed by `stop` (with `reason:
-"error"`) and a clean close. The two **non-fatal** refusals —
-`conference_failed` and `park_failed` — are the exception: they report a
-rejected control request, the call continues, and no `stop` follows.
+"error"`) and a clean close. The **non-fatal** refusals —
+`conference_failed`, `park_failed`, and `hold_failed` — are the exception:
+they report a rejected control request, the call continues, and no `stop`
+follows.
 
 ### 3.11 `recording_started` / `recording_stopped` / `recording_failed` — recording lifecycle (0.5.0)
 
@@ -391,6 +393,25 @@ flowing for this call's own leg. Audio frames are unchanged on the
 wire: SiphonAI sends the room mix (minus this call's own contribution)
 as the inbound binary frames, and the server's outbound audio is mixed
 into the room.
+
+### 3.13 `held` / `resumed` — your hold/resume request took effect (0.7.2)
+
+Confirmations that a server-initiated `hold` / `resume` (§4.10) completed —
+the re-INVITE was acknowledged by the peer. Sent **after** the SIP
+round-trip, so the server knows the hold is real before relying on it.
+
+```json
+{ "type": "held",    "call_id": "...", "seq": 61 }
+{ "type": "resumed", "call_id": "...", "seq": 80 }
+```
+
+> **`held`/`resumed` (your request) vs. `hold`/`resume` (§3.3, the peer).**
+> These are **different messages**. `held`/`resumed` confirm *your* `hold`/
+> `resume` succeeded. The §3.3 `hold`/`resume` events fire when the **far
+> end** put *you* on hold (an incoming re-INVITE) — unrelated to anything
+> you sent. A failed hold/resume request comes back as
+> `error { code: "hold_failed" }` (§3.10) instead, and the call is
+> unchanged.
 
 ---
 
@@ -603,6 +624,37 @@ which opens a **fresh** WS session with `start.retrieved: true` (§3.1).
 A parked call with no WS session cannot retrieve itself; that's the
 operator control plane's job, the mirror of why participants are
 removed from conferences by the admin API rather than by a peer.
+
+### 4.10 `hold` / `resume` — put the caller on hold (0.7.2)
+
+```json
+{ "type": "hold",   "call_id": "..." }
+{ "type": "resume", "call_id": "..." }
+```
+
+Put **this** call's caller on hold, or bring them back. Unlike park, the
+WS session **stays open** and the server resumes the call itself — this is
+the primitive for "user asks to hold → bot holds → bot resumes."
+
+- **`hold`** re-INVITEs the caller so their media goes on hold
+  (`a=sendonly`/`recvonly`, RFC 3264): they hear hold music
+  (`[media].moh_file`, or comfort noise) and stop sending, and SiphonAI
+  stops forwarding their audio to the server (so no barge-in fires during
+  hold). On success SiphonAI replies `held` (§3.13) once the re-INVITE is
+  acknowledged. No-op if already held.
+- **`resume`** re-INVITEs back to two-way audio and restores the direct
+  caller↔server pair; SiphonAI replies `resumed`. No-op if not held.
+- On failure (the peer rejects the re-INVITE, it times out, or glare can't
+  be resolved) SiphonAI replies `error { code: "hold_failed" }` (§3.10) and
+  the call stays in its **prior** state — a failed hold never drops it.
+
+**Self-scoped (§5.3):** `hold` acts only on the session's *own* call.
+
+**Distinct from `mute` (§4.6) and the `hold` *event* (§3.3).** `mute` only
+silences the server's *own* audio (the caller's mic still reaches the
+server, the dialog stays `sendrecv`); `hold` signals the far end and plays
+hold music. The §3.3 `hold` *event* is the opposite direction — the peer
+holding *you*.
 
 ---
 

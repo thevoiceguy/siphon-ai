@@ -235,6 +235,18 @@ pub enum BridgeOut {
         participant_call_id: String,
     },
 
+    /// Confirmation that a server-requested [`BridgeIn::Hold`] took
+    /// effect (0.7.2): the caller's hold re-INVITE was acknowledged and
+    /// they're now on hold music. **Distinct from the peer-initiated
+    /// [`BridgeOut::Hold`] event**, which reports that the *far end* held
+    /// *us*. A server that sent `hold` waits for this before relying on
+    /// the hold; on failure it gets `error { code: "hold_failed" }`.
+    Held { call_id: CallId, seq: Seq },
+
+    /// Confirmation that a server-requested [`BridgeIn::Resume`] restored
+    /// two-way audio (0.7.2). Mirror of [`BridgeOut::Held`].
+    Resumed { call_id: CallId, seq: Seq },
+
     /// Last message SiphonAI sends. Followed by a clean WS close (1000).
     Stop {
         call_id: CallId,
@@ -441,6 +453,11 @@ pub enum ErrorCode {
     /// `[park].max_parked` reached). The call continues unparked.
     /// Added in 0.7.0.
     ParkFailed,
+    /// A [`BridgeIn::Hold`] or [`BridgeIn::Resume`] re-INVITE was
+    /// rejected by the peer, timed out, or lost glare resolution (0.7.2).
+    /// The call stays in its prior media state — a failed hold never
+    /// drops the call.
+    HoldFailed,
     Internal,
 }
 
@@ -573,6 +590,20 @@ pub enum BridgeIn {
     /// [`BridgeOut::ConferenceLeft`]`{ reason: "left" }` and restores
     /// the direct caller↔WS audio pair.
     ConferenceLeave { call_id: CallId },
+
+    /// Put this call's caller on hold (0.7.2): SiphonAI re-INVITEs the
+    /// caller so their media goes on hold (`a=sendonly`/`recvonly`, RFC
+    /// 3264) — they hear hold music and stop sending — while the WS
+    /// session stays open. Self-scoped. SiphonAI replies
+    /// [`BridgeOut::Held`] once the re-INVITE is acknowledged, or
+    /// `error { code: "hold_failed" }` (the call stays as it was — a
+    /// failed hold never drops it). No-op if already held. Distinct from
+    /// [`BridgeIn::Mute`], which only silences the bot's own audio.
+    Hold { call_id: CallId },
+
+    /// Resume a held call (0.7.2): re-INVITE back to two-way audio.
+    /// SiphonAI replies [`BridgeOut::Resumed`]. No-op if not held.
+    Resume { call_id: CallId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1271,6 +1302,54 @@ mod tests {
             panic!("expected Error");
         };
         assert_eq!(code, ErrorCode::ParkFailed);
+    }
+
+    // ─── Hold / resume (0.7.2) ───────────────────────────────────────────
+
+    #[test]
+    fn bridge_in_hold_and_resume() {
+        assert!(matches!(
+            assert_round_trip::<BridgeIn>(r#"{ "type": "hold", "call_id": "siphon-a" }"#),
+            BridgeIn::Hold { .. }
+        ));
+        assert!(matches!(
+            assert_round_trip::<BridgeIn>(r#"{ "type": "resume", "call_id": "siphon-a" }"#),
+            BridgeIn::Resume { .. }
+        ));
+    }
+
+    #[test]
+    fn bridge_out_held_and_resumed() {
+        // The bot-initiated acks — distinct `type`s from the peer-initiated
+        // `hold`/`resume` events (which stay as-is).
+        assert!(matches!(
+            assert_round_trip::<BridgeOut>(r#"{ "type": "held", "call_id": "c", "seq": 11 }"#),
+            BridgeOut::Held { .. }
+        ));
+        assert!(matches!(
+            assert_round_trip::<BridgeOut>(r#"{ "type": "resumed", "call_id": "c", "seq": 12 }"#),
+            BridgeOut::Resumed { .. }
+        ));
+    }
+
+    #[test]
+    fn peer_hold_event_still_distinct_from_held_ack() {
+        // Sanity: the peer-initiated `hold` event and the `held` ack are
+        // different messages, so a server can tell "the far end held me"
+        // from "my hold request succeeded".
+        let peer = assert_round_trip::<BridgeOut>(
+            r#"{ "type": "hold", "call_id": "c", "seq": 5, "direction": "sendonly" }"#,
+        );
+        assert!(matches!(peer, BridgeOut::Hold { .. }));
+    }
+
+    #[test]
+    fn bridge_out_error_hold_failed() {
+        let raw = r#"{ "type": "error", "call_id": "c", "seq": 7, "code": "hold_failed", "message": "488 not acceptable" }"#;
+        let BridgeOut::Error { code, .. } = assert_round_trip::<BridgeOut>(raw) else {
+            panic!("expected Error");
+        };
+        assert_eq!(code, ErrorCode::HoldFailed);
     }
 
     // ─── Negative cases ─────────────────────────────────────────────────

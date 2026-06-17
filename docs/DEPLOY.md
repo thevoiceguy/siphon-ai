@@ -4,6 +4,18 @@ This is the operator's reference for running `siphon-ai` in something other
 than `cargo run`. For configuration semantics see `docs/CONFIG.md`; for the
 observability bar (the §11.8 ten questions) see `docs/OPERATIONS.md`.
 
+## Build prerequisites
+
+The daemon links **libopus** (Opus codec support, 0.8.0) — built from source
+by the `audiopus` crate at compile time. Building `siphon-ai` therefore needs
+a **C toolchain + CMake** (`cc`/`g++`, `make`, `cmake`, `perl`) on the build
+host, in addition to the Rust toolchain. The shipped `docker/Dockerfile`
+builder stage already installs these (musl-dev, cmake, make, g++, pkgconfig,
+perl), so `docker build` is turnkey. For a bare `cargo build`, install the
+equivalents (e.g. `apt install build-essential cmake` /
+`apk add musl-dev cmake make g++`). The runtime image needs nothing extra —
+libopus is statically linked into the binary.
+
 ## Container image
 
 The repo ships a multi-stage Dockerfile that builds a statically-linked

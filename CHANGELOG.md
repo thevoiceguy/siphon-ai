@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-17
+
+Theme: **Opus codec support.** SiphonAI advertised only G.711/G.722 and
+**rejected Opus at config load**; the v1 plan deferred it (DEV_PLAN §15.1)
+as blocked on resampling. Opus is now negotiable. It runs at a **16 kHz
+bridge rate** — `opus/48000/2` on the wire, but the WS path sees a 16 kHz
+session (`start.audio.sample_rate = 16000`) — so the fixed 8/16 kHz PCM16
+audio contract (CLAUDE.md §4.2) is unchanged and the WS protocol stays
+`version: "1"`. **Off by default** (add `"opus"` to `[media].codecs`).
+Minor-version bump because it adds SiphonAI's first **native build
+dependency** (libopus). Delivered across three chunks (forge-media PR →
+siphon-ai enablement → harness/docs/release).
+
+### Added
+
+- **Opus in `[media].codecs`.** A peer that offers `opus/48000/2` (or a
+  route that lists `"opus"` for outbound) now negotiates Opus. The media
+  engine (forge) runs the codec at 16 kHz mono — libopus decodes any
+  encoded stream to 16 kHz and downmixes stereo→mono internally, and the
+  encoder takes 16 kHz mono PCM (RFC 7587 — the RTP clock stays 48 kHz).
+  RTP timestamps step at the 48 kHz clock; only the WS-facing PCM is
+  16 kHz. The dynamic Opus payload type is preserved on the answer
+  (RFC 3264). `docs/CONFIG.md`.
+- **SIPp `opus` regression phase** (`opus_caller.xml`): offers Opus, asserts
+  the 200 OK answers Opus and the daemon brings the call up at 16 kHz
+  (`negotiated=opus sample_rate=16000`). Signalling only — the Opus
+  encode/decode round-trip is forge unit-tested.
+
+### Changed
+
+- **Upstream forge-media pin `e95a31a959a6` → `3c82c2e5d175`** — adds the
+  Opus 16 kHz bridge rate (forge-media#75, mirroring G.722's
+  wire-clock-vs-PCM-rate split) and enables forge-engine's `opus` feature.
+  Also picks up an unrelated SDES mid-call re-key API (forge-media#72),
+  unused here.
+- **New native build dependency: libopus** (via `audiopus`/`audiopus_sys`,
+  built from source). Building `siphon-ai` now needs a C toolchain + CMake;
+  the shipped Dockerfile already has them. `docs/DEPLOY.md` gains a build-
+  prerequisites note. The runtime image is unaffected (statically linked).
+
+### Notes
+
+- **SDP `fmtp` (`stereo=0` / `useinbandfec` / `maxplaybackrate`) is a
+  follow-up.** Opus is correct without it (the `/2` rtpmap is emitted and
+  forge decodes mono regardless); the params interact with the answer's
+  dynamic PT and want validation against a real softphone/carrier
+  (`docs/DESIGN_OPUS.md` §7.5).
+
 ## [0.7.5] - 2026-06-17
 
 Follow-up to 0.7.2: **bot-initiated hold on outbound legs.** The hold/resume

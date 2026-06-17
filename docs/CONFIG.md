@@ -101,7 +101,7 @@ mode = "session_progress"
 
 | Field                       | Type             | Default                | Notes |
 |-----------------------------|------------------|------------------------|-------|
-| `codecs`                    | `["pcmu","pcma","g722"]` | `["pcmu","pcma"]` | Priority-ordered. Opus is rejected at load — its 48 kHz audio rate isn't supported on the WS path yet. |
+| `codecs`                    | `["pcmu","pcma","g722","opus"]` | `["pcmu","pcma"]` | Priority-ordered. **`opus`** (0.8.0) negotiates `opus/48000/2` on the wire but runs at a 16 kHz bridge rate, so an Opus call surfaces as a 16 kHz session (`start.audio.sample_rate = 16000`) — forge decodes/encodes Opus at 16 kHz mono and libopus handles the 48↔16 resample + stereo→mono. Requires the daemon built with Opus support (libopus; see `docs/DEPLOY.md`). Not in the default list — add `"opus"` to enable. |
 | `dtmf`                      | `"rfc2833" \| "off"` | `"rfc2833"`      | `"off"` disables the `telephone-event` payload type. |
 | `rtp_port_range`            | `[min, max]`     | forge default          | Both ports must be even; min < max. |
 | `inactivity_timeout_secs`   | integer          | `60`                   | Tear the call down after this many seconds with no inbound RTP. `0` disables the watchdog. |

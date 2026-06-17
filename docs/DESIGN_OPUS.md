@@ -1,11 +1,15 @@
 # Design note — Opus codec support
 
-> **Status: DRAFT — decisions in §7 (gating ones LOCKED 2026-06-17).** Same
-> design-first pass we did for park / hold / reconnect, because Opus
-> challenges the **locked WS audio contract** (CLAUDE.md §4.2, D8: PCM16
-> mono, 8 k/16 k only, exact 20 ms frames) and needs an **upstream
-> forge-media change** plus a **new native dependency**. The build follows
-> this once §7 is fully locked; deviations get noted back here.
+> **Status: IMPLEMENTED (0.8.0).** Chunk 1 (forge-media PR #75), chunk 2
+> (siphon-ai enablement #185), chunk 3 (this release). Two design unknowns
+> resolved cleanly during the chunk-1 spike: **libopus does the 48↔16
+> resample AND the stereo→mono downmix internally** (no `forge-resampler`
+> crate, no separate downmix — §7.4/§7.6), so the forge change was just
+> "run the Opus codec at a 16 kHz bridge rate" mirroring G.722. One
+> **deviation:** SDP **fmtp** (§4) is **deferred to a follow-up** — it
+> interacts with the answer's dynamic PT and the params (§7.5) want
+> validation against a real softphone/carrier. Opus is correct without it
+> (the `/2` rtpmap is emitted; forge decodes mono regardless).
 
 Adds **Opus** to the negotiable codec set. Opus is the modern wideband
 codec WebRTC/softphones prefer; SiphonAI advertises only G.711/G.722

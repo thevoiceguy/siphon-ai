@@ -1221,6 +1221,66 @@ fi
 oh_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: Opus negotiation ──────────────────
+# A daemon with `[media].codecs = ["opus","pcmu"]`; SIPp offers Opus at a
+# dynamic PT (96, opus/48000/2) and asserts the 200 OK answers Opus
+# (the scenario's check_it on the answer rtpmap). Proves Opus negotiation
+# + the 16 kHz bridge session end-to-end (0.8.0). Signalling only — SIPp
+# can't encode Opus media; the codec round-trip is forge unit-tested.
+echo
+echo "─── auxiliary phase: opus ─────────────────────────────"
+OP_WS_PORT=8778
+OP_WS_LOG=$(mktemp -t echo-ws-op.XXXXXX.log)
+OP_DAEMON_LOG=$(mktemp -t siphon-ai-op.XXXXXX.log)
+OP_CONFIG=$(mktemp -t siphon-ai-op.XXXXXX.toml)
+cat >"$OP_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-op"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["opus", "pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$OP_WS_PORT/"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+OP_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$OP_PYTHON" ]] || OP_PYTHON=python3
+"$OP_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$OP_WS_PORT" >"$OP_WS_LOG" 2>&1 &
+OP_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$OP_CONFIG" \
+    >"$OP_DAEMON_LOG" 2>&1 &
+OP_DAEMON_PID=$!
+op_cleanup() {
+    kill "$OP_WS_PID" "$OP_DAEMON_PID" 2>/dev/null || true
+    wait "$OP_WS_PID" "$OP_DAEMON_PID" 2>/dev/null || true
+}
+trap op_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── opus_negotiation ─────────────────────────────────"
+# The scenario's check_it asserts the 200 OK carries an opus rtpmap; a
+# clean SIPp run (rc 0) means negotiation succeeded. Cross-check the
+# daemon logged a 16 kHz Opus session.
+if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/opus_caller.xml" -m 1 -timeout 12s -trace_err \
+        -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1 \
+    && grep -q "negotiated=opus sample_rate=16000" "$OP_DAEMON_LOG"; then
+    echo "  OK"
+else
+    echo "  FAIL (daemon: $OP_DAEMON_LOG; ws: $OP_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+op_cleanup
+trap - EXIT
+
 # ─── Optional third phase: blind_transfer ─────────────────────────
 # Needs a WS server that proactively emits BridgeIn::Transfer. The
 # runner stops the daemon, brings up an echo-ws that auto-emits

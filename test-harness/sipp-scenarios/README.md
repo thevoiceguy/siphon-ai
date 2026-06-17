@@ -57,6 +57,7 @@ sipp -sf basic_call_then_bye.xml -m 1 -p 5070 -s 1000 127.0.0.1:5060
 | `reinvite_hold_resume.xml`          | Peer-initiated hold: SIPp **sends** a sendonly re-INVITE then a sendrecv one; SiphonAI mirrors recvonly/sendrecv (RFC 3264 §6.1) |
 | `bot_hold_caller.xml`               | 0.7.2 bot-initiated hold: the inverse — the echo-ws (`--auto-hold`) drives `hold`/`resume`, so SiphonAI **sends** the re-INVITEs and SIPp asserts it receives sendonly then sendrecv (**bot_hold** phase) |
 | `outbound_bot_hold_uas.xml`         | 0.7.5 bot-initiated hold on an **outbound** leg: SIPp is the callee (UAS), the echo-ws (`--auto-hold`) drives `hold`/`resume`, and SIPp asserts it receives the sendonly/sendrecv re-INVITEs on the outbound Direct dialog (**outbound_bot_hold** phase) |
+| `opus_caller.xml`                    | 0.8.0 Opus: SIPp offers `opus/48000/2` at a dynamic PT and asserts the 200 OK answers Opus; the daemon brings the call up as a 16 kHz bridge session (**opus** phase). Signalling only — SIPp can't encode Opus media. |
 
 `run-all.sh` also has an always-on **recording** auxiliary phase: it starts
 a daemon with `[recording].mode = "always"` writing to a temp dir, runs one
@@ -134,6 +135,14 @@ the callee), the echo-ws (`--auto-hold`) drives `hold`/`resume`, and SiphonAI
 sends the sendonly/sendrecv re-INVITEs on the outbound Direct dialog (via the
 gateway UAC). Pass = SIPp completed (both direction asserts held) **and**
 `siphon_ai_holds_total{result="ok"}` reads 2.
+
+And an always-on **opus** phase (0.8.0): a daemon with
+`[media].codecs = ["opus","pcmu"]`; `opus_caller.xml` offers Opus at a
+dynamic PT and asserts (via `check_it`) the 200 OK answers Opus. Pass = SIPp
+completed **and** the daemon logged `negotiated=opus sample_rate=16000` — Opus
+on the wire (`opus/48000/2`) surfacing as a 16 kHz bridge session. Signalling
+only; the Opus encode/decode round-trip is covered by forge-codecs /
+forge-engine unit tests.
 
 The `stir_shaken_*` scenarios run in `run-all.sh`'s always-on
 **stir_shaken** auxiliary phase. It builds + runs the

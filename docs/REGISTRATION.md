@@ -45,6 +45,30 @@ arrive on a registered transport get the implicit source `"trunk"`.
 You can declare any number of `[[register]]` blocks; each runs an independent
 drive task. Names must be unique.
 
+### Advertised address vs. bind address
+
+A `REGISTER`'s `Via` sent-by and `Contact` host tell the registrar where to
+send INVITEs back, so they must be a **reachable** address — never the
+wildcard bind. When `[sip].listen` binds an unspecified address
+(`0.0.0.0:5060` or `[::]:5060`), you **must** set `[node].public_address` to
+the host the registrar can route to; SiphonAI advertises that address
+(combined with the listen port) in the REGISTER, while the socket still binds
+all interfaces:
+
+```toml
+[node]
+public_address = "203.0.113.199"   # reachable IP the registrar routes back to
+
+[sip]
+listen = "0.0.0.0:5060"             # bind all interfaces
+```
+
+This is the same `public_address` used in the SDP `c=` line and the inbound
+UAS `Contact`. A wildcard bind without `[node].public_address` is rejected at
+config load. A concrete, non-wildcard `[sip].listen` (e.g.
+`203.0.113.199:5060`) needs no extra setting — that address is advertised
+directly.
+
 ## What v1 supports
 
 - Initial REGISTER + Digest auth retry (handled by the upstream

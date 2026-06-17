@@ -524,13 +524,23 @@ impl Runtime {
         // → refresh / retry loop. Tasks share the manager's shutdown
         // signal so the runtime's teardown path wakes them all at
         // once. See `crate::registration` for the loop semantics.
+        // REGISTER Via/Contact must advertise a reachable address, not
+        // the socket bind — a wildcard bind (`0.0.0.0`/`::`) is not a
+        // routable Contact and registrars can't send INVITEs back to it.
+        // `sip_public_addr` combines `[node].public_address` (always
+        // populated post-compile; wildcard bind without it is a load
+        // error) with the listen port; fall back to the bind addr only
+        // for a concrete, non-wildcard listen.
+        let registration_advertised_addr = sip_public_addr(&node, &sip)
+            .unwrap_or(sip.listen_addr)
+            .to_string();
         let registration_listeners = crate::registration::spawn_registration_tasks(
             &registration_mgr,
             &registrations,
             Arc::clone(&transaction_mgr),
             Arc::clone(&dispatcher),
             Arc::clone(&sip_resolver),
-            &sip,
+            &registration_advertised_addr,
             Arc::clone(&webhook_sink_for_registrations),
         );
 

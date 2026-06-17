@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-06-17
+
+Theme: **WS reconnect mid-call** — opt-in resilience. Until now, any
+unexpected drop of the WebSocket to the developer's server killed the
+call (fallback prompt → BYE → CDR `ws_disconnect`), so a server deploy /
+restart / network blip took out every in-flight call. With
+`[bridge].ws_reconnect_enabled = true`, SiphonAI instead keeps the SIP
+call up on hold music and re-dials the **same** `ws_url`, resuming on a
+fresh session keyed by the same `call_id` — falling back to teardown only
+if no redial succeeds within a bounded window. **Off by default**; the WS
+protocol stays `version: "1"` (additive) and the CDR schema stays at
+version 1. Delivered across three chunks (config + protocol surface →
+reconnect drive → observability/docs/harness/release).
+
+### Added
+
+- **Automatic WS reconnect (`[bridge].ws_reconnect_enabled`).** On an
+  **unexpected** drop (server closed the socket without a `hangup`, an
+  IO/TLS error, or a keepalive timeout) SiphonAI parks the caller on hold
+  music and re-dials the same `ws_url` with exponential backoff
+  (250 ms → ×2 → cap 5 s), resuming on a fresh session. Bounded by
+  **`[bridge].ws_reconnect_max_secs`** (default 30) — how long the caller
+  hears hold music before reconnect gives up and the §5.7 teardown runs.
+  Both knobs take a per-route `[route.bridge]` override; enabling with a
+  zero window fails loud at load. `docs/CONFIG.md`.
+- **`start.reconnected`** — a new additive boolean on the `start` message
+  (omitted-when-false, like `retrieved`), `true` on the session that
+  resumes a call after a drop. The server should drop any handler it still
+  holds for that `call_id` and treat the new socket as the live one; `seq`
+  restarts at 0 and there is **no replay** of pre-drop audio/events.
+  `docs/PROTOCOL.md` §3.1, §5.7.
+- **Metric `siphon_ai_ws_reconnects_total{result=recovered|exhausted}`**
+  and **CDR `reconnect { count, total_gap_ms }`** (additive, schema stays
+  v1) — per-call reconnect-episode accounting. `docs/DEPLOY.md`.
+- **SIPp `ws_reconnect` regression phase** — an echo-ws started with
+  `--drop-after-ms` closes the socket mid-call; the daemon reconnects, the
+  redial's `start` carries `reconnected: true`, and the call resumes and
+  ends cleanly (asserts `ws_reconnects_total{result="recovered"}`).
+
+### Changed
+
+- **PROTOCOL.md §5.7 rewritten.** Reconnect is now supported (opt-in).
+  With it on, **a call is ended by the `hangup` control message** — a bare
+  WS socket close (even a clean `1000`) is treated as an unexpected drop
+  and reconnected. With reconnect **off**, the v1 behaviour is unchanged.
+- **`MediaTap` survive-WS-drop mode.** Internally, a reconnect-enabled
+  call's tap treats a closed WS-facing channel as non-fatal (it holds for
+  the redial) rather than tearing down — park parks *before* closing, but
+  reconnect reacts *to* the close, so the tap had to learn to outlive it.
+
+### Notes
+
+- Inbound legs only this release. Outbound bot-hold and outbound reconnect
+  remain follow-ups (the reconnect drive is bridge-generic, but the
+  settings aren't threaded into the originate path yet).
+
 ## [0.7.2] - 2026-06-16
 
 Theme: **bot-initiated hold/resume** — the WS server can now put its own

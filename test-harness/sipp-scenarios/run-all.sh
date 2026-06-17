@@ -977,6 +977,80 @@ fi
 bh_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: WS reconnect mid-call ─────────────
+# SIPp calls in and waits (park_caller.xml just answers + waits for a
+# server BYE). The echo-ws (--drop-after-ms) abruptly closes the socket
+# mid-call; with [bridge].ws_reconnect_enabled the daemon keeps the call
+# up on hold music and re-dials. The redial's start carries
+# reconnected:true, the echo-ws hangs that resumed call up, and SiphonAI
+# BYEs the caller. Pass = SIPp saw the BYE AND
+# ws_reconnects_total{result="recovered"} == 1. (Exhaustion is covered by
+# the controller unit test ws_reconnect_exhausts_and_tears_down.)
+echo
+echo "─── auxiliary phase: ws_reconnect ─────────────────────"
+RC_WS_PORT=8775
+RC_ADMIN_PORT=9091
+RC_WS_LOG=$(mktemp -t echo-ws-rc.XXXXXX.log)
+RC_DAEMON_LOG=$(mktemp -t siphon-ai-rc.XXXXXX.log)
+RC_CONFIG=$(mktemp -t siphon-ai-rc.XXXXXX.toml)
+cat >"$RC_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-rc"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$RC_WS_PORT/"
+ws_reconnect_enabled = true
+ws_reconnect_max_secs = 10
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$RC_ADMIN_PORT"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+RC_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$RC_PYTHON" ]] || RC_PYTHON=python3
+"$RC_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$RC_WS_PORT" \
+    --drop-after-ms 700 \
+    >"$RC_WS_LOG" 2>&1 &
+RC_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$RC_CONFIG" \
+    >"$RC_DAEMON_LOG" 2>&1 &
+RC_DAEMON_PID=$!
+rc_cleanup() {
+    kill "$RC_WS_PID" "$RC_DAEMON_PID" 2>/dev/null || true
+    wait "$RC_WS_PID" "$RC_DAEMON_PID" 2>/dev/null || true
+}
+trap rc_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── ws_reconnect_recovers ────────────────────────────"
+rc_ok=0
+if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/park_caller.xml" -m 1 -timeout 20s -trace_err \
+        -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1; then
+    if curl -s "http://127.0.0.1:$RC_ADMIN_PORT/metrics" \
+        | grep -q 'siphon_ai_ws_reconnects_total{result="recovered"} 1'; then
+        rc_ok=1
+    fi
+fi
+if (( rc_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (daemon: $RC_DAEMON_LOG; ws: $RC_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+rc_cleanup
+trap - EXIT
+
 # ─── Optional third phase: blind_transfer ─────────────────────────
 # Needs a WS server that proactively emits BridgeIn::Transfer. The
 # runner stops the daemon, brings up an echo-ws that auto-emits

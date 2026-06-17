@@ -1985,6 +1985,10 @@ impl CallStart {
                 count: h.count,
                 total_ms: h.total_ms,
             }),
+            reconnect: outcome.reconnect.map(|r| siphon_ai_cdr::ReconnectInfo {
+                count: r.count,
+                total_gap_ms: r.total_gap_ms,
+            }),
         }
     }
 }
@@ -2006,6 +2010,9 @@ pub(crate) struct CallTerminationView {
     /// Bot-hold accounting, when the call was held at least once. Feeds
     /// the CDR `hold { count, total_ms }`.
     pub(crate) hold: Option<crate::call::HoldSummary>,
+    /// WS-reconnect accounting, when the call reconnected at least once.
+    /// Feeds the CDR `reconnect { count, total_gap_ms }`.
+    pub(crate) reconnect: Option<crate::call::ReconnectSummary>,
 }
 
 impl CallTerminationView {
@@ -2018,6 +2025,7 @@ impl CallTerminationView {
                 recording: o.recording,
                 park: o.park,
                 hold: o.hold,
+                reconnect: o.reconnect,
             },
             Err(e) => Self {
                 // Treat a panic / join error as "bridge ended" —
@@ -2029,6 +2037,7 @@ impl CallTerminationView {
                 recording: None,
                 park: None,
                 hold: None,
+                reconnect: None,
             },
         }
     }

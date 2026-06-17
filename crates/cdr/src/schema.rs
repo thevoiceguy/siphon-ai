@@ -98,6 +98,12 @@ pub struct CdrRecord {
     /// schema stays at version 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<HoldInfo>,
+
+    /// Reconnect summary (0.7.3), present when the WS dropped and
+    /// reconnect ran at least once. Omitted otherwise. Additive optional
+    /// field → CDR schema stays at version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconnect: Option<ReconnectInfo>,
 }
 
 /// Per-call park accounting on the CDR (0.7.0).
@@ -118,6 +124,18 @@ pub struct HoldInfo {
     pub count: u32,
     /// Cumulative wall-time the call spent held, in milliseconds.
     pub total_ms: u64,
+}
+
+/// Per-call WS-reconnect accounting on the CDR (0.7.3). An episode is one
+/// unexpected WS drop that entered the reconnect path
+/// (`[bridge].ws_reconnect_enabled`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconnectInfo {
+    /// Number of reconnect episodes over the call's lifetime.
+    pub count: u32,
+    /// Cumulative wall-time the call spent on reconnect hold music, in
+    /// milliseconds.
+    pub total_gap_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +231,7 @@ mod tests {
             recording_path: None,
             park: None,
             hold: None,
+            reconnect: None,
         }
     }
 
@@ -288,6 +307,27 @@ mod tests {
         assert_eq!(v["version"], serde_json::json!(1));
         let back: CdrRecord = serde_json::from_value(v).unwrap();
         assert_eq!(back.hold, rec.hold);
+    }
+
+    #[test]
+    fn reconnect_field_is_additive_and_stays_at_v1() {
+        // Never reconnected → omitted, schema still v1.
+        let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("reconnect"));
+        assert_eq!(v["version"], serde_json::json!(1));
+
+        // Reconnected → nested {count, total_gap_ms}; version unchanged.
+        let mut rec = sample();
+        rec.reconnect = Some(ReconnectInfo {
+            count: 1,
+            total_gap_ms: 1200,
+        });
+        let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
+        assert_eq!(v["reconnect"]["count"], serde_json::json!(1));
+        assert_eq!(v["reconnect"]["total_gap_ms"], serde_json::json!(1200));
+        assert_eq!(v["version"], serde_json::json!(1));
+        let back: CdrRecord = serde_json::from_value(v).unwrap();
+        assert_eq!(back.reconnect, rec.reconnect);
     }
 
     #[test]

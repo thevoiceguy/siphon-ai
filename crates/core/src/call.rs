@@ -87,6 +87,7 @@ use tracing::{debug, info, instrument, warn};
 use crate::transfer::{plan_refer, ReferPlan, TransferContext, TransferOutcome};
 use siphon_ai_telemetry::{
     HOLDS_TOTAL, PARKED_CALLS_ACTIVE, PARKS_TOTAL, RETRIEVES_TOTAL, TRANSFERS_TOTAL,
+    WS_RECONNECTS_TOTAL,
 };
 
 /// Bounded channel capacity for audio frames. 10 × 20 ms = 200 ms
@@ -234,6 +235,11 @@ pub struct CallOutcome {
     /// least once. Feeds the CDR `hold { count, total_ms }`. `None` for
     /// a call that was never bot-held (the field is omitted then).
     pub hold: Option<HoldSummary>,
+    /// Reconnect outcome (0.7.3), `Some` when the WS dropped and
+    /// reconnect ran at least once. Feeds the CDR
+    /// `reconnect { count, total_gap_ms }`. `None` when the call never
+    /// reconnected (the field is omitted then).
+    pub reconnect: Option<ReconnectSummary>,
 }
 
 /// Per-call park outcome surfaced on [`CallOutcome`] → CDR.
@@ -253,6 +259,18 @@ pub struct HoldSummary {
     pub count: u32,
     /// Cumulative wall-time the call spent bot-held, in milliseconds.
     pub total_ms: u64,
+}
+
+/// Per-call WS-reconnect outcome surfaced on [`CallOutcome`] → CDR
+/// (0.7.3). An episode is one unexpected drop that entered the reconnect
+/// path (whether it recovered or was exhausted).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconnectSummary {
+    /// How many reconnect episodes occurred over the call's lifetime.
+    pub count: u32,
+    /// Cumulative wall-time the call spent on reconnect hold music, in
+    /// milliseconds.
+    pub total_gap_ms: u64,
 }
 
 /// Per-call recording outcome surfaced on [`CallOutcome`].
@@ -768,6 +786,11 @@ impl CallController {
         let mut reconnecting = false;
         let mut reconnect_attempt: u32 = 0;
         let mut reconnect_since: Option<Instant> = None;
+        // CDR `reconnect { count, total_gap_ms }` accounting (mirrors park).
+        // `count` = reconnect episodes (one per eligible drop that entered
+        // the reconnect path); `total` = cumulative time on reconnect MOH.
+        let mut reconnect_count: u32 = 0;
+        let mut reconnect_total = Duration::ZERO;
         // Tap-side channels of the in-flight redial, handed to the tap
         // on `ready` (not at dial) so a redial that fails fast doesn't
         // flap the caller's audio.
@@ -1511,16 +1534,20 @@ impl CallController {
                         reconnecting = false;
                         reconnect_deadline_armed = false;
                         reconnect_backoff_armed = false;
-                        let gap_ms = reconnect_since
-                            .take()
-                            .map(|s| s.elapsed().as_millis() as u64)
-                            .unwrap_or(0);
-                        info!(call_id = %call_id, gap_ms, "ws reconnected; call resumed on a fresh session");
+                        let gap = reconnect_since.take().map(|s| s.elapsed()).unwrap_or_default();
+                        reconnect_total += gap;
+                        metrics::counter!(WS_RECONNECTS_TOTAL, "result" => "recovered").increment(1);
+                        info!(call_id = %call_id, gap_ms = gap.as_millis() as u64,
+                            "ws reconnected; call resumed on a fresh session");
                     }
                 }
 
                 // ─── Reconnect: window elapsed → give up (0.7.3 §6) ─────
                 _ = &mut reconnect_deadline_sleep, if reconnecting && reconnect_deadline_armed => {
+                    if let Some(since) = reconnect_since.take() {
+                        reconnect_total += since.elapsed();
+                    }
+                    metrics::counter!(WS_RECONNECTS_TOTAL, "result" => "exhausted").increment(1);
                     warn!(call_id = %call_id, window_secs = ws_reconnect_max.as_secs(),
                         "ws reconnect window elapsed; tearing down (ws_disconnect)");
                     termination = CallTermination::BridgeEnded;
@@ -1587,6 +1614,7 @@ impl CallController {
                         }
                         reconnecting = true;
                         reconnect_attempt = 0;
+                        reconnect_count += 1;
                         reconnect_since = Some(Instant::now());
                         reconnect_deadline_sleep
                             .as_mut()
@@ -1676,6 +1704,21 @@ impl CallController {
         let hold_summary = (hold_count > 0).then_some(HoldSummary {
             count: hold_count,
             total_ms: hold_total.as_millis() as u64,
+        });
+
+        // ─── Reconnect teardown ──────────────────────────────────
+        // If the call ended mid-reconnect (a caller BYE / tap end during
+        // the gap, not the deadline), close the books on the open gap and
+        // count the episode as exhausted (it never recovered).
+        if reconnecting {
+            if let Some(since) = reconnect_since.take() {
+                reconnect_total += since.elapsed();
+            }
+            metrics::counter!(WS_RECONNECTS_TOTAL, "result" => "exhausted").increment(1);
+        }
+        let reconnect_summary = (reconnect_count > 0).then_some(ReconnectSummary {
+            count: reconnect_count,
+            total_gap_ms: reconnect_total.as_millis() as u64,
         });
 
         // ─── Drain remaining sub-tasks with a budget ─────────────
@@ -1793,6 +1836,7 @@ impl CallController {
             recording: recording_summary,
             park: park_summary,
             hold: hold_summary,
+            reconnect: reconnect_summary,
         })
     }
 }

@@ -505,6 +505,12 @@ fn build_outbound_record(
             count: h.count,
             total_ms: h.total_ms,
         }),
+        // WS-reconnect accounting (0.7.3). `None` for outbound legs (the
+        // drive is inbound-only this release), mapped for forward-compat.
+        reconnect: view.reconnect.map(|r| siphon_ai_cdr::ReconnectInfo {
+            count: r.count,
+            total_gap_ms: r.total_gap_ms,
+        }),
     }
 }
 
@@ -537,6 +543,7 @@ mod tests {
             recording: None,
             park: None,
             hold: None,
+            reconnect: None,
         };
         let audio = CdrAudioInfo {
             codec: "PCMU".into(),

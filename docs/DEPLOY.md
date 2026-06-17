@@ -496,6 +496,15 @@ never bot-held):
   sent `hold`; see PROTOCOL.md §4.10) — a far-end hold is the peer's
   business and is not tallied here.
 
+One optional reconnect object appears when the WS dropped and reconnect ran
+at least once (added in 0.7.3; schema stays at version 1 — omitted when the
+call never reconnected):
+
+- `reconnect` — `{ "count": <episodes>, "total_gap_ms": <cumulative ms on reconnect hold music> }`.
+  An episode is one unexpected WS drop that entered the reconnect path
+  (`[bridge].ws_reconnect_enabled`; see PROTOCOL.md §5.7). Cross-check
+  `siphon_ai_ws_reconnects_total` for the recovered/exhausted split.
+
 Outbound originated calls (0.6.0, `POST /admin/v1/calls`) produce the same
 record with `direction: "outbound"` — the schema stays at version 1 (the
 field was reserved for this since v1). Two outbound-specific readings:
@@ -615,6 +624,7 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_retrieves_total`             | counter   | `result=ok\|not_parked`               | Retrieve requests (0.7.0). `not_parked` = a retrieve signalled a call that wasn't parked (ignored). |
 | `siphon_ai_parked_calls_active`         | gauge     | —                                     | Currently-parked calls (0.7.0). Incremented on park, decremented on retrieve or teardown. |
 | `siphon_ai_holds_total`                 | counter   | `result=ok\|failed`                   | Bot-initiated hold/resume re-INVITEs (0.7.2 — the WS server sends `hold`/`resume`). Covers both directions. `failed` = the re-INVITE was rejected / timed out / glared, or hold was rejected (already held by the far end, tap unavailable, not configured); the call stays in its prior media state. Does **not** count far-end (peer-initiated) holds. |
+| `siphon_ai_ws_reconnects_total`         | counter   | `result=recovered\|exhausted`         | WS reconnect episodes mid-call (0.7.3 — `[bridge].ws_reconnect_enabled`). One increment per unexpected drop that entered the reconnect path. `recovered` = re-dialed the same `ws_url` within `ws_reconnect_max_secs`; `exhausted` = the window elapsed (or the call ended mid-gap) and the call tore down (`ws_disconnect`). |
 | `forge_rtcp_*`                          | various   | per-call (forge-side)                 | RTP/RTCP quality. See forge-media's own metric inventory. |
 | `heplify_*`                             | various   | from the HEP collector                | Only visible if you scrape heplify too. |
 

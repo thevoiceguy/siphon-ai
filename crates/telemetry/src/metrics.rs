@@ -135,6 +135,14 @@ pub const RETRIEVES_TOTAL: &str = "siphon_ai_retrieves_total";
 /// must match the call site in `siphon-ai-core::call`.
 pub const HOLDS_TOTAL: &str = "siphon_ai_holds_total";
 
+/// WS reconnect episodes mid-call (0.7.3, `[bridge].ws_reconnect_enabled`).
+/// Labeled by `result`: `recovered` (re-dialed within the window) /
+/// `exhausted` (hit `ws_reconnect_max_secs` and tore the call down). One
+/// increment per reconnect episode (an unexpected drop that entered the
+/// reconnect path). Literal must match the call site in
+/// `siphon-ai-core::call`.
+pub const WS_RECONNECTS_TOTAL: &str = "siphon_ai_ws_reconnects_total";
+
 // ─── Gauges ─────────────────────────────────────────────────────────
 
 /// Currently-active calls. Incremented when the controller spawns,
@@ -318,6 +326,10 @@ pub fn register_descriptions() {
     describe_counter!(
         HOLDS_TOTAL,
         "Bot-initiated hold/resume re-INVITEs, by result (ok, failed)."
+    );
+    describe_counter!(
+        WS_RECONNECTS_TOTAL,
+        "WS reconnect episodes mid-call, by result (recovered, exhausted)."
     );
     describe_gauge!(
         CALLS_ACTIVE,

@@ -38,7 +38,7 @@ use sip_core::Response;
 use sip_dns::SipResolver;
 use sip_transaction::{TransactionManager, TransportDispatcher};
 use sip_uac::integrated::{IntegratedUAC, RequestTarget};
-use siphon_ai_config::{RegisterConfig, SipConfig, SipTransport};
+use siphon_ai_config::{RegisterConfig, SipTransport};
 use siphon_ai_sip_glue::{
     refresh_delay, spawn_disabled_task, RegistrationManager, RegistrationStatus, ShutdownSignal,
 };
@@ -80,7 +80,7 @@ pub fn spawn_registration_tasks(
     transaction_mgr: Arc<TransactionManager>,
     dispatcher: Arc<dyn TransportDispatcher>,
     resolver: Arc<SipResolver>,
-    sip: &SipConfig,
+    advertised_addr: &str,
     webhook_sink: WebhookSinkHandle,
 ) -> Vec<JoinHandle<()>> {
     // Seed every `siphon_ai_register_state` row so a /metrics scrape
@@ -112,7 +112,7 @@ pub fn spawn_registration_tasks(
             Arc::clone(&transaction_mgr),
             Arc::clone(&dispatcher),
             Arc::clone(&resolver),
-            sip.listen_addr.to_string(),
+            advertised_addr.to_string(),
             Arc::clone(&webhook_sink),
         ));
     }
@@ -340,6 +340,19 @@ fn response_expires(resp: &Response) -> Option<Duration> {
     None
 }
 
+/// Build the `Contact` URI a registrar will route INVITEs back through.
+/// `addr` is the daemon's *advertised* SIP address (`host:port`), never
+/// the socket bind — see the caller. Kept as a pure helper so the
+/// no-wildcard-leak invariant is unit-testable without a live UAC.
+fn build_contact_uri(username: &str, addr: &str, transport: SipTransport) -> String {
+    let transport_param = match transport {
+        SipTransport::Udp => "udp",
+        SipTransport::Tcp => "tcp",
+        SipTransport::Tls => "tls",
+    };
+    format!("sip:{username}@{addr};transport={transport_param}")
+}
+
 fn build_uac(
     cfg: &RegisterConfig,
     transaction_mgr: Arc<TransactionManager>,
@@ -350,18 +363,13 @@ fn build_uac(
     // From URI is the AOR we register: sip:<username>@<server_host>.
     let local_uri = format!("sip:{}@{}", cfg.username, cfg.server_host);
     // Contact URI is where the registrar should send INVITEs back —
-    // our SIP listen address. Transport param matches what we
-    // configured for this registration (registrar may use it to pick
-    // a connection back to us).
-    let transport_param = match cfg.transport {
-        SipTransport::Udp => "udp",
-        SipTransport::Tcp => "tcp",
-        SipTransport::Tls => "tls",
-    };
-    let contact_uri = format!(
-        "sip:{}@{};transport={}",
-        cfg.username, local_addr_str, transport_param
-    );
+    // our advertised, reachable SIP address (`[node].public_address` +
+    // the listen port), NOT the socket bind address. A wildcard bind
+    // (`0.0.0.0`/`::`) must never leak into the Via/Contact a registrar
+    // routes to. Transport param matches what we configured for this
+    // registration (registrar may use it to pick a connection back to
+    // us). `local_addr` below feeds the Via sent-by the same way.
+    let contact_uri = build_contact_uri(&cfg.username, local_addr_str, cfg.transport);
 
     let builder = IntegratedUAC::builder()
         .local_uri(&local_uri)
@@ -486,5 +494,26 @@ mod tests {
     fn response_expires_ignores_garbage_value() {
         let resp = response_with(&[("Expires", "not-a-number")]);
         assert_eq!(response_expires(&resp), None);
+    }
+
+    #[test]
+    fn contact_uri_carries_advertised_addr_and_transport() {
+        let uri = build_contact_uri("+12123013382", "10.246.253.199:5060", SipTransport::Udp);
+        assert_eq!(uri, "sip:+12123013382@10.246.253.199:5060;transport=udp");
+    }
+
+    #[test]
+    fn contact_uri_never_carries_wildcard_bind() {
+        // Regression: a wildcard SIP bind (`0.0.0.0`) must not leak into
+        // the Contact a registrar routes back through. The drive task is
+        // fed `[node].public_address` (the advertised addr), never the
+        // socket bind, so the wildcard never reaches this builder.
+        let uri = build_contact_uri("alice", "10.0.0.7:5061", SipTransport::Tcp);
+        assert!(
+            !uri.contains("0.0.0.0"),
+            "contact leaked wildcard bind: {uri}"
+        );
+        assert!(uri.contains("10.0.0.7:5061"));
+        assert!(uri.ends_with(";transport=tcp"));
     }
 }

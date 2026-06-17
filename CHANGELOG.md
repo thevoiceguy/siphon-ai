@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-06-17
+
+### Fixed
+
+- **Outbound REGISTER advertised `0.0.0.0` in `Via` and `Contact` when
+  `[sip].listen` used a wildcard bind** (`0.0.0.0:5060` / `[::]:5060`).
+  The registration drive task used the socket *bind* address for the
+  `Via` sent-by and `Contact` host, so a wildcard bind leaked into the
+  outbound REGISTER — `0.0.0.0` is not a routable Contact, so registrars
+  (e.g. CUCM) could not send INVITEs back, breaking inbound calls and
+  registrar classification. REGISTER now advertises
+  `[node].public_address` combined with the listen port — the same
+  reachable address the inbound UAS already uses for its `Contact`. The
+  socket still binds the configured (possibly wildcard) address; only
+  the advertised SIP headers changed. A concrete, non-wildcard
+  `[sip].listen` is unaffected. (`[node].public_address` is required
+  whenever the bind is unspecified, so the advertised address is always
+  routable.)
+
 ## [0.8.0] - 2026-06-17
 
 Theme: **Opus codec support.** SiphonAI advertised only G.711/G.722 and

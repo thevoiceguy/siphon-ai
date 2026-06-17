@@ -264,6 +264,122 @@ async fn registrations_seed_into_manager_on_startup() {
         .expect("task does not panic");
 }
 
+/// Wildcard SIP bind + `[node].public_address`. The bind stays
+/// `0.0.0.0:<port>`; the advertised address (and so the REGISTER's
+/// Via and Contact) must be the public address. Regression for the
+/// `0.0.0.0` leak that breaks CUCM/registrar reachability.
+const REGISTER_WILDCARD_FIXTURE: &str = r#"
+[node]
+public_address = "127.0.0.1"
+
+[sip]
+listen = "${TEST_SIP_LISTEN}"
+transports = ["udp"]
+
+[media]
+codecs = ["pcmu"]
+rtp_port_range = [${TEST_RTP_MIN}, ${TEST_RTP_MAX}]
+
+[bridge]
+ws_url = "wss://example.test/sip-bridge"
+
+[[register]]
+name = "cucm"
+server = "${TEST_REGISTRAR}"
+username = "+12123013382"
+password = "secret"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+
+#[tokio::test]
+async fn register_advertises_public_address_not_wildcard_bind() {
+    install_crypto_provider();
+
+    // Fake registrar: a bare UDP socket that captures the first
+    // datagram the daemon sends it. We never answer — one REGISTER
+    // is all we need to inspect.
+    let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("registrar bind");
+    let registrar_addr = registrar.local_addr().expect("registrar addr");
+
+    // Grab a free port number, release it, then ask the daemon to
+    // bind the WILDCARD address on that port. This is the scenario in
+    // the bug report (`listen = "0.0.0.0:5060"`): the bind is
+    // unspecified, but Via/Contact must not be.
+    let listen_port = {
+        let s = std::net::UdpSocket::bind("0.0.0.0:0").expect("scratch bind");
+        s.local_addr().expect("scratch addr").port()
+    };
+
+    let listen: &'static str = Box::leak(format!("0.0.0.0:{listen_port}").into_boxed_str());
+    let registrar_str: &'static str = Box::leak(registrar_addr.to_string().into_boxed_str());
+    let env = MapEnv::new([
+        ("TEST_SIP_LISTEN", listen),
+        ("TEST_RTP_MIN", "40800"),
+        ("TEST_RTP_MAX", "40900"),
+        ("TEST_REGISTRAR", registrar_str),
+    ]);
+    let cfg = load_from_str_with_env(REGISTER_WILDCARD_FIXTURE, &env).expect("config compiles");
+
+    let runtime = Runtime::build(cfg, siphon_ai_telemetry::LogFilterHandle::noop())
+        .await
+        .expect("runtime builds");
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let run_handle = tokio::spawn(async move {
+        let _ = runtime
+            .run(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+
+    // The drive task fires REGISTER on startup; grab the first datagram.
+    let mut buf = vec![0u8; 4096];
+    let (n, _from) = tokio::time::timeout(Duration::from_secs(5), registrar.recv_from(&mut buf))
+        .await
+        .expect("REGISTER arrives within 5s")
+        .expect("registrar recv");
+    let register = String::from_utf8_lossy(&buf[..n]);
+
+    assert!(
+        register.starts_with("REGISTER "),
+        "expected a REGISTER request, got: {register}"
+    );
+    assert!(
+        !register.contains("0.0.0.0"),
+        "wildcard bind leaked into outbound REGISTER:\n{register}"
+    );
+    // Via sent-by and Contact host must both be the public address.
+    let via = register
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("via:"))
+        .expect("Via header present");
+    assert!(
+        via.contains(&format!("127.0.0.1:{listen_port}")),
+        "Via must advertise public_address:port, got: {via}"
+    );
+    let contact = register
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("contact:"))
+        .expect("Contact header present");
+    assert!(
+        contact.contains(&format!("127.0.0.1:{listen_port}")),
+        "Contact must advertise public_address:port, got: {contact}"
+    );
+
+    shutdown_tx.send(()).expect("shutdown signal");
+    tokio::time::timeout(Duration::from_secs(2), run_handle)
+        .await
+        .expect("runtime exits within 2s")
+        .expect("task does not panic");
+}
+
 #[tokio::test]
 async fn build_fails_when_listen_port_is_busy() {
     install_crypto_provider();

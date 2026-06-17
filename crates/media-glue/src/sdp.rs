@@ -122,6 +122,29 @@ impl Codec {
         }
     }
 
+    /// The `a=fmtp:` parameter string this codec wants advertised, or
+    /// `None` for codecs whose defaults need no tuning (G.711/G.722).
+    ///
+    /// **Opus (RFC 7587):** SiphonAI consumes and produces 16 kHz mono
+    /// (forge runs the codec at a 16 kHz bridge rate — see
+    /// [`audio_sample_rate`](Self::audio_sample_rate)), so we tell the
+    /// peer not to waste bits on 48 kHz stereo: `maxplaybackrate` /
+    /// `sprop-maxcapturerate = 16000`, `stereo` / `sprop-stereo = 0`.
+    /// `useinbandfec=1` asks for in-band FEC (cheap loss resilience on
+    /// lossy links); `usedtx=0` keeps the steady 20 ms cadence the
+    /// playout loop and barge-in logic expect (no variable framing).
+    /// Functionally Opus is correct without this — forge decodes mono
+    /// at 16 kHz regardless — these are politeness/quality hints.
+    pub fn fmtp_params(self) -> Option<&'static str> {
+        match self {
+            Codec::Opus => Some(
+                "maxplaybackrate=16000;sprop-maxcapturerate=16000;\
+                 stereo=0;sprop-stereo=0;useinbandfec=1;usedtx=0",
+            ),
+            Codec::Pcmu | Codec::Pcma | Codec::G722 => None,
+        }
+    }
+
     /// Parse from the rtpmap encoding-name (case-insensitive).
     /// Returns `None` for unsupported codecs — the caller logs and
     /// falls back to the next offered codec.
@@ -190,6 +213,14 @@ impl LocalCapabilities {
                     codec.rtpmap_channels(),
                 )
                 .expect("codec rtpmap is well-formed");
+            // `a=fmtp:<pt> …` for codecs that tune their format (Opus).
+            // On the offer we control the PT, so key it to ours; the
+            // answer path re-keys to the negotiated PT (negotiate_answer).
+            if let Some(params) = codec.fmtp_params() {
+                audio = audio
+                    .add_attribute("fmtp", &format!("{} {}", codec.rtp_payload_type(), params))
+                    .expect("fmtp attribute is well-formed");
+            }
         }
 
         if let Some(pt) = self.dtmf_payload_type {
@@ -432,7 +463,7 @@ pub fn negotiate_answer(
     caps: &LocalCapabilities,
 ) -> Result<AnswerOutcome, SdpError> {
     let local_caps = caps.to_sdp();
-    let answer = SessionDescription::negotiate_answer(offer, &local_caps, &caps.local_ip)
+    let mut answer = SessionDescription::negotiate_answer(offer, &local_caps, &caps.local_ip)
         .map_err(|e| SdpError::Negotiate(e.to_string()))?;
 
     let audio = answer
@@ -473,6 +504,21 @@ pub fn negotiate_answer(
         .map(|d| d.as_token())
         .and_then(MediaDirection::from_attr)
         .unwrap_or_default();
+
+    // Re-key our codec's `a=fmtp:` onto the negotiated (offerer's)
+    // payload type before serializing. The upstream negotiator carries
+    // fmtp forward keyed by the *offered* PT, so when the peer offered
+    // Opus at a dynamic PT other than our own 111 (e.g. 96), our tuning
+    // is dropped and the offerer's fmtp (or none) is echoed instead.
+    // `set_fmtp` replaces any fmtp for that PT, guaranteeing the answer
+    // advertises OUR Opus params (mono / 16 kHz / FEC) on the PT that
+    // is actually in the answer. No-op for codecs without fmtp.
+    let negotiated_pt = primary.payload_type;
+    if let Some(params) = codec.fmtp_params() {
+        if let Some(media) = answer.find_media_mut(MediaType::Audio) {
+            media.set_fmtp(negotiated_pt, params);
+        }
+    }
 
     let answer_text = answer.serialize();
     Ok(AnswerOutcome {
@@ -662,6 +708,85 @@ a=sendrecv\r\n";
         assert_eq!(
             outcome.negotiated_audio_sample_rate, 16000,
             "the WS bridge sees 16 kHz PCM for Opus"
+        );
+        // Our Opus fmtp is re-keyed onto the offerer's PT (96, not our
+        // 111) and advertises mono / 16 kHz / FEC.
+        assert!(
+            outcome.answer_text.contains("a=fmtp:96 "),
+            "answer carries Opus fmtp on the negotiated PT:\n{}",
+            outcome.answer_text
+        );
+        let fmtp_line = outcome
+            .answer_text
+            .lines()
+            .find(|l| l.starts_with("a=fmtp:96 "))
+            .expect("fmtp:96 line present");
+        for needle in [
+            "maxplaybackrate=16000",
+            "stereo=0",
+            "sprop-stereo=0",
+            "useinbandfec=1",
+            "usedtx=0",
+        ] {
+            assert!(
+                fmtp_line.contains(needle),
+                "fmtp must advertise {needle}; got: {fmtp_line}"
+            );
+        }
+        // No stale fmtp keyed to our own 111 leaked into the answer.
+        assert!(
+            !outcome.answer_text.contains("a=fmtp:111"),
+            "answer must not carry our offer-side PT 111:\n{}",
+            outcome.answer_text
+        );
+    }
+
+    #[test]
+    fn generate_offer_advertises_opus_fmtp_at_our_pt() {
+        let sdp = generate_offer(&caps(vec![Codec::Opus]), None);
+        let fmtp = sdp
+            .lines()
+            .find(|l| l.starts_with("a=fmtp:111 "))
+            .expect("offer carries Opus fmtp on our PT 111");
+        assert!(
+            fmtp.contains("stereo=0"),
+            "offer fmtp advertises mono: {fmtp}"
+        );
+        assert!(
+            fmtp.contains("maxplaybackrate=16000"),
+            "offer fmtp caps playback at 16 kHz: {fmtp}"
+        );
+    }
+
+    #[test]
+    fn g711_negotiation_emits_no_fmtp() {
+        // Regression: only codecs with tuning get an fmtp line. G.711
+        // must stay fmtp-free on both the offer and the answer (the
+        // telephone-event `a=fmtp:101 0-16` is the DTMF range, not a
+        // codec fmtp, and is unaffected here since we offer PCMU only).
+        let offer_sdp = "\
+v=0\r\n\
+o=peer 1 1 IN IP4 198.51.100.20\r\n\
+s=-\r\n\
+c=IN IP4 198.51.100.20\r\n\
+t=0 0\r\n\
+m=audio 4000 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=ptime:20\r\n\
+a=sendrecv\r\n";
+        let offer = parse_offer(offer_sdp).expect("offer parses");
+        let mut caps = caps(vec![Codec::Pcmu]);
+        caps.dtmf_payload_type = None; // isolate: no telephone-event fmtp
+        let outcome = negotiate_answer(&offer, &caps).expect("pcmu negotiates");
+        assert!(
+            !outcome.answer_text.contains("a=fmtp:"),
+            "G.711 answer must carry no fmtp:\n{}",
+            outcome.answer_text
+        );
+        let offer_out = generate_offer(&caps, None);
+        assert!(
+            !offer_out.contains("a=fmtp:"),
+            "G.711 offer must carry no fmtp:\n{offer_out}"
         );
     }
 

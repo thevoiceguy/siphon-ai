@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-06-17
+
+### Added
+
+- **Opus SDP `fmtp` (RFC 7587)** — the deferred 0.8.0 Opus follow-up.
+  SiphonAI now advertises `a=fmtp:<pt> maxplaybackrate=16000;
+  sprop-maxcapturerate=16000; stereo=0; sprop-stereo=0; useinbandfec=1;
+  usedtx=0` for Opus — telling the peer we want **mono at ≤16 kHz** (the
+  16 kHz bridge rate forge runs Opus at) and asking for in-band FEC. On
+  the outbound **offer** it's keyed to our PT (111); on the **answer** it
+  is re-keyed onto the *negotiated* payload type, so it survives a peer
+  offering Opus at a different dynamic PT (the upstream negotiator carries
+  fmtp forward by the offered PT, which would otherwise drop our tuning).
+  Opus was already functionally correct without this — forge decodes mono
+  at 16 kHz regardless — so these are quality/bandwidth hints, additive,
+  no protocol/CDR change. Other codecs (G.711/G.722) remain fmtp-free.
+  The SIPp `opus` phase now also `check_it`-asserts the answer `a=fmtp`.
+
 ## [0.8.1] - 2026-06-17
 
 ### Fixed

@@ -2875,7 +2875,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2915,7 +2915,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-bridge"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "base64",
  "bytes",
@@ -2936,7 +2936,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-cdr"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2953,7 +2953,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-config"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "regex",
  "serde",
@@ -2970,7 +2970,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-core"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3010,7 +3010,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-http"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "http-body-util",
  "hyper",
@@ -3025,7 +3025,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-media-glue"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3049,7 +3049,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-recording"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "thiserror 1.0.69",
  "tokio",
@@ -3058,7 +3058,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-routes"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "regex",
  "serde",
@@ -3069,7 +3069,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-security"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3078,7 +3078,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-sip-glue"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3101,7 +3101,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-stir-shaken"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "base64",
  "rcgen",
@@ -3119,7 +3119,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-telemetry"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "anyhow",
  "forge-hep",
@@ -3140,7 +3140,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-webhooks"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "async-trait",
  "chrono",

@@ -121,6 +121,12 @@ server BYE). Pass = SIPp saw the BYE **and**
 path — no redial within the window — is covered by the controller unit test
 `ws_reconnect_exhausts_and_tears_down`.)
 
+And an always-on **outbound_reconnect** phase (0.7.4): the same drop +
+reconnect, but on the **outbound** originate path — SiphonAI dials out
+(`outbound_uas_answer.xml` as the callee), the echo-ws (`--drop-after-ms`)
+drops, SiphonAI re-dials and resumes, and the call ends cleanly. Pass = SIPp
+completed **and** `siphon_ai_ws_reconnects_total{result="recovered"}` reads 1.
+
 The `stir_shaken_*` scenarios run in `run-all.sh`'s always-on
 **stir_shaken** auxiliary phase. It builds + runs the
 `gen_test_passport` example (a `siphon-ai-stir-shaken` example) to mint a

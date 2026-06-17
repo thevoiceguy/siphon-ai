@@ -79,8 +79,10 @@ fn multi_codec_offer_picks_offer_order_subject_to_our_caps() {
     // opus → opus wins (we have it in caps).
     let answer = build_answer(ASTERISK_OPUS_PREF_OFFER, &caps_full(20100)).unwrap();
     assert_eq!(answer.negotiated_codec, Codec::Opus);
+    // rtpmap clock stays 48 kHz on the wire, but the WS bridge sees Opus
+    // at 16 kHz (forge runs the codec at a 16 kHz bridge rate, 0.8.0).
     assert_eq!(answer.negotiated_clock_rate, 48000);
-    assert_eq!(answer.negotiated_audio_sample_rate, 48000);
+    assert_eq!(answer.negotiated_audio_sample_rate, 16000);
 
     // The answer should still echo the offer's PT (111), not our
     // canonical 111. They happen to match here, but for dynamic

@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  outbound_bot_hold_uas — roles inverted: SIPp is the CALLEE (UAS),
+  SiphonAI the UAC (placed via POST /admin/v1/calls). After the call is
+  up, the WS server (echo, --auto-hold) drives a bot-initiated hold cycle,
+  so SiphonAI sends a hold re-INVITE (a=sendonly) then a resume re-INVITE
+  (a=sendrecv) on the outbound (Direct) dialog. This asserts the callee
+  receives both, answering each (recvonly / sendrecv), then gets the BYE.
+
+  The outbound analogue of bot_hold_caller.xml (which is the inbound,
+  UAC-side caller). Validates that bot-hold works on outbound legs (0.7.5)
+  — the re-INVITE goes out the gateway UAC on the directly-held dialog.
+-->
+<scenario name="outbound_bot_hold_uas">
+  <recv request="INVITE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 180 Ringing
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <send retrans="500">
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+]]>
+  </send>
+
+  <recv request="ACK" rtd="true"/>
+
+  <!-- HOLD: the bot (WS) drives SiphonAI to re-INVITE us sendonly. -->
+  <recv request="INVITE" crlf="true">
+    <action>
+      <ereg regexp="a=sendonly"
+            search_in="msg"
+            check_it="true"
+            assign_to="hold_offer_dir"/>
+      <log message="bot hold offer captured: a=[$hold_offer_dir]"/>
+    </action>
+  </recv>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 53655765 2353687638 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=recvonly
+]]>
+  </send>
+
+  <recv request="ACK" optional="true"/>
+
+  <!-- RESUME: re-INVITE back to sendrecv. -->
+  <recv request="INVITE" crlf="true">
+    <action>
+      <ereg regexp="a=sendrecv"
+            search_in="msg"
+            check_it="true"
+            assign_to="resume_offer_dir"/>
+      <log message="bot resume offer captured: a=[$resume_offer_dir]"/>
+    </action>
+  </recv>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 53655765 2353687639 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+]]>
+  </send>
+
+  <recv request="ACK" optional="true"/>
+
+  <!-- The echo server hangs up once resume completes. -->
+  <recv request="BYE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]>
+  </send>
+</scenario>

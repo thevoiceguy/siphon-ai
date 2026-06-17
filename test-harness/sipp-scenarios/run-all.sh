@@ -1137,6 +1137,90 @@ fi
 or_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: outbound bot-hold ─────────────────
+# Like the outbound phase (SIPp the callee, SiphonAI the UAC), but the
+# echo-ws (--auto-hold) drives a bot-initiated hold cycle, so SiphonAI
+# sends a hold re-INVITE (a=sendonly) then a resume (a=sendrecv) on the
+# outbound (Direct) dialog via the gateway UAC. outbound_bot_hold_uas.xml
+# asserts the callee receives both and answers each. Proves bot-hold works
+# on outbound legs (0.7.5). Pass = SIPp completed (both direction asserts
+# held) AND siphon_ai_holds_total{result="ok"} == 2.
+echo
+echo "─── auxiliary phase: outbound_bot_hold ────────────────"
+OH_WS_PORT=8777
+OH_ADMIN_PORT=9091
+OH_WS_LOG=$(mktemp -t echo-ws-oh.XXXXXX.log)
+OH_DAEMON_LOG=$(mktemp -t siphon-ai-oh.XXXXXX.log)
+OH_CONFIG=$(mktemp -t siphon-ai-oh.XXXXXX.toml)
+cat >"$OH_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-oh"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$OH_WS_PORT/"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$OH_ADMIN_PORT"
+[outbound]
+max_concurrent = 2
+[[gateway]]
+name = "sipp"
+proxy = "127.0.0.1:$SIPP_PORT"
+from = "sip:harness@127.0.0.1"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+OH_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$OH_PYTHON" ]] || OH_PYTHON=python3
+"$OH_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$OH_WS_PORT" \
+    --auto-hold \
+    >"$OH_WS_LOG" 2>&1 &
+OH_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$OH_CONFIG" \
+    >"$OH_DAEMON_LOG" 2>&1 &
+OH_DAEMON_PID=$!
+OH_SIPP_PID=""
+oh_cleanup() {
+    kill "$OH_WS_PID" "$OH_DAEMON_PID" $OH_SIPP_PID 2>/dev/null || true
+    wait "$OH_WS_PID" "$OH_DAEMON_PID" $OH_SIPP_PID 2>/dev/null || true
+}
+trap oh_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── outbound_bot_hold ────────────────────────────────"
+oh_ok=0
+sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/outbound_bot_hold_uas.xml" \
+    -m 1 -timeout 20s -trace_err -p "$SIPP_PORT" >/dev/null 2>&1 &
+OH_SIPP_PID=$!
+sleep 0.3
+oh_resp=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "http://127.0.0.1:$OH_ADMIN_PORT/admin/v1/calls" \
+    -d '{"to": "7001", "gateway": "sipp"}')
+if [[ "$oh_resp" == "202" ]] && wait "$OH_SIPP_PID"; then
+    if curl -s "http://127.0.0.1:$OH_ADMIN_PORT/metrics" \
+        | grep -q 'siphon_ai_holds_total{result="ok"} 2'; then
+        oh_ok=1
+    fi
+fi
+if (( oh_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (originate=$oh_resp; daemon: $OH_DAEMON_LOG; ws: $OH_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+oh_cleanup
+trap - EXIT
+
 # ─── Optional third phase: blind_transfer ─────────────────────────
 # Needs a WS server that proactively emits BridgeIn::Transfer. The
 # runner stops the daemon, brings up an echo-ws that auto-emits

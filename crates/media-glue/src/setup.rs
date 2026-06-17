@@ -247,6 +247,11 @@ pub struct OutboundAccepted {
     /// for a plaintext call or a `preferred` downgrade. The exchange is
     /// always SDES on the outbound origination path.
     pub srtp_profile: Option<String>,
+    /// The SDP **offer** we sent for this call (our local media, `sendrecv`).
+    /// Retained so the call layer can build a bot-initiated hold/resume
+    /// re-INVITE offer by flipping its direction (0.7.5) — the outbound
+    /// analogue of the inbound side's cached answer SDP.
+    pub offer_sdp: String,
 }
 
 impl std::fmt::Debug for OutboundAccepted {
@@ -507,6 +512,7 @@ impl MediaSetup {
             call_id,
             srtp,
             offer_crypto,
+            offer_sdp,
             ..
         } = offer;
 
@@ -604,6 +610,7 @@ impl MediaSetup {
             session,
             tap: media_tap,
             srtp_profile,
+            offer_sdp,
         })
     }
 }

@@ -27,7 +27,9 @@ use siphon_ai_cdr::{
     AudioInfo as CdrAudioInfo, CdrRecord, CdrSinkHandle, Direction as CdrDirection,
     TerminationInfo as CdrTerminationInfo, CDR_VERSION,
 };
-use siphon_ai_media_glue::{OutboundOfferRequest, OutboundSrtp, TapOptions};
+use siphon_ai_media_glue::{
+    rewrite_sdp_direction, MediaDirection, OutboundOfferRequest, OutboundSrtp, TapOptions,
+};
 use siphon_ai_telemetry::{
     OriginateRejection, OriginateRequest, OutboundOriginateHandle, OUTBOUND_CALLS_ACTIVE,
     OUTBOUND_CALLS_TOTAL, OUTBOUND_SRTP_TOTAL,
@@ -44,6 +46,7 @@ use crate::acceptor::{
 };
 use crate::call::{CallController, CallControllerConfig};
 use crate::conference::ConferenceRegistry;
+use crate::hold::HoldContext;
 use crate::outbound::{
     NotAnsweredCause, OutboundCall, OutboundError, OutboundGuard, OutboundOriginator,
     OutboundRejection,
@@ -423,6 +426,21 @@ async fn run_call(
         },
         consult_registry: ctx.consult_registry.clone(),
     };
+    // Bot-initiated hold on outbound legs (0.7.5). Same DialogControl as
+    // transfer (Direct dialog, no flow — the gateway UAC reaches the peer).
+    // The hold/resume offers are our original offer SDP with the direction
+    // flipped (the outbound analogue of inbound's cached answer); the gap
+    // MOH reuses the shared `[media].moh_file`.
+    let hold = Some(HoldContext {
+        control: DialogControl {
+            uac: originator.uac(),
+            source: DialogSource::Direct(Box::new(dialog.clone())),
+            flow: None,
+        },
+        hold_offer_sdp: rewrite_sdp_direction(&accepted.offer_sdp, MediaDirection::SendOnly),
+        resume_offer_sdp: rewrite_sdp_direction(&accepted.offer_sdp, MediaDirection::SendRecv),
+        moh_file: ctx.ws_reconnect_moh_file.clone(),
+    });
     let cfg = CallControllerConfig {
         call_id: ctx.bridge_id.clone(),
         bridge,
@@ -435,11 +453,7 @@ async fn run_call(
         recording: None,
         conference: ctx.conference.clone(),
         park: ctx.park.clone(),
-        // Bot-initiated hold on outbound legs is a 0.7.2 follow-up: it
-        // needs our original offer SDP plumbed through `apply_answer`
-        // to build the hold/resume re-INVITE offer. Inbound legs (the
-        // primary bot-answers-the-call path) carry it today.
-        hold: None,
+        hold,
         // WS reconnect (0.7.3) — outbound legs reconnect on the daemon
         // `[bridge]` defaults, same drive as inbound.
         ws_reconnect_enabled: ctx.ws_reconnect_enabled,

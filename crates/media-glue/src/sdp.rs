@@ -40,15 +40,16 @@ use forge_sdp::{
 };
 use thiserror::Error;
 
-/// Codecs SiphonAI v1 supports. Anything not in this list is
-/// rejected at negotiation time.
+/// Codecs SiphonAI supports. Anything not in this list is rejected at
+/// negotiation time.
 ///
-/// We don't add OPUS yet because the v1 dev plan calls it
-/// "nice-to-have" (DEV_PLAN.md §3.2) and forge-codecs gates it
-/// behind a feature; the workspace already builds with `opus`
-/// optional. We *advertise* it but the actual encode/decode on the
-/// forge side will Refuse if the feature isn't on. That's fine for
-/// negotiation — peers that only speak G.711 will fall back.
+/// **Opus (0.8.0):** negotiable when listed in `[media].codecs`. It
+/// advertises a 48 kHz RTP clock on the wire but runs at a **16 kHz
+/// bridge rate** — forge-engine builds the Opus codec at 16 kHz mono and
+/// libopus does the 48↔16 resample + stereo→mono internally — so the WS
+/// audio path still sees 16 kHz PCM (the same wire-clock-vs-PCM-rate split
+/// as G.722). Requires forge-engine's `opus` feature (libopus via
+/// `audiopus`), enabled in the workspace `Cargo.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
     /// G.711 µ-law. Static PT 0, 8 kHz, mono. Mandatory.
@@ -112,7 +113,12 @@ impl Codec {
         match self {
             Codec::Pcmu | Codec::Pcma => 8000,
             Codec::G722 => 16000,
-            Codec::Opus => 48000,
+            // Opus advertises a 48 kHz RTP clock (`opus/48000/2`) but the
+            // media engine runs the codec at 16 kHz (forge-engine builds it
+            // at 16 kHz mono; libopus does the 48↔16 + stereo→mono), so the
+            // WS bridge sees 16 kHz PCM — within the fixed 8/16 kHz contract.
+            // Same wire-clock-vs-PCM-rate split as G.722.
+            Codec::Opus => 16000,
         }
     }
 
@@ -624,6 +630,39 @@ a=rtpmap:{pt} {name}/{clock}\r\n\
 a=ptime:20\r\n\
 a=sendrecv\r\n"
         )
+    }
+
+    #[test]
+    fn negotiate_answer_opus_maps_to_16k_and_preserves_dynamic_pt() {
+        // A peer offers Opus at a dynamic PT (96, opus/48000/2). We accept
+        // it; the answer keeps the offerer's PT (RFC 3264), and the
+        // post-decode rate the WS sees is 16 kHz (not the 48 kHz clock) —
+        // forge runs Opus at a 16 kHz bridge rate.
+        let offer_sdp = "\
+v=0\r\n\
+o=peer 1 1 IN IP4 198.51.100.20\r\n\
+s=-\r\n\
+c=IN IP4 198.51.100.20\r\n\
+t=0 0\r\n\
+m=audio 4000 RTP/AVP 96\r\n\
+a=rtpmap:96 opus/48000/2\r\n\
+a=ptime:20\r\n\
+a=sendrecv\r\n";
+        let offer = parse_offer(offer_sdp).expect("offer parses");
+        let outcome = negotiate_answer(&offer, &caps(vec![Codec::Opus])).expect("opus negotiates");
+        assert_eq!(outcome.negotiated_codec, Codec::Opus);
+        assert_eq!(
+            outcome.negotiated_payload_type, 96,
+            "answer must echo the offerer's dynamic Opus PT"
+        );
+        assert_eq!(
+            outcome.negotiated_clock_rate, 48000,
+            "rtpmap clock stays 48k"
+        );
+        assert_eq!(
+            outcome.negotiated_audio_sample_rate, 16000,
+            "the WS bridge sees 16 kHz PCM for Opus"
+        );
     }
 
     #[test]

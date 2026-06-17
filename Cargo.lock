@@ -156,6 +156,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "audiopus"
+version = "0.3.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab55eb0e56d7c6de3d59f544e5db122d7725ec33be6a276ee8241f3be6473955"
+dependencies = [
+ "audiopus_sys",
+]
+
+[[package]]
+name = "audiopus_sys"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62314a1546a2064e033665d658e88c620a62904be945f8147e6b16c3db9f8651"
+dependencies = [
+ "cmake",
+ "log",
+ "pkg-config",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -684,8 +704,9 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 [[package]]
 name = "forge-codecs"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6#e95a31a959a6c9d515c7fb59c6141818ef071369"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175#3c82c2e5d17598e36d44aa338e1679074b292e6b"
 dependencies = [
+ "audiopus",
  "ezk-g722",
  "lazy_static",
  "thiserror 2.0.18",
@@ -695,7 +716,7 @@ dependencies = [
 [[package]]
 name = "forge-core"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6#e95a31a959a6c9d515c7fb59c6141818ef071369"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175#3c82c2e5d17598e36d44aa338e1679074b292e6b"
 dependencies = [
  "chrono",
  "serde",
@@ -710,7 +731,7 @@ dependencies = [
 [[package]]
 name = "forge-dtmf"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6#e95a31a959a6c9d515c7fb59c6141818ef071369"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175#3c82c2e5d17598e36d44aa338e1679074b292e6b"
 dependencies = [
  "chrono",
  "forge-core",
@@ -722,7 +743,7 @@ dependencies = [
 [[package]]
 name = "forge-engine"
 version = "0.4.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6#e95a31a959a6c9d515c7fb59c6141818ef071369"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175#3c82c2e5d17598e36d44aa338e1679074b292e6b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -752,7 +773,7 @@ dependencies = [
 [[package]]
 name = "forge-hep"
 version = "0.0.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6#e95a31a959a6c9d515c7fb59c6141818ef071369"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175#3c82c2e5d17598e36d44aa338e1679074b292e6b"
 dependencies = [
  "bytes",
  "hep-rs",
@@ -765,7 +786,7 @@ dependencies = [
 [[package]]
 name = "forge-injection"
 version = "0.1.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6#e95a31a959a6c9d515c7fb59c6141818ef071369"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175#3c82c2e5d17598e36d44aa338e1679074b292e6b"
 dependencies = [
  "forge-core",
  "rubato",
@@ -778,7 +799,7 @@ dependencies = [
 [[package]]
 name = "forge-mixer"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6#e95a31a959a6c9d515c7fb59c6141818ef071369"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175#3c82c2e5d17598e36d44aa338e1679074b292e6b"
 dependencies = [
  "bytes",
  "dashmap 6.2.1",
@@ -792,7 +813,7 @@ dependencies = [
 [[package]]
 name = "forge-recorder"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6#e95a31a959a6c9d515c7fb59c6141818ef071369"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175#3c82c2e5d17598e36d44aa338e1679074b292e6b"
 dependencies = [
  "bytes",
  "forge-core",
@@ -806,7 +827,7 @@ dependencies = [
 [[package]]
 name = "forge-resampler"
 version = "0.1.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6#e95a31a959a6c9d515c7fb59c6141818ef071369"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175#3c82c2e5d17598e36d44aa338e1679074b292e6b"
 dependencies = [
  "thiserror 2.0.18",
  "tracing",
@@ -815,7 +836,7 @@ dependencies = [
 [[package]]
 name = "forge-rtp"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6#e95a31a959a6c9d515c7fb59c6141818ef071369"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175#3c82c2e5d17598e36d44aa338e1679074b292e6b"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -840,14 +861,14 @@ dependencies = [
 [[package]]
 name = "forge-sdp"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6#e95a31a959a6c9d515c7fb59c6141818ef071369"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175#3c82c2e5d17598e36d44aa338e1679074b292e6b"
 dependencies = [
  "base64",
  "chrono",
  "forge-core",
  "forge-rtp",
  "rand 0.9.4",
- "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6)",
+ "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175)",
  "smol_str",
  "thiserror 2.0.18",
 ]
@@ -855,7 +876,7 @@ dependencies = [
 [[package]]
 name = "forge-transcoder"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6#e95a31a959a6c9d515c7fb59c6141818ef071369"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175#3c82c2e5d17598e36d44aa338e1679074b292e6b"
 dependencies = [
  "bytes",
  "forge-codecs",
@@ -868,7 +889,7 @@ dependencies = [
 [[package]]
 name = "forge-vad"
 version = "0.1.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6#e95a31a959a6c9d515c7fb59c6141818ef071369"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175#3c82c2e5d17598e36d44aa338e1679074b292e6b"
 dependencies = [
  "thiserror 2.0.18",
 ]
@@ -2782,7 +2803,7 @@ dependencies = [
 [[package]]
 name = "sip-sdp"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=e95a31a959a6#e95a31a959a6c9d515c7fb59c6141818ef071369"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=3c82c2e5d175#3c82c2e5d17598e36d44aa338e1679074b292e6b"
 dependencies = [
  "nom",
  "smol_str",

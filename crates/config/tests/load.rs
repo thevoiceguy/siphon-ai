@@ -531,28 +531,32 @@ any = true
 }
 
 #[test]
-fn opus_in_codec_list_is_rejected_at_load() {
-    // The WS audio path is PCM16 at 8 kHz or 16 kHz (CLAUDE.md
-    // §4.2). Opus samples at 48 kHz and would crash forge tap
-    // attach with `UnsupportedSampleRate(48000)`. Refuse at config
-    // compile so the operator sees the limitation before any
-    // INVITE arrives.
+fn opus_in_codec_list_compiles() {
+    // Opus is accepted as of 0.8.0 (forge runs the codec at a 16 kHz
+    // bridge rate; libopus does the 48<->16 + stereo->mono). It now
+    // satisfies the WS audio path's 8/16 kHz contract, so it parses into
+    // the compiled codec set instead of being rejected.
     let env = MapEnv::new([]);
     let toml = r#"
+[node]
+id = "opus-test"
+public_address = "203.0.113.10"
 [sip]
 listen = "127.0.0.1:5060"
-
 [media]
 codecs = ["pcmu", "opus"]
-
 [bridge]
 ws_url = "wss://x/y"
+[[route]]
+name = "default"
+[route.match]
+any = true
 "#;
-    let err = load_from_str_with_env(toml, &env).unwrap_err();
-    let msg = err.to_string();
+    let cfg = load_from_str_with_env(toml, &env).expect("opus config compiles");
     assert!(
-        msg.contains("opus") && msg.contains("48"),
-        "expected opus-rejection error, got: {msg}"
+        cfg.bridge_defaults.codecs.contains(&Codec::Opus),
+        "Opus should be in the compiled codec set, got {:?}",
+        cfg.bridge_defaults.codecs
     );
 }
 

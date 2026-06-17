@@ -56,6 +56,7 @@ sipp -sf basic_call_then_bye.xml -m 1 -p 5070 -s 1000 127.0.0.1:5060
 | `conference_caller.xml`             | 0.7.0 conferencing: a caller that stays up while the echo-ws joins it to a room (`--auto-conference-join`); two run concurrently in the **conference** phase |
 | `reinvite_hold_resume.xml`          | Peer-initiated hold: SIPp **sends** a sendonly re-INVITE then a sendrecv one; SiphonAI mirrors recvonly/sendrecv (RFC 3264 §6.1) |
 | `bot_hold_caller.xml`               | 0.7.2 bot-initiated hold: the inverse — the echo-ws (`--auto-hold`) drives `hold`/`resume`, so SiphonAI **sends** the re-INVITEs and SIPp asserts it receives sendonly then sendrecv (**bot_hold** phase) |
+| `outbound_bot_hold_uas.xml`         | 0.7.5 bot-initiated hold on an **outbound** leg: SIPp is the callee (UAS), the echo-ws (`--auto-hold`) drives `hold`/`resume`, and SIPp asserts it receives the sendonly/sendrecv re-INVITEs on the outbound Direct dialog (**outbound_bot_hold** phase) |
 
 `run-all.sh` also has an always-on **recording** auxiliary phase: it starts
 a daemon with `[recording].mode = "always"` writing to a temp dir, runs one
@@ -126,6 +127,13 @@ reconnect, but on the **outbound** originate path — SiphonAI dials out
 (`outbound_uas_answer.xml` as the callee), the echo-ws (`--drop-after-ms`)
 drops, SiphonAI re-dials and resumes, and the call ends cleanly. Pass = SIPp
 completed **and** `siphon_ai_ws_reconnects_total{result="recovered"}` reads 1.
+
+And an always-on **outbound_bot_hold** phase (0.7.5): bot-initiated hold on
+the **outbound** path — SiphonAI dials out (`outbound_bot_hold_uas.xml` as
+the callee), the echo-ws (`--auto-hold`) drives `hold`/`resume`, and SiphonAI
+sends the sendonly/sendrecv re-INVITEs on the outbound Direct dialog (via the
+gateway UAC). Pass = SIPp completed (both direction asserts held) **and**
+`siphon_ai_holds_total{result="ok"}` reads 2.
 
 The `stir_shaken_*` scenarios run in `run-all.sh`'s always-on
 **stir_shaken** auxiliary phase. It builds + runs the

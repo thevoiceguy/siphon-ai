@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-06-17
+
+Follow-up to 0.7.2: **bot-initiated hold on outbound legs.** The hold/resume
+drive shipped in 0.7.2 was inbound-only — it built the hold/resume re-INVITE
+offers from the inbound side's cached answer SDP, which the outbound originate
+path didn't retain. This closes that gap, so a call placed via
+`POST /admin/v1/calls` can be held/resumed by the WS server exactly like an
+inbound call. No protocol or CDR change; hold remains always-available (no
+flag).
+
+### Changed
+
+- **Outbound originated calls now support `hold` / `resume`.** `apply_answer`
+  retains the SDP **offer** we sent (`OutboundAccepted.offer_sdp`), and the
+  outbound `run_call` builds a `HoldContext` from it (direction-flipped to
+  `sendonly` / `sendrecv`) with the same `DialogControl` it uses for outbound
+  transfer (the directly-held dialog, re-INVITE via the gateway UAC). The gap
+  music reuses the shared `[media].moh_file`.
+- SIPp **outbound_bot_hold** regression phase (`outbound_bot_hold_uas.xml`):
+  SiphonAI dials out, the echo-ws (`--auto-hold`) drives `hold`/`resume`, and
+  the callee asserts it receives the sendonly/sendrecv re-INVITEs —
+  `holds_total{result="ok"}` reads 2.
+
+With this, both bot-hold and WS reconnect now work on inbound **and** outbound
+legs.
+
 ## [0.7.4] - 2026-06-17
 
 Follow-up to 0.7.3: **WS reconnect on outbound legs.** The reconnect drive

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-06-17
+
+Follow-up to 0.7.3: **WS reconnect on outbound legs.** The reconnect drive
+shipped in 0.7.3 was inbound-only — the controller logic is bridge-generic,
+but the `[bridge].ws_reconnect_*` settings weren't threaded into the
+outbound originate path. This closes that gap, so a call placed via
+`POST /admin/v1/calls` reconnects the same way an inbound call does when
+its WS drops. Still gated by `[bridge].ws_reconnect_enabled` (off by
+default); no protocol or CDR change.
+
+### Changed
+
+- **Outbound originated calls now honour `[bridge].ws_reconnect_enabled`.**
+  The originate path threads the daemon's reconnect settings (enabled,
+  `ws_reconnect_max_secs`, and the shared `[media].moh_file` for the gap)
+  through to the call controller and puts the leg's tap in survive-WS-drop
+  mode — identical behaviour and code path to inbound. A new
+  `OutboundService::with_moh_file` carries the hold-music file.
+- SIPp **outbound_reconnect** regression phase: SiphonAI dials out, SIPp
+  answers, the echo-ws (`--drop-after-ms`) drops, SiphonAI re-dials and
+  resumes (`reconnected: true`), and the call ends cleanly — asserting
+  `ws_reconnects_total{result="recovered"}`.
+
 ## [0.7.3] - 2026-06-17
 
 Theme: **WS reconnect mid-call** — opt-in resilience. Until now, any

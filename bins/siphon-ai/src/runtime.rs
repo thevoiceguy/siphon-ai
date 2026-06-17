@@ -614,6 +614,9 @@ impl Runtime {
             // Outbound bots can join conferences too (§9.1 — a room is
             // composed of any active calls). Share the same registries.
             service = service.with_control_registry(control_registry.clone());
+            // Hold music for the WS-reconnect gap on outbound legs (0.7.3) —
+            // the same [media].moh_file the inbound acceptor uses.
+            service = service.with_moh_file(media.moh_file.clone());
             if let Some(reg) = &conference_registry {
                 service = service.with_conference(reg.clone());
             }

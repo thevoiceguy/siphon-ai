@@ -92,6 +92,10 @@ pub struct OutboundService {
     /// Park context (0.7.0). `Some` when `[park].enabled`; outbound
     /// bots can park/retrieve just like inbound calls.
     park: Option<ParkContext>,
+    /// `[media].moh_file` — hold music for the WS-reconnect gap (0.7.3).
+    /// Shared with the inbound side (the acceptor's `hold_moh_file`).
+    /// `None` → comfort silence.
+    moh_file: Option<std::path::PathBuf>,
 }
 
 impl OutboundService {
@@ -116,6 +120,7 @@ impl OutboundService {
             conference: None,
             control_registry: CallControlRegistry::new(),
             park: None,
+            moh_file: None,
         }
     }
 
@@ -137,6 +142,15 @@ impl OutboundService {
     /// Share the park context so outbound bots can park/retrieve.
     pub fn with_park(mut self, park: ParkContext) -> Self {
         self.park = Some(park);
+        self
+    }
+
+    /// Set the hold-music file (`[media].moh_file`) used during the
+    /// WS-reconnect gap on outbound legs (0.7.3). `None` → comfort
+    /// silence. Reconnect itself is gated by `[bridge].ws_reconnect_enabled`
+    /// (from the daemon defaults).
+    pub fn with_moh_file(mut self, moh_file: Option<std::path::PathBuf>) -> Self {
+        self.moh_file = moh_file;
         self
     }
 }
@@ -209,6 +223,11 @@ impl OutboundOriginateHandle for OutboundService {
         let conference = self.conference.clone();
         let control_registry = self.control_registry.clone();
         let park = self.park.clone();
+        // WS reconnect (0.7.3) — outbound legs reconnect on the same daemon
+        // defaults as inbound; extracted before the spawn (no `self` inside).
+        let ws_reconnect_enabled = self.defaults.ws_reconnect_enabled;
+        let ws_reconnect_max = self.defaults.ws_reconnect_max;
+        let ws_reconnect_moh_file = self.moh_file.clone();
 
         info!(call_id = %bridge_id_str, gateway = %gateway, "originating outbound call");
         let log_id = bridge_id_str.clone();
@@ -243,6 +262,9 @@ impl OutboundOriginateHandle for OutboundService {
                         control_registry,
                         park,
                         srtp_requested,
+                        ws_reconnect_enabled,
+                        ws_reconnect_max,
+                        ws_reconnect_moh_file,
                     };
                     run_call(originator, call, bridge, ctx).await;
                 }
@@ -313,6 +335,11 @@ struct OutboundCallContext {
     /// Whether this gateway offered SRTP (`[[gateway]].srtp != off`), so the
     /// answered-call path can record `encrypted` vs `downgraded`.
     srtp_requested: bool,
+    /// WS reconnect (0.7.3), from the daemon `[bridge]` defaults — outbound
+    /// legs reconnect the same way inbound does (the drive is bridge-generic).
+    ws_reconnect_enabled: bool,
+    ws_reconnect_max: std::time::Duration,
+    ws_reconnect_moh_file: Option<std::path::PathBuf>,
 }
 
 /// Run an answered outbound call's audio bridge to completion, tear it
@@ -400,7 +427,10 @@ async fn run_call(
         call_id: ctx.bridge_id.clone(),
         bridge,
         start,
-        media_tap: accepted.tap,
+        // Reconnect-enabled legs put the tap in survive-WS-drop mode so an
+        // unexpected drop doesn't tear it down before the controller redials
+        // (0.7.3) — same as the acceptor does for inbound.
+        media_tap: accepted.tap.with_ws_reconnect(ctx.ws_reconnect_enabled),
         transfer: Some(transfer),
         recording: None,
         conference: ctx.conference.clone(),
@@ -410,13 +440,11 @@ async fn run_call(
         // to build the hold/resume re-INVITE offer. Inbound legs (the
         // primary bot-answers-the-call path) carry it today.
         hold: None,
-        // WS reconnect on outbound legs is a 0.7.3 follow-up — the drive
-        // is bridge-generic, but the reconnect settings aren't threaded
-        // into the originate context yet and the chunk-3 harness only
-        // covers inbound. Disabled here; inbound carries it.
-        ws_reconnect_enabled: false,
-        ws_reconnect_max: std::time::Duration::from_secs(30),
-        ws_reconnect_moh_file: None,
+        // WS reconnect (0.7.3) — outbound legs reconnect on the daemon
+        // `[bridge]` defaults, same drive as inbound.
+        ws_reconnect_enabled: ctx.ws_reconnect_enabled,
+        ws_reconnect_max: ctx.ws_reconnect_max,
+        ws_reconnect_moh_file: ctx.ws_reconnect_moh_file.clone(),
     };
     let (controller, handle) = CallController::new(cfg);
     // Reachable by the admin conference API for this leg's lifetime.
@@ -535,6 +563,9 @@ mod tests {
             control_registry: CallControlRegistry::new(),
             park: None,
             srtp_requested: false,
+            ws_reconnect_enabled: false,
+            ws_reconnect_max: std::time::Duration::from_secs(30),
+            ws_reconnect_moh_file: None,
         };
         let view = CallTerminationView {
             cause: CdrTerminationCause::ServerHangup,

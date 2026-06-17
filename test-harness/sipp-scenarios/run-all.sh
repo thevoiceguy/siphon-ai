@@ -1051,6 +1051,92 @@ fi
 rc_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: outbound WS reconnect ─────────────
+# Like the outbound phase (SIPp is the callee, SiphonAI the UAC dialing
+# via a gateway), but the echo-ws (--drop-after-ms) drops mid-call and
+# [bridge].ws_reconnect_enabled makes SiphonAI re-dial. The redial's start
+# carries reconnected:true, the echo-ws hangs that resumed call up, and
+# SiphonAI BYEs the SIPp callee. Proves reconnect works on the outbound
+# originate path too (0.7.4). Pass = SIPp completed AND
+# ws_reconnects_total{result="recovered"} == 1.
+echo
+echo "─── auxiliary phase: outbound_reconnect ───────────────"
+OR_WS_PORT=8776
+OR_ADMIN_PORT=9091
+OR_WS_LOG=$(mktemp -t echo-ws-or.XXXXXX.log)
+OR_DAEMON_LOG=$(mktemp -t siphon-ai-or.XXXXXX.log)
+OR_CONFIG=$(mktemp -t siphon-ai-or.XXXXXX.toml)
+cat >"$OR_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-or"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$OR_WS_PORT/"
+ws_reconnect_enabled = true
+ws_reconnect_max_secs = 10
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$OR_ADMIN_PORT"
+[outbound]
+max_concurrent = 2
+[[gateway]]
+name = "sipp"
+proxy = "127.0.0.1:$SIPP_PORT"
+from = "sip:harness@127.0.0.1"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+OR_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$OR_PYTHON" ]] || OR_PYTHON=python3
+"$OR_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$OR_WS_PORT" \
+    --drop-after-ms 700 \
+    >"$OR_WS_LOG" 2>&1 &
+OR_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$OR_CONFIG" \
+    >"$OR_DAEMON_LOG" 2>&1 &
+OR_DAEMON_PID=$!
+OR_SIPP_PID=""
+or_cleanup() {
+    kill "$OR_WS_PID" "$OR_DAEMON_PID" $OR_SIPP_PID 2>/dev/null || true
+    wait "$OR_WS_PID" "$OR_DAEMON_PID" $OR_SIPP_PID 2>/dev/null || true
+}
+trap or_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── outbound_reconnect_recovers ──────────────────────"
+or_ok=0
+sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/outbound_uas_answer.xml" \
+    -m 1 -timeout 20s -trace_err -p "$SIPP_PORT" >/dev/null 2>&1 &
+OR_SIPP_PID=$!
+sleep 0.3
+or_resp=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "http://127.0.0.1:$OR_ADMIN_PORT/admin/v1/calls" \
+    -d '{"to": "7001", "gateway": "sipp"}')
+if [[ "$or_resp" == "202" ]] && wait "$OR_SIPP_PID"; then
+    if curl -s "http://127.0.0.1:$OR_ADMIN_PORT/metrics" \
+        | grep -q 'siphon_ai_ws_reconnects_total{result="recovered"} 1'; then
+        or_ok=1
+    fi
+fi
+if (( or_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (originate=$or_resp; daemon: $OR_DAEMON_LOG; ws: $OR_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+or_cleanup
+trap - EXIT
+
 # ─── Optional third phase: blind_transfer ─────────────────────────
 # Needs a WS server that proactively emits BridgeIn::Transfer. The
 # runner stops the daemon, brings up an echo-ws that auto-emits

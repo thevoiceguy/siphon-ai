@@ -80,6 +80,72 @@ where
     port
 }
 
+/// Like [`one_shot_server`] but accepts **two** connections on the same
+/// port in sequence — the original session (`h1`) and the reconnect
+/// redial (`h2`). Used by the WS-reconnect tests (0.7.3).
+async fn two_shot_server<F1, Fut1, F2, Fut2>(h1: F1, h2: F2) -> u16
+where
+    F1: FnOnce(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Fut1 + Send + 'static,
+    Fut1: std::future::Future<Output = ()> + Send,
+    F2: FnOnce(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Fut2 + Send + 'static,
+    Fut2: std::future::Future<Output = ()> + Send,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (s1, _) = listener.accept().await.expect("accept 1");
+        let ws1 = tokio_tungstenite::accept_hdr_async(s1, echo_subprotocol)
+            .await
+            .expect("handshake 1");
+        h1(ws1).await;
+
+        let (s2, _) = listener.accept().await.expect("accept 2 (redial)");
+        let ws2 = tokio_tungstenite::accept_hdr_async(s2, echo_subprotocol)
+            .await
+            .expect("handshake 2");
+        h2(ws2).await;
+    });
+    port
+}
+
+/// Controller with WS reconnect enabled and a caller-chosen window.
+fn make_controller_reconnect(
+    port: u16,
+    call_id: &str,
+    window: Duration,
+) -> (CallController, siphon_ai_core::CallHandle) {
+    let manager = Arc::new(MediaBridgeManager::new());
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        ForgeCallId::new(call_id),
+        8000,
+    )
+    .expect("attach tap")
+    .with_ws_reconnect(true);
+    Box::leak(Box::new(manager));
+    let cfg = CallControllerConfig {
+        call_id: CallId::new(call_id),
+        bridge: BridgeConfig {
+            ws_url: format!("ws://127.0.0.1:{port}/"),
+            auth_header: None,
+            connect_timeout: Duration::from_secs(2),
+            tls: None,
+        },
+        start: start_msg(call_id),
+        media_tap: tap,
+        transfer: None,
+        recording: None,
+        conference: None,
+        park: None,
+        hold: None,
+        ws_reconnect_enabled: true,
+        ws_reconnect_max: window,
+        ws_reconnect_moh_file: None,
+    };
+    CallController::new(cfg)
+}
+
 /// Handshake callback: echo the `siphon-ai.v1` subprotocol back so
 /// tungstenite's client doesn't reject the upgrade with
 /// `NoSubProtocol`. The bridge code tolerates a missing echo
@@ -150,6 +216,9 @@ fn make_controller_full(
         conference,
         park,
         hold: None,
+        ws_reconnect_enabled: false,
+        ws_reconnect_max: std::time::Duration::from_secs(30),
+        ws_reconnect_moh_file: None,
     };
     CallController::new(cfg)
 }
@@ -235,6 +304,66 @@ async fn server_hangup_yields_server_hangup_termination() {
     let (controller, _handle) = make_controller(port, "test-2");
     let outcome = controller.run().await.expect("run");
     assert_eq!(outcome.termination, CallTermination::ServerHangup);
+}
+
+#[tokio::test]
+async fn ws_drop_reconnects_and_resumes() {
+    // 0.7.3: an unexpected drop with reconnect enabled re-dials the same
+    // ws_url. Conn 1 reads `start` then drops the socket; conn 2 (the
+    // redial) MUST carry `start.reconnected = true` (seq 0), then ends
+    // the call with a `hangup`.
+    let port = two_shot_server(
+        |mut ws| async move {
+            let _ = ws.next().await; // original start
+            drop(ws); // unexpected close — no stop/hangup
+        },
+        |mut ws| async move {
+            let text = match ws.next().await.expect("recv start").expect("ws ok") {
+                Message::Text(t) => t,
+                other => panic!("expected text, got {other:?}"),
+            };
+            let v: Value = serde_json::from_str(&text).expect("start is JSON");
+            assert_eq!(v["type"], "start");
+            assert_eq!(v["call_id"], "recon-1");
+            assert_eq!(v["seq"], 0);
+            assert_eq!(v["reconnected"], true, "redial start must flag reconnected");
+            ws.send(Message::Text(
+                serde_json::json!({"type":"hangup","call_id":"recon-1","cause":"normal"})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+            while let Some(Ok(m)) = ws.next().await {
+                if matches!(m, Message::Close(_)) {
+                    break;
+                }
+            }
+            ws.close(None).await.ok();
+        },
+    )
+    .await;
+
+    let (controller, _handle) = make_controller_reconnect(port, "recon-1", Duration::from_secs(10));
+    let outcome = controller.run().await.expect("run");
+    // The call survived the drop and ended via the resumed session's hangup.
+    assert_eq!(outcome.termination, CallTermination::ServerHangup);
+}
+
+#[tokio::test]
+async fn ws_reconnect_exhausts_and_tears_down() {
+    // Conn 1 reads `start` then drops; the server never accepts again, so
+    // every redial is refused. With a short window the controller gives
+    // up and tears the call down (→ §5.7 ws_disconnect).
+    let port = one_shot_server(|mut ws| async move {
+        let _ = ws.next().await;
+        drop(ws);
+    })
+    .await;
+
+    let (controller, _handle) =
+        make_controller_reconnect(port, "recon-2", Duration::from_millis(500));
+    let outcome = controller.run().await.expect("run");
+    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
 }
 
 #[tokio::test]

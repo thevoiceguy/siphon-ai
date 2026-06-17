@@ -410,6 +410,13 @@ async fn run_call(
         // to build the hold/resume re-INVITE offer. Inbound legs (the
         // primary bot-answers-the-call path) carry it today.
         hold: None,
+        // WS reconnect on outbound legs is a 0.7.3 follow-up — the drive
+        // is bridge-generic, but the reconnect settings aren't threaded
+        // into the originate context yet and the chunk-3 harness only
+        // covers inbound. Disabled here; inbound carries it.
+        ws_reconnect_enabled: false,
+        ws_reconnect_max: std::time::Duration::from_secs(30),
+        ws_reconnect_moh_file: None,
     };
     let (controller, handle) = CallController::new(cfg);
     // Reachable by the admin conference API for this leg's lifetime.
@@ -498,6 +505,12 @@ fn build_outbound_record(
             count: h.count,
             total_ms: h.total_ms,
         }),
+        // WS-reconnect accounting (0.7.3). `None` for outbound legs (the
+        // drive is inbound-only this release), mapped for forward-compat.
+        reconnect: view.reconnect.map(|r| siphon_ai_cdr::ReconnectInfo {
+            count: r.count,
+            total_gap_ms: r.total_gap_ms,
+        }),
     }
 }
 
@@ -530,6 +543,7 @@ mod tests {
             recording: None,
             park: None,
             hold: None,
+            reconnect: None,
         };
         let audio = CdrAudioInfo {
             codec: "PCMU".into(),

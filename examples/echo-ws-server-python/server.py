@@ -85,6 +85,15 @@ class Options:
     # the bot-initiated hold/resume SIPp scenario (the caller asserts it
     # receives a sendonly re-INVITE then a sendrecv one). None = disabled.
     auto_hold: bool
+    # Test-harness knob: drop the **first** connection's socket this many ms
+    # after `start` (an unexpected WS drop), to exercise SiphonAI's WS
+    # reconnect (0.7.3). With `[bridge].ws_reconnect_enabled = true` SiphonAI
+    # re-dials; the redial's `start` carries `reconnected: true`, and this
+    # server ends that resumed call with a `hangup`. `_dropped_once` (mutated
+    # at runtime) makes the drop fire only on the first connection so the
+    # redial succeeds. None = disabled.
+    drop_after_ms: int | None
+    _dropped_once: bool = False
 
 
 # ─── HTTP-side concerns: auth + subprotocol ─────────────────────────────────
@@ -184,6 +193,22 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
                     # This session is picking up a previously parked call
                     # (PROTOCOL.md §3.1 / §4.9), not a fresh inbound one.
                     LOG.info("start call_id=%s is a retrieved (parked) call", call_id)
+                if msg.get("reconnected"):
+                    # SiphonAI re-dialed after an unexpected WS drop (0.7.3,
+                    # PROTOCOL.md §5.7). End this resumed call so the harness
+                    # caller completes — proving the reconnect recovered.
+                    LOG.info("start call_id=%s is a reconnected (resumed) call", call_id)
+                    if call_id:
+                        asyncio.create_task(
+                            _send_after(
+                                connection, 300, {"type": "hangup", "call_id": call_id}
+                            )
+                        )
+                elif opts.drop_after_ms is not None and not opts._dropped_once:
+                    # First connection: drop the socket after a beat to
+                    # simulate an unexpected WS failure mid-call.
+                    opts._dropped_once = True
+                    asyncio.create_task(_drop_after(connection, opts.drop_after_ms))
                 if opts.echo_marks:
                     # Optional behavior used by SiphonAI's protocol smoke
                     # tests: round-trip a `mark` to verify the control
@@ -340,6 +365,18 @@ async def _send_after(
         LOG.debug("auto-send dropped: connection closed before delay elapsed")
 
 
+async def _drop_after(connection: ServerConnection, delay_ms: int) -> None:
+    """Test-harness only: after `delay_ms`, abruptly close the socket to
+    simulate an unexpected WS drop (no `stop`/`hangup`). Drives 0.7.3
+    reconnect. Closes with a non-1000 code so it reads as a failure."""
+    await asyncio.sleep(delay_ms / 1000.0)
+    LOG.info("test-harness: dropping WS connection to trigger reconnect")
+    try:
+        await connection.close(code=1011, reason="harness drop")
+    except websockets.exceptions.ConnectionClosed:
+        pass
+
+
 async def _auto_hold_cycle(
     connection: ServerConnection, call_id: str, opts: Options
 ) -> None:
@@ -464,6 +501,18 @@ def parse_args(argv: list[str] | None = None) -> Options:
         ),
     )
     p.add_argument(
+        "--drop-after-ms",
+        type=int,
+        default=None,
+        help=(
+            "test-harness only: drop the first connection's socket this many "
+            "ms after `start` (an unexpected WS drop). With "
+            "[bridge].ws_reconnect_enabled SiphonAI re-dials; the redial's "
+            "start carries reconnected:true and this server hangs it up. The "
+            "hook for the 0.7.3 WS-reconnect SIPp phase."
+        ),
+    )
+    p.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -488,6 +537,7 @@ def parse_args(argv: list[str] | None = None) -> Options:
         auto_park=args.auto_park is not None,
         auto_park_slot=args.auto_park or None,
         auto_hold=args.auto_hold,
+        drop_after_ms=args.drop_after_ms,
     )
 
 

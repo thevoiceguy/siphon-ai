@@ -110,6 +110,17 @@ each (recvonly / sendrecv). Pass = the SIPp scenario completed (both
 `check_it` direction asserts held) **and** `siphon_ai_holds_total{result="ok"}`
 reads 2 (one tick for hold, one for resume).
 
+And an always-on **ws_reconnect** phase (0.7.3): a daemon with
+`[bridge].ws_reconnect_enabled` and an echo-ws started with
+`--drop-after-ms`, which abruptly closes the socket mid-call. SiphonAI keeps
+the call up on hold music and re-dials the same `ws_url`; the redial's
+`start` carries `reconnected: true`, the echo-ws hangs that resumed call up,
+and SiphonAI BYEs the caller. Reuses `park_caller.xml` (answer + wait for the
+server BYE). Pass = SIPp saw the BYE **and**
+`siphon_ai_ws_reconnects_total{result="recovered"}` reads 1. (The exhaustion
+path — no redial within the window — is covered by the controller unit test
+`ws_reconnect_exhausts_and_tears_down`.)
+
 The `stir_shaken_*` scenarios run in `run-all.sh`'s always-on
 **stir_shaken** auxiliary phase. It builds + runs the
 `gen_test_passport` example (a `siphon-ai-stir-shaken` example) to mint a

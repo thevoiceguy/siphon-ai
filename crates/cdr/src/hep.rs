@@ -143,6 +143,7 @@ mod tests {
             recording_path: None,
             park: None,
             hold: None,
+            reconnect: None,
         }
     }
 

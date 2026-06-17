@@ -286,7 +286,7 @@ ws_url = "wss://example.test/sip-bridge"
 [[register]]
 name = "cucm"
 server = "${TEST_REGISTRAR}"
-username = "+12123013382"
+username = "+15551234567"
 password = "secret"
 
 [[route]]

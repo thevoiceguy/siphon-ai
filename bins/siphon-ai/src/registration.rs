@@ -498,8 +498,8 @@ mod tests {
 
     #[test]
     fn contact_uri_carries_advertised_addr_and_transport() {
-        let uri = build_contact_uri("+12123013382", "10.246.253.199:5060", SipTransport::Udp);
-        assert_eq!(uri, "sip:+12123013382@10.246.253.199:5060;transport=udp");
+        let uri = build_contact_uri("+15551234567", "203.0.113.199:5060", SipTransport::Udp);
+        assert_eq!(uri, "sip:+15551234567@203.0.113.199:5060;transport=udp");
     }
 
     #[test]

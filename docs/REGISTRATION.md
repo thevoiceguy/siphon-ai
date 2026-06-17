@@ -57,7 +57,7 @@ all interfaces:
 
 ```toml
 [node]
-public_address = "10.246.253.199"   # reachable IP the registrar routes back to
+public_address = "203.0.113.199"   # reachable IP the registrar routes back to
 
 [sip]
 listen = "0.0.0.0:5060"             # bind all interfaces
@@ -66,7 +66,7 @@ listen = "0.0.0.0:5060"             # bind all interfaces
 This is the same `public_address` used in the SDP `c=` line and the inbound
 UAS `Contact`. A wildcard bind without `[node].public_address` is rejected at
 config load. A concrete, non-wildcard `[sip].listen` (e.g.
-`10.246.253.199:5060`) needs no extra setting — that address is advertised
+`203.0.113.199:5060`) needs no extra setting — that address is advertised
 directly.
 
 ## What v1 supports

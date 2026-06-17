@@ -1223,10 +1223,13 @@ trap - EXIT
 
 # ─── Always-on auxiliary phase: Opus negotiation ──────────────────
 # A daemon with `[media].codecs = ["opus","pcmu"]`; SIPp offers Opus at a
-# dynamic PT (96, opus/48000/2) and asserts the 200 OK answers Opus
-# (the scenario's check_it on the answer rtpmap). Proves Opus negotiation
-# + the 16 kHz bridge session end-to-end (0.8.0). Signalling only — SIPp
-# can't encode Opus media; the codec round-trip is forge unit-tested.
+# dynamic PT (96, opus/48000/2) and asserts the 200 OK answers Opus AND
+# carries our Opus fmtp re-keyed onto that PT (mono / 16 kHz: stereo=0,
+# maxplaybackrate=16000 — the 0.8.2 fmtp follow-up). Both are check_it
+# eregs in the scenario, so a clean SIPp run (rc 0) means negotiation +
+# fmtp succeeded. Proves Opus negotiation + the 16 kHz bridge session
+# end-to-end (0.8.0). Signalling only — SIPp can't encode Opus media; the
+# codec round-trip is forge unit-tested.
 echo
 echo "─── auxiliary phase: opus ─────────────────────────────"
 OP_WS_PORT=8778

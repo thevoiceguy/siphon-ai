@@ -42,7 +42,9 @@ a=sendrecv
   <recv response="180" optional="true"/>
   <recv response="183" optional="true"/>
 
-  <!-- 200 OK MUST answer Opus (echoing our PT 96). -->
+  <!-- 200 OK MUST answer Opus (echoing our PT 96) AND carry our Opus
+       fmtp re-keyed onto that PT (mono / 16 kHz bridge: stereo=0,
+       maxplaybackrate=16000). 0.8.2 fmtp follow-up. -->
   <recv response="200" rtd="true">
     <action>
       <ereg regexp="a=rtpmap:96 opus/48000"
@@ -50,6 +52,11 @@ a=sendrecv
             check_it="true"
             assign_to="opus_answer"/>
       <log message="opus answer rtpmap captured: [$opus_answer]"/>
+      <ereg regexp="a=fmtp:96 .*stereo=0"
+            search_in="msg"
+            check_it="true"
+            assign_to="opus_fmtp"/>
+      <log message="opus answer fmtp captured: [$opus_fmtp]"/>
     </action>
   </recv>
 

@@ -1,15 +1,27 @@
 # Design note — Opus codec support
 
-> **Status: IMPLEMENTED (0.8.0).** Chunk 1 (forge-media PR #75), chunk 2
-> (siphon-ai enablement #185), chunk 3 (this release). Two design unknowns
-> resolved cleanly during the chunk-1 spike: **libopus does the 48↔16
-> resample AND the stereo→mono downmix internally** (no `forge-resampler`
-> crate, no separate downmix — §7.4/§7.6), so the forge change was just
-> "run the Opus codec at a 16 kHz bridge rate" mirroring G.722. One
-> **deviation:** SDP **fmtp** (§4) is **deferred to a follow-up** — it
-> interacts with the answer's dynamic PT and the params (§7.5) want
-> validation against a real softphone/carrier. Opus is correct without it
-> (the `/2` rtpmap is emitted; forge decodes mono regardless).
+> **Status: IMPLEMENTED.** Core in 0.8.0 — chunk 1 (forge-media PR #75),
+> chunk 2 (siphon-ai enablement #185), chunk 3 (release #186). SDP
+> **fmtp** (§4) landed as a **0.8.2 follow-up** (#188). Two design
+> unknowns resolved cleanly during the chunk-1 spike: **libopus does the
+> 48↔16 resample AND the stereo→mono downmix internally** (no
+> `forge-resampler` crate, no separate downmix — §7.4/§7.6), so the forge
+> change was just "run the Opus codec at a 16 kHz bridge rate" mirroring
+> G.722.
+>
+> **fmtp resolution (§4, §7.5):** the upstream negotiator carries fmtp
+> forward keyed by the *offered* PT, so a peer offering Opus at a dynamic
+> PT other than our 111 would drop our tuning. Resolved siphon-ai-side
+> (no upstream change): `Codec::fmtp_params()` is emitted on our PT in the
+> outbound **offer**, and on the **answer** we `set_fmtp()` it onto the
+> *negotiated* PT after negotiation. Params shipped:
+> `maxplaybackrate=16000; sprop-maxcapturerate=16000; stereo=0;
+> sprop-stereo=0; useinbandfec=1; usedtx=0`. These are quality/politeness
+> hints (tell the peer: mono, ≤16 kHz, please FEC) — Opus was already
+> functionally correct without them since forge decodes mono at 16 kHz
+> regardless. Validated via the SIPp opus phase (`check_it` on the answer
+> `a=fmtp`); broader real-softphone/carrier tuning can refine the param
+> set later without further design work.
 
 Adds **Opus** to the negotiable codec set. Opus is the modern wideband
 codec WebRTC/softphones prefer; SiphonAI advertises only G.711/G.722

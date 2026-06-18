@@ -571,6 +571,17 @@ impl Runtime {
         let outbound_handle: Option<AdminOutbound> = if outbound.enabled() {
             let mut gateways = HashMap::with_capacity(outbound.gateways.len());
             for gw in &outbound.gateways {
+                // Outbound delayed offer (chunk 2): the gateway's UAC and
+                // its originator share one registry — `place_delayed` parks
+                // per-call media params, the UAC's answer generator picks
+                // them up when the peer's offer arrives in the 2xx.
+                let delayed_registry: siphon_ai_core::DelayedOfferRegistry =
+                    Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+                let answerer: Arc<dyn sip_uac::integrated::SdpAnswerGenerator> =
+                    Arc::new(siphon_ai_core::DelayedOfferAnswerer::new(
+                        (*outbound_media).clone(),
+                        Arc::clone(&delayed_registry),
+                    ));
                 let uac = build_outbound_uac(
                     TransferUacBuild {
                         local_uri: &local_uri,
@@ -582,10 +593,12 @@ impl Runtime {
                         sip_resolver: Arc::clone(&sip_resolver),
                     },
                     gw.credentials.as_ref(),
+                    Some(answerer),
                 )?;
-                let originator = Arc::new(OutboundOriginator::new(
+                let originator = Arc::new(OutboundOriginator::with_delayed_registry(
                     (*outbound_media).clone(),
                     Arc::new(uac),
+                    delayed_registry,
                 ));
                 gateways.insert(
                     gw.name.clone(),
@@ -1297,6 +1310,7 @@ fn build_transfer_uac(args: TransferUacBuild<'_>) -> Result<IntegratedUAC> {
 fn build_outbound_uac(
     args: TransferUacBuild<'_>,
     credentials: Option<&siphon_ai_config::GatewayCredentials>,
+    sdp_answer_generator: Option<Arc<dyn sip_uac::integrated::SdpAnswerGenerator>>,
 ) -> Result<IntegratedUAC> {
     let mut builder = IntegratedUAC::builder()
         .local_uri(args.local_uri)
@@ -1316,6 +1330,11 @@ fn build_outbound_uac(
             creds.username.clone(),
             creds.password.clone(),
         )));
+    }
+    // Outbound delayed offer (RFC 3264): when set, the UAC invokes this to
+    // build the SDP answer for the ACK on a 2xx carrying the peer's offer.
+    if let Some(generator) = sdp_answer_generator {
+        builder = builder.sdp_answer_generator(generator);
     }
     builder
         .build()

@@ -32,8 +32,8 @@ pub use conference::{ConferenceError, ConferenceLimits, ConferenceRegistry, Conf
 pub use conference_admin::ConferenceAdmin;
 pub use hold::HoldContext;
 pub use outbound::{
-    NotAnsweredCause, OutboundCall, OutboundError, OutboundGuard, OutboundOriginator,
-    OutboundPermit, OutboundRejection, StaticCredentials,
+    DelayedOfferAnswerer, DelayedOfferRegistry, NotAnsweredCause, OutboundCall, OutboundError,
+    OutboundGuard, OutboundOriginator, OutboundPermit, OutboundRejection, StaticCredentials,
 };
 pub use outbound_service::{OutboundGateway, OutboundService};
 pub use park::{

@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  outbound_delayed_uas — roles inverted, OUTBOUND delayed offer (0.9.0
+  chunk 2). SIPp is the CALLEE (UAS); SiphonAI is the UAC placing the
+  call via `POST /admin/v1/calls` with `delayed_offer: true` through a
+  `[[gateway]]` pointing at SIPp's port.
+
+  SiphonAI sends an INVITE with NO SDP; SIPp answers 200 OK carrying its
+  own SDP OFFER; SiphonAI must send the SDP ANSWER in the ACK (built by
+  the gateway UAC's delayed-offer answer generator). The scenario
+  asserts (check_it) the ACK actually carries an `m=audio` answer —
+  proving the generator fired. Then the WS bridge runs (echo-ws auto-
+  hangs-up) and SiphonAI BYEs us.
+
+  Run via run-all.sh's outbound_delayed phase — the scenario alone does
+  nothing until the runner POSTs the originate request.
+-->
+<scenario name="outbound_delayed_uas">
+  <!-- The INVITE has no SDP (delayed offer); we don't assert on the
+       absent body here — the daemon log + the ACK answer below are the
+       proof. -->
+  <recv request="INVITE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 180 Ringing
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <!-- 200 OK carrying OUR (SIPp's) SDP OFFER — the delayed-offer flow. -->
+  <send retrans="500">
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <!-- ACK MUST carry SiphonAI's SDP answer (generated for the late
+       offer). check_it fails the call if the answer is absent. -->
+  <recv request="ACK" rtd="true">
+    <action>
+      <ereg regexp="m=audio [0-9]+ RTP/AVP"
+            search_in="msg"
+            check_it="true"
+            assign_to="ack_answer"/>
+      <log message="delayed-offer ACK carried answer m-line: [$ack_answer]"/>
+    </action>
+  </recv>
+
+  <!-- The call is up; the echo WS server emits hangup after ~1.5 s, so
+       SiphonAI BYEs us. -->
+  <recv request="BYE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]>
+  </send>
+</scenario>

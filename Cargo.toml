@@ -117,6 +117,11 @@ sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "302
 sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
 sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
 sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
+# sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
+# (distinct from forge-media's pinned sip-sdp). Used by the outbound
+# delayed-offer answer generator to hand the UAC a SessionDescription it
+# accepts. Must stay on the same siphon-rs rev as the rest below.
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
 sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.

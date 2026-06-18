@@ -18,27 +18,157 @@
 //! §4.4); this struct is process-wide plumbing (one shared UAC + media
 //! setup), not per-call state.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use forge_core::CallId;
+use forge_core::{CallId, ParticipantId};
 use sip_core::SipUri;
+// The SAME sip-sdp sip-uac's SdpAnswerGenerator speaks — distinct from
+// forge-media's pinned sip-sdp (whose `SessionDescription` is a different
+// type to cargo). We parse our media-glue answer text into this so the UAC
+// accepts it for the ACK.
 use sip_dialog::Dialog;
-use sip_uac::integrated::{CallHandle, IntegratedUAC, RequestTarget};
+use sip_sdp::SessionDescription;
+use sip_uac::integrated::{CallHandle, IntegratedUAC, RequestTarget, SdpAnswerGenerator};
 use sip_uac::CredentialProvider;
 use siphon_ai_media_glue::{
-    MediaSetup, OutboundAccepted, OutboundOfferRequest, SetupError, TapOptions,
+    Codec, InboundAccepted, InboundCall, MediaSetup, OutboundAccepted, OutboundOfferRequest,
+    SetupError, TapOptions,
 };
 use thiserror::Error;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info, instrument, warn};
+
+/// Per-call state for an outbound **delayed-offer** call (we sent an
+/// offerless INVITE; the peer's offer arrives in the 2xx). Parked in the
+/// [`DelayedOfferRegistry`] by [`OutboundOriginator::place_delayed`] keyed
+/// by SIP Call-ID, consumed by [`DelayedOfferAnswerer::generate_answer`]
+/// when the 2xx lands. The fields are exactly what `accept_inbound` needs
+/// to build our answer from the peer's offer.
+///
+/// Public only because it appears in the `pub` [`DelayedOfferRegistry`]
+/// alias; its fields are private and it is constructed solely by
+/// [`OutboundOriginator::place_delayed`].
+pub struct DelayedOfferPending {
+    forge_call_id: CallId,
+    codecs: Vec<Codec>,
+    dtmf_payload_type: Option<u8>,
+    participant_a: ParticipantId,
+    participant_b: ParticipantId,
+    tap: TapOptions,
+    /// Delivers the media-setup result back to `place_delayed` once the
+    /// generator has built the answer (or failed).
+    result_tx: oneshot::Sender<Result<InboundAccepted, SetupError>>,
+}
+
+/// SIP-Call-ID → parked delayed-offer call. Shared between the
+/// [`OutboundOriginator`] (which inserts) and the per-UAC
+/// [`DelayedOfferAnswerer`] (which removes + finalizes).
+pub type DelayedOfferRegistry = Arc<Mutex<HashMap<String, DelayedOfferPending>>>;
+
+/// The UAC's [`SdpAnswerGenerator`] for outbound delayed offer. When a 2xx
+/// to an offerless INVITE carries the peer's offer, the UAC calls this to
+/// build the SDP answer that goes in the ACK. We answer via `media-glue`
+/// (`accept_inbound` — parse offer, allocate, build answer) and hand the
+/// resulting session/tap back to `place_delayed` through the registry's
+/// oneshot. One answerer per gateway UAC; per-call state is keyed by the
+/// dialog's Call-ID, so concurrent calls don't collide.
+pub struct DelayedOfferAnswerer {
+    media: MediaSetup,
+    registry: DelayedOfferRegistry,
+}
+
+impl DelayedOfferAnswerer {
+    pub fn new(media: MediaSetup, registry: DelayedOfferRegistry) -> Self {
+        Self { media, registry }
+    }
+}
+
+#[async_trait]
+impl SdpAnswerGenerator for DelayedOfferAnswerer {
+    async fn generate_answer(
+        &self,
+        offer: &SessionDescription,
+        dialog: &Dialog,
+    ) -> anyhow::Result<SessionDescription> {
+        let sip_call_id = dialog.id().call_id().to_string();
+        // Lock only to pull the parked entry out; never hold across the
+        // await below.
+        let pending = self
+            .registry
+            .lock()
+            .expect("delayed-offer registry mutex poisoned")
+            .remove(&sip_call_id);
+        let Some(pending) = pending else {
+            return Err(anyhow::anyhow!(
+                "no parked delayed-offer call for Call-ID {sip_call_id}"
+            ));
+        };
+        let DelayedOfferPending {
+            forge_call_id,
+            codecs,
+            dtmf_payload_type,
+            participant_a,
+            participant_b,
+            tap,
+            result_tx,
+        } = pending;
+
+        let offer_sdp = offer.serialize();
+        let result = self
+            .media
+            .accept_inbound(InboundCall {
+                call_id: forge_call_id,
+                offer_sdp: &offer_sdp,
+                codecs,
+                dtmf_payload_type,
+                participant_a,
+                participant_b,
+                from_tag: None,
+                to_tag: None,
+                barge_in_action: tap.barge_in_action,
+                barge_in_debounce: tap.barge_in_debounce,
+                inactivity_timeout: tap.inactivity_timeout,
+                silence_threshold: tap.silence_threshold,
+                dead_air_threshold: tap.dead_air_threshold,
+                rtp_stats_interval: tap.rtp_stats_interval,
+            })
+            .await;
+
+        match result {
+            Ok(accepted) => {
+                // Re-parse our answer text into the UAC's sip-sdp type for
+                // the ACK (media-glue's SessionDescription is forge's
+                // distinct sip-sdp), then hand the session/tap back.
+                let answer_sd = SessionDescription::parse(&accepted.answer.answer_text)
+                    .map_err(|e| anyhow::anyhow!("re-parse delayed-offer answer: {e}"))?;
+                let _ = result_tx.send(Ok(accepted));
+                Ok(answer_sd)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let _ = result_tx.send(Err(e));
+                Err(anyhow::anyhow!("delayed-offer answer build failed: {msg}"))
+            }
+        }
+    }
+}
+
+/// How long `place_delayed` waits for the generator's media result after a
+/// 2xx before giving up (the generator runs synchronously during 2xx
+/// processing, so this only guards a 2xx that carried no usable offer).
+const DELAYED_RESULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Places outbound calls through a shared UAC, allocating + binding media
 /// via [`MediaSetup`]. Daemon-wide; cheap to construct.
 pub struct OutboundOriginator {
     media: MediaSetup,
     uac: Arc<IntegratedUAC>,
+    /// Shared with this gateway's [`DelayedOfferAnswerer`]. `place_delayed`
+    /// parks per-call state here for the generator to pick up.
+    delayed_registry: DelayedOfferRegistry,
 }
 
 /// An established outbound call: the bound media plus the confirmed SIP
@@ -95,7 +225,23 @@ pub enum NotAnsweredCause {
 
 impl OutboundOriginator {
     pub fn new(media: MediaSetup, uac: Arc<IntegratedUAC>) -> Self {
-        Self { media, uac }
+        Self::with_delayed_registry(media, uac, Arc::new(Mutex::new(HashMap::new())))
+    }
+
+    /// Construct sharing an explicit [`DelayedOfferRegistry`] with the
+    /// gateway's [`DelayedOfferAnswerer`] (so `place_delayed` and the UAC's
+    /// answer generator see the same parked calls). The daemon wires both
+    /// halves; tests that don't exercise delayed offer use [`Self::new`].
+    pub fn with_delayed_registry(
+        media: MediaSetup,
+        uac: Arc<IntegratedUAC>,
+        delayed_registry: DelayedOfferRegistry,
+    ) -> Self {
+        Self {
+            media,
+            uac,
+            delayed_registry,
+        }
     }
 
     /// This gateway's UAC. The outbound leg's transfer context sends
@@ -165,6 +311,133 @@ impl OutboundOriginator {
         let dialog = handle.dialog.read().await.clone();
 
         info!(code, "outbound call answered and media bridged");
+        Ok(OutboundCall {
+            accepted,
+            dialog,
+            call_handle: handle,
+            call_id,
+        })
+    }
+
+    /// Place an outbound **delayed-offer** call: send an INVITE with **no
+    /// SDP**, let the peer offer in its 2xx, and answer in the ACK. The
+    /// inverse of [`Self::place`]'s early offer. Media setup happens inside
+    /// the UAC's [`DelayedOfferAnswerer`] (it has the peer's offer); the
+    /// session/tap come back here via the registry's oneshot. Reuses
+    /// `req`'s media parameters (the `srtp` field is ignored — SRTP on the
+    /// delayed-offer answer is a follow-up).
+    #[instrument(skip(self, target, req, tap), fields(call_id = %req.call_id))]
+    pub async fn place_delayed(
+        &self,
+        target: SipUri,
+        req: OutboundOfferRequest,
+        tap: TapOptions,
+    ) -> Result<OutboundCall, OutboundError> {
+        let call_id = req.call_id.clone();
+        debug!(target = %target.as_str(), "placing outbound delayed-offer call");
+
+        // (1) Send the offerless INVITE.
+        let handle = match self.uac.invite(RequestTarget::Uri(target), None).await {
+            Ok(h) => h,
+            Err(e) => {
+                self.stop_session(&call_id).await;
+                return Err(OutboundError::Transport(e.to_string()));
+            }
+        };
+
+        // (2) Park per-call media params keyed by the INVITE's Call-ID
+        //     BEFORE awaiting the final response. The peer cannot 2xx until
+        //     it receives the INVITE we just sent, so the generator (which
+        //     fires on that 2xx) can't run before this registration.
+        let sip_call_id = handle
+            .invite_request()
+            .headers()
+            .get_smol("Call-ID")
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let (result_tx, result_rx) = oneshot::channel();
+        self.delayed_registry
+            .lock()
+            .expect("delayed-offer registry mutex poisoned")
+            .insert(
+                sip_call_id.clone(),
+                DelayedOfferPending {
+                    forge_call_id: call_id.clone(),
+                    codecs: req.codecs,
+                    dtmf_payload_type: req.dtmf_payload_type,
+                    participant_a: req.participant_a,
+                    participant_b: req.participant_b,
+                    tap,
+                    result_tx,
+                },
+            );
+
+        // (3) Await the final response. The UAC invokes the answer
+        //     generator + sends the ACK on a 2xx itself.
+        let unpark = || {
+            self.delayed_registry
+                .lock()
+                .expect("delayed-offer registry mutex poisoned")
+                .remove(&sip_call_id);
+        };
+        let response = match handle.await_final().await {
+            Ok(r) => r,
+            Err(e) => {
+                unpark();
+                self.stop_session(&call_id).await;
+                return Err(OutboundError::Transport(e.to_string()));
+            }
+        };
+        let code = response.code();
+        if !(200..300).contains(&code) {
+            // No 2xx → the generator never ran; reclaim the parked entry.
+            unpark();
+            let cause = classify_failure(code, response.reason());
+            debug!(code, ?cause, "outbound delayed-offer INVITE not answered");
+            self.stop_session(&call_id).await;
+            return Err(OutboundError::NotAnswered(cause));
+        }
+
+        // (4) 2xx — the generator built our answer (and ran media setup)
+        //     during 2xx processing; collect the session/tap it produced.
+        let inbound = match tokio::time::timeout(DELAYED_RESULT_TIMEOUT, result_rx).await {
+            Ok(Ok(Ok(accepted))) => accepted,
+            Ok(Ok(Err(setup_err))) => {
+                // The generator ran but media build failed (it rolled its
+                // own session back). The dialog is up; mirror `place`'s
+                // post-2xx error handling and surface the setup error.
+                return Err(OutboundError::Setup(setup_err));
+            }
+            Ok(Err(_)) | Err(_) => {
+                // The generator never delivered — a 2xx that carried no
+                // usable SDP offer (a non-compliant answer to an offerless
+                // INVITE), or it timed out.
+                unpark();
+                warn!("2xx to offerless INVITE carried no usable SDP offer");
+                self.stop_session(&call_id).await;
+                return Err(OutboundError::Transport(
+                    "2xx to offerless INVITE carried no usable SDP offer".into(),
+                ));
+            }
+        };
+        let dialog = handle.dialog.read().await.clone();
+
+        // Reshape into `OutboundAccepted` so the shared outbound run_call
+        // works unchanged. `offer_sdp` = our answer text, so hold/resume
+        // flip the negotiated media the same way the inbound path does.
+        // No SRTP on the delayed answer in this cut.
+        let accepted = OutboundAccepted {
+            offer_sdp: inbound.answer.answer_text.clone(),
+            answer: inbound.answer,
+            session: inbound.session,
+            tap: inbound.tap,
+            srtp_profile: None,
+        };
+
+        info!(
+            code,
+            "outbound delayed-offer call answered and media bridged"
+        );
         Ok(OutboundCall {
             accepted,
             dialog,

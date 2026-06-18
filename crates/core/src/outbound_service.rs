@@ -218,7 +218,10 @@ impl OutboundOriginateHandle for OutboundService {
         let from = req.from.clone().unwrap_or_else(|| gw.from.clone());
         let to = req.to.clone();
         let gateway = req.gateway.clone();
-        let srtp_requested = gw.srtp != OutboundSrtp::Off;
+        let delayed_offer = req.delayed_offer;
+        // A delayed-offer outbound INVITE carries no SDP, so we can't offer
+        // SRTP in it — the peer offers, we answer (plaintext in this cut).
+        let srtp_requested = !delayed_offer && gw.srtp != OutboundSrtp::Off;
         let originator = Arc::clone(&gw.originator);
         let cdr_sink = Arc::clone(&self.cdr_sink);
         let webhook_sink = Arc::clone(&self.webhook_sink);
@@ -247,7 +250,11 @@ impl OutboundOriginateHandle for OutboundService {
                     gateway: gateway.clone(),
                 }))
                 .await;
-            let result = originator.place(target, offer_req, tap).await;
+            let result = if delayed_offer {
+                originator.place_delayed(target, offer_req, tap).await
+            } else {
+                originator.place(target, offer_req, tap).await
+            };
             let result_label = outbound_result_label(&result);
             metrics::counter!(OUTBOUND_CALLS_TOTAL, "result" => result_label).increment(1);
             match result {

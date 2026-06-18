@@ -58,7 +58,8 @@ sipp -sf basic_call_then_bye.xml -m 1 -p 5070 -s 1000 127.0.0.1:5060
 | `bot_hold_caller.xml`               | 0.7.2 bot-initiated hold: the inverse — the echo-ws (`--auto-hold`) drives `hold`/`resume`, so SiphonAI **sends** the re-INVITEs and SIPp asserts it receives sendonly then sendrecv (**bot_hold** phase) |
 | `outbound_bot_hold_uas.xml`         | 0.7.5 bot-initiated hold on an **outbound** leg: SIPp is the callee (UAS), the echo-ws (`--auto-hold`) drives `hold`/`resume`, and SIPp asserts it receives the sendonly/sendrecv re-INVITEs on the outbound Direct dialog (**outbound_bot_hold** phase) |
 | `opus_caller.xml`                    | 0.8.0 Opus: SIPp offers `opus/48000/2` at a dynamic PT and asserts the 200 OK answers Opus **and** (0.8.2) carries our Opus fmtp re-keyed onto that PT (`a=fmtp:96 …stereo=0`); the daemon brings the call up as a 16 kHz bridge session (**opus** phase). Signalling only — SIPp can't encode Opus media. |
-| `delayed_offer_caller.xml`           | 0.9.0 delayed offer (offerless INVITE, the CUCM-without-MTP case): SIPp sends an INVITE with **no SDP** and asserts the 200 OK carries SiphonAI's own offer (`m=audio` + PCMU rtpmap, via `check_it`); SIPp then sends its SDP answer in the ACK and the call bridges + BYEs (**delayed_offer** phase). |
+| `delayed_offer_caller.xml`           | 0.9.0 inbound delayed offer (offerless INVITE, the CUCM-without-MTP case): SIPp sends an INVITE with **no SDP** and asserts the 200 OK carries SiphonAI's own offer (`m=audio` + PCMU rtpmap, via `check_it`); SIPp then sends its SDP answer in the ACK and the call bridges + BYEs (**delayed_offer** phase). |
+| `outbound_delayed_uas.xml`           | 0.9.0 **outbound** delayed offer, roles inverted: SiphonAI dials via `POST /admin/v1/calls` with `delayed_offer: true` (offerless INVITE); SIPp answers 200 with its own SDP **offer** and asserts (via `check_it`) the **ACK** carries SiphonAI's SDP **answer** (proving the gateway UAC's answer generator fired) (**outbound_delayed** phase). |
 
 `run-all.sh` also has an always-on **recording** auxiliary phase: it starts
 a daemon with `[recording].mode = "always"` writing to a temp dir, runs one
@@ -154,6 +155,15 @@ sends the answer in the ACK, the call bridges through the echo-ws and is
 BYE'd. Pass = SIPp completed **and** the daemon logged the delayed-offer
 accept. The error paths (ACK timeout, missing/invalid answer, no codec)
 are unit-tested; SIPp covers the happy-path signalling contract.
+
+And an always-on **outbound_delayed** phase (0.9.0 chunk 2): the
+roles-inverted **outbound** direction. The runner POSTs
+`/admin/v1/calls` with `delayed_offer: true`, so SiphonAI dials an
+offerless INVITE through the `[[gateway]]`; SIPp
+(`outbound_delayed_uas.xml`) answers 200 with its own SDP offer and
+asserts (via `check_it`) that SiphonAI's **ACK** carries the SDP answer
+its gateway UAC's answer generator built. Pass = SIPp completed **and**
+`siphon_ai_outbound_calls_total{result="answered"}` reads 1.
 
 The `stir_shaken_*` scenarios run in `run-all.sh`'s always-on
 **stir_shaken** auxiliary phase. It builds + runs the

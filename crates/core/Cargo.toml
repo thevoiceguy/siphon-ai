@@ -37,6 +37,7 @@ siphon-ai-webhooks.workspace   = true
 sip-core.workspace        = true
 sip-dialog.workspace      = true
 sip-uac.workspace         = true
+sip-sdp.workspace         = true
 sip-uas.workspace         = true
 sip-transaction.workspace = true
 # `DialogFlow` carries the inbound connection's writer channel,

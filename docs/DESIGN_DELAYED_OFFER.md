@@ -1,5 +1,20 @@
 # Design note — SIP delayed offer (offerless INVITE)
 
+> **Status: IN PROGRESS — chunks 1 (inbound) + 2 (outbound) landed.**
+> Outbound delayed offer (chunk 2): `POST /admin/v1/calls` with
+> `delayed_offer: true` dials an offerless INVITE; the gateway UAC's
+> `SdpAnswerGenerator` (a per-gateway answerer sharing a Call-ID-keyed
+> registry with the originator) builds our answer from the peer's 2xx
+> offer via `accept_inbound` and the ACK carries it. The session/tap come
+> back to `place_delayed` through the registry's oneshot, then the shared
+> outbound `run_call` bridges — so delayed-outbound legs get transfer/hold
+> for free (offer_sdp = our answer text). One wrinkle resolved: the UAC's
+> trait wants siphon-rs's `sip_sdp::SessionDescription`, distinct from
+> forge-media's pinned sip-sdp, so core gained a direct `sip-sdp` dep and
+> re-parses the answer text. SRTP on the delayed answer stays a follow-up
+> (the offerless INVITE can't carry an SDES offer). Next: chunk 3 =
+> config/docs/release (~v0.9.0).
+>
 > **Status: IN PROGRESS — chunk 1 (inbound) landed.** Inbound delayed
 > offer is implemented (offerless INVITE → offer in 200 OK → answer from
 > ACK → bridge), reusing the outbound `originate_offer` / `apply_answer`

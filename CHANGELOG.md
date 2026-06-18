@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-06-18
+
+### Added
+
+- **SRTP on the inbound delayed-offer offer (SDES, RFC 4568)** — the
+  mirror of the 0.9.1 outbound follow-up. On an inbound delayed offer
+  SiphonAI is the *offerer*, so when `[media].srtp` (or a `[route.media]`
+  override) is `preferred`/`required` the 200 OK now offers SDES
+  (`RTP/SAVP` + `a=crypto`); the peer's answered key is installed from the
+  ACK (`apply_answer`), and `required` fails the call if the peer answers
+  plaintext. Surfaces on `start.srtp`. This reuses the existing
+  `originate_offer`/`apply_answer` SDES path the delayed-offer accept
+  already runs — it just stops hardcoding plaintext. SIPp
+  `delayed_offer_srtp` phase added. *DTLS-SRTP on a delayed offer isn't
+  produced (the SDES offer path only) — a remaining follow-up.*
+
 ## [0.9.1] - 2026-06-18
 
 ### Added

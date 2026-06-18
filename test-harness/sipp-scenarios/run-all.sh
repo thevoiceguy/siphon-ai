@@ -1510,6 +1510,64 @@ fi
 do_cleanup
 trap - EXIT
 
+# ─── auxiliary phase: delayed_offer + SRTP ────────────────────────
+# (0.9.2) Inbound delayed offer where SiphonAI OFFERS SDES SRTP in the
+# 200 OK (we're the offerer). `[media].srtp = "required"` makes the
+# offer RTP/SAVP + a=crypto; SIPp answers SRTP in the ACK and SiphonAI
+# installs the key. The scenario's check_it asserts the 200 carried
+# `a=crypto`; pass also requires the daemon to log the delayed accept.
+echo
+echo "─── auxiliary phase: delayed_offer_srtp ───────────────"
+DOS_WS_PORT=8787
+DOS_WS_LOG=$(mktemp -t echo-ws-dos.XXXXXX.log)
+DOS_DAEMON_LOG=$(mktemp -t siphon-ai-dos.XXXXXX.log)
+DOS_CONFIG=$(mktemp -t siphon-ai-dos.XXXXXX.toml)
+cat >"$DOS_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-dos"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+srtp = "required"
+[bridge]
+ws_url = "ws://127.0.0.1:$DOS_WS_PORT/"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+DOS_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$DOS_PYTHON" ]] || DOS_PYTHON=python3
+"$DOS_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$DOS_WS_PORT" >"$DOS_WS_LOG" 2>&1 &
+DOS_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$DOS_CONFIG" \
+    >"$DOS_DAEMON_LOG" 2>&1 &
+DOS_DAEMON_PID=$!
+dos_cleanup() {
+    kill "$DOS_WS_PID" "$DOS_DAEMON_PID" 2>/dev/null || true
+    wait "$DOS_WS_PID" "$DOS_DAEMON_PID" 2>/dev/null || true
+}
+trap dos_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── delayed_offer_srtp ────────────────────────────────"
+if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/delayed_offer_srtp_caller.xml" -m 1 -timeout 12s -trace_err \
+        -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1 \
+    && grep -q "delayed-offer 200 OK sent; awaiting ACK answer" "$DOS_DAEMON_LOG"; then
+    echo "  OK"
+else
+    echo "  FAIL (daemon: $DOS_DAEMON_LOG; ws: $DOS_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+dos_cleanup
+trap - EXIT
+
 # ─── Optional third phase: blind_transfer ─────────────────────────
 # Needs a WS server that proactively emits BridgeIn::Transfer. The
 # runner stops the daemon, brings up an echo-ws that auto-emits

@@ -61,6 +61,7 @@ sipp -sf basic_call_then_bye.xml -m 1 -p 5070 -s 1000 127.0.0.1:5060
 | `delayed_offer_caller.xml`           | 0.9.0 inbound delayed offer (offerless INVITE, the CUCM-without-MTP case): SIPp sends an INVITE with **no SDP** and asserts the 200 OK carries SiphonAI's own offer (`m=audio` + PCMU rtpmap, via `check_it`); SIPp then sends its SDP answer in the ACK and the call bridges + BYEs (**delayed_offer** phase). |
 | `outbound_delayed_uas.xml`           | 0.9.0 **outbound** delayed offer, roles inverted: SiphonAI dials via `POST /admin/v1/calls` with `delayed_offer: true` (offerless INVITE); SIPp answers 200 with its own SDP **offer** and asserts (via `check_it`) the **ACK** carries SiphonAI's SDP **answer** (proving the gateway UAC's answer generator fired) (**outbound_delayed** phase). |
 | `outbound_delayed_srtp_uas.xml`      | 0.9.1 outbound delayed offer **with SRTP on the answer**: gateway `srtp = "required"`; the offerless INVITE can't offer SRTP, so SIPp's 200 carries an `RTP/SAVP` + `a=crypto` SDES **offer** and SIPp asserts (via `check_it`) the **ACK** answers SRTP (`a=crypto`) — SiphonAI installed keys (**outbound_delayed_srtp** phase). |
+| `delayed_offer_srtp_caller.xml`      | 0.9.2 inbound delayed offer **with SRTP on the offer**: `[media].srtp = "required"`; SIPp sends an offerless INVITE and asserts (via `check_it`) SiphonAI's 200 OK carries an SDES **offer** (`a=crypto`) — we're the offerer; SIPp answers SRTP in the ACK and the keyed call bridges (**delayed_offer_srtp** phase). |
 
 `run-all.sh` also has an always-on **recording** auxiliary phase: it starts
 a daemon with `[recording].mode = "always"` writing to a temp dir, runs one
@@ -174,6 +175,15 @@ carry an SDES offer, `outbound_delayed_srtp_uas.xml`'s 200 carries the
 Pass = SIPp completed **and**
 `siphon_ai_outbound_srtp_total{result="encrypted"}` reads 1. (DTLS-SRTP
 on a delayed answer is not handled — SDES only.)
+
+And an always-on **delayed_offer_srtp** phase (0.9.2): the inbound
+mirror — SiphonAI **offers** SDES SRTP in the 200 OK because on an
+inbound delayed offer *we* are the offerer. A daemon with `[media].srtp
+= "required"`; `delayed_offer_srtp_caller.xml` sends an offerless INVITE
+and asserts (via `check_it`) the 200 OK carries `a=crypto`, then answers
+SRTP in the ACK so SiphonAI installs the key and the call bridges. Pass =
+SIPp completed **and** the daemon logged the delayed accept. (DTLS-SRTP
+on a delayed offer is not produced — SDES only.)
 
 The `stir_shaken_*` scenarios run in `run-all.sh`'s always-on
 **stir_shaken** auxiliary phase. It builds + runs the

@@ -162,6 +162,23 @@ pub struct ReinviteCall<'a> {
     pub sip_call_id: String,
 }
 
+/// Inputs to an ACK handler. An ACK has no response, so there is no
+/// transaction handle — just the request (whose body may carry an SDP
+/// answer, for the delayed-offer flow) and the resolved dialog.
+///
+/// Only ACKs that carry a body are dispatched here; an ACK confirming
+/// an early-offer 2xx (no body) is absorbed by the UAS and never
+/// reaches the acceptor. The acceptor matches the dialog against any
+/// half-negotiated delayed-offer call it is holding and finalizes media
+/// from the answer in the ACK body.
+pub struct AckCall<'a> {
+    pub request: &'a Request,
+    pub dialog: &'a Dialog,
+    /// The SIP `Call-ID` header value, cached so the acceptor doesn't
+    /// re-parse it to look up its held delayed-offer state.
+    pub sip_call_id: String,
+}
+
 /// Hook for the eventual `core::CallController`. SiphonAI's
 /// per-call setup logic — answer with SDP, attach MediaTap, open
 /// the WS bridge — implements this trait. Routing doesn't know
@@ -182,6 +199,16 @@ pub trait CallAcceptor: Send + Sync {
     async fn on_reinvite(&self, call: ReinviteCall<'_>) -> anyhow::Result<()> {
         let response = UserAgentServer::create_response(call.request, 501, "Not Implemented");
         call.handle.send_final(response).await;
+        Ok(())
+    }
+
+    /// An ACK carrying a body arrived. The default impl ignores it
+    /// (early-offer ACKs need no application handling). The
+    /// delayed-offer acceptor overrides this to read the SDP answer
+    /// from the ACK body and finalize the call. There is no response
+    /// to send — an ACK is the end of the INVITE transaction.
+    async fn on_ack(&self, call: AckCall<'_>) -> anyhow::Result<()> {
+        let _ = call;
         Ok(())
     }
 }
@@ -374,6 +401,31 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                 Ok(())
             }
         }
+    }
+
+    #[instrument(skip_all, fields(method = "ACK"))]
+    async fn on_ack(&self, request: &Request, dialog: &Dialog) -> anyhow::Result<()> {
+        // Only ACKs with a body interest us — that's where a
+        // delayed-offer answer rides. An empty ACK (the early-offer
+        // case) is the normal end of the INVITE transaction; nothing
+        // to do. Skipping the empty case keeps the hot path free of a
+        // pointless acceptor round-trip and a dialog-map probe.
+        if request.body().is_empty() {
+            return Ok(());
+        }
+        let sip_call_id = request
+            .headers()
+            .get_smol("Call-ID")
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        debug!(sip_call_id = %sip_call_id, "ACK with body → acceptor");
+        self.acceptor
+            .on_ack(AckCall {
+                request,
+                dialog,
+                sip_call_id,
+            })
+            .await
     }
 
     #[instrument(skip_all, fields(method = "CANCEL", peer = %ctx.peer()))]

@@ -1,5 +1,20 @@
 # Design note — SIP delayed offer (offerless INVITE)
 
+> **Status: IN PROGRESS — chunk 1 (inbound) landed.** Inbound delayed
+> offer is implemented (offerless INVITE → offer in 200 OK → answer from
+> ACK → bridge), reusing the outbound `originate_offer` / `apply_answer`
+> media path; the negotiation is gated in the accept path with a
+> per-dialog held map + Timer-H watchdog (no new `CallState`). Two
+> **scope notes for chunk 1**: (a) in-dialog **transfer/hold** and
+> **SRTP-on-the-offer** for delayed-offer legs are deferred to a
+> follow-up (the leg bridges audio without them); (b) the new failure
+> modes surface as the `siphon_ai_delayed_offer_total{result}` **metric**
+> + a `warn` log rather than a per-call **CDR** — a delayed-offer call
+> that fails negotiation never became a call (no `CallStart`), matching
+> how early-offer rejects behave today. The CDR `TerminationCause`
+> vocabulary (§7) is still the plan for calls that *do* go active. Chunk
+> 2 = outbound; chunk 3 = config/docs/release.
+>
 > **Status: DRAFT — gating decisions LOCKED (2026-06-17).** Same
 > design-first pass we did for park / hold / reconnect / Opus, because
 > delayed offer inverts the SDP offer/answer direction relative to every

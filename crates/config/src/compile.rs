@@ -457,6 +457,10 @@ pub struct SipConfig {
     /// (`[sip].preferred_session_expires_secs`). `None` = honour
     /// the peer's value uncapped.
     pub preferred_session_expires: Option<Duration>,
+    /// Accept offerless inbound INVITEs (RFC 3264 delayed offer):
+    /// offer in the 200 OK, read the answer from the ACK. `false`
+    /// rejects an offerless INVITE with 488. Default `true`.
+    pub allow_delayed_offer: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -950,6 +954,7 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
         call_progress,
         min_session_expires,
         preferred_session_expires,
+        allow_delayed_offer: raw.allow_delayed_offer,
     })
 }
 

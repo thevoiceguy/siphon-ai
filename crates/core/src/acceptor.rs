@@ -72,8 +72,8 @@ use siphon_ai_cdr::{
     TerminationCause as CdrTerminationCause, TerminationInfo as CdrTerminationInfo, CDR_VERSION,
 };
 use siphon_ai_media_glue::{
-    AnswerOutcome, Codec, InboundAccepted, InboundCall, MediaSetup, MediaTapError, SdpError,
-    SetupError, TapDisconnect,
+    AnswerOutcome, Codec, InboundAccepted, InboundCall, MediaSetup, MediaTapError,
+    OutboundOfferRequest, OutboundSrtp, SdpError, SetupError, TapDisconnect, TapOptions,
 };
 use siphon_ai_recording::{RecordingConfig, RecordingMode, RecordingSetup};
 use siphon_ai_routes::CompiledRoute;
@@ -81,8 +81,8 @@ use siphon_ai_security::MinAttestation;
 use siphon_ai_sip_glue::{CallAcceptor, InviteFacts, MatchedCall};
 use siphon_ai_stir_shaken::Verifier;
 use siphon_ai_telemetry::{
-    HepTelemetry, CALLS_ACTIVE, CALLS_TOTAL, CALL_DURATION_SECONDS, INVITES_TOTAL,
-    RECORDINGS_TOTAL, ROUTE_MATCH_TOTAL, SDP_NEGOTIATE_SECONDS, VERSTAT_TOTAL,
+    HepTelemetry, CALLS_ACTIVE, CALLS_TOTAL, CALL_DURATION_SECONDS, DELAYED_OFFER_TOTAL,
+    INVITES_TOTAL, RECORDINGS_TOTAL, ROUTE_MATCH_TOTAL, SDP_NEGOTIATE_SECONDS, VERSTAT_TOTAL,
 };
 use siphon_ai_webhooks::{
     CallEndEvent, CallStartEvent, NullSink as WebhookNullSink, WebhookEvent, WebhookSinkHandle,
@@ -1496,6 +1496,18 @@ pub struct BridgingAcceptor {
     /// (v0.1.0 behaviour); operators opt in to `Ringing` or
     /// `SessionProgress` via `[sip.call_progress]`.
     call_progress: CallProgressMode,
+    /// Accept offerless inbound INVITEs (RFC 3264 delayed offer):
+    /// offer in the 200 OK, finalize from the ACK's answer. Default
+    /// `true`; the daemon's `[sip].allow_delayed_offer` overrides via
+    /// [`Self::with_allow_delayed_offer`]. When `false`, an offerless
+    /// INVITE is rejected 488.
+    allow_delayed_offer: bool,
+    /// Half-negotiated delayed-offer calls awaiting their ACK answer,
+    /// keyed by the confirmed dialog. Inserted by `on_matched` after
+    /// the 200-OK-with-offer is sent, removed by `on_ack` (or the
+    /// Timer-H watchdog). Short-lived per-dialog state — never shared
+    /// across calls (CLAUDE.md §4.4).
+    pending_delayed: Arc<RwLock<HashMap<DialogId, PendingDelayedOffer>>>,
     /// Long-lived DTLS certificate generated once at acceptor
     /// startup (per-process, matches WebRTC practice). The same
     /// cert is presented to every DTLS-SRTP handshake; its SHA-256
@@ -1749,6 +1761,8 @@ impl BridgingAcceptor {
             session_timer_manager,
             dialog_handles,
             call_progress: CallProgressMode::default(),
+            allow_delayed_offer: true,
+            pending_delayed: Arc::new(RwLock::new(HashMap::new())),
             dtls_cert,
             verifier: None,
             security: AcceptSecurityPolicy::default(),
@@ -1766,6 +1780,13 @@ impl BridgingAcceptor {
     /// [`CallProgressMode::InstantAnswer`] (the v0.1.0 behaviour).
     pub fn with_call_progress(mut self, mode: CallProgressMode) -> Self {
         self.call_progress = mode;
+        self
+    }
+
+    /// Set whether offerless inbound INVITEs are accepted as delayed
+    /// offer (`[sip].allow_delayed_offer`). Default `true`.
+    pub fn with_allow_delayed_offer(mut self, allow: bool) -> Self {
+        self.allow_delayed_offer = allow;
         self
     }
 
@@ -2302,6 +2323,16 @@ fn rewrite_sdp_direction(sdp: &str, new_dir: siphon_ai_media_glue::MediaDirectio
 #[async_trait]
 impl CallAcceptor for BridgingAcceptor {
     #[instrument(skip(self, call), fields(sip_call_id = %call.sip_call_id))]
+    async fn on_ack(&self, call: siphon_ai_sip_glue::AckCall<'_>) -> anyhow::Result<()> {
+        // The routing handler only forwards body-carrying ACKs here. A
+        // delayed-offer call we're holding is finalized from the answer;
+        // any other body-bearing ACK is matched against nothing and
+        // ignored.
+        self.finalize_delayed_offer(call).await;
+        Ok(())
+    }
+
+    #[instrument(skip(self, call), fields(sip_call_id = %call.sip_call_id))]
     async fn on_reinvite(&self, call: siphon_ai_sip_glue::ReinviteCall<'_>) -> anyhow::Result<()> {
         // Look up the call's cached answer SDP. Without it we have
         // no record of the original codec / port / direction and
@@ -2495,6 +2526,29 @@ impl CallAcceptor for BridgingAcceptor {
         to = %call.facts.request_uri_user,
     ))]
     async fn on_matched(&self, call: MatchedCall<'_>) -> anyhow::Result<()> {
+        // Delayed offer (RFC 3264): an INVITE with no SDP. When allowed,
+        // we offer in the 200 OK and finalize from the ACK answer
+        // (`accept_delayed_offer` / `on_ack`); when disabled, reject 488
+        // (an offerless INVITE is RFC-legal, so 488 — "we can't do
+        // offerless here" — is more honest than a 400). Any *other*
+        // offer problem (bad Content-Type, non-UTF-8 body) falls through
+        // to the normal early-offer path, which surfaces it as today.
+        if matches!(extract_offer_sdp(call.request), Err(OfferError::NoBody)) {
+            if self.allow_delayed_offer {
+                return self.accept_delayed_offer(call).await;
+            }
+            warn!("offerless INVITE rejected (488): [sip].allow_delayed_offer = false");
+            metrics::counter!(INVITES_TOTAL, "result" => "rejected").increment(1);
+            let mut response =
+                UserAgentServer::create_response(call.request, 488, "Not Acceptable Here");
+            // Best-effort UAS auto-fill is applied by the routing layer for
+            // responses it sends; here we send directly, matching the other
+            // in-acceptor reject paths.
+            let _ = &mut response;
+            call.handle.send_final(response).await;
+            return Ok(());
+        }
+
         match self
             .prepare_call(call.request, call.route, &call.facts)
             .await
@@ -3299,6 +3353,366 @@ impl BridgingAcceptor {
     }
 }
 
+/// How long to wait for the ACK-with-answer on a delayed-offer call
+/// before tearing it down. Tracks RFC 3261 Timer H (64·T1 = 32 s) — the
+/// server transaction's own ACK-retransmit deadline (Decision §7.3).
+const DELAYED_OFFER_ACK_TIMEOUT: Duration = Duration::from_secs(32);
+
+/// A delayed-offer call that has been answered (200 OK carrying our
+/// offer) and is awaiting the peer's SDP answer in the ACK. Owned
+/// per-dialog state held in [`BridgingAcceptor::pending_delayed`] only
+/// between `accept_delayed_offer` and `on_ack` (or the Timer-H
+/// watchdog). Everything route-derived is captured here because the
+/// route reference is gone by the time the ACK arrives.
+struct PendingDelayedOffer {
+    offer: siphon_ai_media_glue::OutboundOffer,
+    bridge_call_id: BridgeCallId,
+    forge_call_id: forge_core::CallId,
+    sip_call_id: String,
+    facts: InviteFacts,
+    verstat: Option<Box<siphon_ai_security::VerificationResult>>,
+    bridge_config: BridgeConfig,
+    tap_options: TapOptions,
+    route_name: String,
+    ws_reconnect_enabled: bool,
+    ws_reconnect_max: Duration,
+    recording: Option<RecordingSetup>,
+    dialog: sip_dialog::Dialog,
+    session_timer: Option<NegotiatedSessionTimer>,
+    flow: Option<DialogFlow>,
+}
+
+impl BridgingAcceptor {
+    /// Inbound delayed offer (RFC 3264): the INVITE carried no SDP.
+    /// Allocate media, build OUR offer, send it in the 200 OK, and park
+    /// the half-negotiated call until the ACK answer arrives in
+    /// [`Self::on_ack`]. Reuses the outbound `originate_offer` /
+    /// `apply_answer` media path — the same "make offer → apply answer"
+    /// ops, just wired to an inbound dialog.
+    async fn accept_delayed_offer(&self, call: MatchedCall<'_>) -> anyhow::Result<()> {
+        let uas = self.uas.get().ok_or_else(|| {
+            anyhow::anyhow!(
+                "BridgingAcceptor::install_uas was not called; cannot accept delayed offer"
+            )
+        })?;
+        let route = call.route;
+        let sip_call_id = extract_sip_call_id(call.request);
+        let bridge_call_id = (self.call_id_factory)();
+        let forge_call_id = forge_core::CallId::new(bridge_call_id.as_str());
+
+        // STIR/SHAKEN gate first — a rejected call never allocates media.
+        let verstat = match self
+            .run_security(&call.facts, route, bridge_call_id.as_str(), &sip_call_id)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                let (code, reason) = e.sip_status();
+                warn!(error = %e, code, "rejecting delayed-offer INVITE (security gate)");
+                metrics::counter!(INVITES_TOTAL, "result" => e.reject_metric_label()).increment(1);
+                let mut response = UserAgentServer::create_response(call.request, code, reason);
+                if let Some(reason_value) = e.reason_header() {
+                    let _ = response.headers_mut().set_or_push("Reason", reason_value);
+                }
+                call.handle.send_final(response).await;
+                return Ok(());
+            }
+        };
+
+        let bridge_config = match build_bridge_config(&self.defaults, route) {
+            Ok(c) => c,
+            Err(e) => {
+                // No ws_url configured (global or route) — a config error
+                // CLAUDE.md §4.6 says load should catch; 500 at runtime so
+                // a stale config can't half-accept a call.
+                warn!(error = %e, "rejecting delayed-offer INVITE (bridge config)");
+                metrics::counter!(INVITES_TOTAL, "result" => "rejected").increment(1);
+                call.handle
+                    .send_final(UserAgentServer::create_response(
+                        call.request,
+                        500,
+                        "Server Internal Error",
+                    ))
+                    .await;
+                return Ok(());
+            }
+        };
+
+        let codecs = resolve_codecs(&self.defaults, route);
+        let dtmf_pt = resolve_dtmf_pt(&self.defaults, route);
+        let tap_options = TapOptions {
+            barge_in_action: barge_in_to_tap_action(&resolve_barge_in(&self.defaults, route)),
+            barge_in_debounce: resolve_barge_in(&self.defaults, route).debounce,
+            inactivity_timeout: resolve_inactivity_timeout(&self.defaults, route),
+            silence_threshold: resolve_silence_threshold(&self.defaults, route),
+            dead_air_threshold: resolve_dead_air_threshold(&self.defaults, route),
+            rtp_stats_interval: resolve_rtp_stats_interval(&self.defaults, route),
+        };
+
+        // Build OUR offer + allocate the forge session (plaintext RTP/AVP
+        // in this first cut; SRTP-on-delayed-offer is a follow-up). This
+        // mirrors outbound origination, which never calls `start_session`
+        // explicitly — `apply_answer` + the controller bring media up.
+        let offer = match self
+            .media
+            .originate_offer(OutboundOfferRequest {
+                call_id: forge_call_id.clone(),
+                codecs,
+                dtmf_payload_type: dtmf_pt,
+                participant_a: forge_core::ParticipantId::new(format!("sip-{}", forge_call_id.0)),
+                participant_b: forge_core::ParticipantId::new(format!("ws-{}", forge_call_id.0)),
+                from_tag: None,
+                to_tag: None,
+                srtp: OutboundSrtp::Off,
+            })
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                warn!(error = %e, "delayed-offer media allocation failed; rejecting 500");
+                metrics::counter!(INVITES_TOTAL, "result" => "rejected").increment(1);
+                call.handle
+                    .send_final(UserAgentServer::create_response(
+                        call.request,
+                        500,
+                        "Server Internal Error",
+                    ))
+                    .await;
+                return Ok(());
+            }
+        };
+
+        // 200 OK carrying our offer (instead of an answer). The peer's
+        // answer will arrive in the ACK.
+        let accept_outcome = match uas
+            .accept_invite_with_session_timer(
+                call.request,
+                &call.handle,
+                call.transport,
+                Some(&offer.offer_sdp),
+                &self.session_timer_policy,
+            )
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                self.rollback_forge_session(&bridge_call_id, &forge_call_id, "delayed_accept")
+                    .await;
+                return Err(anyhow::anyhow!(
+                    "failed to accept delayed-offer INVITE: {e}"
+                ));
+            }
+        };
+        let (dialog, session_timer) = match accept_outcome {
+            AcceptInviteAsyncOutcome::Accepted {
+                dialog,
+                session_timer,
+            } => (dialog, session_timer),
+            AcceptInviteAsyncOutcome::SessionIntervalTooSmall { .. } => {
+                // The helper already sent 422; release the media we built.
+                self.rollback_forge_session(&bridge_call_id, &forge_call_id, "delayed_422")
+                    .await;
+                metrics::counter!(INVITES_TOTAL, "result" => "rejected").increment(1);
+                return Ok(());
+            }
+        };
+
+        let effective_mode = match route.recording.mode.as_deref() {
+            Some("off") => RecordingMode::Off,
+            Some("always") => RecordingMode::Always,
+            Some("on_demand") => RecordingMode::OnDemand,
+            _ => self.recording.mode,
+        };
+        let recording = match effective_mode {
+            RecordingMode::Always => Some(RecordingSetup {
+                path: self.recording.path_for(bridge_call_id.as_str()),
+                auto_start: true,
+            }),
+            RecordingMode::OnDemand => Some(RecordingSetup {
+                path: self.recording.path_for(bridge_call_id.as_str()),
+                auto_start: false,
+            }),
+            RecordingMode::Off => None,
+        };
+        let (ws_reconnect_enabled, ws_reconnect_max) = resolve_ws_reconnect(&self.defaults, route);
+
+        let dialog_id = dialog.id().clone();
+        info!(
+            call_id = %bridge_call_id,
+            sip_call_id = %sip_call_id,
+            "delayed-offer 200 OK sent; awaiting ACK answer"
+        );
+        self.pending_delayed.write().insert(
+            dialog_id.clone(),
+            PendingDelayedOffer {
+                offer,
+                bridge_call_id: bridge_call_id.clone(),
+                forge_call_id: forge_call_id.clone(),
+                sip_call_id,
+                facts: call.facts,
+                verstat,
+                bridge_config,
+                tap_options,
+                route_name: route.name.to_string(),
+                ws_reconnect_enabled,
+                ws_reconnect_max,
+                recording,
+                dialog,
+                session_timer,
+                flow: DialogFlow::from_transport(call.transport),
+            },
+        );
+
+        // Timer-H watchdog: if no ACK-with-answer lands within ~32 s,
+        // reclaim the parked media and record `ack_timeout`.
+        let pending = Arc::clone(&self.pending_delayed);
+        let media = Arc::clone(&self.media);
+        tokio::spawn(async move {
+            tokio::time::sleep(DELAYED_OFFER_ACK_TIMEOUT).await;
+            // Bind out of the guard's scope before any await — parking_lot
+            // guards are not Send and the spawned future must be.
+            let stale = pending.write().remove(&dialog_id);
+            if let Some(stale) = stale {
+                warn!(
+                    call_id = %stale.bridge_call_id,
+                    "delayed-offer ACK timeout (no answer within Timer H); tearing down"
+                );
+                metrics::counter!(DELAYED_OFFER_TOTAL, "result" => "ack_timeout").increment(1);
+                let _ = media
+                    .session_manager()
+                    .stop_session(&stale.forge_call_id)
+                    .await;
+            }
+        });
+        Ok(())
+    }
+
+    /// Finalize a delayed-offer call from the SDP answer in its ACK.
+    /// Looks up the parked offer by dialog, applies the answer (codec +
+    /// peer RTP endpoint), and spawns the controller via the shared
+    /// [`Self::run_call`]. Unmatched ACKs (early-offer, or already
+    /// finalized / timed-out) are a no-op.
+    async fn finalize_delayed_offer(&self, call: siphon_ai_sip_glue::AckCall<'_>) {
+        // Bind out of the guard before any await (parking_lot guards are
+        // not Send; this method awaits apply_answer below).
+        let entry = self.pending_delayed.write().remove(call.dialog.id());
+        let Some(pending) = entry else {
+            // Not a delayed-offer ACK we're holding (early offer, or the
+            // watchdog already reclaimed it).
+            return;
+        };
+        let PendingDelayedOffer {
+            offer,
+            bridge_call_id,
+            forge_call_id,
+            sip_call_id,
+            facts,
+            verstat,
+            bridge_config,
+            tap_options,
+            route_name,
+            ws_reconnect_enabled,
+            ws_reconnect_max,
+            recording,
+            dialog,
+            session_timer,
+            flow,
+        } = pending;
+
+        let answer_sdp = match std::str::from_utf8(call.request.body()) {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                warn!(call_id = %bridge_call_id, "delayed-offer ACK body is not UTF-8");
+                metrics::counter!(DELAYED_OFFER_TOTAL, "result" => "invalid_sdp_answer")
+                    .increment(1);
+                let _ = self
+                    .media
+                    .session_manager()
+                    .stop_session(&forge_call_id)
+                    .await;
+                return;
+            }
+        };
+
+        // Bind the peer's answer to leg A. `apply_answer` rolls the forge
+        // session back itself on a binding error.
+        let accepted = match self
+            .media
+            .apply_answer(offer, &answer_sdp, tap_options)
+            .await
+        {
+            Ok(a) => a,
+            Err(e) => {
+                let result = delayed_answer_error_result(&e);
+                warn!(call_id = %bridge_call_id, error = %e, result, "delayed-offer answer rejected");
+                metrics::counter!(DELAYED_OFFER_TOTAL, "result" => result).increment(1);
+                return;
+            }
+        };
+
+        let start = build_start_msg(
+            bridge_call_id.clone(),
+            &facts,
+            &sip_call_id,
+            &accepted.answer,
+            &self.defaults.forward_headers,
+            None,
+            verstat,
+        );
+
+        // In-dialog transfer / hold on a delayed-offer leg is a follow-up
+        // (it needs the Managed DialogControl threaded here); the call
+        // bridges audio without them in this first cut.
+        let cfg = CallControllerConfig {
+            call_id: bridge_call_id.clone(),
+            bridge: bridge_config.clone(),
+            start: start.clone(),
+            media_tap: accepted.tap.with_ws_reconnect(ws_reconnect_enabled),
+            transfer: None,
+            recording,
+            conference: self.conference.clone(),
+            park: self.park.clone(),
+            hold: None,
+            ws_reconnect_enabled,
+            ws_reconnect_max,
+            ws_reconnect_moh_file: self.hold_moh_file.clone(),
+        };
+        let (controller, handle) = CallController::new(cfg);
+        let prepared = PreparedCall {
+            bridge_call_id,
+            forge_call_id,
+            sip_call_id,
+            answer: accepted.answer,
+            bridge_config,
+            start,
+            controller,
+            handle,
+        };
+        metrics::counter!(DELAYED_OFFER_TOTAL, "result" => "answered").increment(1);
+        self.run_call(
+            prepared,
+            &route_name,
+            Some(AcceptedSession {
+                dialog,
+                timer: session_timer,
+                flow,
+            }),
+        );
+    }
+}
+
+/// Map an `apply_answer` failure on the delayed-offer path to its
+/// `siphon_ai_delayed_offer_total{result}` label.
+fn delayed_answer_error_result(e: &SetupError) -> &'static str {
+    match e {
+        SetupError::Sdp(SdpError::NoCommonCodec) => "no_compatible_codec",
+        SetupError::Sdp(SdpError::NoAudio) | SetupError::Sdp(SdpError::AudioRejected) => {
+            "invalid_remote_media"
+        }
+        _ => "invalid_sdp_answer",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3402,6 +3816,39 @@ a=sendrecv\r\n";
 
     fn first_route(toml: &str) -> siphon_ai_routes::RouteSet {
         load_from_toml(toml).expect("compile routes")
+    }
+
+    // ─── delayed offer ─────────────────────────────────────────────
+
+    #[test]
+    fn delayed_answer_errors_map_to_metric_results() {
+        use siphon_ai_media_glue::{SdpError, SetupError};
+        assert_eq!(
+            delayed_answer_error_result(&SetupError::Sdp(SdpError::NoCommonCodec)),
+            "no_compatible_codec"
+        );
+        assert_eq!(
+            delayed_answer_error_result(&SetupError::Sdp(SdpError::NoAudio)),
+            "invalid_remote_media"
+        );
+        assert_eq!(
+            delayed_answer_error_result(&SetupError::Sdp(SdpError::AudioRejected)),
+            "invalid_remote_media"
+        );
+        // Anything else (parse, forge, srtp) is a generic bad answer.
+        assert_eq!(
+            delayed_answer_error_result(&SetupError::Sdp(SdpError::Parse("x".into()))),
+            "invalid_sdp_answer"
+        );
+    }
+
+    #[test]
+    fn offerless_invite_is_detected_as_delayed_offer() {
+        // An INVITE with no body and no Content-Type is the delayed-offer
+        // trigger (NoBody) — distinct from a wrong Content-Type, which the
+        // early-offer path still surfaces.
+        let req = invite_with(None, "");
+        assert_eq!(extract_offer_sdp(&req), Err(OfferError::NoBody));
     }
 
     // ─── extract_offer_sdp ─────────────────────────────────────────

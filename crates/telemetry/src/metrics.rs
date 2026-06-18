@@ -97,6 +97,16 @@ pub const OUTBOUND_CALLS_TOTAL: &str = "siphon_ai_outbound_calls_total";
 /// `siphon-ai-core::outbound_service`.
 pub const OUTBOUND_SRTP_TOTAL: &str = "siphon_ai_outbound_srtp_total";
 
+/// Inbound delayed-offer (offerless INVITE) outcomes (0.9.0). Labeled by
+/// `result`: `answered` (peer's ACK answer negotiated and the call
+/// bridged), `ack_timeout` (no ACK before Timer H), `missing_sdp_answer`
+/// (ACK had no body), `invalid_sdp_answer` (ACK body unparseable),
+/// `no_compatible_codec` (answer selected nothing we offered), or
+/// `invalid_remote_media` (answer's RTP address/port unusable or stream
+/// rejected). Bounded cardinality. Literal must match the call site in
+/// `siphon-ai-core::acceptor`.
+pub const DELAYED_OFFER_TOTAL: &str = "siphon_ai_delayed_offer_total";
+
 /// REFER transfers attempted (0.6.1; back-fills blind-transfer
 /// counting, which previously had no metric). Labeled by `mode`
 /// (`blind` / `attended`) and `result`: `accepted` (202, call torn
@@ -305,6 +315,10 @@ pub fn register_descriptions() {
     describe_counter!(
         OUTBOUND_SRTP_TOTAL,
         "Outbound SRTP (SDES) outcomes for answered calls, by result (encrypted, downgraded)."
+    );
+    describe_counter!(
+        DELAYED_OFFER_TOTAL,
+        "Inbound delayed-offer (offerless INVITE) outcomes, by result (answered, ack_timeout, missing_sdp_answer, invalid_sdp_answer, no_compatible_codec, invalid_remote_media)."
     );
     describe_counter!(
         TRANSFERS_TOTAL,

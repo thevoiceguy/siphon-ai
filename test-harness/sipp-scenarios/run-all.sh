@@ -1284,6 +1284,68 @@ fi
 op_cleanup
 trap - EXIT
 
+# ─── auxiliary phase: delayed_offer ───────────────────────────────
+# A daemon with [media].codecs = ["pcmu"] and the default
+# [sip].allow_delayed_offer = true. SIPp sends an INVITE with NO SDP
+# (RFC 3264 delayed offer, the CUCM-without-MTP case); SiphonAI must
+# answer 200 OK carrying its own offer, then read SIPp's answer from
+# the ACK. The scenario's check_it asserts the 200 carried an `m=audio`
+# + PCMU rtpmap; a clean SIPp run (rc 0) means the offerless INVITE was
+# accepted, finalized from the ACK, and BYE'd. Proves the inbound
+# delayed-offer flow end-to-end (0.9.0).
+echo
+echo "─── auxiliary phase: delayed_offer ────────────────────"
+DO_WS_PORT=8781
+DO_WS_LOG=$(mktemp -t echo-ws-do.XXXXXX.log)
+DO_DAEMON_LOG=$(mktemp -t siphon-ai-do.XXXXXX.log)
+DO_CONFIG=$(mktemp -t siphon-ai-do.XXXXXX.toml)
+cat >"$DO_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-do"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$DO_WS_PORT/"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+DO_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$DO_PYTHON" ]] || DO_PYTHON=python3
+"$DO_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$DO_WS_PORT" >"$DO_WS_LOG" 2>&1 &
+DO_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$DO_CONFIG" \
+    >"$DO_DAEMON_LOG" 2>&1 &
+DO_DAEMON_PID=$!
+do_cleanup() {
+    kill "$DO_WS_PID" "$DO_DAEMON_PID" 2>/dev/null || true
+    wait "$DO_WS_PID" "$DO_DAEMON_PID" 2>/dev/null || true
+}
+trap do_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── delayed_offer ─────────────────────────────────────"
+# rc 0 = both check_it asserts passed (200 carried our offer) and the
+# call completed; cross-check the daemon logged the delayed-offer accept.
+if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/delayed_offer_caller.xml" -m 1 -timeout 12s -trace_err \
+        -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1 \
+    && grep -q "delayed-offer 200 OK sent; awaiting ACK answer" "$DO_DAEMON_LOG"; then
+    echo "  OK"
+else
+    echo "  FAIL (daemon: $DO_DAEMON_LOG; ws: $DO_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+do_cleanup
+trap - EXIT
+
 # ─── Optional third phase: blind_transfer ─────────────────────────
 # Needs a WS server that proactively emits BridgeIn::Transfer. The
 # runner stops the daemon, brings up an echo-ws that auto-emits

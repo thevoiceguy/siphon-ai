@@ -31,8 +31,8 @@ pub use dialog::{
     NullDialogTerminator,
 };
 pub use handler::{
-    dispatch_invite, CallAcceptor, MatchedCall, RegisterSourceResolver, ReinviteCall, RouteAction,
-    RoutingHandler, TrunkAllowlist, TrunkAllowlistHandle,
+    dispatch_invite, AckCall, CallAcceptor, MatchedCall, RegisterSourceResolver, ReinviteCall,
+    RouteAction, RoutingHandler, TrunkAllowlist, TrunkAllowlistHandle,
 };
 pub use invite::InviteFacts;
 pub use register::{

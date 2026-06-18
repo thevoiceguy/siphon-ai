@@ -325,6 +325,7 @@ impl Runtime {
             .with_webhook_sink(Arc::clone(&webhook_sink))
             .with_session_timer_policy(session_timer_policy)
             .with_call_progress(sip.call_progress)
+            .with_allow_delayed_offer(sip.allow_delayed_offer)
             .with_verifier(verifier)
             .with_security_policy(security_policy)
             // Share the same HEP worker the SIP/RTCP/CDR emitters use so

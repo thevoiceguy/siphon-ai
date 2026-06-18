@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-06-18
+
+### Added
+
+- **DTLS-SRTP on the inbound delayed-offer offer (RFC 5763)** — the
+  second DTLS-on-delayed follow-up; SiphonAI can now both answer (0.9.3)
+  *and* offer DTLS on a delayed call. On an inbound delayed offer
+  SiphonAI is the *offerer*, so with `[media].srtp` `preferred`/`required`
+  and the new **`[media].srtp_offer = "dtls"`** it offers DTLS-SRTP in the
+  200 OK (`UDP/TLS/RTP/SAVPF` + `a=fingerprint` + `a=setup:actpass`); the
+  peer's answered fingerprint + setup arrive in the ACK, where SiphonAI
+  derives its role (RFC 5763 §5) and enables the handshake. Surfaces on
+  `start.srtp` (`exchange: "dtls"`). `[media].srtp_offer` defaults to
+  `"sdes"` (the 0.9.2 behaviour); it only affects the delayed-offer path
+  (inbound early offer always *answers* the peer's choice). SIPp
+  `delayed_offer_dtls` phase added. **This completes SRTP for delayed
+  offer** — SDES + DTLS, both directions. *Remaining delayed-offer
+  follow-up: a per-call CDR for negotiations that fail before going
+  active (today a metric + warn).*
+
 ## [0.9.3] - 2026-06-18
 
 ### Added

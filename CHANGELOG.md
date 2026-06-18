@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-18
+
+Theme: **SIP delayed offer (offerless INVITE).** SiphonAI previously
+**required** an inbound INVITE to carry an SDP offer and rejected an
+offerless one, forcing interop partners (notably **Cisco CUCM**) to
+insert a Media Termination Point. Delayed offer is now supported in both
+directions, so the MTP can be removed and media flows directly. Protocol
+stays `version: "1"` (no WS message change — `start` is just deferred by
+one SIP round-trip until the codec is known from the answer); CDR stays
+at its current `version` (the new outcomes surface as a metric, not a CDR
+reason — a call that fails negotiation never went active).
+
 ### Added
 
 - **SIP delayed offer (offerless INVITE), RFC 3264 — inbound and

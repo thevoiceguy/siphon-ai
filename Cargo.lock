@@ -3009,6 +3009,7 @@ dependencies = [
  "sip-core",
  "sip-dialog",
  "sip-parse",
+ "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/siphon-rs?rev=3023963ba83a)",
  "sip-transaction",
  "sip-uac",
  "sip-uas",

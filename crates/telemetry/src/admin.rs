@@ -107,6 +107,11 @@ pub struct OriginateRequest {
     /// Caller-ID override (a `sip:` URI). Falls back to the gateway's `from`.
     #[serde(default)]
     pub from: Option<String>,
+    /// Place the call as a **delayed offer** (RFC 3264): send an INVITE
+    /// with no SDP and answer the peer's offer in the ACK. Default `false`
+    /// (early offer — SiphonAI offers in the INVITE).
+    #[serde(default)]
+    pub delayed_offer: bool,
 }
 
 /// Why an originate request was refused synchronously (before the call is

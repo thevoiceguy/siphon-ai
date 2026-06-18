@@ -9,21 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Inbound SIP delayed offer (offerless INVITE), RFC 3264** — chunk 1 of
-  the delayed-offer theme. An inbound INVITE with no SDP is now accepted:
-  SiphonAI allocates media, puts **its own offer** in the 200 OK, and
-  reads the peer's **answer from the ACK** before bridging. This removes
-  the forced **MTP** on CUCM (and similar) trunks/phones, so media flows
-  directly. Early-offer INVITEs are unchanged. On by default; gate with
-  `[sip].allow_delayed_offer = false` to force strict early offer (an
-  offerless INVITE is then rejected `488`). New metric
-  `siphon_ai_delayed_offer_total{result}` (`answered`, `ack_timeout`,
-  `missing_sdp_answer`, `invalid_sdp_answer`, `no_compatible_codec`,
-  `invalid_remote_media`). The ACK-answer wait is bounded by SIP Timer H
-  (~32 s). The call is marked active only after the ACK answer is parsed.
-  SIPp `delayed_offer` regression phase added. *In-dialog transfer/hold
-  and SRTP-on-the-offer for delayed-offer legs, plus the outbound
-  direction, are follow-up chunks.*
+- **SIP delayed offer (offerless INVITE), RFC 3264 — inbound and
+  outbound.** Removes the forced **MTP** on CUCM (and similar)
+  trunks/phones so media flows directly. Early-offer calls are unchanged.
+  - **Inbound** (chunk 1): an inbound INVITE with no SDP is accepted —
+    SiphonAI allocates media, puts **its own offer** in the 200 OK, and
+    reads the peer's **answer from the ACK** before bridging. On by
+    default; gate with `[sip].allow_delayed_offer = false` to force strict
+    early offer (offerless INVITE then rejected `488`). The ACK-answer
+    wait is bounded by SIP Timer H (~32 s); the call is active only after
+    the answer is parsed. Metric `siphon_ai_delayed_offer_total{result}`.
+  - **Outbound** (chunk 2): `POST /admin/v1/calls` with `"delayed_offer":
+    true` dials an **offerless INVITE**, takes the peer's offer from the
+    2xx, and answers in the **ACK** (via the gateway UAC's RFC-3264 answer
+    generator). Delayed-outbound legs get transfer/hold like early-offer
+    ones. (SRTP on the delayed-offer answer is a follow-up — the offerless
+    INVITE can't carry an SDES offer.)
+  - SIPp `delayed_offer` (inbound) and `outbound_delayed` phases added.
 
 ## [0.8.2] - 2026-06-17
 

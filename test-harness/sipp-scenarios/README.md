@@ -60,6 +60,7 @@ sipp -sf basic_call_then_bye.xml -m 1 -p 5070 -s 1000 127.0.0.1:5060
 | `opus_caller.xml`                    | 0.8.0 Opus: SIPp offers `opus/48000/2` at a dynamic PT and asserts the 200 OK answers Opus **and** (0.8.2) carries our Opus fmtp re-keyed onto that PT (`a=fmtp:96 …stereo=0`); the daemon brings the call up as a 16 kHz bridge session (**opus** phase). Signalling only — SIPp can't encode Opus media. |
 | `delayed_offer_caller.xml`           | 0.9.0 inbound delayed offer (offerless INVITE, the CUCM-without-MTP case): SIPp sends an INVITE with **no SDP** and asserts the 200 OK carries SiphonAI's own offer (`m=audio` + PCMU rtpmap, via `check_it`); SIPp then sends its SDP answer in the ACK and the call bridges + BYEs (**delayed_offer** phase). |
 | `outbound_delayed_uas.xml`           | 0.9.0 **outbound** delayed offer, roles inverted: SiphonAI dials via `POST /admin/v1/calls` with `delayed_offer: true` (offerless INVITE); SIPp answers 200 with its own SDP **offer** and asserts (via `check_it`) the **ACK** carries SiphonAI's SDP **answer** (proving the gateway UAC's answer generator fired) (**outbound_delayed** phase). |
+| `outbound_delayed_srtp_uas.xml`      | 0.9.1 outbound delayed offer **with SRTP on the answer**: gateway `srtp = "required"`; the offerless INVITE can't offer SRTP, so SIPp's 200 carries an `RTP/SAVP` + `a=crypto` SDES **offer** and SIPp asserts (via `check_it`) the **ACK** answers SRTP (`a=crypto`) — SiphonAI installed keys (**outbound_delayed_srtp** phase). |
 
 `run-all.sh` also has an always-on **recording** auxiliary phase: it starts
 a daemon with `[recording].mode = "always"` writing to a temp dir, runs one
@@ -164,6 +165,15 @@ offerless INVITE through the `[[gateway]]`; SIPp
 asserts (via `check_it`) that SiphonAI's **ACK** carries the SDP answer
 its gateway UAC's answer generator built. Pass = SIPp completed **and**
 `siphon_ai_outbound_calls_total{result="answered"}` reads 1.
+
+And an always-on **outbound_delayed_srtp** phase (0.9.1): outbound
+delayed offer where SRTP rides the **answer**. `[[gateway]].srtp =
+"required"` makes encryption mandatory; since the offerless INVITE can't
+carry an SDES offer, `outbound_delayed_srtp_uas.xml`'s 200 carries the
+`RTP/SAVP` + `a=crypto` offer and asserts SiphonAI's **ACK** answers SRTP.
+Pass = SIPp completed **and**
+`siphon_ai_outbound_srtp_total{result="encrypted"}` reads 1. (DTLS-SRTP
+on a delayed answer is not handled — SDES only.)
 
 The `stir_shaken_*` scenarios run in `run-all.sh`'s always-on
 **stir_shaken** auxiliary phase. It builds + runs the

@@ -219,9 +219,11 @@ impl OutboundOriginateHandle for OutboundService {
         let to = req.to.clone();
         let gateway = req.gateway.clone();
         let delayed_offer = req.delayed_offer;
-        // A delayed-offer outbound INVITE carries no SDP, so we can't offer
-        // SRTP in it — the peer offers, we answer (plaintext in this cut).
-        let srtp_requested = !delayed_offer && gw.srtp != OutboundSrtp::Off;
+        // SRTP is requested whenever the gateway asks for it. For early
+        // offer we offer SDES; for delayed offer we can't offer (no SDP in
+        // the INVITE) but we answer the peer's SDES offer per the same
+        // policy — either way the negotiated suite rides `accepted.srtp_profile`.
+        let srtp_requested = gw.srtp != OutboundSrtp::Off;
         let originator = Arc::clone(&gw.originator);
         let cdr_sink = Arc::clone(&self.cdr_sink);
         let webhook_sink = Arc::clone(&self.webhook_sink);

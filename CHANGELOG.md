@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-06-18
+
+### Added
+
+- **DTLS-SRTP on the outbound delayed-offer answer (RFC 5763)** — the
+  first of the two DTLS-on-delayed follow-ups. When SiphonAI dials an
+  **offerless** outbound INVITE and the peer's 2xx offers DTLS-SRTP
+  (`UDP/TLS/RTP/SAVPF` + `a=fingerprint` + `a=setup:actpass`), SiphonAI
+  now **answers** it: the gateway UAC's delayed-offer answer generator
+  runs the inbound early-offer DTLS path (rewrite the offer for codec
+  matching, patch the answer back to the SAVPF profile with our
+  `a=fingerprint` + opposite `a=setup`, and `enable_dtls` as the
+  handshake server). The generator gained a per-process DTLS certificate;
+  the negotiated exchange (`dtls` vs `sdes`) is now carried on
+  `OutboundAccepted` so `start.srtp.exchange` reports it correctly.
+  Governed by `[[gateway]].srtp` like the SDES answer (0.9.1). SIPp
+  `outbound_delayed_dtls` phase added. *DTLS on the **inbound**
+  delayed-offer (where we'd offer DTLS) is the next follow-up.*
+
 ## [0.9.2] - 2026-06-18
 
 ### Added

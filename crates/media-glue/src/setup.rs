@@ -242,11 +242,15 @@ pub struct OutboundAccepted {
     pub answer: AnswerOutcome,
     pub session: Arc<MediaSession>,
     pub tap: MediaTap,
-    /// The negotiated SDES crypto-suite when outbound SRTP was established
+    /// The negotiated SRTP crypto-suite when outbound SRTP was established
     /// (e.g. `"AES_CM_128_HMAC_SHA1_80"`), for `start.srtp.profile`. `None`
-    /// for a plaintext call or a `preferred` downgrade. The exchange is
-    /// always SDES on the outbound origination path.
+    /// for a plaintext call or a `preferred` downgrade.
     pub srtp_profile: Option<String>,
+    /// How that SRTP was keyed. SDES on the early-offer origination path;
+    /// the delayed-offer answer path can also negotiate DTLS-SRTP (0.9.3),
+    /// so the exchange is carried here rather than assumed. Ignored when
+    /// `srtp_profile` is `None`.
+    pub srtp_exchange: siphon_ai_bridge::protocol::SrtpExchange,
     /// The SDP **offer** we sent for this call (our local media, `sendrecv`).
     /// Retained so the call layer can build a bot-initiated hold/resume
     /// re-INVITE offer by flipping its direction (0.7.5) — the outbound
@@ -610,6 +614,8 @@ impl MediaSetup {
             session,
             tap: media_tap,
             srtp_profile,
+            // Early-offer origination offers SDES only.
+            srtp_exchange: siphon_ai_bridge::protocol::SrtpExchange::Sdes,
             offer_sdp,
         })
     }

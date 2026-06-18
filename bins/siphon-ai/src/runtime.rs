@@ -570,6 +570,13 @@ impl Runtime {
         // (DEV_PLAN_0.6.0 §9.5/§9.6).
         let outbound_handle: Option<AdminOutbound> = if outbound.enabled() {
             let mut gateways = HashMap::with_capacity(outbound.gateways.len());
+            // Per-process DTLS cert for answering a peer's DTLS-SRTP offer
+            // on an outbound delayed call (0.9.3). Shared across gateways,
+            // same posture as the inbound acceptor's cert.
+            let outbound_dtls_cert = Arc::new(
+                forge_rtp::dtls::DtlsCertificate::generate()
+                    .map_err(|e| anyhow!("outbound DTLS cert generation failed: {e}"))?,
+            );
             for gw in &outbound.gateways {
                 // Outbound delayed offer (chunk 2): the gateway's UAC and
                 // its originator share one registry — `place_delayed` parks
@@ -581,6 +588,7 @@ impl Runtime {
                     Arc::new(siphon_ai_core::DelayedOfferAnswerer::new(
                         (*outbound_media).clone(),
                         Arc::clone(&delayed_registry),
+                        Arc::clone(&outbound_dtls_cert),
                     ));
                 let uac = build_outbound_uac(
                     TransferUacBuild {

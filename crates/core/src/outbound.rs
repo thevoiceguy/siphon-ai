@@ -43,7 +43,8 @@ use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info, instrument, warn};
 
 use crate::acceptor::{
-    enforce_srtp_mode, maybe_tweak_sdes_offer, post_process_sdes_answer, SrtpMode,
+    enforce_srtp_mode, maybe_tweak_dtls_srtp_offer, maybe_tweak_sdes_offer,
+    post_process_dtls_srtp_answer, post_process_sdes_answer, SrtpMode,
 };
 
 /// Per-call state for an outbound **delayed-offer** call (we sent an
@@ -79,6 +80,7 @@ pub struct DelayedOfferPending {
 struct DelayedMediaResult {
     accepted: InboundAccepted,
     srtp_profile: Option<String>,
+    srtp_exchange: siphon_ai_bridge::protocol::SrtpExchange,
 }
 
 /// SIP-Call-ID → parked delayed-offer call. Shared between the
@@ -96,11 +98,24 @@ pub type DelayedOfferRegistry = Arc<Mutex<HashMap<String, DelayedOfferPending>>>
 pub struct DelayedOfferAnswerer {
     media: MediaSetup,
     registry: DelayedOfferRegistry,
+    /// Per-process DTLS certificate, for answering a peer's DTLS-SRTP
+    /// offer (its SHA-256 fingerprint goes in our answer; it's handed to
+    /// `enable_dtls` for the handshake). Shared across this gateway's
+    /// delayed calls — same posture as the inbound acceptor's cert.
+    dtls_cert: Arc<forge_rtp::dtls::DtlsCertificate>,
 }
 
 impl DelayedOfferAnswerer {
-    pub fn new(media: MediaSetup, registry: DelayedOfferRegistry) -> Self {
-        Self { media, registry }
+    pub fn new(
+        media: MediaSetup,
+        registry: DelayedOfferRegistry,
+        dtls_cert: Arc<forge_rtp::dtls::DtlsCertificate>,
+    ) -> Self {
+        Self {
+            media,
+            registry,
+            dtls_cert,
+        }
     }
 }
 
@@ -137,14 +152,14 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
 
         let offer_sdp = offer.serialize();
 
-        // SRTP answer side (SDES): an offerless INVITE can't carry an SDES
-        // offer, so we answer the peer's offer per the gateway's policy.
-        // Gate first (Required + plaintext peer offer → fail), then if the
-        // peer offered SDES, rewrite its `RTP/SAVP` to `RTP/AVP` so the
-        // codec negotiator (which doesn't know SAVP) can match — we patch
-        // the answer back + install keys below. Mirrors the inbound
-        // early-offer path in `prepare_call_inner`. DTLS-SRTP offers aren't
-        // handled here (no per-call cert in the generator) — a follow-up.
+        // SRTP answer side: an offerless INVITE can't OFFER SRTP, so we
+        // answer the peer's offer per the gateway's policy. Gate first
+        // (Required + plaintext peer offer → fail). Then, if the peer
+        // offered DTLS-SRTP or SDES, rewrite its secure m-line profile to
+        // `RTP/AVP` so the codec negotiator (which doesn't know SAVP/SAVPF)
+        // can match — we patch the answer back + install keys / enable DTLS
+        // below. Try DTLS first, then SDES (they're mutually exclusive on
+        // one m-line). Mirrors the inbound early-offer path.
         if let Ok(parsed) = <forge_sdp::SessionDescription>::from_str(&offer_sdp) {
             if let Err(e) = enforce_srtp_mode(srtp_mode, &parsed) {
                 let msg = e.to_string();
@@ -152,17 +167,30 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
                 return Err(anyhow::anyhow!("delayed-offer SRTP policy: {msg}"));
             }
         }
-        let sdes_tweak = match maybe_tweak_sdes_offer(&offer_sdp) {
+        let dtls_tweak = match maybe_tweak_dtls_srtp_offer(&offer_sdp) {
             Ok(t) => t,
             Err(e) => {
                 let msg = e.to_string();
                 let _ = result_tx.send(Err(SetupError::Srtp(msg.clone())));
-                return Err(anyhow::anyhow!("delayed-offer SDES offer: {msg}"));
+                return Err(anyhow::anyhow!("delayed-offer DTLS offer: {msg}"));
             }
         };
-        let offer_for_negotiator = sdes_tweak
+        let sdes_tweak = if dtls_tweak.is_none() {
+            match maybe_tweak_sdes_offer(&offer_sdp) {
+                Ok(t) => t,
+                Err(e) => {
+                    let msg = e.to_string();
+                    let _ = result_tx.send(Err(SetupError::Srtp(msg.clone())));
+                    return Err(anyhow::anyhow!("delayed-offer SDES offer: {msg}"));
+                }
+            }
+        } else {
+            None
+        };
+        let offer_for_negotiator = dtls_tweak
             .as_ref()
             .map(|t| t.tweaked_sdp.clone())
+            .or_else(|| sdes_tweak.as_ref().map(|t| t.tweaked_sdp.clone()))
             .unwrap_or_else(|| offer_sdp.clone());
 
         let result = self
@@ -194,9 +222,45 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
             }
         };
 
-        // SDES post-negotiation: patch the answer back to `RTP/SAVP` with
-        // our `a=crypto:` and install the key material on the session leg.
-        let srtp_profile = if let Some(tweak) = &sdes_tweak {
+        // Post-negotiation: patch the answer back to the secure profile and
+        // bring up keys. DTLS-SRTP installs our fingerprint + starts the
+        // handshake (we answer, so DtlsRole::Server); SDES installs the
+        // pre-derived keys directly. `(profile, exchange)` rides back so
+        // `start.srtp` reports the right exchange.
+        let (srtp_profile, srtp_exchange) = if let Some(tweak) = &dtls_tweak {
+            let local_fp = self.dtls_cert.fingerprint_sha256().to_string();
+            let new_text = match post_process_dtls_srtp_answer(
+                &mut accepted.answer.answer,
+                tweak,
+                &local_fp,
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    let msg = e.to_string();
+                    let _ = result_tx.send(Err(SetupError::Srtp(msg.clone())));
+                    return Err(anyhow::anyhow!("delayed-offer DTLS answer: {msg}"));
+                }
+            };
+            accepted.answer.answer_text = new_text;
+            if let Err(e) = accepted
+                .session
+                .enable_dtls(
+                    forge_engine::ParticipantLabel::A,
+                    Arc::clone(&self.dtls_cert),
+                    forge_rtp::dtls::DtlsRole::Server,
+                    tweak.remote_fingerprint.1.clone(),
+                )
+                .await
+            {
+                let msg = e.to_string();
+                let _ = result_tx.send(Err(SetupError::Srtp(format!("enable_dtls: {msg}"))));
+                return Err(anyhow::anyhow!("delayed-offer enable_dtls: {msg}"));
+            }
+            (
+                Some("AES_CM_128_HMAC_SHA1_80".to_string()),
+                siphon_ai_bridge::protocol::SrtpExchange::Dtls,
+            )
+        } else if let Some(tweak) = &sdes_tweak {
             match post_process_sdes_answer(&mut accepted.answer.answer, tweak) {
                 Ok(new_text) => {
                     accepted.answer.answer_text = new_text;
@@ -206,7 +270,10 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
                         tweak.sdes_answer.recv_key.clone(),
                     )
                     .await;
-                    Some(tweak.sdes_answer.local_attribute.suite.as_str().to_string())
+                    (
+                        Some(tweak.sdes_answer.local_attribute.suite.as_str().to_string()),
+                        siphon_ai_bridge::protocol::SrtpExchange::Sdes,
+                    )
                 }
                 Err(e) => {
                     let msg = e.to_string();
@@ -215,16 +282,17 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
                 }
             }
         } else {
-            None
+            (None, siphon_ai_bridge::protocol::SrtpExchange::Sdes)
         };
 
-        // Re-parse our (possibly SAVP-patched) answer text into the UAC's
-        // sip-sdp type for the ACK, then hand the media back.
+        // Re-parse our (possibly SAVP/SAVPF-patched) answer text into the
+        // UAC's sip-sdp type for the ACK, then hand the media back.
         let answer_sd = SessionDescription::parse(&accepted.answer.answer_text)
             .map_err(|e| anyhow::anyhow!("re-parse delayed-offer answer: {e}"))?;
         let _ = result_tx.send(Ok(DelayedMediaResult {
             accepted,
             srtp_profile,
+            srtp_exchange,
         }));
         Ok(answer_sd)
     }
@@ -509,12 +577,13 @@ impl OutboundOriginator {
         // Reshape into `OutboundAccepted` so the shared outbound run_call
         // works unchanged. `offer_sdp` = our answer text, so hold/resume
         // flip the negotiated media the same way the inbound path does.
-        // `srtp_profile` carries the SDES suite when the peer's offer was
-        // answered with SRTP (drives `start.srtp` + the outbound SRTP
-        // metric); `None` for a plaintext answer.
+        // `srtp_profile`/`srtp_exchange` carry the negotiated SRTP (SDES or
+        // DTLS) when the peer's offer was answered encrypted — drives
+        // `start.srtp` + the outbound SRTP metric; `None` for plaintext.
         let DelayedMediaResult {
             accepted: inbound,
             srtp_profile,
+            srtp_exchange,
         } = media;
         let accepted = OutboundAccepted {
             offer_sdp: inbound.answer.answer_text.clone(),
@@ -522,6 +591,7 @@ impl OutboundOriginator {
             session: inbound.session,
             tap: inbound.tap,
             srtp_profile,
+            srtp_exchange,
         };
 
         info!(

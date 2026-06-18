@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  outbound_delayed_dtls_uas — outbound delayed offer where the peer
+  offers DTLS-SRTP and SiphonAI ANSWERS it (0.9.3). Roles inverted: SIPp
+  is the CALLEE (UAS), SiphonAI the UAC dialing via `POST /admin/v1/calls`
+  with `delayed_offer: true` through a `[[gateway]]` whose `srtp` is set.
+
+  SiphonAI sends an offerless INVITE. SIPp answers 200 OK carrying a
+  DTLS-SRTP OFFER (`UDP/TLS/RTP/SAVPF` + `a=fingerprint` + `a=setup:actpass`);
+  SiphonAI must answer DTLS in the ACK — same profile, OUR `a=fingerprint`
+  and the opposite `a=setup`. The scenario asserts (check_it) the ACK
+  carries `a=fingerprint:sha-256`, proving SiphonAI answered the peer's
+  DTLS offer and enabled the handshake. (SIPp doesn't complete a real
+  DTLS handshake — this is a signalling test; the handshake/media path is
+  forge-tested.)
+
+  Run via run-all.sh's outbound_delayed_dtls phase.
+-->
+<scenario name="outbound_delayed_dtls_uas">
+  <recv request="INVITE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 180 Ringing
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <!-- 200 OK carrying SIPp's DTLS-SRTP OFFER. -->
+  <send retrans="500">
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] UDP/TLS/RTP/SAVPF 0
+a=rtpmap:0 PCMU/8000
+a=fingerprint:sha-256 AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB
+a=setup:actpass
+]]>
+  </send>
+
+  <!-- ACK MUST carry SiphonAI's DTLS answer fingerprint. -->
+  <recv request="ACK" rtd="true">
+    <action>
+      <ereg regexp="a=fingerprint:sha-256 "
+            search_in="msg"
+            check_it="true"
+            assign_to="ack_fp"/>
+      <log message="delayed-offer DTLS ACK carried fingerprint: [$ack_fp]"/>
+    </action>
+  </recv>
+
+  <recv request="BYE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]>
+  </send>
+</scenario>

@@ -397,7 +397,9 @@ async fn run_call(
             .srtp_profile
             .as_ref()
             .map(|profile| siphon_ai_bridge::protocol::SrtpInfo {
-                exchange: siphon_ai_bridge::protocol::SrtpExchange::Sdes,
+                // SDES on early offer; the delayed-offer answer path may
+                // have negotiated DTLS-SRTP (0.9.3) — use what it recorded.
+                exchange: accepted.srtp_exchange,
                 profile: profile.clone(),
             });
     if ctx.srtp_requested {

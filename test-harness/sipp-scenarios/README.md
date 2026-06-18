@@ -62,6 +62,7 @@ sipp -sf basic_call_then_bye.xml -m 1 -p 5070 -s 1000 127.0.0.1:5060
 | `outbound_delayed_uas.xml`           | 0.9.0 **outbound** delayed offer, roles inverted: SiphonAI dials via `POST /admin/v1/calls` with `delayed_offer: true` (offerless INVITE); SIPp answers 200 with its own SDP **offer** and asserts (via `check_it`) the **ACK** carries SiphonAI's SDP **answer** (proving the gateway UAC's answer generator fired) (**outbound_delayed** phase). |
 | `outbound_delayed_srtp_uas.xml`      | 0.9.1 outbound delayed offer **with SRTP on the answer**: gateway `srtp = "required"`; the offerless INVITE can't offer SRTP, so SIPp's 200 carries an `RTP/SAVP` + `a=crypto` SDES **offer** and SIPp asserts (via `check_it`) the **ACK** answers SRTP (`a=crypto`) — SiphonAI installed keys (**outbound_delayed_srtp** phase). |
 | `delayed_offer_srtp_caller.xml`      | 0.9.2 inbound delayed offer **with SRTP on the offer**: `[media].srtp = "required"`; SIPp sends an offerless INVITE and asserts (via `check_it`) SiphonAI's 200 OK carries an SDES **offer** (`a=crypto`) — we're the offerer; SIPp answers SRTP in the ACK and the keyed call bridges (**delayed_offer_srtp** phase). |
+| `outbound_delayed_dtls_uas.xml`      | 0.9.3 outbound delayed offer **with DTLS-SRTP on the answer**: gateway `srtp = "required"`; SIPp's 200 carries a `UDP/TLS/RTP/SAVPF` + `a=fingerprint` + `a=setup:actpass` DTLS **offer** and SIPp asserts (via `check_it`) the **ACK** answers DTLS (`a=fingerprint:sha-256`) — SiphonAI enabled the handshake (**outbound_delayed_dtls** phase). Signalling only; SIPp doesn't complete a real DTLS handshake. |
 
 `run-all.sh` also has an always-on **recording** auxiliary phase: it starts
 a daemon with `[recording].mode = "always"` writing to a temp dir, runs one
@@ -182,8 +183,17 @@ inbound delayed offer *we* are the offerer. A daemon with `[media].srtp
 = "required"`; `delayed_offer_srtp_caller.xml` sends an offerless INVITE
 and asserts (via `check_it`) the 200 OK carries `a=crypto`, then answers
 SRTP in the ACK so SiphonAI installs the key and the call bridges. Pass =
-SIPp completed **and** the daemon logged the delayed accept. (DTLS-SRTP
-on a delayed offer is not produced — SDES only.)
+SIPp completed **and** the daemon logged the delayed accept.
+
+And an always-on **outbound_delayed_dtls** phase (0.9.3): outbound
+delayed offer where the peer offers **DTLS-SRTP** and SiphonAI answers
+it. `[[gateway]].srtp = "required"`; SIPp's 200 carries a
+`UDP/TLS/RTP/SAVPF` + `a=fingerprint` + `a=setup:actpass` offer and
+`outbound_delayed_dtls_uas.xml` asserts SiphonAI's **ACK** answers DTLS
+(`a=fingerprint:sha-256`). Pass = SIPp completed **and**
+`siphon_ai_outbound_srtp_total{result="encrypted"}` reads 1. Signalling
+only — SIPp doesn't complete a real DTLS handshake; the
+handshake/media path is forge-tested.
 
 The `stir_shaken_*` scenarios run in `run-all.sh`'s always-on
 **stir_shaken** auxiliary phase. It builds + runs the

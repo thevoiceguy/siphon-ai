@@ -8,11 +8,15 @@
 > answer generator, governed by `[[gateway]].srtp`. v0.9.2 is the mirror:
 > on an inbound delayed offer SiphonAI is the *offerer*, so `[media].srtp`
 > `preferred`/`required` makes the 200 OK offer SDES and `apply_answer`
-> installs the peer's ACK key. Remaining follow-ups (not blocking):
-> **DTLS-SRTP** on a delayed offer/answer (the SDES paths only; no
-> per-call cert in the generator); a per-call CDR for negotiations that
-> fail before going active (today a metric + warn). Protocol stayed
-> `version: "1"`, CDR version unchanged.
+> installs the peer's ACK key. v0.9.3 adds **DTLS-SRTP on the
+> outbound delayed answer**: the gateway answer generator now runs the
+> inbound early-offer DTLS path (it gained a per-process cert), and the
+> SRTP exchange (dtls/sdes) is carried on `OutboundAccepted` so
+> `start.srtp` is right. Remaining follow-ups (not blocking): **DTLS on
+> the inbound delayed-offer** (where *we* offer DTLS — a new offer-build
+> capability); a per-call CDR for negotiations that fail before going
+> active (today a metric + warn). Protocol stayed `version: "1"`, CDR
+> version unchanged.
 >
 > Outbound delayed offer (chunk 2): `POST /admin/v1/calls` with
 > `delayed_offer: true` dials an offerless INVITE; the gateway UAC's

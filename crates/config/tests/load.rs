@@ -214,6 +214,39 @@ any = true
 }
 
 #[test]
+fn allow_delayed_offer_defaults_true_and_can_be_disabled() {
+    let env = MapEnv::new([]);
+    let base = r#"
+[sip]
+listen = "127.0.0.1:5060"
+__DELAYED__
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    // Default (field omitted) — delayed offer is accepted.
+    let cfg = load_from_str_with_env(&base.replace("__DELAYED__", ""), &env)
+        .expect("compiles with default");
+    assert!(cfg.sip.allow_delayed_offer, "delayed offer on by default");
+
+    // Explicit opt-out.
+    let cfg = load_from_str_with_env(
+        &base.replace("__DELAYED__", "allow_delayed_offer = false"),
+        &env,
+    )
+    .expect("compiles with opt-out");
+    assert!(
+        !cfg.sip.allow_delayed_offer,
+        "operator can force early offer"
+    );
+}
+
+#[test]
 fn unknown_codec_is_a_compile_error() {
     let env = MapEnv::new([]);
     let toml = r#"

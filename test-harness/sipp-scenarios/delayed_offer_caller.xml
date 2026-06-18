@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  delayed_offer_caller — SIPp (UAC) sends an INVITE with NO SDP body
+  (RFC 3264 delayed offer, the CUCM-without-MTP case). SiphonAI (UAS)
+  must answer 200 OK carrying ITS OWN SDP offer; SIPp then sends the
+  SDP answer in the ACK. Validates the 0.9.0 inbound delayed-offer flow
+  end-to-end: offerless INVITE accepted, offer in the 200, answer parsed
+  from the ACK, media bridged, call torn down with a BYE.
+
+  The 200 OK MUST contain an `m=audio` line and a codec rtpmap (our
+  offer). SIPp asserts that via check_it, then answers PCMU at a
+  concrete address. The daemon's [media].codecs must include pcmu
+  (run-all sets it). SiphonAI does not send 100/180 in v1; those recv
+  lines are optional.
+-->
+<scenario name="delayed_offer_caller">
+  <send retrans="500">
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp-do@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp-do@[local_ip]:[local_port]>
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+
+  <!-- 200 OK MUST carry OUR SDP offer (delayed offer). -->
+  <recv response="200" rtd="true">
+    <action>
+      <ereg regexp="m=audio [0-9]+ RTP/AVP"
+            search_in="msg"
+            check_it="true"
+            assign_to="our_offer_mline"/>
+      <log message="delayed-offer 200 carried offer m-line: [$our_offer_mline]"/>
+      <ereg regexp="a=rtpmap:0 PCMU/8000"
+            search_in="msg"
+            check_it="true"
+            assign_to="our_offer_pcmu"/>
+      <log message="delayed-offer 200 offered PCMU: [$our_offer_pcmu]"/>
+    </action>
+  </recv>
+
+  <!-- ACK carries OUR SDP answer (we pick PCMU at a concrete addr). -->
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp-do@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 6000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=ptime:20
+a=sendrecv
+]]>
+  </send>
+
+  <pause milliseconds="600"/>
+
+  <send retrans="500">
+<![CDATA[
+BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-bye
+Max-Forwards: 70
+From: <sip:sipp-do@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 BYE
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="200" rtd="true"/>
+</scenario>

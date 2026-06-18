@@ -146,6 +146,17 @@ pub struct RawSip {
     /// here. Unset = honour the peer's value uncapped.
     #[serde(default)]
     pub preferred_session_expires_secs: Option<u32>,
+    /// Accept an inbound INVITE with no SDP (RFC 3264 delayed offer):
+    /// SiphonAI offers in the 200 OK and reads the peer's answer from
+    /// the ACK. Needed for CUCM trunks/phones without a forced MTP.
+    /// Default `true`. Set `false` to force strict early offer — an
+    /// offerless INVITE is then rejected (488).
+    #[serde(default = "default_true")]
+    pub allow_delayed_offer: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// `[sip.call_progress]` — what — if any — provisional response

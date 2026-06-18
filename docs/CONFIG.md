@@ -44,6 +44,7 @@ before TOML parsing. Unset variables without a default fail the load.
 | `transports` | `["udp","tcp","tls"]` | `["udp"]` | Subset enabled. `"tls"` requires `[sip.tls]`. |
 | `user_agent` | string           | unset      | Set to brand the `User-Agent` and `Server` headers. |
 | `contact`    | string           | derived    | Override the `Contact` URI; otherwise built from `[node].public_address` + the bound port. |
+| `allow_delayed_offer` | bool    | `true`     | Accept an inbound INVITE with **no SDP** (RFC 3264 delayed offer): SiphonAI offers in the 200 OK and reads the peer's answer from the ACK. Needed for CUCM trunks/phones without a forced MTP. `false` rejects an offerless INVITE with `488`. Early-offer INVITEs are unaffected either way. |
 
 ### `[sip.tls]`
 

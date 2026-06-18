@@ -248,6 +248,14 @@ pub struct RawMedia {
     /// fail-loud error per CLAUDE.md §4.6.
     #[serde(default)]
     pub srtp: Option<String>,
+    /// Which SRTP key-exchange to **offer** when SiphonAI is the offerer
+    /// on a **delayed offer** (inbound offerless INVITE) and `srtp` is
+    /// `"preferred"`/`"required"` — `"sdes"` (default) or `"dtls"`. Only
+    /// the delayed-offer path offers SRTP; inbound early offer always
+    /// *answers* the peer's choice, so this is ignored there. Unknown
+    /// strings are a fail-loud error.
+    #[serde(default)]
+    pub srtp_offer: Option<String>,
     /// Hold-music file played to the caller during a bot-initiated hold
     /// (0.7.2) — a WAV whose native rate matches the call's negotiated
     /// rate (no resampling in v1; a mismatch falls back to generated

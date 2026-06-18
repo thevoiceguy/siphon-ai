@@ -159,6 +159,11 @@ pub struct BridgeDefaults {
     /// override via `[route.media].srtp` (see [`resolve_srtp_mode`]).
     /// Default [`SrtpMode::Off`] — plaintext-RTP only, matching v0.2.0.
     pub srtp_mode: SrtpMode,
+    /// When SiphonAI is the *offerer* on a delayed offer and `srtp_mode`
+    /// is `Preferred`/`Required`, offer DTLS-SRTP instead of SDES. From
+    /// `[media].srtp_offer = "dtls"`. Default `false` (offer SDES, the
+    /// 0.9.2 behaviour). Only affects the inbound delayed-offer path.
+    pub offer_dtls_srtp: bool,
     /// mTLS settings for the bridge WS leg, sourced from
     /// `[bridge.tls]`. `None` when the operator hasn't configured a
     /// client cert — bridge uses the existing plaintext or webpki
@@ -288,6 +293,7 @@ impl Default for BridgeDefaults {
             dead_air_threshold: Some(Duration::from_millis(10000)),
             rtp_stats_interval: Some(Duration::from_millis(5000)),
             srtp_mode: SrtpMode::Off,
+            offer_dtls_srtp: false,
             bridge_tls: None,
             ws_reconnect_enabled: false,
             ws_reconnect_max: Duration::from_secs(30),
@@ -969,6 +975,49 @@ pub fn post_process_dtls_srtp_answer(
     audio_mut.set_media_dtls_setup(local_setup);
 
     Ok(answer.serialize())
+}
+
+/// Turn a plaintext `RTP/AVP` **offer** into a DTLS-SRTP offer: swap the
+/// audio m-line to `UDP/TLS/RTP/SAVPF`, add our `a=fingerprint:sha-256`,
+/// and offer `a=setup:actpass` (let the answerer pick its role, RFC 5763
+/// §5). Used by the inbound **delayed-offer** path (the only place
+/// SiphonAI offers SRTP and chose `[media].srtp_offer = "dtls"`); the
+/// peer's answered fingerprint + setup come back in the ACK, where
+/// `enable_dtls` is called with the negotiated role. Returns the offer
+/// SDP text for the 200 OK.
+pub fn build_dtls_srtp_offer(
+    plain_offer_sdp: &str,
+    local_fingerprint_sha256: &str,
+) -> Result<String, AcceptError> {
+    use forge_sdp::SessionDescriptionExt as _;
+    use forge_sdp::{dtls::DtlsSetup, dtls::MediaDtlsAttributesExt, MediaType, Protocol};
+
+    let mut parsed = <forge_sdp::SessionDescription as forge_sdp::SessionDescriptionExt>::from_str(
+        plain_offer_sdp,
+    )
+    .map_err(|e| AcceptError::Setup(SetupError::Sdp(SdpError::Parse(e.to_string()))))?;
+
+    let audio_mut = <forge_sdp::SessionDescription>::find_media_mut(&mut parsed, MediaType::Audio)
+        .ok_or(AcceptError::Setup(SetupError::Sdp(SdpError::NoAudio)))?;
+    audio_mut.protocol = Protocol::UdpTlsRtpSavpf;
+    audio_mut.set_media_dtls_fingerprint("sha-256", local_fingerprint_sha256);
+    audio_mut.set_media_dtls_setup(DtlsSetup::Actpass);
+
+    Ok(parsed.serialize())
+}
+
+/// Derive our DTLS role from the peer's answered `a=setup:`, for a DTLS
+/// offer we made as `actpass` (RFC 5763 §5): if the peer is `active` it
+/// is the client and we are the server; if it is `passive` we are the
+/// client. `actpass`/`holdconn` in an *answer* is non-compliant — treat
+/// it as the peer deferring, so we take the server role.
+fn dtls_role_for_offerer(peer_setup: forge_sdp::dtls::DtlsSetup) -> forge_rtp::dtls::DtlsRole {
+    use forge_sdp::dtls::DtlsSetup;
+    match peer_setup {
+        DtlsSetup::Active => forge_rtp::dtls::DtlsRole::Server,
+        DtlsSetup::Passive => forge_rtp::dtls::DtlsRole::Client,
+        DtlsSetup::Actpass | DtlsSetup::Holdconn => forge_rtp::dtls::DtlsRole::Server,
+    }
 }
 
 /// Local SDES crypto-suite preference, in priority order. The
@@ -3380,6 +3429,10 @@ struct PendingDelayedOffer {
     dialog: sip_dialog::Dialog,
     session_timer: Option<NegotiatedSessionTimer>,
     flow: Option<DialogFlow>,
+    /// We offered DTLS-SRTP in the 200 OK (`[media].srtp_offer = "dtls"`);
+    /// `finalize_delayed_offer` must enable DTLS from the peer's answered
+    /// fingerprint in the ACK rather than expect an SDES key.
+    offered_dtls: bool,
 }
 
 impl BridgingAcceptor {
@@ -3446,12 +3499,23 @@ impl BridgingAcceptor {
         // `Preferred`/`Required` → offer `RTP/SAVP` + `a=crypto`;
         // `apply_answer` (in `finalize_delayed_offer`) installs the peer's
         // answered key from the ACK, and `Required` fails the call if the
-        // peer answers plaintext. DTLS-SRTP offers aren't produced here
-        // (the SDES `originate_offer` path only) — a follow-up.
-        let srtp = match resolve_srtp_mode(&self.defaults, route) {
-            SrtpMode::Off => OutboundSrtp::Off,
-            SrtpMode::Preferred => OutboundSrtp::Preferred,
-            SrtpMode::Required => OutboundSrtp::Required,
+        // peer answers plaintext.
+        //
+        // DTLS-SRTP (0.9.4): when `[media].srtp_offer = "dtls"`, offer
+        // DTLS instead of SDES — build a plaintext offer (srtp Off), then
+        // patch it to `UDP/TLS/RTP/SAVPF` + our fingerprint + setup:actpass
+        // below; the peer's answered fingerprint comes back in the ACK,
+        // where `finalize_delayed_offer` enables the handshake.
+        let srtp_mode = resolve_srtp_mode(&self.defaults, route);
+        let offer_dtls = srtp_mode != SrtpMode::Off && self.defaults.offer_dtls_srtp;
+        let srtp = if offer_dtls {
+            OutboundSrtp::Off
+        } else {
+            match srtp_mode {
+                SrtpMode::Off => OutboundSrtp::Off,
+                SrtpMode::Preferred => OutboundSrtp::Preferred,
+                SrtpMode::Required => OutboundSrtp::Required,
+            }
         };
         let tap_options = TapOptions {
             barge_in_action: barge_in_to_tap_action(&resolve_barge_in(&self.defaults, route)),
@@ -3495,6 +3559,31 @@ impl BridgingAcceptor {
             }
         };
 
+        // When offering DTLS, patch the plaintext offer to a DTLS-SRTP
+        // offer (SAVPF + our fingerprint + setup:actpass). Failure rolls
+        // the just-allocated session back.
+        let offer_sdp_to_send = if offer_dtls {
+            match build_dtls_srtp_offer(&offer.offer_sdp, self.dtls_cert.fingerprint_sha256()) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "delayed-offer DTLS offer build failed; rejecting 500");
+                    self.rollback_forge_session(&bridge_call_id, &forge_call_id, "dtls_offer")
+                        .await;
+                    metrics::counter!(INVITES_TOTAL, "result" => "rejected").increment(1);
+                    call.handle
+                        .send_final(UserAgentServer::create_response(
+                            call.request,
+                            500,
+                            "Server Internal Error",
+                        ))
+                        .await;
+                    return Ok(());
+                }
+            }
+        } else {
+            offer.offer_sdp.clone()
+        };
+
         // 200 OK carrying our offer (instead of an answer). The peer's
         // answer will arrive in the ACK.
         let accept_outcome = match uas
@@ -3502,7 +3591,7 @@ impl BridgingAcceptor {
                 call.request,
                 &call.handle,
                 call.transport,
-                Some(&offer.offer_sdp),
+                Some(&offer_sdp_to_send),
                 &self.session_timer_policy,
             )
             .await
@@ -3573,6 +3662,7 @@ impl BridgingAcceptor {
                 dialog,
                 session_timer,
                 flow: DialogFlow::from_transport(call.transport),
+                offered_dtls: offer_dtls,
             },
         );
 
@@ -3630,6 +3720,7 @@ impl BridgingAcceptor {
             dialog,
             session_timer,
             flow,
+            offered_dtls,
         } = pending;
 
         let answer_sdp = match std::str::from_utf8(call.request.body()) {
@@ -3663,17 +3754,75 @@ impl BridgingAcceptor {
             }
         };
 
-        // Surface negotiated SRTP on `start.srtp` when our SDES offer was
-        // accepted (exchange is always SDES on the delayed-offer path).
-        // `None` for a plaintext call or a `preferred` downgrade.
-        let srtp_info =
+        // Surface negotiated SRTP on `start.srtp`.
+        //
+        // DTLS (we offered it, 0.9.4): the peer's ACK answer carries its
+        // fingerprint + setup. Derive our role (we offered actpass) and
+        // enable the handshake on leg A. SDES: `apply_answer` already
+        // installed the keys; read the suite off `accepted.srtp_profile`.
+        let srtp_info = if offered_dtls {
+            let parsed =
+                <forge_sdp::SessionDescription as forge_sdp::SessionDescriptionExt>::from_str(
+                    &answer_sdp,
+                )
+                .ok();
+            let peer_fp = parsed.as_ref().and_then(extract_remote_dtls_fingerprint);
+            let peer_setup = parsed
+                .as_ref()
+                .and_then(extract_remote_dtls_setup)
+                .unwrap_or(forge_sdp::dtls::DtlsSetup::Active);
+            match peer_fp {
+                Some(fp) => {
+                    let role = dtls_role_for_offerer(peer_setup);
+                    if let Err(e) = accepted
+                        .session
+                        .enable_dtls(
+                            forge_engine::ParticipantLabel::A,
+                            Arc::clone(&self.dtls_cert),
+                            role,
+                            fp.1.clone(),
+                        )
+                        .await
+                    {
+                        warn!(call_id = %bridge_call_id, error = %e, "delayed-offer DTLS enable failed");
+                        metrics::counter!(DELAYED_OFFER_TOTAL, "result" => "invalid_remote_media")
+                            .increment(1);
+                        let _ = self
+                            .media
+                            .session_manager()
+                            .stop_session(&forge_call_id)
+                            .await;
+                        return;
+                    }
+                    Some(siphon_ai_bridge::protocol::SrtpInfo {
+                        exchange: siphon_ai_bridge::protocol::SrtpExchange::Dtls,
+                        profile: "AES_CM_128_HMAC_SHA1_80".to_string(),
+                    })
+                }
+                None => {
+                    // We offered DTLS but the answer carried no fingerprint:
+                    // the peer can't do DTLS-SRTP. Fail rather than run
+                    // plaintext under a secure policy.
+                    warn!(call_id = %bridge_call_id, "delayed-offer DTLS answer has no fingerprint");
+                    metrics::counter!(DELAYED_OFFER_TOTAL, "result" => "invalid_remote_media")
+                        .increment(1);
+                    let _ = self
+                        .media
+                        .session_manager()
+                        .stop_session(&forge_call_id)
+                        .await;
+                    return;
+                }
+            }
+        } else {
             accepted
                 .srtp_profile
                 .as_ref()
                 .map(|profile| siphon_ai_bridge::protocol::SrtpInfo {
                     exchange: siphon_ai_bridge::protocol::SrtpExchange::Sdes,
                     profile: profile.clone(),
-                });
+                })
+        };
         let start = build_start_msg(
             bridge_call_id.clone(),
             &facts,

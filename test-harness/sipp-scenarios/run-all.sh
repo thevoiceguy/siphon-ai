@@ -1651,6 +1651,67 @@ fi
 dos_cleanup
 trap - EXIT
 
+# ─── auxiliary phase: delayed_offer + DTLS offer ──────────────────
+# (0.9.4) Inbound delayed offer where SiphonAI OFFERS DTLS-SRTP in the
+# 200 OK (we're the offerer). `[media].srtp = "required"` +
+# `[media].srtp_offer = "dtls"` make the offer UDP/TLS/RTP/SAVPF +
+# a=fingerprint + a=setup:actpass; SIPp answers DTLS in the ACK and
+# SiphonAI enables the handshake. The scenario's check_it asserts the
+# 200 carried `a=fingerprint:sha-256`; pass also requires the daemon to
+# log the delayed accept. (SIPp doesn't run a real DTLS handshake.)
+echo
+echo "─── auxiliary phase: delayed_offer_dtls ───────────────"
+DOD_WS_PORT=8791
+DOD_WS_LOG=$(mktemp -t echo-ws-dod.XXXXXX.log)
+DOD_DAEMON_LOG=$(mktemp -t siphon-ai-dod.XXXXXX.log)
+DOD_CONFIG=$(mktemp -t siphon-ai-dod.XXXXXX.toml)
+cat >"$DOD_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-dod"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+srtp = "required"
+srtp_offer = "dtls"
+[bridge]
+ws_url = "ws://127.0.0.1:$DOD_WS_PORT/"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+DOD_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$DOD_PYTHON" ]] || DOD_PYTHON=python3
+"$DOD_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$DOD_WS_PORT" >"$DOD_WS_LOG" 2>&1 &
+DOD_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$DOD_CONFIG" \
+    >"$DOD_DAEMON_LOG" 2>&1 &
+DOD_DAEMON_PID=$!
+dod_cleanup() {
+    kill "$DOD_WS_PID" "$DOD_DAEMON_PID" 2>/dev/null || true
+    wait "$DOD_WS_PID" "$DOD_DAEMON_PID" 2>/dev/null || true
+}
+trap dod_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── delayed_offer_dtls ────────────────────────────────"
+if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/delayed_offer_dtls_caller.xml" -m 1 -timeout 12s -trace_err \
+        -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1 \
+    && grep -q "delayed-offer 200 OK sent; awaiting ACK answer" "$DOD_DAEMON_LOG"; then
+    echo "  OK"
+else
+    echo "  FAIL (daemon: $DOD_DAEMON_LOG; ws: $DOD_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+dod_cleanup
+trap - EXIT
+
 # ─── Optional third phase: blind_transfer ─────────────────────────
 # Needs a WS server that proactively emits BridgeIn::Transfer. The
 # runner stops the daemon, brings up an echo-ws that auto-emits

@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  delayed_offer_dtls_caller — inbound delayed offer where SiphonAI OFFERS
+  DTLS-SRTP in the 200 OK (0.9.4). SIPp (UAC) sends an INVITE with NO SDP;
+  the daemon runs with [media].srtp = "required" and
+  [media].srtp_offer = "dtls", so SiphonAI's 200 OK must carry a DTLS-SRTP
+  OFFER (UDP/TLS/RTP/SAVPF + a=fingerprint + a=setup:actpass) — we're the
+  offerer. SIPp answers DTLS in the ACK (its fingerprint + a=setup:active),
+  SiphonAI enables the handshake (server role) and the call bridges.
+
+  The scenario asserts (check_it) the 200 carries `a=fingerprint:sha-256`
+  (our DTLS offer). Signalling only — SIPp doesn't complete a real DTLS
+  handshake; the handshake/media path is forge-tested.
+-->
+<scenario name="delayed_offer_dtls_caller">
+  <send retrans="500">
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp-dod@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp-dod@[local_ip]:[local_port]>
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+
+  <!-- 200 OK MUST carry OUR DTLS-SRTP offer (a=fingerprint + SAVPF). -->
+  <recv response="200" rtd="true">
+    <action>
+      <ereg regexp="a=fingerprint:sha-256 "
+            search_in="msg"
+            check_it="true"
+            assign_to="our_fp_offer"/>
+      <log message="delayed-offer 200 carried DTLS offer: [$our_fp_offer]"/>
+    </action>
+  </recv>
+
+  <!-- ACK carries OUR DTLS answer (fingerprint + setup:active). -->
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp-dod@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 6000 UDP/TLS/RTP/SAVPF 0
+a=rtpmap:0 PCMU/8000
+a=fingerprint:sha-256 BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC:BC
+a=setup:active
+a=ptime:20
+a=sendrecv
+]]>
+  </send>
+
+  <pause milliseconds="600"/>
+
+  <send retrans="500">
+<![CDATA[
+BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-bye
+Max-Forwards: 70
+From: <sip:sipp-dod@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 BYE
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="200" rtd="true"/>
+</scenario>

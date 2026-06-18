@@ -9,14 +9,17 @@
 > on an inbound delayed offer SiphonAI is the *offerer*, so `[media].srtp`
 > `preferred`/`required` makes the 200 OK offer SDES and `apply_answer`
 > installs the peer's ACK key. v0.9.3 adds **DTLS-SRTP on the
-> outbound delayed answer**: the gateway answer generator now runs the
-> inbound early-offer DTLS path (it gained a per-process cert), and the
-> SRTP exchange (dtls/sdes) is carried on `OutboundAccepted` so
-> `start.srtp` is right. Remaining follow-ups (not blocking): **DTLS on
-> the inbound delayed-offer** (where *we* offer DTLS — a new offer-build
-> capability); a per-call CDR for negotiations that fail before going
-> active (today a metric + warn). Protocol stayed `version: "1"`, CDR
-> version unchanged.
+> outbound delayed answer** (gateway generator runs the inbound DTLS
+> path, gained a per-process cert; the SRTP exchange dtls/sdes is carried
+> on `OutboundAccepted`). v0.9.4 adds **DTLS on the inbound delayed-offer
+> *offer*** — a new capability: `[media].srtp_offer = "dtls"` makes the
+> 200 OK offer DTLS (`build_dtls_srtp_offer` patches the plaintext offer
+> to SAVPF + our fingerprint + setup:actpass), and the ACK answer's
+> fingerprint drives role negotiation + `enable_dtls`. **SRTP for delayed
+> offer is now complete** (SDES + DTLS, both directions). Remaining
+> follow-up (not blocking): a per-call CDR for negotiations that fail
+> before going active (today a metric + warn). Protocol stayed
+> `version: "1"`, CDR version unchanged.
 >
 > Outbound delayed offer (chunk 2): `POST /admin/v1/calls` with
 > `delayed_offer: true` dials an offerless INVITE; the gateway UAC's

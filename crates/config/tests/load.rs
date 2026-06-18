@@ -247,6 +247,50 @@ any = true
 }
 
 #[test]
+fn srtp_offer_defaults_sdes_parses_dtls_and_rejects_unknown() {
+    let env = MapEnv::new([]);
+    let base = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[media]
+codecs = ["pcmu"]
+srtp = "required"
+__OFFER__
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    // Default (field omitted) → SDES (offer_dtls_srtp false).
+    let cfg = load_from_str_with_env(&base.replace("__OFFER__\n", ""), &env)
+        .expect("compiles with default");
+    assert!(!cfg.bridge_defaults.offer_dtls_srtp, "defaults to SDES");
+
+    // Explicit "dtls".
+    let cfg = load_from_str_with_env(&base.replace("__OFFER__", r#"srtp_offer = "dtls""#), &env)
+        .expect("compiles with dtls");
+    assert!(cfg.bridge_defaults.offer_dtls_srtp, "dtls offer enabled");
+
+    // "sdes" is explicit-default.
+    let cfg = load_from_str_with_env(&base.replace("__OFFER__", r#"srtp_offer = "sdes""#), &env)
+        .expect("compiles with sdes");
+    assert!(!cfg.bridge_defaults.offer_dtls_srtp);
+
+    // Unknown → fail loud (CLAUDE.md §4.6).
+    let err = load_from_str_with_env(&base.replace("__OFFER__", r#"srtp_offer = "tls""#), &env)
+        .unwrap_err();
+    assert!(
+        matches!(err, LoadError::Compile(_)),
+        "unknown srtp_offer must be a compile error, got {err:?}"
+    );
+}
+
+#[test]
 fn unknown_codec_is_a_compile_error() {
     let env = MapEnv::new([]);
     let toml = r#"

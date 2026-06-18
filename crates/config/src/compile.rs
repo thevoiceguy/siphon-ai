@@ -573,6 +573,9 @@ pub enum CompileError {
     #[error("[media].srtp is {0:?}; expected \"off\", \"preferred\", or \"required\"")]
     UnknownSrtpMode(String),
 
+    #[error("[media].srtp_offer is {0:?}; expected \"sdes\" or \"dtls\"")]
+    UnknownSrtpOffer(String),
+
     #[error("[bridge.tls] is malformed: {0}")]
     BadBridgeTls(#[from] siphon_ai_bridge::tls::TlsConfigError),
 
@@ -1434,6 +1437,15 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
     // (`compile_srtp_mode`). Default — and any unset value — is `Off`.
     let srtp_mode = compile_srtp_mode(media.srtp.as_deref())?;
 
+    // `[media].srtp_offer` — which key-exchange to OFFER when we're the
+    // offerer on a delayed offer. `"sdes"` (default) or `"dtls"`; unknown
+    // strings fail loud (CLAUDE.md §4.6).
+    let offer_dtls_srtp = match media.srtp_offer.as_deref() {
+        None | Some("sdes") => false,
+        Some("dtls") => true,
+        Some(other) => return Err(CompileError::UnknownSrtpOffer(other.to_string())),
+    };
+
     // `[bridge.tls]` — mTLS for the WS leg. Validation at compile
     // time so cert/key issues surface at daemon startup, not on the
     // first call that tries to use them.
@@ -1459,6 +1471,7 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         dead_air_threshold,
         rtp_stats_interval,
         srtp_mode,
+        offer_dtls_srtp,
         bridge_tls,
         ws_reconnect_enabled,
         ws_reconnect_max,

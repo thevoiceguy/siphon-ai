@@ -510,6 +510,88 @@ fi
 odo_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: outbound delayed offer + SRTP ─────
+# (0.9.1) Outbound delayed offer where the peer offers SDES SRTP in its
+# 2xx and SiphonAI answers it in the ACK. The `[[gateway]].srtp =
+# "required"` makes the answer mandatory. The scenario's check_it
+# asserts the ACK carries `a=crypto`; pass also requires the daemon to
+# report the call ANSWERED **and** the SRTP result `encrypted`.
+echo
+echo "─── auxiliary phase: outbound_delayed_srtp ────────────"
+ODS_WS_PORT=8785
+ODS_ADMIN_PORT=9098
+ODS_WS_LOG=$(mktemp -t echo-ws-ods.XXXXXX.log)
+ODS_DAEMON_LOG=$(mktemp -t siphon-ai-ods.XXXXXX.log)
+ODS_CONFIG=$(mktemp -t siphon-ai-ods.XXXXXX.toml)
+cat >"$ODS_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-ods"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$ODS_WS_PORT/"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$ODS_ADMIN_PORT"
+[outbound]
+max_concurrent = 2
+[[gateway]]
+name = "sipp"
+proxy = "127.0.0.1:$SIPP_PORT"
+from = "sip:harness@127.0.0.1"
+srtp = "required"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+ODS_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$ODS_PYTHON" ]] || ODS_PYTHON=python3
+"$ODS_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$ODS_WS_PORT" \
+    --auto-hangup-after-ms 1500 \
+    >"$ODS_WS_LOG" 2>&1 &
+ODS_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$ODS_CONFIG" \
+    >"$ODS_DAEMON_LOG" 2>&1 &
+ODS_DAEMON_PID=$!
+ods_cleanup() {
+    kill "$ODS_WS_PID" "$ODS_DAEMON_PID" 2>/dev/null || true
+    wait "$ODS_WS_PID" "$ODS_DAEMON_PID" 2>/dev/null || true
+}
+trap ods_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── outbound_delayed_srtp_uas ────────────────────────"
+ods_ok=0
+sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/outbound_delayed_srtp_uas.xml" \
+    -m 1 -timeout 15s -trace_err -p "$SIPP_PORT" >/dev/null 2>&1 &
+ODS_SIPP_PID=$!
+sleep 0.3
+ods_resp=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "http://127.0.0.1:$ODS_ADMIN_PORT/admin/v1/calls" \
+    -d '{"to": "7001", "gateway": "sipp", "delayed_offer": true}')
+if [[ "$ods_resp" == "202" ]] && wait "$ODS_SIPP_PID"; then
+    if curl -s "http://127.0.0.1:$ODS_ADMIN_PORT/metrics" \
+        | grep -q 'siphon_ai_outbound_srtp_total{result="encrypted"} 1'; then
+        ods_ok=1
+    fi
+fi
+if (( ods_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (originate=$ods_resp; daemon: $ODS_DAEMON_LOG; ws: $ODS_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+ods_cleanup
+trap - EXIT
+
 # ─── Always-on auxiliary phase: attended transfer ─────────────────
 # The full 0.6.1 three-party flow with SIPp on both far ends:
 #   * leg A  — SIPp UAC calls in (the transferee); its echo-ws is

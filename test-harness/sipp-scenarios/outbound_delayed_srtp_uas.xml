@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  outbound_delayed_srtp_uas — outbound delayed offer WITH SRTP on the
+  answer (0.9.0 follow-up). Roles inverted: SIPp is the CALLEE (UAS),
+  SiphonAI the UAC dialing via `POST /admin/v1/calls` with
+  `delayed_offer: true` through a `[[gateway]]` whose `srtp` is set.
+
+  SiphonAI sends an offerless INVITE (so it CAN'T offer SRTP). SIPp
+  answers 200 OK carrying an `RTP/SAVP` + `a=crypto` (SDES) OFFER;
+  SiphonAI must answer SRTP in the ACK — `RTP/SAVP` with its own
+  `a=crypto`. The scenario asserts (check_it) the ACK carries `a=crypto`,
+  proving SiphonAI answered the peer's SDES offer with SRTP keys
+  installed. Then the WS bridge runs (echo-ws auto-hangs-up) and
+  SiphonAI BYEs us.
+
+  Run via run-all.sh's outbound_delayed_srtp phase.
+-->
+<scenario name="outbound_delayed_srtp_uas">
+  <recv request="INVITE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 180 Ringing
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <!-- 200 OK carrying SIPp's SDES SRTP OFFER (RTP/SAVP + a=crypto). -->
+  <send retrans="500">
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/SAVP 0
+a=rtpmap:0 PCMU/8000
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+]]>
+  </send>
+
+  <!-- ACK MUST carry SiphonAI's SDES answer: RTP/SAVP is implied by the
+       crypto line; assert the crypto is present (keys answered). -->
+  <recv request="ACK" rtd="true">
+    <action>
+      <ereg regexp="a=crypto:[0-9]+ AES_CM_128_HMAC_SHA1_80"
+            search_in="msg"
+            check_it="true"
+            assign_to="ack_crypto"/>
+      <log message="delayed-offer SRTP ACK carried crypto: [$ack_crypto]"/>
+    </action>
+  </recv>
+
+  <recv request="BYE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]>
+  </send>
+</scenario>

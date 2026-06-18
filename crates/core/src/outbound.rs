@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use forge_core::{CallId, ParticipantId};
+use forge_sdp::SessionDescriptionExt as _;
 use sip_core::SipUri;
 // The SAME sip-sdp sip-uac's SdpAnswerGenerator speaks — distinct from
 // forge-media's pinned sip-sdp (whose `SessionDescription` is a different
@@ -35,11 +36,15 @@ use sip_uac::integrated::{CallHandle, IntegratedUAC, RequestTarget, SdpAnswerGen
 use sip_uac::CredentialProvider;
 use siphon_ai_media_glue::{
     Codec, InboundAccepted, InboundCall, MediaSetup, OutboundAccepted, OutboundOfferRequest,
-    SetupError, TapOptions,
+    OutboundSrtp, SetupError, TapOptions,
 };
 use thiserror::Error;
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info, instrument, warn};
+
+use crate::acceptor::{
+    enforce_srtp_mode, maybe_tweak_sdes_offer, post_process_sdes_answer, SrtpMode,
+};
 
 /// Per-call state for an outbound **delayed-offer** call (we sent an
 /// offerless INVITE; the peer's offer arrives in the 2xx). Parked in the
@@ -58,9 +63,22 @@ pub struct DelayedOfferPending {
     participant_a: ParticipantId,
     participant_b: ParticipantId,
     tap: TapOptions,
+    /// SRTP answer policy (from the gateway's `srtp` mode). We can't
+    /// *offer* SRTP in an offerless INVITE, but if the peer offers SDES in
+    /// its 2xx we answer it (Preferred) or require it (Required → a
+    /// plaintext offer fails the call). `Off` answers plaintext only.
+    srtp_mode: SrtpMode,
     /// Delivers the media-setup result back to `place_delayed` once the
     /// generator has built the answer (or failed).
-    result_tx: oneshot::Sender<Result<InboundAccepted, SetupError>>,
+    result_tx: oneshot::Sender<Result<DelayedMediaResult, SetupError>>,
+}
+
+/// What the [`DelayedOfferAnswerer`] hands back to [`OutboundOriginator::place_delayed`]
+/// once it has built the answer: the bound media plus the negotiated SDES
+/// suite (for `start.srtp`), `None` for a plaintext answer.
+struct DelayedMediaResult {
+    accepted: InboundAccepted,
+    srtp_profile: Option<String>,
 }
 
 /// SIP-Call-ID → parked delayed-offer call. Shared between the
@@ -113,15 +131,45 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
             participant_a,
             participant_b,
             tap,
+            srtp_mode,
             result_tx,
         } = pending;
 
         let offer_sdp = offer.serialize();
+
+        // SRTP answer side (SDES): an offerless INVITE can't carry an SDES
+        // offer, so we answer the peer's offer per the gateway's policy.
+        // Gate first (Required + plaintext peer offer → fail), then if the
+        // peer offered SDES, rewrite its `RTP/SAVP` to `RTP/AVP` so the
+        // codec negotiator (which doesn't know SAVP) can match — we patch
+        // the answer back + install keys below. Mirrors the inbound
+        // early-offer path in `prepare_call_inner`. DTLS-SRTP offers aren't
+        // handled here (no per-call cert in the generator) — a follow-up.
+        if let Ok(parsed) = <forge_sdp::SessionDescription>::from_str(&offer_sdp) {
+            if let Err(e) = enforce_srtp_mode(srtp_mode, &parsed) {
+                let msg = e.to_string();
+                let _ = result_tx.send(Err(SetupError::Srtp(msg.clone())));
+                return Err(anyhow::anyhow!("delayed-offer SRTP policy: {msg}"));
+            }
+        }
+        let sdes_tweak = match maybe_tweak_sdes_offer(&offer_sdp) {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = e.to_string();
+                let _ = result_tx.send(Err(SetupError::Srtp(msg.clone())));
+                return Err(anyhow::anyhow!("delayed-offer SDES offer: {msg}"));
+            }
+        };
+        let offer_for_negotiator = sdes_tweak
+            .as_ref()
+            .map(|t| t.tweaked_sdp.clone())
+            .unwrap_or_else(|| offer_sdp.clone());
+
         let result = self
             .media
             .accept_inbound(InboundCall {
                 call_id: forge_call_id,
-                offer_sdp: &offer_sdp,
+                offer_sdp: &offer_for_negotiator,
                 codecs,
                 dtmf_payload_type,
                 participant_a,
@@ -137,22 +185,48 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
             })
             .await;
 
-        match result {
-            Ok(accepted) => {
-                // Re-parse our answer text into the UAC's sip-sdp type for
-                // the ACK (media-glue's SessionDescription is forge's
-                // distinct sip-sdp), then hand the session/tap back.
-                let answer_sd = SessionDescription::parse(&accepted.answer.answer_text)
-                    .map_err(|e| anyhow::anyhow!("re-parse delayed-offer answer: {e}"))?;
-                let _ = result_tx.send(Ok(accepted));
-                Ok(answer_sd)
-            }
+        let mut accepted = match result {
+            Ok(a) => a,
             Err(e) => {
                 let msg = e.to_string();
                 let _ = result_tx.send(Err(e));
-                Err(anyhow::anyhow!("delayed-offer answer build failed: {msg}"))
+                return Err(anyhow::anyhow!("delayed-offer answer build failed: {msg}"));
             }
-        }
+        };
+
+        // SDES post-negotiation: patch the answer back to `RTP/SAVP` with
+        // our `a=crypto:` and install the key material on the session leg.
+        let srtp_profile = if let Some(tweak) = &sdes_tweak {
+            match post_process_sdes_answer(&mut accepted.answer.answer, tweak) {
+                Ok(new_text) => {
+                    accepted.answer.answer_text = new_text;
+                    forge_engine::srtp_install::install_srtp_keys(
+                        accepted.session.srtp_a(),
+                        tweak.sdes_answer.send_key.clone(),
+                        tweak.sdes_answer.recv_key.clone(),
+                    )
+                    .await;
+                    Some(tweak.sdes_answer.local_attribute.suite.as_str().to_string())
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let _ = result_tx.send(Err(SetupError::Srtp(msg.clone())));
+                    return Err(anyhow::anyhow!("delayed-offer SDES answer: {msg}"));
+                }
+            }
+        } else {
+            None
+        };
+
+        // Re-parse our (possibly SAVP-patched) answer text into the UAC's
+        // sip-sdp type for the ACK, then hand the media back.
+        let answer_sd = SessionDescription::parse(&accepted.answer.answer_text)
+            .map_err(|e| anyhow::anyhow!("re-parse delayed-offer answer: {e}"))?;
+        let _ = result_tx.send(Ok(DelayedMediaResult {
+            accepted,
+            srtp_profile,
+        }));
+        Ok(answer_sd)
     }
 }
 
@@ -323,9 +397,11 @@ impl OutboundOriginator {
     /// SDP**, let the peer offer in its 2xx, and answer in the ACK. The
     /// inverse of [`Self::place`]'s early offer. Media setup happens inside
     /// the UAC's [`DelayedOfferAnswerer`] (it has the peer's offer); the
-    /// session/tap come back here via the registry's oneshot. Reuses
-    /// `req`'s media parameters (the `srtp` field is ignored — SRTP on the
-    /// delayed-offer answer is a follow-up).
+    /// session/tap come back here via the registry's oneshot. `req`'s
+    /// `srtp` mode governs the **answer** (we can't offer SRTP in an
+    /// offerless INVITE): `Preferred` answers the peer's SDES offer when
+    /// present, `Required` fails the call on a plaintext peer offer.
+    /// DTLS-SRTP offers aren't answered here (a follow-up).
     #[instrument(skip(self, target, req, tap), fields(call_id = %req.call_id))]
     pub async fn place_delayed(
         &self,
@@ -355,6 +431,13 @@ impl OutboundOriginator {
             .get_smol("Call-ID")
             .map(|s| s.to_string())
             .unwrap_or_default();
+        // The gateway's SRTP policy governs the *answer* (we can't offer in
+        // an offerless INVITE). OutboundSrtp ↔ SrtpMode are 1:1.
+        let srtp_mode = match req.srtp {
+            OutboundSrtp::Off => SrtpMode::Off,
+            OutboundSrtp::Preferred => SrtpMode::Preferred,
+            OutboundSrtp::Required => SrtpMode::Required,
+        };
         let (result_tx, result_rx) = oneshot::channel();
         self.delayed_registry
             .lock()
@@ -368,6 +451,7 @@ impl OutboundOriginator {
                     participant_a: req.participant_a,
                     participant_b: req.participant_b,
                     tap,
+                    srtp_mode,
                     result_tx,
                 },
             );
@@ -400,8 +484,8 @@ impl OutboundOriginator {
 
         // (4) 2xx — the generator built our answer (and ran media setup)
         //     during 2xx processing; collect the session/tap it produced.
-        let inbound = match tokio::time::timeout(DELAYED_RESULT_TIMEOUT, result_rx).await {
-            Ok(Ok(Ok(accepted))) => accepted,
+        let media = match tokio::time::timeout(DELAYED_RESULT_TIMEOUT, result_rx).await {
+            Ok(Ok(Ok(m))) => m,
             Ok(Ok(Err(setup_err))) => {
                 // The generator ran but media build failed (it rolled its
                 // own session back). The dialog is up; mirror `place`'s
@@ -425,17 +509,24 @@ impl OutboundOriginator {
         // Reshape into `OutboundAccepted` so the shared outbound run_call
         // works unchanged. `offer_sdp` = our answer text, so hold/resume
         // flip the negotiated media the same way the inbound path does.
-        // No SRTP on the delayed answer in this cut.
+        // `srtp_profile` carries the SDES suite when the peer's offer was
+        // answered with SRTP (drives `start.srtp` + the outbound SRTP
+        // metric); `None` for a plaintext answer.
+        let DelayedMediaResult {
+            accepted: inbound,
+            srtp_profile,
+        } = media;
         let accepted = OutboundAccepted {
             offer_sdp: inbound.answer.answer_text.clone(),
             answer: inbound.answer,
             session: inbound.session,
             tap: inbound.tap,
-            srtp_profile: None,
+            srtp_profile,
         };
 
         info!(
             code,
+            srtp = accepted.srtp_profile.is_some(),
             "outbound delayed-offer call answered and media bridged"
         );
         Ok(OutboundCall {

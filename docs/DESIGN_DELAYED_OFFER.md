@@ -1,11 +1,16 @@
 # Design note — SIP delayed offer (offerless INVITE)
 
 > **Status: IMPLEMENTED — released v0.9.0 (chunks 1 inbound #190, 2
-> outbound #191, 3 release).** Remaining follow-ups (not blocking): SRTP
-> on the delayed-offer answer (an offerless INVITE can't carry an SDES
-> offer); a per-call CDR for negotiations that fail before going active
-> (today a metric + warn). Protocol stayed `version: "1"`, CDR version
-> unchanged.
+> outbound #191, 3 release); SRTP-on-the-outbound-answer follow-up in
+> v0.9.1.** The 0.9.1 follow-up answers a peer's SDES SRTP offer on an
+> outbound delayed call (the offerless INVITE can't *offer* SRTP) by
+> running the inbound early-offer SDES path inside the gateway UAC's
+> answer generator, governed by `[[gateway]].srtp`. Remaining follow-ups
+> (not blocking): **SRTP on the inbound delayed-offer** (where *we* offer
+> — needs us to emit an SDES offer in the 200 OK); **DTLS-SRTP** on a
+> delayed answer (no per-call cert in the generator); a per-call CDR for
+> negotiations that fail before going active (today a metric + warn).
+> Protocol stayed `version: "1"`, CDR version unchanged.
 >
 > Outbound delayed offer (chunk 2): `POST /admin/v1/calls` with
 > `delayed_offer: true` dials an offerless INVITE; the gateway UAC's

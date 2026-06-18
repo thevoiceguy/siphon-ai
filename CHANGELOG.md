@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-06-18
+
+### Added
+
+- **SRTP on the outbound delayed-offer answer (SDES, RFC 4568)** — the
+  deferred 0.9.0 follow-up. An offerless outbound INVITE can't *offer*
+  SRTP, but when the peer's 2xx carries an SDES offer (`RTP/SAVP` +
+  `a=crypto`) SiphonAI now **answers** it: the gateway UAC's delayed-offer
+  answer generator runs the same SDES negotiation the inbound early-offer
+  path uses (rewrite the peer offer for codec matching, patch the answer
+  back to `RTP/SAVP` with our `a=crypto`, install the keys on the leg).
+  Governed by `[[gateway]].srtp` — `preferred` answers SRTP when offered
+  (else plaintext), `required` fails the call on a plaintext peer offer.
+  Surfaces on `start.srtp` and `siphon_ai_outbound_srtp_total{result}`
+  like early-offer outbound SRTP. SIPp `outbound_delayed_srtp` phase
+  added. *DTLS-SRTP on a delayed answer is not handled (no per-call cert
+  in the generator), and SRTP on the **inbound** delayed-offer (where we
+  offer) remains a separate follow-up.*
+
 ## [0.9.0] - 2026-06-18
 
 Theme: **SIP delayed offer (offerless INVITE).** SiphonAI previously

@@ -3440,6 +3440,19 @@ impl BridgingAcceptor {
 
         let codecs = resolve_codecs(&self.defaults, route);
         let dtmf_pt = resolve_dtmf_pt(&self.defaults, route);
+        // SRTP on inbound delayed offer: WE offer, so the `[sip]`/route
+        // SRTP policy drives an SDES *offer* in the 200 OK (the inbound
+        // early-offer path answers SRTP; here we must offer it).
+        // `Preferred`/`Required` → offer `RTP/SAVP` + `a=crypto`;
+        // `apply_answer` (in `finalize_delayed_offer`) installs the peer's
+        // answered key from the ACK, and `Required` fails the call if the
+        // peer answers plaintext. DTLS-SRTP offers aren't produced here
+        // (the SDES `originate_offer` path only) — a follow-up.
+        let srtp = match resolve_srtp_mode(&self.defaults, route) {
+            SrtpMode::Off => OutboundSrtp::Off,
+            SrtpMode::Preferred => OutboundSrtp::Preferred,
+            SrtpMode::Required => OutboundSrtp::Required,
+        };
         let tap_options = TapOptions {
             barge_in_action: barge_in_to_tap_action(&resolve_barge_in(&self.defaults, route)),
             barge_in_debounce: resolve_barge_in(&self.defaults, route).debounce,
@@ -3449,10 +3462,10 @@ impl BridgingAcceptor {
             rtp_stats_interval: resolve_rtp_stats_interval(&self.defaults, route),
         };
 
-        // Build OUR offer + allocate the forge session (plaintext RTP/AVP
-        // in this first cut; SRTP-on-delayed-offer is a follow-up). This
-        // mirrors outbound origination, which never calls `start_session`
+        // Build OUR offer + allocate the forge session. This mirrors
+        // outbound origination, which never calls `start_session`
         // explicitly — `apply_answer` + the controller bring media up.
+        // `srtp` makes the offer SDES per the resolved policy above.
         let offer = match self
             .media
             .originate_offer(OutboundOfferRequest {
@@ -3463,7 +3476,7 @@ impl BridgingAcceptor {
                 participant_b: forge_core::ParticipantId::new(format!("ws-{}", forge_call_id.0)),
                 from_tag: None,
                 to_tag: None,
-                srtp: OutboundSrtp::Off,
+                srtp,
             })
             .await
         {
@@ -3650,13 +3663,24 @@ impl BridgingAcceptor {
             }
         };
 
+        // Surface negotiated SRTP on `start.srtp` when our SDES offer was
+        // accepted (exchange is always SDES on the delayed-offer path).
+        // `None` for a plaintext call or a `preferred` downgrade.
+        let srtp_info =
+            accepted
+                .srtp_profile
+                .as_ref()
+                .map(|profile| siphon_ai_bridge::protocol::SrtpInfo {
+                    exchange: siphon_ai_bridge::protocol::SrtpExchange::Sdes,
+                    profile: profile.clone(),
+                });
         let start = build_start_msg(
             bridge_call_id.clone(),
             &facts,
             &sip_call_id,
             &accepted.answer,
             &self.defaults.forward_headers,
-            None,
+            srtp_info,
             verstat,
         );
 

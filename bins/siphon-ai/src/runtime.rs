@@ -1233,15 +1233,17 @@ fn build_webhook_sink(cfg: WebhooksConfig) -> Result<WebhookSinkHandle> {
         .url
         .ok_or_else(|| anyhow!("[webhooks].url unexpectedly empty"))?;
     let signed = cfg.secret.is_some();
+    let spooled = cfg.spool_dir.is_some();
     let http = WebhookHttpSink::new(WebhookHttpSinkConfig {
         url: url.clone(),
         auth_header: cfg.auth_header,
         secret: cfg.secret,
+        spool_dir: cfg.spool_dir,
         retry_max: cfg.retry_max,
         timeout_ms: cfg.timeout.as_millis() as u64,
     })
     .map_err(|e| anyhow!("lifecycle webhook client build failed: {e}"))?;
-    info!(url = %url, allowlist = cfg.events.len(), signed, "lifecycle webhook sink active");
+    info!(url = %url, allowlist = cfg.events.len(), signed, spooled, "lifecycle webhook sink active");
     let sink: WebhookSinkHandle = if cfg.events.is_empty() {
         Arc::new(http)
     } else {
@@ -1307,11 +1309,12 @@ fn build_cdr_webhook_sink(cfg: &CdrWebhookConfig) -> Result<CdrSinkHandle> {
         url: cfg.url.clone(),
         auth_header: cfg.auth_header.clone(),
         secret: cfg.secret.clone(),
+        spool_dir: cfg.spool_dir.clone(),
         retry_max: cfg.retry_max,
         timeout_ms: cfg.timeout.as_millis() as u64,
     })
     .map_err(|e| anyhow!("CDR webhook client build failed: {e}"))?;
-    info!(url = %cfg.url, signed = cfg.secret.is_some(), "CDR webhook sink active");
+    info!(url = %cfg.url, signed = cfg.secret.is_some(), spooled = cfg.spool_dir.is_some(), "CDR webhook sink active");
     Ok(Arc::new(sink) as CdrSinkHandle)
 }
 

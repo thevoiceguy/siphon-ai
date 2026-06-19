@@ -1105,6 +1105,7 @@ enabled = true
 url = "https://billing.example.com/cdr"
 auth_header = "Bearer ${CDR_TOKEN}"
 secret = "${CDR_SECRET}"
+spool_dir = "/var/lib/siphon-ai/spool/cdr"
 retry_max = 5
 timeout_ms = 7500
 
@@ -1119,6 +1120,7 @@ any = true
     assert_eq!(w.auth_header.as_deref(), Some("Bearer tok-123"));
     // Signing secret arrives env-expanded.
     assert_eq!(w.secret.as_deref(), Some("whsec-cdr"));
+    assert_eq!(w.spool_dir.as_deref(), Some("/var/lib/siphon-ai/spool/cdr"));
     assert_eq!(w.retry_max, 5);
     assert_eq!(w.timeout, std::time::Duration::from_millis(7500));
 }
@@ -1630,6 +1632,7 @@ enabled = true
 url = "https://ops.example.com/siphon-events"
 auth_header = "Bearer ${WEBHOOK_TOKEN}"
 secret = "${WEBHOOK_SECRET}"
+spool_dir = "/var/lib/siphon-ai/spool/webhooks"
 events = ["call_start", "call_end"]
 retry_max = 5
 timeout_ms = 4000
@@ -1648,6 +1651,10 @@ any = true
     assert_eq!(cfg.webhooks.auth_header.as_deref(), Some("Bearer wh-xyz"));
     // Signing secret arrives env-expanded.
     assert_eq!(cfg.webhooks.secret.as_deref(), Some("whsec-life"));
+    assert_eq!(
+        cfg.webhooks.spool_dir.as_deref(),
+        Some("/var/lib/siphon-ai/spool/webhooks")
+    );
     assert_eq!(
         cfg.webhooks.events,
         vec!["call_start".to_string(), "call_end".to_string()]

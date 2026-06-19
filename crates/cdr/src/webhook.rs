@@ -18,6 +18,8 @@
 //!   same record stream and tail it on the receiver side. (A disk
 //!   spool is the next chunk of the delivery-durability theme.)
 
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use siphon_ai_http::{
@@ -41,6 +43,12 @@ pub struct WebhookSinkConfig {
     /// ⇒ unsigned.
     #[serde(default)]
     pub secret: Option<String>,
+    /// Optional durable spool directory. When set, a record that
+    /// exhausts the in-memory retry budget is persisted here and
+    /// re-attempted by a background worker that survives restarts.
+    /// `None` ⇒ best-effort (drop after the budget).
+    #[serde(default)]
+    pub spool_dir: Option<String>,
     /// Maximum retries on transient failure. `0` means "post once,
     /// don't retry."
     #[serde(default = "default_retry_max")]
@@ -64,6 +72,7 @@ impl WebhookSinkConfig {
             url: url.into(),
             auth_header: None,
             secret: None,
+            spool_dir: None,
             retry_max: DEFAULT_RETRY_MAX,
             timeout_ms: DEFAULT_TIMEOUT_MS,
         }
@@ -87,8 +96,11 @@ impl WebhookSink {
             retry_max: config.retry_max,
             timeout_ms: config.timeout_ms,
             secret: config.secret,
+            spool_dir: config.spool_dir.map(PathBuf::from),
             sink: SinkKind::Cdr,
         })?;
+        // Start the drain worker once, on the single poster we build.
+        poster.spawn_drainer();
         Ok(Self { poster })
     }
 }

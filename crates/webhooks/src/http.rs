@@ -7,6 +7,8 @@
 //! signing all live in `siphon-ai-http`, shared with the CDR webhook
 //! sink — so a change to delivery behavior happens once.
 
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use siphon_ai_http::{
@@ -29,6 +31,12 @@ pub struct HttpSinkConfig {
     /// receiver can verify authenticity + freshness. `None` ⇒ unsigned.
     #[serde(default)]
     pub secret: Option<String>,
+    /// Optional durable spool directory. When set, a delivery that
+    /// exhausts the in-memory retry budget is persisted here and
+    /// re-attempted by a background worker that survives restarts.
+    /// `None` ⇒ best-effort (drop after the budget).
+    #[serde(default)]
+    pub spool_dir: Option<String>,
     /// Maximum retries on transient failure. `0` = post once.
     #[serde(default = "default_retry_max")]
     pub retry_max: u32,
@@ -51,6 +59,7 @@ impl HttpSinkConfig {
             url: url.into(),
             auth_header: None,
             secret: None,
+            spool_dir: None,
             retry_max: DEFAULT_RETRY_MAX,
             timeout_ms: DEFAULT_TIMEOUT_MS,
         }
@@ -72,8 +81,12 @@ impl HttpSink {
             retry_max: config.retry_max,
             timeout_ms: config.timeout_ms,
             secret: config.secret,
+            spool_dir: config.spool_dir.map(PathBuf::from),
             sink: SinkKind::Lifecycle,
         })?;
+        // Start the drain worker once, on the single poster we build
+        // (clones made per-emit don't re-spawn it).
+        poster.spawn_drainer();
         Ok(Self { poster })
     }
 }

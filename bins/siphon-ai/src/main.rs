@@ -9,11 +9,12 @@
 //! The actual wiring lives in [`runtime::Runtime`]; this module is
 //! the thin shell that bridges process startup into a `Runtime`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use clap::Parser;
+use anyhow::{anyhow, Context, Result};
+use clap::{Parser, Subcommand};
 use siphon_ai::Runtime;
+use siphon_ai_config::Config;
 use siphon_ai_telemetry::LogFilterHandle;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -21,15 +22,38 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 #[derive(Parser, Debug)]
 #[command(name = "siphon-ai", version, about = "SIP-to-WebSocket media bridge")]
 struct Cli {
-    /// Path to the TOML configuration file.
-    #[arg(long, short, env = "SIPHON_AI_CONFIG")]
-    config: PathBuf,
+    /// Path to the TOML configuration file. Required to run the
+    /// daemon and by every subcommand. `global` so it can appear
+    /// before or after the subcommand — `siphon-ai --config X check`
+    /// and `siphon-ai check --config X` both work.
+    #[arg(long, short, env = "SIPHON_AI_CONFIG", global = true)]
+    config: Option<PathBuf>,
 
     /// Override the tracing filter (`siphon_ai=debug,siphon=info`).
     /// Defaults to `RUST_LOG` if set, or the built-in default
-    /// otherwise.
-    #[arg(long, env = "SIPHON_AI_LOG")]
+    /// otherwise. Only affects running the daemon.
+    #[arg(long, env = "SIPHON_AI_LOG", global = true)]
     log: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Validate and compile the config file, then exit — without
+    /// starting the daemon or binding any sockets. Exit code 0 if the
+    /// config is valid, 1 otherwise. Safe as a pre-deploy / CI
+    /// preflight (e.g. before `systemctl reload`).
+    Check,
+}
+
+/// The config path, from `--config` or `$SIPHON_AI_CONFIG`. A clap
+/// `global` arg can't be `required`, so enforce presence here.
+fn config_path(cli: &Cli) -> Result<PathBuf> {
+    cli.config
+        .clone()
+        .ok_or_else(|| anyhow!("--config <PATH> is required (or set SIPHON_AI_CONFIG)"))
 }
 
 #[tokio::main]
@@ -48,11 +72,22 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let cli = Cli::parse();
+
+    // Read-only subcommands dispatch here and exit — no tracing
+    // subscriber, no socket binding, no runtime.
+    if let Some(command) = &cli.command {
+        match command {
+            Command::Check => run_check(&config_path(&cli)?),
+        }
+    }
+
+    // No subcommand → run the daemon.
+    let config = config_path(&cli)?;
     let log_filter = init_tracing(cli.log.as_deref());
 
-    info!(config = %cli.config.display(), "loading configuration");
-    let config = siphon_ai_config::load_from_path(&cli.config)
-        .with_context(|| format!("load config {}", cli.config.display()))?;
+    info!(config = %config.display(), "loading configuration");
+    let config = siphon_ai_config::load_from_path(&config)
+        .with_context(|| format!("load config {}", config.display()))?;
 
     info!(
         node_id = %config.node.id,
@@ -67,6 +102,122 @@ async fn main() -> Result<()> {
         .context("runtime build failed")?;
 
     runtime.run(shutdown_signal()).await
+}
+
+/// `siphon-ai check` — load + compile the config and exit. Prints a
+/// one-screen summary on success (exit 0); prints the validation error
+/// to stderr and exits 1 on failure. Never starts the daemon.
+fn run_check(path: &Path) -> ! {
+    match siphon_ai_config::load_from_path(path) {
+        Ok(config) => {
+            print_check_summary(path, &config);
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("config INVALID: {}", path.display());
+            eprintln!("  {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// One-screen summary of a valid compiled config — what the daemon
+/// would run with. A missing default route warns (matching the
+/// daemon's startup warning) but does not fail the check.
+fn print_check_summary(path: &Path, config: &Config) {
+    use std::fmt::Write as _;
+
+    let transports = config
+        .sip
+        .transports
+        .iter()
+        .map(|t| match t {
+            siphon_ai_config::SipTransport::Udp => "udp",
+            siphon_ai_config::SipTransport::Tcp => "tcp",
+            siphon_ai_config::SipTransport::Tls => "tls",
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // Optional subsystems that are switched on.
+    let mut enabled: Vec<String> = Vec::new();
+    if config.outbound.max_concurrent > 0 && !config.outbound.gateways.is_empty() {
+        enabled.push(format!(
+            "outbound({} gateway(s))",
+            config.outbound.gateways.len()
+        ));
+    }
+    if !matches!(config.recording.mode, siphon_ai_config::RecordingMode::Off) {
+        enabled.push("recording".into());
+    }
+    if config.cdr.enabled {
+        let mut sinks = Vec::new();
+        if config.cdr.file.is_some() {
+            sinks.push("file");
+        }
+        if config.cdr.webhook.is_some() {
+            sinks.push("webhook");
+        }
+        enabled.push(format!("cdr({})", sinks.join("+")));
+    }
+    if config.webhooks.enabled {
+        enabled.push("webhooks".into());
+    }
+    if config.conference.enabled {
+        enabled.push("conference".into());
+    }
+    if config.park.enabled {
+        enabled.push("park".into());
+    }
+    if config.hep.enabled {
+        enabled.push("hep".into());
+    }
+    if config.admin.is_some() {
+        enabled.push("admin".into());
+    }
+    if config.security.stir_shaken.enabled {
+        enabled.push("stir_shaken".into());
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "config OK: {}", path.display());
+    let _ = writeln!(out, "  node id:       {}", config.node.id);
+    let _ = writeln!(
+        out,
+        "  sip listen:    {} [{}]",
+        config.sip.listen_addr, transports
+    );
+    let _ = writeln!(out, "  public addr:   {}", config.node.public_address);
+    let default = if config.routes.has_default() {
+        "yes"
+    } else {
+        "NO — add a final `any = true` route"
+    };
+    let _ = writeln!(
+        out,
+        "  routes:        {} (default route: {default})",
+        config.routes.len()
+    );
+    let _ = writeln!(
+        out,
+        "  registrations: {}    trunks: {}",
+        config.registrations.len(),
+        config.trunks.len()
+    );
+    let _ = writeln!(
+        out,
+        "  enabled:       {}",
+        if enabled.is_empty() {
+            "(none)".to_string()
+        } else {
+            enabled.join(", ")
+        }
+    );
+    print!("{out}");
+
+    if !config.routes.has_default() {
+        eprintln!("warning: no default route (`any = true`) — calls matching no route get SIP 404");
+    }
 }
 
 /// Initialise the global tracing subscriber and return a reload

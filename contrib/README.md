@@ -69,7 +69,7 @@ administrator; use the anchors that authority publishes.
    ```sh
    openssl crl2pkcs7 -nocrl -certfile /etc/siphon-ai/sti-pa-roots.pem \
      | openssl pkcs7 -print_certs -noout      # lists each subject — sanity check
-   siphon-ai --config /etc/siphon-ai/config.toml --check   # fails loud on a bad bundle
+   siphon-ai check --config /etc/siphon-ai/config.toml   # fails loud on a bad bundle
    ```
 
 ### Keeping it current

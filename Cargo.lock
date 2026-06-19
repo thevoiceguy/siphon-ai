@@ -2927,6 +2927,7 @@ dependencies = [
  "siphon-ai-stir-shaken",
  "siphon-ai-telemetry",
  "siphon-ai-webhooks",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "tracing",

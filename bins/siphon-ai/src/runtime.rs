@@ -480,40 +480,11 @@ impl Runtime {
                 _ => None,
             };
 
-        // SIGHUP cert-reload task. Spawned only when TLS is on; reads
-        // the same `[sip.tls]` config the listener uses, so the
-        // semantics match: same cert/key paths, same key-pair
-        // validation, just performed on every SIGHUP rather than only
-        // at startup.
-        // Always install a SIGHUP handler at startup. The default
-        // Unix disposition for SIGHUP is *terminate the process* —
-        // if we don't claim the signal, `systemctl reload
-        // siphon-ai` on a non-TLS deployment would kill the daemon.
-        // When TLS is configured the handler does the cert reload;
-        // when it isn't, the handler is a no-op (just consumes the
-        // signal so it doesn't fire the default action).
-        match config_path {
-            // Daemon with a backing config file: full SIGHUP reload
-            // (config file + TLS cert).
-            Some(path) => {
-                let initial_text = std::fs::read_to_string(&path).unwrap_or_default();
-                crate::reload::spawn_reload_handler(crate::reload::ReloadContext {
-                    config_path: path,
-                    initial_text,
-                    route_swap: Arc::clone(&route_swap),
-                    webhook_swap: Arc::clone(&webhook_swap),
-                    cdr_swap: Arc::clone(&cdr_swap),
-                    hep_telemetry: hep_telemetry.clone(),
-                    webhook_spool_active,
-                    cdr_spool_active,
-                    tls: sip.tls.clone().zip(tls_server_config.clone()),
-                    restart_fingerprints,
-                });
-            }
-            // No backing file (tests): preserve the prior TLS-cert /
-            // no-op SIGHUP behavior.
-            None => spawn_sighup_handler(sip.tls.clone(), tls_server_config.clone()),
-        }
+        // The SIGHUP handler (config reload + TLS cert reload) is
+        // spawned *after* the outbound service is built (it needs the
+        // gateway-reload handle). The TLS swap handle is consumed by the
+        // listeners below, so clone it for the handler here.
+        let tls_for_reload = tls_server_config.clone();
 
         // ─── Integrated UAS ────────────────────────────────────────
         let local_uri = sip_local_uri(&node, &sip);
@@ -635,71 +606,31 @@ impl Runtime {
         // endpoint requires an `admin`-role bearer token (it's on the
         // authenticated `[admin]` listener); the cap + rate limit remain
         // the abuse guardrails on top of that (DEV_PLAN_0.6.0 §9.5/§9.6).
+        // SIGHUP gateway hot-reload (0.12.1): when outbound is enabled we
+        // keep the build deps + the concrete service so a reload can
+        // rebuild + swap the gateway set.
+        let outbound_reload: Option<crate::reload::OutboundReload>;
         let outbound_handle: Option<AdminOutbound> = if outbound.enabled() {
-            let mut gateways = HashMap::with_capacity(outbound.gateways.len());
             // Per-process DTLS cert for answering a peer's DTLS-SRTP offer
-            // on an outbound delayed call (0.9.3). Shared across gateways,
-            // same posture as the inbound acceptor's cert.
+            // on an outbound delayed call (0.9.3). Shared across gateways
+            // (and reused across reloads), same posture as the inbound
+            // acceptor's cert.
             let outbound_dtls_cert = Arc::new(
                 forge_rtp::dtls::DtlsCertificate::generate()
                     .map_err(|e| anyhow!("outbound DTLS cert generation failed: {e}"))?,
             );
-            for gw in &outbound.gateways {
-                // Outbound delayed offer (chunk 2): the gateway's UAC and
-                // its originator share one registry — `place_delayed` parks
-                // per-call media params, the UAC's answer generator picks
-                // them up when the peer's offer arrives in the 2xx.
-                let delayed_registry: siphon_ai_core::DelayedOfferRegistry =
-                    Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-                let answerer: Arc<dyn sip_uac::integrated::SdpAnswerGenerator> =
-                    Arc::new(siphon_ai_core::DelayedOfferAnswerer::new(
-                        (*outbound_media).clone(),
-                        Arc::clone(&delayed_registry),
-                        Arc::clone(&outbound_dtls_cert),
-                    ));
-                let uac = build_outbound_uac(
-                    TransferUacBuild {
-                        local_uri: &local_uri,
-                        contact_uri: &contact_uri,
-                        listen_addr: sip.listen_addr,
-                        public_addr: sip_public_addr(&node, &sip),
-                        transaction_mgr: Arc::clone(&transaction_mgr),
-                        dispatcher: Arc::clone(&dispatcher),
-                        sip_resolver: Arc::clone(&sip_resolver),
-                    },
-                    gw.credentials.as_ref(),
-                    Some(answerer),
-                )?;
-                let originator = Arc::new(OutboundOriginator::with_delayed_registry(
-                    (*outbound_media).clone(),
-                    Arc::new(uac),
-                    delayed_registry,
-                ));
-                gateways.insert(
-                    gw.name.clone(),
-                    OutboundGateway {
-                        originator,
-                        proxy_host: gw.proxy_host.clone(),
-                        proxy_port: gw.proxy_port,
-                        transport_uri_param: gw.transport.uri_param(),
-                        from: gw.from.clone(),
-                        // Map the config SRTP policy onto the media-glue
-                        // offer mode (core's SrtpMode is the inbound enum;
-                        // OutboundSrtp is its outbound mirror).
-                        srtp: match gw.srtp {
-                            siphon_ai_core::SrtpMode::Off => {
-                                siphon_ai_media_glue::OutboundSrtp::Off
-                            }
-                            siphon_ai_core::SrtpMode::Preferred => {
-                                siphon_ai_media_glue::OutboundSrtp::Preferred
-                            }
-                            siphon_ai_core::SrtpMode::Required => {
-                                siphon_ai_media_glue::OutboundSrtp::Required
-                            }
-                        },
-                    },
-                );
-            }
+            let gateway_deps = GatewayBuildDeps {
+                outbound_media: Arc::clone(&outbound_media),
+                outbound_dtls_cert,
+                local_uri: local_uri.clone(),
+                contact_uri: contact_uri.clone(),
+                listen_addr: sip.listen_addr,
+                public_addr: sip_public_addr(&node, &sip),
+                transaction_mgr: Arc::clone(&transaction_mgr),
+                dispatcher: Arc::clone(&dispatcher),
+                sip_resolver: Arc::clone(&sip_resolver),
+            };
+            let gateways = build_gateways(&outbound, &gateway_deps)?;
             let guard = OutboundGuard::new(outbound.max_concurrent, outbound.rate_limit_per_sec);
             let mut service = OutboundService::new(
                 gateways,
@@ -728,10 +659,46 @@ impl Runtime {
                 max_concurrent = outbound.max_concurrent,
                 "outbound origination enabled"
             );
-            Some(Arc::new(service) as AdminOutbound)
+            let service = Arc::new(service);
+            outbound_reload = Some(crate::reload::OutboundReload {
+                gateway_fingerprint: crate::reload::gateway_fingerprint(&outbound),
+                service: Arc::clone(&service),
+                deps: gateway_deps,
+            });
+            Some(service as AdminOutbound)
         } else {
+            outbound_reload = None;
             None
         };
+
+        // ─── SIGHUP handler (config reload + TLS cert reload) ──────
+        // Spawned here so it has the gateway-reload handle. Always
+        // installed: the default SIGHUP disposition is *terminate*, so
+        // even a no-config-path / no-TLS daemon must claim the signal or
+        // `systemctl reload` would kill it.
+        match config_path {
+            // Daemon with a backing config file: full SIGHUP reload
+            // (config file + gateways + TLS cert).
+            Some(path) => {
+                let initial_text = std::fs::read_to_string(&path).unwrap_or_default();
+                crate::reload::spawn_reload_handler(crate::reload::ReloadContext {
+                    config_path: path,
+                    initial_text,
+                    route_swap: Arc::clone(&route_swap),
+                    webhook_swap: Arc::clone(&webhook_swap),
+                    cdr_swap: Arc::clone(&cdr_swap),
+                    hep_telemetry: hep_telemetry.clone(),
+                    webhook_spool_active,
+                    cdr_spool_active,
+                    outbound: outbound_reload,
+                    tls: sip.tls.clone().zip(tls_for_reload),
+                    restart_fingerprints,
+                });
+            }
+            // No backing file (tests): preserve the prior TLS-cert /
+            // no-op SIGHUP behavior.
+            None => spawn_sighup_handler(sip.tls.clone(), tls_for_reload),
+        }
 
         // ─── Build admin state + observability HTTP listener ──────
         // Deferred until now so admin endpoints have the call
@@ -1418,6 +1385,89 @@ fn build_transfer_uac(args: TransferUacBuild<'_>) -> Result<IntegratedUAC> {
     builder
         .build()
         .map_err(|e| anyhow!("transfer UAC build: {e}"))
+}
+
+/// Long-lived dependencies needed to build the outbound gateway table.
+/// Bundled so the initial build and a later SIGHUP gateway reload share
+/// one construction path (all `Arc`s / owned strings — cheap to hold for
+/// the daemon's lifetime). The DTLS cert is generated once and reused
+/// across reloads.
+pub struct GatewayBuildDeps {
+    pub outbound_media: Arc<MediaSetup>,
+    pub outbound_dtls_cert: Arc<forge_rtp::dtls::DtlsCertificate>,
+    pub local_uri: String,
+    pub contact_uri: String,
+    pub listen_addr: SocketAddr,
+    pub public_addr: Option<SocketAddr>,
+    pub transaction_mgr: Arc<TransactionManager>,
+    pub dispatcher: Arc<dyn TransportDispatcher>,
+    pub sip_resolver: Arc<sip_dns::SipResolver>,
+}
+
+/// Build the `name → OutboundGateway` table from `[outbound]` config.
+/// One authenticated UAC + delayed-offer registry + originator per
+/// `[[gateway]]`. Called once at startup and again on a SIGHUP gateway
+/// reload — each call mints fresh UACs (stateless senders over the shared
+/// transaction manager), so a reload can fully replace the set.
+pub(crate) fn build_gateways(
+    outbound: &siphon_ai_config::OutboundConfig,
+    deps: &GatewayBuildDeps,
+) -> Result<HashMap<String, OutboundGateway>> {
+    let mut gateways = HashMap::with_capacity(outbound.gateways.len());
+    for gw in &outbound.gateways {
+        // Outbound delayed offer: the gateway's UAC and its originator
+        // share one registry — `place_delayed` parks per-call media
+        // params, the UAC's answer generator picks them up on the 2xx.
+        let delayed_registry: siphon_ai_core::DelayedOfferRegistry =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let answerer: Arc<dyn sip_uac::integrated::SdpAnswerGenerator> =
+            Arc::new(siphon_ai_core::DelayedOfferAnswerer::new(
+                (*deps.outbound_media).clone(),
+                Arc::clone(&delayed_registry),
+                Arc::clone(&deps.outbound_dtls_cert),
+            ));
+        let uac = build_outbound_uac(
+            TransferUacBuild {
+                local_uri: &deps.local_uri,
+                contact_uri: &deps.contact_uri,
+                listen_addr: deps.listen_addr,
+                public_addr: deps.public_addr,
+                transaction_mgr: Arc::clone(&deps.transaction_mgr),
+                dispatcher: Arc::clone(&deps.dispatcher),
+                sip_resolver: Arc::clone(&deps.sip_resolver),
+            },
+            gw.credentials.as_ref(),
+            Some(answerer),
+        )?;
+        let originator = Arc::new(OutboundOriginator::with_delayed_registry(
+            (*deps.outbound_media).clone(),
+            Arc::new(uac),
+            delayed_registry,
+        ));
+        gateways.insert(
+            gw.name.clone(),
+            OutboundGateway {
+                originator,
+                proxy_host: gw.proxy_host.clone(),
+                proxy_port: gw.proxy_port,
+                transport_uri_param: gw.transport.uri_param(),
+                from: gw.from.clone(),
+                // Map the config SRTP policy onto the media-glue offer
+                // mode (core's SrtpMode is the inbound enum; OutboundSrtp
+                // is its outbound mirror).
+                srtp: match gw.srtp {
+                    siphon_ai_core::SrtpMode::Off => siphon_ai_media_glue::OutboundSrtp::Off,
+                    siphon_ai_core::SrtpMode::Preferred => {
+                        siphon_ai_media_glue::OutboundSrtp::Preferred
+                    }
+                    siphon_ai_core::SrtpMode::Required => {
+                        siphon_ai_media_glue::OutboundSrtp::Required
+                    }
+                },
+            },
+        );
+    }
+    Ok(gateways)
 }
 
 /// Build a per-gateway outbound UAC. Same shape as [`build_transfer_uac`],

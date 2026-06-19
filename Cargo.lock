@@ -2996,6 +2996,7 @@ name = "siphon-ai-core"
 version = "0.12.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "bytes",
  "chrono",

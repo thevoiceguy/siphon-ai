@@ -21,6 +21,9 @@ http-body-util.workspace              = true
 serde.workspace                       = true
 serde_json.workspace                  = true
 thiserror.workspace                   = true
+# Admin bearer-token auth: SHA-256 the token + constant-time compare.
+sha2.workspace                        = true
+subtle.workspace                      = true
 
 # HEP3 / Homer shipping. Owned by us (github.com/thevoiceguy/hep-rs +
 # the sip-hep / forge-hep adapter crates). Telemetry assembles the

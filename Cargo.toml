@@ -61,9 +61,11 @@ toml       = "0.8"
 bytes  = "1"
 base64 = "0.22"
 
-# Crypto (HMAC for webhook signing)
+# Crypto (HMAC for webhook signing; SHA-256 + constant-time eq for
+# admin token auth)
 hmac = "0.12"
 sha2 = "0.10"
+subtle = "2"
 
 # WebSocket
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }

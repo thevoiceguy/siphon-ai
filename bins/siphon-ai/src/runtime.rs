@@ -161,6 +161,10 @@ impl Runtime {
             webhooks,
             hep,
             park,
+            // [admin] auth is parsed + validated at load (chunk 1); the
+            // separate authenticated admin listener that consumes it
+            // lands in chunk 2.
+            admin: _,
         } = config;
 
         // ─── Telemetry: install Prometheus recorder ─────────────────

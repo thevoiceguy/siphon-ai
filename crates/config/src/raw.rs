@@ -82,6 +82,38 @@ pub struct RawConfig {
 
     #[serde(default)]
     pub hep: RawHep,
+
+    /// `[admin]` — the authenticated admin API listener. Absent → the
+    /// `/admin/*` surface is not served at all (secure default).
+    #[serde(default)]
+    pub admin: Option<RawAdmin>,
+}
+
+/// `[admin]` — bearer-token-authenticated admin API on its own listener
+/// (separate from `[observability]`'s open metrics/health). See
+/// `docs/DESIGN_ADMIN_AUTH.md`.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawAdmin {
+    /// `host:port` the admin listener binds. Required.
+    pub listen: String,
+    /// One or more bearer tokens, each with a role. At least one is
+    /// required (an admin listener with no tokens authenticates nobody).
+    #[serde(default, rename = "token")]
+    pub tokens: Vec<RawAdminToken>,
+}
+
+/// One `[[admin.token]]` entry.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawAdminToken {
+    /// Label for audit logs — NOT a secret. Must be unique.
+    pub name: String,
+    /// The bearer secret (env-expanded). Stored only as a SHA-256 hash
+    /// after load.
+    pub token: String,
+    /// `"readonly"` | `"operator"` | `"admin"`.
+    pub role: String,
 }
 
 /// `[node]` — identity for logs / metrics / SDP origin host.

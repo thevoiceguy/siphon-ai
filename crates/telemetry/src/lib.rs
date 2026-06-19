@@ -20,6 +20,7 @@
 //! - Per-call HEP correlation chunks.
 
 pub mod admin;
+pub mod auth;
 pub mod hep;
 pub mod http;
 pub mod log_filter;
@@ -32,6 +33,7 @@ pub use admin::{
     CreateConferenceRequest, OriginateRejection, OriginateRequest, OutboundOriginateHandle,
     ParkAdminError, ParkAdminHandle, ParkRequest, ParkedRow, RegistrationRow, RetrieveRequest,
 };
+pub use auth::{AdminAuth, AdminToken, AuthReject, Role};
 pub use hep::{HepBuildError, HepTelemetry, HepTelemetryBuild, HepWorkerHandle};
 pub use http::ObservabilityServer;
 pub use log_filter::{LogFilterError, LogFilterHandle};

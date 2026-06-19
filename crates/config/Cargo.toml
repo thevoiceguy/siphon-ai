@@ -25,3 +25,6 @@ siphon-ai-media-glue.workspace = true
 siphon-ai-recording.workspace  = true
 siphon-ai-routes.workspace     = true
 siphon-ai-security.workspace   = true
+# `[admin]` compiles into telemetry's auth types (Role / AdminToken /
+# AdminAuth). telemetry sits below core, so this dep is acyclic.
+siphon-ai-telemetry.workspace  = true

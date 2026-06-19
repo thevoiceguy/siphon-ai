@@ -93,8 +93,8 @@ use siphon_ai_telemetry::{
         AdminCallRegistry, AdminConference, AdminOutbound, AdminPark, AdminState,
         CallRegistryHandle, RegistrationRow,
     },
-    install_recorder, HepTelemetry, HepTelemetryBuild, HepWorkerHandle, LogFilterHandle,
-    ObservabilityServer, ReadinessFlag,
+    install_recorder, AdminServer, HepTelemetry, HepTelemetryBuild, HepWorkerHandle,
+    LogFilterHandle, ObservabilityServer, ReadinessFlag,
 };
 use siphon_ai_webhooks::{
     FilteredSink as WebhookFilteredSink, HttpSink as WebhookHttpSink,
@@ -121,6 +121,9 @@ pub struct Runtime {
     /// `Some` when `[observability].enabled = true`. Dropped on
     /// shutdown to stop the HTTP listener.
     observability: Option<ObservabilityServer>,
+    /// `Some` when `[admin]` is configured — the authenticated admin
+    /// HTTP listener. Dropped on shutdown.
+    admin: Option<AdminServer>,
     /// `Some` when `[hep].enabled = true`. Share-by-Arc so the admin
     /// state, CDR sink, and per-call code can borrow it; the UDP
     /// worker lives separately on `hep_worker` for shutdown. The
@@ -161,10 +164,7 @@ impl Runtime {
             webhooks,
             hep,
             park,
-            // [admin] auth is parsed + validated at load (chunk 1); the
-            // separate authenticated admin listener that consumes it
-            // lands in chunk 2.
-            admin: _,
+            admin,
         } = config;
 
         // ─── Telemetry: install Prometheus recorder ─────────────────
@@ -569,9 +569,10 @@ impl Runtime {
         // One authenticated UAC + originator per `[[gateway]]`, then the
         // daemon-wide service the `POST /admin/v1/calls` endpoint drives.
         // Only when `[outbound]` is enabled (a positive concurrency cap);
-        // otherwise the endpoint returns 501. The originate endpoint has no
-        // built-in auth — the cap + rate limit are the native guardrails
-        // (DEV_PLAN_0.6.0 §9.5/§9.6).
+        // otherwise the endpoint returns 501. As of 0.10.0 the originate
+        // endpoint requires an `admin`-role bearer token (it's on the
+        // authenticated `[admin]` listener); the cap + rate limit remain
+        // the abuse guardrails on top of that (DEV_PLAN_0.6.0 §9.5/§9.6).
         let outbound_handle: Option<AdminOutbound> = if outbound.enabled() {
             let mut gateways = HashMap::with_capacity(outbound.gateways.len());
             // Per-process DTLS cert for answering a peer's DTLS-SRTP offer
@@ -706,13 +707,13 @@ impl Runtime {
                 )) as AdminPark
             }),
         };
-        let observability_server = build_observability(
-            observability,
-            readiness.clone(),
-            prometheus_handle,
-            admin_state,
-        )
-        .await?;
+        let observability_server =
+            build_observability(observability, readiness.clone(), prometheus_handle).await?;
+
+        // Authenticated admin listener (0.10.0), separate from the open
+        // observability listener. `None` when no `[admin]` block is
+        // configured — `/admin/*` is then not served at all.
+        let admin_server = build_admin(admin, admin_state).await?;
 
         // We're now serving SIP — let the readiness probe flip.
         readiness.mark_ready();
@@ -724,6 +725,7 @@ impl Runtime {
             uas,
             listeners,
             observability: observability_server,
+            admin: admin_server,
             hep_telemetry,
             hep_worker,
             registration_mgr,
@@ -786,6 +788,10 @@ impl Runtime {
         if let Some(server) = self.observability {
             server.shutdown().await;
         }
+        // Stop the authenticated admin listener.
+        if let Some(server) = self.admin {
+            server.shutdown().await;
+        }
 
         // Drain the HEP UDP worker — aborts the task, bounded wait.
         // The telemetry handle itself is dropped here too (Arc
@@ -809,16 +815,16 @@ impl Runtime {
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
-/// Spawn the observability `/health` / `/ready` / `/metrics` HTTP
-/// server with admin routes installed. The Prometheus recorder is
-/// installed earlier in `Runtime::build` (so metric calls in call
-/// layers don't crash even when `[observability]` is disabled); the
-/// `prometheus` handle here is just the renderer for `/metrics`.
+/// Spawn the **open** observability `/health` / `/ready` / `/metrics`
+/// HTTP server. The Prometheus recorder is installed earlier in
+/// `Runtime::build` (so metric calls in call layers don't crash even
+/// when `[observability]` is disabled); the `prometheus` handle here is
+/// just the renderer for `/metrics`. `/admin/*` is NOT served here
+/// (0.10.0) — see [`build_admin`].
 async fn build_observability(
     cfg: ObservabilityConfig,
     readiness: ReadinessFlag,
     prometheus: siphon_ai_telemetry::PrometheusHandle,
-    admin: AdminState,
 ) -> Result<Option<ObservabilityServer>> {
     if !cfg.enabled {
         debug!("[observability].enabled = false; skipping HTTP listener");
@@ -827,9 +833,38 @@ async fn build_observability(
     let listen = cfg
         .http_listen
         .ok_or_else(|| anyhow!("[observability].http_listen unexpectedly empty"))?;
-    let server = ObservabilityServer::start(listen, prometheus, readiness, admin)
+    let server = ObservabilityServer::start(listen, prometheus, readiness)
         .await
         .with_context(|| format!("bind observability HTTP {listen}"))?;
+    Ok(Some(server))
+}
+
+/// Spawn the **authenticated** admin HTTP server (`[admin]`). `None`
+/// when no `[admin]` block is configured — `/admin/*` is then not served
+/// at all (the secure default). Warns when the bind is not loopback: the
+/// admin listener is plain HTTP, so the bearer token would travel in the
+/// clear on a routable address (pair with a TLS-terminating proxy until
+/// native `[admin].tls` lands).
+async fn build_admin(
+    cfg: Option<siphon_ai_config::AdminConfig>,
+    admin_state: AdminState,
+) -> Result<Option<AdminServer>> {
+    let Some(cfg) = cfg else {
+        debug!("no [admin] block; /admin/* is not served");
+        return Ok(None);
+    };
+    if !cfg.listen_addr.ip().is_loopback() {
+        warn!(
+            target: "siphon_ai_config",
+            listen = %cfg.listen_addr,
+            "[admin].listen is not a loopback address and the admin listener is plain HTTP — \
+             the bearer token travels in the clear on the wire. Bind loopback or front the \
+             admin listener with a TLS-terminating proxy."
+        );
+    }
+    let server = AdminServer::start(cfg.listen_addr, cfg.auth, admin_state)
+        .await
+        .with_context(|| format!("bind admin HTTP {}", cfg.listen_addr))?;
     Ok(Some(server))
 }
 

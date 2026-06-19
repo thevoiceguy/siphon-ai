@@ -97,6 +97,15 @@ pub const OUTBOUND_CALLS_TOTAL: &str = "siphon_ai_outbound_calls_total";
 /// `siphon-ai-core::outbound_service`.
 pub const OUTBOUND_SRTP_TOTAL: &str = "siphon_ai_outbound_srtp_total";
 
+/// Authenticated admin API requests (0.10.0). Labeled by `endpoint`
+/// (the route template, ids collapsed — bounded), `role` (the
+/// authenticated token's role, or `none` when auth failed), and
+/// `result` (`ok`, `unauthenticated`, `forbidden`, `not_found`). One
+/// counter per admin call on the `[admin]` listener; pairs with the
+/// structured audit log. Literal must match the call site in
+/// `siphon-ai-telemetry::http`.
+pub const ADMIN_REQUESTS_TOTAL: &str = "siphon_ai_admin_requests_total";
+
 /// Inbound delayed-offer (offerless INVITE) outcomes (0.9.0). Labeled by
 /// `result`: `answered` (peer's ACK answer negotiated and the call
 /// bridged), `ack_timeout` (no ACK before Timer H), `missing_sdp_answer`
@@ -315,6 +324,10 @@ pub fn register_descriptions() {
     describe_counter!(
         OUTBOUND_SRTP_TOTAL,
         "Outbound SRTP (SDES) outcomes for answered calls, by result (encrypted, downgraded)."
+    );
+    describe_counter!(
+        ADMIN_REQUESTS_TOTAL,
+        "Authenticated admin API requests, by endpoint (route template), role, and result (ok, unauthenticated, forbidden, not_found)."
     );
     describe_counter!(
         DELAYED_OFFER_TOTAL,

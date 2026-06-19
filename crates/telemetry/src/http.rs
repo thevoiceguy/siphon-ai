@@ -1,26 +1,25 @@
-//! Hyper-based HTTP server for `/health`, `/ready`, `/metrics`,
-//! and the `/admin/*` operator surface.
+//! Hyper-based HTTP servers for the daemon's HTTP surfaces:
 //!
-//! Single bind, all routes. Spawns a per-connection task; the
-//! probe routes are zero-allocation in the steady state
-//! (`/health` and `/ready` produce literal byte slices,
-//! `/metrics` calls `PrometheusHandle::render` which owns the
-//! string allocation).
+//! - [`ObservabilityServer`] — `/health`, `/ready`, `/metrics` on
+//!   `[observability].http_listen`. **Unauthenticated** by design: it's
+//!   the scrape/probe surface (Prometheus, k8s) and carries no power.
+//!   The probe routes are zero-allocation in the steady state.
+//! - [`AdminServer`] — the `/admin/*` operator surface (see
+//!   [`crate::admin`]) on its own `[admin].listen`, **gated by a bearer
+//!   token + RBAC** ([`crate::auth`]). `/admin/*` is **no longer served**
+//!   by the observability listener (0.10.0).
 //!
-//! ## Admin endpoints
+//! Each server spawns a per-connection task. Routes that need
+//! dependencies the runtime hasn't wired up return 503 (e.g.
+//! `/admin/hep/test` with HEP disabled).
 //!
-//! See [`crate::admin`]. They go through the same listener so
-//! operators have one HTTP surface to point a probe / dashboard
-//! at, not two. Routes that need dependencies the runtime hasn't
-//! wired up return 503 (e.g., `/admin/hep/test` with HEP disabled).
+//! ## Admin transport security
 //!
-//! ## What's NOT here
-//!
-//! - **No auth** — these endpoints are intended to bind on a
-//!   loopback or trusted-network address (k8s pods, localhost). If
-//!   exposed publicly, sit them behind an authenticating reverse
-//!   proxy. Per CLAUDE.md §12 ("Security v1 minimum") that's the
-//!   v1 threat model.
+//! The admin listener is plain HTTP in this cut, so the bearer token
+//! travels in the clear on the wire — bind it on **loopback** (the
+//! default posture) or front it with a TLS-terminating proxy. A native
+//! `[admin].tls` is a follow-up; the runtime warns when the admin bind
+//! is not loopback.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -29,16 +28,18 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
-use hyper::header::CONTENT_TYPE;
+use hyper::header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE};
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::admin::{self, AdminState};
+use crate::auth::{route_label, AdminAuth, AuthReject};
+use crate::metrics::ADMIN_REQUESTS_TOTAL;
 use crate::readiness::ReadinessFlag;
 
 /// Body byte cap on PUT/POST admin requests. 8 KiB is far more than
@@ -64,7 +65,6 @@ impl ObservabilityServer {
         addr: SocketAddr,
         prometheus: PrometheusHandle,
         readiness: ReadinessFlag,
-        admin: AdminState,
     ) -> Result<Self> {
         let listener = TcpListener::bind(addr)
             .await
@@ -75,7 +75,6 @@ impl ObservabilityServer {
         let state = Arc::new(SharedState {
             prometheus,
             readiness,
-            admin,
         });
 
         let listener = tokio::spawn(async move {
@@ -104,7 +103,6 @@ impl ObservabilityServer {
 struct SharedState {
     prometheus: PrometheusHandle,
     readiness: ReadinessFlag,
-    admin: AdminState,
 }
 
 async fn run_accept_loop(listener: TcpListener, state: Arc<SharedState>) {
@@ -168,17 +166,8 @@ async fn handle_request(req: Request<Incoming>, state: Arc<SharedState>) -> Resp
         _ => {}
     }
 
-    // Admin routes — read the body (bounded) once, then dispatch.
-    if path.starts_with("/admin") {
-        let body = match read_admin_body(req).await {
-            Ok(b) => b,
-            Err(resp) => return resp,
-        };
-        if let Some(resp) = admin::dispatch(&method, &path, body, &state.admin).await {
-            return resp;
-        }
-    }
-
+    // /admin/* is NOT served here (0.10.0) — it lives on the
+    // authenticated `AdminServer`. Anything else is a 404.
     respond(StatusCode::NOT_FOUND, "text/plain", b"not found\n")
 }
 
@@ -214,6 +203,136 @@ async fn read_admin_body(req: Request<Incoming>) -> Result<Bytes, Response<Full<
     }
 }
 
+// ─── Admin server (authenticated /admin/* on its own listener) ──────
+
+/// Handle to the running **authenticated** admin HTTP server. Bound on
+/// `[admin].listen`; every request is gated by a bearer token + RBAC
+/// ([`crate::auth`]) before reaching [`crate::admin::dispatch`].
+pub struct AdminServer {
+    bound_addr: SocketAddr,
+    listener: JoinHandle<()>,
+}
+
+struct AdminSharedState {
+    admin: AdminState,
+    auth: AdminAuth,
+}
+
+impl AdminServer {
+    /// Bind on `addr` and start serving the gated `/admin/*` surface.
+    pub async fn start(addr: SocketAddr, auth: AdminAuth, admin: AdminState) -> Result<Self> {
+        let listener = TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("bind admin HTTP {}", addr))?;
+        let bound_addr = listener.local_addr().unwrap_or(addr);
+        info!(addr = %bound_addr, "admin HTTP listener bound (bearer-token auth)");
+
+        let state = Arc::new(AdminSharedState { admin, auth });
+        let listener = tokio::spawn(async move {
+            loop {
+                let (stream, peer) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        error!(error = %e, "admin HTTP accept failed; exiting listener");
+                        return;
+                    }
+                };
+                let state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let svc = service_fn(move |req| {
+                        let state = Arc::clone(&state);
+                        async move { Ok::<_, Infallible>(handle_admin_request(req, state, peer).await) }
+                    });
+                    if let Err(e) = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, svc)
+                        .await
+                    {
+                        debug!(peer = %peer, error = %e, "admin HTTP connection closed with error");
+                    }
+                });
+            }
+        });
+
+        Ok(Self {
+            bound_addr,
+            listener,
+        })
+    }
+
+    pub fn bound_addr(&self) -> SocketAddr {
+        self.bound_addr
+    }
+
+    pub async fn shutdown(self) {
+        self.listener.abort();
+        let _ = self.listener.await;
+    }
+}
+
+async fn handle_admin_request(
+    req: Request<Incoming>,
+    state: Arc<AdminSharedState>,
+    peer: SocketAddr,
+) -> Response<Full<Bytes>> {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let endpoint = route_label(&method, &path);
+    let auth_header = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    // Authenticate + authorize BEFORE reading the body — an
+    // unauthenticated caller never makes us buffer its payload.
+    match state.auth.authorize(&method, &path, auth_header.as_deref()) {
+        Err(AuthReject::Unauthenticated) => {
+            warn!(peer = %peer, endpoint, "admin request rejected: 401 unauthenticated");
+            metrics::counter!(ADMIN_REQUESTS_TOTAL, "endpoint" => endpoint, "role" => "none", "result" => "unauthenticated").increment(1);
+            let mut resp = respond(
+                StatusCode::UNAUTHORIZED,
+                "application/json",
+                br#"{"error":"unauthenticated"}"#,
+            );
+            resp.headers_mut()
+                .insert(WWW_AUTHENTICATE, "Bearer".parse().expect("static header"));
+            resp
+        }
+        Err(AuthReject::Forbidden { required, have }) => {
+            warn!(peer = %peer, endpoint, required = required.as_str(), have = have.as_str(), "admin request rejected: 403 forbidden");
+            metrics::counter!(ADMIN_REQUESTS_TOTAL, "endpoint" => endpoint, "role" => have.as_str(), "result" => "forbidden").increment(1);
+            respond(
+                StatusCode::FORBIDDEN,
+                "application/json",
+                br#"{"error":"forbidden: insufficient role"}"#,
+            )
+        }
+        Ok(token) => {
+            // Capture owned audit fields before the body read / dispatch.
+            let actor = token.name.clone();
+            let role = token.role.as_str();
+            let body = match read_admin_body(req).await {
+                Ok(b) => b,
+                Err(resp) => return resp,
+            };
+            match admin::dispatch(&method, &path, body, &state.admin).await {
+                Some(resp) => {
+                    info!(peer = %peer, actor = %actor, role, endpoint, status = resp.status().as_u16(), "admin request");
+                    metrics::counter!(ADMIN_REQUESTS_TOTAL, "endpoint" => endpoint, "role" => role, "result" => "ok").increment(1);
+                    resp
+                }
+                None => {
+                    // Authenticated, but an unknown /admin route.
+                    info!(peer = %peer, actor = %actor, role, endpoint, status = 404, "admin request (unknown route)");
+                    metrics::counter!(ADMIN_REQUESTS_TOTAL, "endpoint" => endpoint, "role" => role, "result" => "not_found").increment(1);
+                    respond(StatusCode::NOT_FOUND, "text/plain", b"not found\n")
+                }
+            }
+        }
+    }
+}
+
 fn respond(status: StatusCode, content_type: &'static str, body: &[u8]) -> Response<Full<Bytes>> {
     Response::builder()
         .status(status)
@@ -241,16 +360,107 @@ mod tests {
         // Tag a metric so /metrics has something interesting; we
         // can't install globally inside the test (other tests do
         // the same), so just reuse the handle without installing.
-        let server = ObservabilityServer::start(
-            "127.0.0.1:0".parse().unwrap(),
-            handle,
-            readiness,
-            AdminState::default(),
-        )
-        .await
-        .expect("start");
+        let server = ObservabilityServer::start("127.0.0.1:0".parse().unwrap(), handle, readiness)
+            .await
+            .expect("start");
         let url = format!("http://{}", server.bound_addr());
         (server, url)
+    }
+
+    /// An `AdminServer` with three tokens (one per role) over an empty
+    /// `AdminState` (every endpoint's deps are `None` → 503, which is
+    /// fine: these tests exercise the auth gate, not dispatch).
+    async fn spawn_admin_server() -> (AdminServer, String) {
+        use crate::auth::{AdminAuth, AdminToken, Role};
+        let auth = AdminAuth::new(vec![
+            AdminToken::new("ro", "ro-tok", Role::ReadOnly),
+            AdminToken::new("op", "op-tok", Role::Operator),
+            AdminToken::new("ad", "ad-tok", Role::Admin),
+        ]);
+        let server =
+            AdminServer::start("127.0.0.1:0".parse().unwrap(), auth, AdminState::default())
+                .await
+                .expect("admin start");
+        let url = format!("http://{}", server.bound_addr());
+        (server, url)
+    }
+
+    /// GET with an optional `Authorization` header.
+    async fn get_auth(url: String, bearer: Option<&str>) -> StatusCode {
+        let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
+        let mut b = Request::builder().method(Method::GET).uri(url);
+        if let Some(t) = bearer {
+            b = b.header(AUTHORIZATION, format!("Bearer {t}"));
+        }
+        let resp = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.request(b.body(Empty::new()).unwrap()),
+        )
+        .await
+        .expect("request returns")
+        .expect("ok");
+        resp.status()
+    }
+
+    #[tokio::test]
+    async fn admin_listener_does_not_serve_admin() {
+        // /admin/* must NOT be on the observability listener anymore.
+        let (server, url) = spawn_test_server(ReadinessFlag::new()).await;
+        let (status, _) = get(format!("{url}/admin/calls")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn admin_requires_auth_and_enforces_roles() {
+        let (server, url) = spawn_admin_server().await;
+        // No token → 401.
+        assert_eq!(
+            get_auth(format!("{url}/admin/calls"), None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        // Bad token → 401.
+        assert_eq!(
+            get_auth(format!("{url}/admin/calls"), Some("wrong")).await,
+            StatusCode::UNAUTHORIZED
+        );
+        // readonly token on a GET → authorized; dispatch's dep is None
+        // so it 503s, but crucially it is NOT 401/403.
+        let s = get_auth(format!("{url}/admin/calls"), Some("ro-tok")).await;
+        assert!(
+            s != StatusCode::UNAUTHORIZED && s != StatusCode::FORBIDDEN,
+            "readonly GET should pass the gate, got {s}"
+        );
+        // readonly token on an unknown route still passes the gate (404).
+        assert_eq!(
+            get_auth(format!("{url}/admin/nope"), Some("ro-tok")).await,
+            StatusCode::NOT_FOUND
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn admin_forbids_below_minimum_role() {
+        let (server, url) = spawn_admin_server().await;
+        // GET /admin/v1/conferences requires readonly — a readonly token
+        // passes the gate. (We can't easily POST originate here, but the
+        // role table is unit-tested; this confirms the 403 wiring.)
+        // Use a path that needs operator with a readonly token via the
+        // HTTP layer: POST hangup. The body read happens after auth, so
+        // GET is fine for the gate check — but hangup is POST. Send POST.
+        let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("{url}/admin/calls/abc/hangup"))
+            .header(AUTHORIZATION, "Bearer ro-tok")
+            .body(Empty::new())
+            .unwrap();
+        let resp = tokio::time::timeout(Duration::from_secs(2), client.request(req))
+            .await
+            .expect("returns")
+            .expect("ok");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        server.shutdown().await;
     }
 
     async fn get(url: String) -> (StatusCode, String) {
@@ -325,7 +535,9 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpStream;
 
-        let (server, url) = spawn_test_server(ReadinessFlag::new()).await;
+        // The body cap is enforced AFTER auth now, so the request needs a
+        // valid admin token (PUT /admin/log requires admin) to reach it.
+        let (server, url) = spawn_admin_server().await;
         let addr_str = url.strip_prefix("http://").unwrap();
         let mut sock = TcpStream::connect(addr_str).await.expect("connect");
 
@@ -336,6 +548,7 @@ mod tests {
         let chunk_header = format!("{:x}\r\n", chunk_payload.len());
         let head = "PUT /admin/log HTTP/1.1\r\n\
                     Host: localhost\r\n\
+                    Authorization: Bearer ad-tok\r\n\
                     Transfer-Encoding: chunked\r\n\
                     Content-Type: text/plain\r\n\
                     Connection: close\r\n\r\n";
@@ -379,7 +592,6 @@ mod tests {
             "127.0.0.1:0".parse().unwrap(),
             handle,
             ReadinessFlag::new(),
-            AdminState::default(),
         )
         .await
         .expect("start");

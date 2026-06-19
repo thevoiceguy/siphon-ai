@@ -26,11 +26,15 @@
 //!
 //! ## Threat model
 //!
-//! These endpoints expose enough power to take calls down. They
-//! MUST bind on a trusted address (loopback, k8s pod-internal, etc.)
-//! per CLAUDE.md §12 / docs/DEV_PLAN.md §12.1. The daemon does NOT
-//! authenticate them — front with an authenticating reverse proxy
-//! if you expose them publicly.
+//! These endpoints expose enough power to take calls down and
+//! originate **billable** outbound calls. As of 0.10.0 they are served
+//! **only on the authenticated `[admin]` listener** ([`crate::http::AdminServer`]),
+//! gated by a bearer token + RBAC ([`crate::auth`]); the open
+//! observability listener no longer serves `/admin/*`. `dispatch` itself
+//! is unauthenticated by design — it runs only after `AdminServer` has
+//! authenticated the bearer token and checked the endpoint's minimum
+//! role. The admin listener is plain HTTP, so bind it on loopback or
+//! front it with TLS termination until native `[admin].tls` lands.
 //!
 //! ## Dependency injection
 //!

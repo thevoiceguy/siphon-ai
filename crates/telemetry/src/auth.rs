@@ -223,6 +223,55 @@ fn operator_pattern(method: &hyper::Method, path: &str) -> bool {
             && path.starts_with("/admin/v1/conferences/"))
 }
 
+/// A **bounded-cardinality** label for the admin-request metric: the
+/// route template (ids collapsed to `:id`), `"unknown"` for an
+/// unrecognised path. Never the raw path (which carries call/room ids).
+pub fn route_label(method: &hyper::Method, path: &str) -> &'static str {
+    use hyper::Method;
+    match (method, path) {
+        (&Method::GET, "/admin/calls") => "GET /admin/calls",
+        (&Method::GET, "/admin/registrations") => "GET /admin/registrations",
+        (&Method::GET, "/admin/log") => "GET /admin/log",
+        (&Method::PUT, "/admin/log") => "PUT /admin/log",
+        (&Method::POST, "/admin/hep/test") => "POST /admin/hep/test",
+        (&Method::POST, "/admin/v1/calls") => "POST /admin/v1/calls",
+        (&Method::GET, "/admin/v1/conferences") => "GET /admin/v1/conferences",
+        (&Method::POST, "/admin/v1/conferences") => "POST /admin/v1/conferences",
+        (&Method::GET, "/admin/v1/parked") => "GET /admin/v1/parked",
+        (m, p)
+            if *m == Method::POST && p.starts_with("/admin/calls/") && p.ends_with("/hangup") =>
+        {
+            "POST /admin/calls/:id/hangup"
+        }
+        (m, p)
+            if *m == Method::POST && p.starts_with("/admin/v1/calls/") && p.ends_with("/park") =>
+        {
+            "POST /admin/v1/calls/:id/park"
+        }
+        (m, p)
+            if *m == Method::POST
+                && p.starts_with("/admin/v1/calls/")
+                && p.ends_with("/retrieve") =>
+        {
+            "POST /admin/v1/calls/:id/retrieve"
+        }
+        (&Method::DELETE, p)
+            if p.starts_with("/admin/v1/conferences/") && p.contains("/participants/") =>
+        {
+            "DELETE /admin/v1/conferences/:id/participants/:cid"
+        }
+        (&Method::POST, p)
+            if p.starts_with("/admin/v1/conferences/") && p.ends_with("/participants") =>
+        {
+            "POST /admin/v1/conferences/:id/participants"
+        }
+        (&Method::DELETE, p) if p.starts_with("/admin/v1/conferences/") => {
+            "DELETE /admin/v1/conferences/:id"
+        }
+        _ => "unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

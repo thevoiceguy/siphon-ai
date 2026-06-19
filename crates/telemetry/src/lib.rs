@@ -35,15 +35,15 @@ pub use admin::{
 };
 pub use auth::{AdminAuth, AdminToken, AuthReject, Role};
 pub use hep::{HepBuildError, HepTelemetry, HepTelemetryBuild, HepWorkerHandle};
-pub use http::ObservabilityServer;
+pub use http::{AdminServer, ObservabilityServer};
 pub use log_filter::{LogFilterError, LogFilterHandle};
 
 // Re-exports for the daemon binary so it doesn't need a second
 // direct dep on `metrics-exporter-prometheus`.
 pub use metrics::{
-    install_recorder, prometheus_builder, register_descriptions, InitError, CALLS_ACTIVE,
-    CALLS_TOTAL, CALL_DURATION_BUCKETS, CALL_DURATION_SECONDS, DELAYED_OFFER_TOTAL, HOLDS_TOTAL,
-    INVITES_TOTAL, OUTBOUND_CALLS_ACTIVE, OUTBOUND_CALLS_TOTAL, OUTBOUND_SRTP_TOTAL,
+    install_recorder, prometheus_builder, register_descriptions, InitError, ADMIN_REQUESTS_TOTAL,
+    CALLS_ACTIVE, CALLS_TOTAL, CALL_DURATION_BUCKETS, CALL_DURATION_SECONDS, DELAYED_OFFER_TOTAL,
+    HOLDS_TOTAL, INVITES_TOTAL, OUTBOUND_CALLS_ACTIVE, OUTBOUND_CALLS_TOTAL, OUTBOUND_SRTP_TOTAL,
     PARKED_CALLS_ACTIVE, PARKS_TOTAL, RECORDINGS_TOTAL, REGISTER_ATTEMPTS_TOTAL, REGISTER_STATE,
     RETRIEVES_TOTAL, ROUTE_MATCH_TOTAL, SDP_NEGOTIATE_BUCKETS, SDP_NEGOTIATE_SECONDS,
     TRANSFERS_TOTAL, VERSTAT_TOTAL, WS_CONNECT_BUCKETS, WS_CONNECT_SECONDS, WS_RECONNECTS_TOTAL,

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-06-19
+
+### Added
+
+- **SIGHUP outbound gateway hot-reload.** `systemctl reload siphon-ai` now
+  also rebuilds and swaps the `[[gateway]]` set — add / remove / modify
+  trunks without a restart. In-flight outbound calls keep the trunk
+  (`OutboundOriginator`) they're on; new originations use the new set. The
+  gateway table moved behind an `ArcSwap` in the outbound service; each
+  reload mints fresh per-gateway UACs (stateless senders over the shared
+  transaction manager). Requires outbound enabled and the `[outbound]`
+  limits unchanged — `max_concurrent` / `rate_limit_per_sec` resize the live
+  admission semaphore and stay restart-required (a reload that changes them
+  warns and applies only the safe sections). Completes the `SIGHUP` reload
+  surface started in 0.12.0.
+
 ## [0.12.0] - 2026-06-19
 
 ### Added

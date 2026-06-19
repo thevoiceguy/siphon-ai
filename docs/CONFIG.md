@@ -676,6 +676,10 @@ reload-safe sections without dropping calls:
 - **webhook + CDR sinks** (`[webhooks]`, `[cdr]`) — rebuilt and swapped,
   **unless** a durable spool (`spool_dir`) is active for that sink (its
   background drain worker can't be hot-swapped → restart required);
+- **outbound gateways** (`[[gateway]]`, 0.12.1) — the set is rebuilt and
+  swapped (add / remove / modify trunks); in-flight outbound calls keep the
+  trunk they're on. Requires outbound enabled and the `[outbound]` limits
+  unchanged (see below);
 - the **`[sip.tls]` cert** is reloaded too (the 0.3.0 behavior, unchanged).
 
 **Fail-safe:** if the new config doesn't load/compile, the error is logged,
@@ -684,10 +688,11 @@ ticks — a bad edit can't take the daemon down. Run `siphon-ai check` first.
 
 **Restart-required sections.** Anything that binds a socket or builds
 process-wide state — `[sip]` listen/transports, `[node]`, `[media]`,
-`[observability]`, `[admin]`, `[hep]`, `[security.stir_shaken]`, and
-`[[gateway]]` (gateway hot-reload is a planned follow-up) — needs a process
-restart. A reload that changes one of these applies the safe sections and
-logs a warning naming the section(s) that did **not** take effect.
+`[observability]`, `[admin]`, `[hep]`, `[security.stir_shaken]`, and the
+`[outbound]` limits (`max_concurrent` / `rate_limit_per_sec`, which also flip
+outbound on/off — resizing the live admission semaphore isn't safe) — needs a
+process restart. A reload that changes one of these applies the safe sections
+and logs a warning naming the section(s) that did **not** take effect.
 
 Watch `siphon_ai_config_reloads_total{result}` (`applied` / `no_change` /
 `failed`); each reload also logs what it did. See `docs/DEPLOY.md` for the

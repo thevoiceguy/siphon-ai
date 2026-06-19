@@ -3035,15 +3035,19 @@ dependencies = [
 name = "siphon-ai-http"
 version = "0.10.0"
 dependencies = [
+ "hmac",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "metrics 0.23.1",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

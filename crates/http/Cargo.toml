@@ -9,14 +9,22 @@ authors.workspace      = true
 repository.workspace   = true
 
 [dependencies]
-tokio.workspace     = true
-reqwest.workspace   = true
-serde.workspace     = true
-thiserror.workspace = true
-tracing.workspace   = true
+tokio.workspace      = true
+reqwest.workspace    = true
+serde.workspace      = true
+serde_json.workspace = true
+thiserror.workspace  = true
+tracing.workspace    = true
+# Delivery observability — increments via the `metrics` facade using
+# the `siphon_ai_*` names registered in `siphon-ai-telemetry`.
+metrics.workspace    = true
+# HMAC-SHA256 request signing (`X-SiphonAI-Signature`) + a per-event
+# idempotency id.
+hmac.workspace       = true
+sha2.workspace       = true
+uuid.workspace       = true
 
 [dev-dependencies]
-serde_json.workspace     = true
 hyper.workspace          = true
 hyper-util.workspace     = true
 http-body-util.workspace = true

@@ -511,6 +511,11 @@ pub struct RawCdrWebhook {
     /// Optional `Authorization` header value, sent verbatim.
     #[serde(default)]
     pub auth_header: Option<String>,
+    /// Optional HMAC-SHA256 signing secret. `${VAR}` env-expanded by
+    /// the loader. When set, each record POST carries
+    /// `X-SiphonAI-Signature`.
+    #[serde(default)]
+    pub secret: Option<String>,
     #[serde(default)]
     pub retry_max: Option<u32>,
     #[serde(default)]
@@ -599,6 +604,11 @@ pub struct RawWebhooks {
     pub url: Option<String>,
     #[serde(default)]
     pub auth_header: Option<String>,
+    /// Optional HMAC-SHA256 signing secret. `${VAR}` env-expanded by
+    /// the loader. When set, each event POST carries
+    /// `X-SiphonAI-Signature`.
+    #[serde(default)]
+    pub secret: Option<String>,
     /// Allowlist of event types to deliver. Empty / unset = all.
     /// Valid values today: `"call_start"`, `"call_end"`. Unknown
     /// names are accepted but never match (no events from them).

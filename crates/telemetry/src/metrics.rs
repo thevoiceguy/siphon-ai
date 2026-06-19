@@ -162,6 +162,22 @@ pub const HOLDS_TOTAL: &str = "siphon_ai_holds_total";
 /// `siphon-ai-core::call`.
 pub const WS_RECONNECTS_TOTAL: &str = "siphon_ai_ws_reconnects_total";
 
+/// Outbound webhook / CDR deliveries by terminal outcome (0.11.0).
+/// Labeled by `sink` (`lifecycle` / `cdr`) and `result`: `delivered`
+/// (2xx), `rejected` (non-retryable 4xx), `dropped` (retry budget
+/// exhausted, or the payload couldn't be serialized). One increment
+/// per logical delivery. Emitted from `siphon-ai-http`; the literal
+/// must match the call site there. Bounded cardinality.
+pub const WEBHOOK_DELIVERIES_TOTAL: &str = "siphon_ai_webhook_deliveries_total";
+
+/// Individual outbound HTTP delivery *attempts* (0.11.0) — one per
+/// POST, so a retried delivery ticks this several times. Labeled by
+/// `sink` and `outcome`: `ok` (2xx), `transient` (retryable 5xx/408/
+/// 429), `error` (connect/timeout), `rejected` (non-retryable 4xx).
+/// Divide by `siphon_ai_webhook_deliveries_total` for an
+/// attempts-per-delivery ratio. Emitted from `siphon-ai-http`.
+pub const WEBHOOK_DELIVERY_ATTEMPTS_TOTAL: &str = "siphon_ai_webhook_delivery_attempts_total";
+
 // ─── Gauges ─────────────────────────────────────────────────────────
 
 /// Currently-active calls. Incremented when the controller spawns,
@@ -223,6 +239,12 @@ pub const RTP_RTT_MS: &str = "siphon_ai_rtp_rtt_ms";
 /// `siphon-ai-media-glue::room`.
 pub const ROOM_TICK_LAG_SECONDS: &str = "siphon_ai_room_tick_lag_seconds";
 
+/// Outbound webhook / CDR delivery latency in **seconds** (0.11.0):
+/// accepted → 2xx, recorded only on success. Labeled by `sink`
+/// (`lifecycle` / `cdr`). Captures retry/backoff dwell, so a slow
+/// receiver shows up as a fat tail. Emitted from `siphon-ai-http`.
+pub const WEBHOOK_DELIVERY_SECONDS: &str = "siphon_ai_webhook_delivery_seconds";
+
 #[derive(Debug, Error)]
 pub enum InitError {
     #[error("metrics recorder install failed: {0}")]
@@ -257,6 +279,12 @@ pub fn prometheus_builder() -> Result<PrometheusBuilder, InitError> {
             b.set_buckets_for_metric(
                 Matcher::Full(ROOM_TICK_LAG_SECONDS.to_string()),
                 &ROOM_TICK_LAG_BUCKETS,
+            )
+        })
+        .and_then(|b| {
+            b.set_buckets_for_metric(
+                Matcher::Full(WEBHOOK_DELIVERY_SECONDS.to_string()),
+                &WEBHOOK_DELIVERY_BUCKETS,
             )
         })
         .map_err(|e| InitError::Install(e.to_string()))
@@ -405,6 +433,19 @@ pub fn register_descriptions() {
         Unit::Seconds,
         "How far past its 20 ms cadence a conference room's mix tick fired."
     );
+    describe_counter!(
+        WEBHOOK_DELIVERIES_TOTAL,
+        "Outbound webhook/CDR deliveries by sink (lifecycle, cdr) and result (delivered, rejected, dropped)."
+    );
+    describe_counter!(
+        WEBHOOK_DELIVERY_ATTEMPTS_TOTAL,
+        "Individual outbound delivery attempts by sink and outcome (ok, transient, error, rejected)."
+    );
+    describe_histogram!(
+        WEBHOOK_DELIVERY_SECONDS,
+        Unit::Seconds,
+        "Outbound webhook/CDR delivery latency (accepted to 2xx), by sink."
+    );
 }
 
 /// Buckets for `ws_connect_seconds`. The first bucket (25ms) catches
@@ -439,6 +480,13 @@ pub const RTP_RTT_MS_BUCKETS: [f64; 11] = [
 /// +Inf.
 pub const ROOM_TICK_LAG_BUCKETS: [f64; 9] =
     [0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25];
+
+/// Buckets for `webhook_delivery_seconds`. A healthy receiver answers
+/// in tens of ms (bottom buckets); the top (30s) catches deliveries
+/// that only succeeded after several backoff rounds against a flaky
+/// receiver — visible as a fat tail rather than clipped into +Inf.
+pub const WEBHOOK_DELIVERY_BUCKETS: [f64; 10] =
+    [0.005, 0.025, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0];
 
 #[cfg(test)]
 mod tests {

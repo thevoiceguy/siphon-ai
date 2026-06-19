@@ -374,6 +374,8 @@ pub struct WebhooksConfig {
     pub enabled: bool,
     pub url: Option<String>,
     pub auth_header: Option<String>,
+    /// HMAC-SHA256 signing secret. `None` ⇒ unsigned deliveries.
+    pub secret: Option<String>,
     /// Empty = deliver everything; non-empty = allowlist filter.
     pub events: Vec<String>,
     pub retry_max: u32,
@@ -431,6 +433,8 @@ pub struct CdrFileConfig {
 pub struct CdrWebhookConfig {
     pub url: String,
     pub auth_header: Option<String>,
+    /// HMAC-SHA256 signing secret. `None` ⇒ unsigned deliveries.
+    pub secret: Option<String>,
     pub retry_max: u32,
     pub timeout: Duration,
 }
@@ -1638,6 +1642,7 @@ fn compile_webhooks(raw: RawWebhooks) -> Result<WebhooksConfig, CompileError> {
         enabled: true,
         url: Some(url),
         auth_header: raw.auth_header.filter(|s| !s.is_empty()),
+        secret: raw.secret.filter(|s| !s.is_empty()),
         events: raw.events.unwrap_or_default(),
         retry_max: raw.retry_max.unwrap_or(3),
         timeout: Duration::from_millis(raw.timeout_ms.unwrap_or(5000)),
@@ -2067,6 +2072,7 @@ fn compile_cdr(raw: RawCdr) -> Result<CdrConfig, CompileError> {
         Some(CdrWebhookConfig {
             url,
             auth_header: raw.webhook.auth_header.filter(|s| !s.is_empty()),
+            secret: raw.webhook.secret.filter(|s| !s.is_empty()),
             retry_max: raw.webhook.retry_max.unwrap_or(3),
             timeout: Duration::from_millis(raw.webhook.timeout_ms.unwrap_or(5000)),
         })

@@ -7,19 +7,23 @@
 //! transient-status classification, and `Authorization` header all
 //! live in `siphon-ai-http`, shared with the lifecycle webhook sink.
 //!
+//! Each delivery carries an `X-SiphonAI-Event-Id` (+ `Idempotency-Key`)
+//! and, when a `secret` is set, an `X-SiphonAI-Signature` — both
+//! provided by `siphon-ai-http`.
+//!
 //! ## What we don't do (yet)
 //!
 //! - **No persistent queue.** A daemon restart loses any in-flight
-//!   retries. Operators who need durability point the file sink at
-//!   the same record stream and tail it on the receiver side.
-//! - **No HMAC signature.** A future webhook secret would be a
-//!   computed `X-SiphonAI-Signature` header; CLAUDE.md §11.6 sketches
-//!   this. When it lands it belongs in `siphon-ai-http` so both
-//!   webhook sinks gain it at once.
+//!   retries. Operators who need durability point the file sink at the
+//!   same record stream and tail it on the receiver side. (A disk
+//!   spool is the next chunk of the delivery-durability theme.)
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use siphon_ai_http::{BuildError, PostLog, RetryingPoster, DEFAULT_RETRY_MAX, DEFAULT_TIMEOUT_MS};
+use siphon_ai_http::{
+    BuildError, PostLog, PosterConfig, RetryingPoster, SinkKind, DEFAULT_RETRY_MAX,
+    DEFAULT_TIMEOUT_MS,
+};
 
 use crate::schema::CdrRecord;
 use crate::sink::CdrSink;
@@ -32,6 +36,11 @@ pub struct WebhookSinkConfig {
     /// caller decides between `Bearer ...`, basic, or other schemes.
     #[serde(default)]
     pub auth_header: Option<String>,
+    /// Optional HMAC-SHA256 signing secret. When set, every record
+    /// POST carries `X-SiphonAI-Signature: t=<unix>,v1=<hex>`. `None`
+    /// ⇒ unsigned.
+    #[serde(default)]
+    pub secret: Option<String>,
     /// Maximum retries on transient failure. `0` means "post once,
     /// don't retry."
     #[serde(default = "default_retry_max")]
@@ -54,6 +63,7 @@ impl WebhookSinkConfig {
         Self {
             url: url.into(),
             auth_header: None,
+            secret: None,
             retry_max: DEFAULT_RETRY_MAX,
             timeout_ms: DEFAULT_TIMEOUT_MS,
         }
@@ -71,12 +81,14 @@ impl WebhookSink {
     /// Build the sink. The `RetryingPoster` creates its
     /// `reqwest::Client` once so connection pooling spans calls.
     pub fn new(config: WebhookSinkConfig) -> Result<Self, BuildError> {
-        let poster = RetryingPoster::new(
-            config.url,
-            config.auth_header,
-            config.retry_max,
-            config.timeout_ms,
-        )?;
+        let poster = RetryingPoster::new(PosterConfig {
+            url: config.url,
+            auth_header: config.auth_header,
+            retry_max: config.retry_max,
+            timeout_ms: config.timeout_ms,
+            secret: config.secret,
+            sink: SinkKind::Cdr,
+        })?;
         Ok(Self { poster })
     }
 }

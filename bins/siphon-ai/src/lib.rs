@@ -5,6 +5,7 @@
 //! the same runtime without spawning a child process.
 
 pub mod registration;
+pub mod reload;
 pub mod runtime;
 
 pub use runtime::Runtime;

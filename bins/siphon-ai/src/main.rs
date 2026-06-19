@@ -157,12 +157,12 @@ async fn main() -> Result<()> {
     }
 
     // No subcommand → run the daemon.
-    let config = config_path(&cli)?;
+    let config_path = config_path(&cli)?;
     let log_filter = init_tracing(cli.log.as_deref());
 
-    info!(config = %config.display(), "loading configuration");
-    let config = siphon_ai_config::load_from_path(&config)
-        .with_context(|| format!("load config {}", config.display()))?;
+    info!(config = %config_path.display(), "loading configuration");
+    let config = siphon_ai_config::load_from_path(&config_path)
+        .with_context(|| format!("load config {}", config_path.display()))?;
 
     info!(
         node_id = %config.node.id,
@@ -172,7 +172,9 @@ async fn main() -> Result<()> {
         "configuration compiled",
     );
 
-    let runtime = Runtime::build(config, log_filter)
+    // Pass the path so SIGHUP (`systemctl reload`) can re-read it for
+    // hot reload of the reload-safe sections.
+    let runtime = Runtime::build_with_reload(config, Some(config_path), log_filter)
         .await
         .context("runtime build failed")?;
 

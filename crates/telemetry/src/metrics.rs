@@ -162,6 +162,13 @@ pub const HOLDS_TOTAL: &str = "siphon_ai_holds_total";
 /// `siphon-ai-core::call`.
 pub const WS_RECONNECTS_TOTAL: &str = "siphon_ai_ws_reconnects_total";
 
+/// Config reloads triggered by `SIGHUP` (0.12.0). Labeled by `result`:
+/// `applied` (the new config loaded and the hot-reloadable sections were
+/// swapped), `no_change` (loaded fine, nothing reloadable differed), or
+/// `failed` (the new config didn't load/compile — the running config was
+/// kept). One increment per `SIGHUP`. Emitted from the daemon binary.
+pub const CONFIG_RELOADS_TOTAL: &str = "siphon_ai_config_reloads_total";
+
 /// Outbound webhook / CDR deliveries by terminal outcome (0.11.0).
 /// Labeled by `sink` (`lifecycle` / `cdr`) and `result`: `delivered`
 /// (2xx), `rejected` (non-retryable 4xx), `dropped` (retry budget
@@ -445,6 +452,10 @@ pub fn register_descriptions() {
         ROOM_TICK_LAG_SECONDS,
         Unit::Seconds,
         "How far past its 20 ms cadence a conference room's mix tick fired."
+    );
+    describe_counter!(
+        CONFIG_RELOADS_TOTAL,
+        "SIGHUP config reloads by result (applied, no_change, failed)."
     );
     describe_counter!(
         WEBHOOK_DELIVERIES_TOTAL,

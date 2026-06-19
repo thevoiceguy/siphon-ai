@@ -16,6 +16,8 @@ thiserror.workspace   = true
 tracing.workspace     = true
 chrono.workspace      = true
 parking_lot.workspace = true
+# Hot-swappable route table for SIGHUP config reload (0.12.0).
+arc-swap = "1"
 
 # Internal
 siphon-ai-routes.workspace = true

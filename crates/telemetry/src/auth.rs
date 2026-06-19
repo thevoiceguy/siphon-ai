@@ -95,6 +95,18 @@ impl AdminAuth {
         self.tokens.is_empty()
     }
 
+    /// Number of configured tokens.
+    pub fn len(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// Iterate the configured tokens (name + role; the hashed secret is
+    /// never exposed). Used by `siphon-ai print-config` to list the
+    /// admin tokens without revealing any secret material.
+    pub fn iter(&self) -> impl Iterator<Item = &AdminToken> {
+        self.tokens.iter()
+    }
+
     /// Match a presented bearer token against the table in constant time.
     /// Returns the matching entry (with its role), or `None` for no
     /// match. We hash the candidate once and `ct_eq` every stored hash

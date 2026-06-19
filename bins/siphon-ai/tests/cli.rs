@@ -138,3 +138,111 @@ fn check_warns_on_missing_default_route_but_exits_zero() {
         "expected a default-route warning on stderr"
     );
 }
+
+/// Config with a secret + two routes (a specific one + a default).
+const WITH_SECRET_AND_ROUTES: &str = r#"
+[node]
+id = "cli-test"
+[sip]
+listen = "127.0.0.1:5060"
+[bridge]
+ws_url = "wss://default/ws"
+ws_auth_header = "Bearer SUPERSECRET"
+[[route]]
+name = "sales"
+[route.match]
+to_user = "1000"
+[route.bridge]
+ws_url = "wss://sales/ws"
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+
+#[test]
+fn print_config_redacts_secrets_by_default() {
+    let cfg = write_cfg(WITH_SECRET_AND_ROUTES);
+    let out = Command::new(BIN)
+        .arg("print-config")
+        .arg("--config")
+        .arg(cfg.path())
+        .output()
+        .expect("run print-config");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("auth_header    = <redacted>"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("SUPERSECRET"),
+        "secret leaked into default print-config output"
+    );
+    // The effective values + per-route override are rendered.
+    assert!(stdout.contains("ws_url         = wss://default/ws"));
+    assert!(stdout.contains("ws_url       -> wss://sales/ws"));
+}
+
+#[test]
+fn print_config_show_secrets_reveals_them() {
+    let cfg = write_cfg(WITH_SECRET_AND_ROUTES);
+    let out = Command::new(BIN)
+        .args(["print-config", "--show-secrets", "--config"])
+        .arg(cfg.path())
+        .output()
+        .expect("run print-config");
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Bearer SUPERSECRET"),
+        "--show-secrets should reveal the secret"
+    );
+}
+
+#[test]
+fn route_test_resolves_first_match_wins() {
+    let cfg = write_cfg(WITH_SECRET_AND_ROUTES);
+    // to=1000 matches the `sales` route and its ws_url override.
+    let out = Command::new(BIN)
+        .args(["route-test", "--to", "1000", "--config"])
+        .arg(cfg.path())
+        .output()
+        .expect("run route-test");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("matched route: sales"), "stdout: {stdout}");
+    assert!(stdout.contains("wss://sales/ws"), "stdout: {stdout}");
+
+    // A non-matching number falls through to the default route, which
+    // inherits the global ws_url.
+    let out = Command::new(BIN)
+        .args(["route-test", "--to", "9999", "--config"])
+        .arg(cfg.path())
+        .output()
+        .expect("run route-test");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("matched route: default"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("wss://default/ws") && stdout.contains("[bridge] default"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn route_test_no_match_reports_404() {
+    // Only a specific route, no default → an unmatched call is 404.
+    let cfg = write_cfg(NO_DEFAULT_ROUTE);
+    let out = Command::new(BIN)
+        .args(["route-test", "--to", "9999", "--config"])
+        .arg(cfg.path())
+        .output()
+        .expect("run route-test");
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("NO MATCH"),
+        "expected a no-match report"
+    );
+}

@@ -211,6 +211,14 @@ pub const CONFERENCE_PARTICIPANTS: &str = "siphon_ai_conference_participants";
 /// retrieve / teardown. Literal must match `siphon-ai-core::call`.
 pub const PARKED_CALLS_ACTIVE: &str = "siphon_ai_parked_calls_active";
 
+/// Webhook/CDR deliveries currently waiting in the durable spool
+/// (0.11.0, `[webhooks].spool_dir` / `[cdr.webhook].spool_dir`).
+/// Labeled by `sink` (`lifecycle` / `cdr`). Sampled by the drain
+/// worker each pass (self-correcting across restarts). A healthy
+/// receiver keeps this at 0; a rising value means deliveries are
+/// failing and backing up on disk. Emitted from `siphon-ai-http`.
+pub const WEBHOOK_SPOOL_DEPTH: &str = "siphon_ai_webhook_spool_depth";
+
 // ─── Histograms ─────────────────────────────────────────────────────
 
 /// Time from "spawned WS bridge task" to "WS handshake completed
@@ -408,6 +416,11 @@ pub fn register_descriptions() {
         "Mixer participants across all rooms (2 per member call: SIP leg + WS session)."
     );
     describe_gauge!(PARKED_CALLS_ACTIVE, Unit::Count, "Currently-parked calls.");
+    describe_gauge!(
+        WEBHOOK_SPOOL_DEPTH,
+        Unit::Count,
+        "Webhook/CDR deliveries waiting in the durable spool, by sink (lifecycle, cdr)."
+    );
     describe_histogram!(
         WS_CONNECT_SECONDS,
         Unit::Seconds,

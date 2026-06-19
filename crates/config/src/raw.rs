@@ -516,6 +516,11 @@ pub struct RawCdrWebhook {
     /// `X-SiphonAI-Signature`.
     #[serde(default)]
     pub secret: Option<String>,
+    /// Optional durable spool directory. When set, a record that
+    /// exhausts the in-memory retry budget is persisted here and
+    /// retried by a background worker that survives restarts.
+    #[serde(default)]
+    pub spool_dir: Option<String>,
     #[serde(default)]
     pub retry_max: Option<u32>,
     #[serde(default)]
@@ -609,6 +614,11 @@ pub struct RawWebhooks {
     /// `X-SiphonAI-Signature`.
     #[serde(default)]
     pub secret: Option<String>,
+    /// Optional durable spool directory. When set, an event that
+    /// exhausts the in-memory retry budget is persisted here and
+    /// retried by a background worker that survives restarts.
+    #[serde(default)]
+    pub spool_dir: Option<String>,
     /// Allowlist of event types to deliver. Empty / unset = all.
     /// Valid values today: `"call_start"`, `"call_end"`. Unknown
     /// names are accepted but never match (no events from them).

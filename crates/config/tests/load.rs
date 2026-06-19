@@ -290,6 +290,91 @@ any = true
     );
 }
 
+const ADMIN_BASE: &str = r#"
+[sip]
+listen = "127.0.0.1:5060"
+[bridge]
+ws_url = "wss://x/y"
+[[route]]
+name = "default"
+[route.match]
+any = true
+__ADMIN__
+"#;
+
+#[test]
+fn admin_absent_means_not_served() {
+    let cfg = load_from_str_with_env(&ADMIN_BASE.replace("__ADMIN__", ""), &MapEnv::new([]))
+        .expect("compiles");
+    assert!(cfg.admin.is_none(), "no [admin] block → /admin not served");
+}
+
+#[test]
+fn admin_with_tokens_compiles_and_gates_by_role() {
+    let toml = ADMIN_BASE.replace(
+        "__ADMIN__",
+        r#"
+[admin]
+listen = "127.0.0.1:9092"
+[[admin.token]]
+name = "ops"
+token = "${OPS_TOK}"
+role = "operator"
+[[admin.token]]
+name = "billing"
+token = "secret-admin"
+role = "admin"
+"#,
+    );
+    let cfg =
+        load_from_str_with_env(&toml, &MapEnv::new([("OPS_TOK", "secret-ops")])).expect("compiles");
+    let admin = cfg.admin.expect("admin configured");
+    assert_eq!(admin.listen_addr.port(), 9092);
+    // The env-expanded operator token authenticates as operator; the
+    // admin token as admin; a wrong token does not authenticate.
+    use siphon_ai_telemetry::Role;
+    assert_eq!(
+        admin.auth.authenticate("secret-ops").map(|t| t.role),
+        Some(Role::Operator)
+    );
+    assert_eq!(
+        admin.auth.authenticate("secret-admin").map(|t| t.role),
+        Some(Role::Admin)
+    );
+    assert!(admin.auth.authenticate("nope").is_none());
+}
+
+#[test]
+fn admin_without_tokens_is_an_error() {
+    let toml = ADMIN_BASE.replace("__ADMIN__", "[admin]\nlisten = \"127.0.0.1:9092\"\n");
+    let err = load_from_str_with_env(&toml, &MapEnv::new([])).unwrap_err();
+    assert!(
+        matches!(err, LoadError::Compile(_)),
+        "an admin listener with no tokens must fail loud, got {err:?}"
+    );
+}
+
+#[test]
+fn admin_unknown_role_and_bad_listen_are_errors() {
+    let bad_role = ADMIN_BASE.replace(
+        "__ADMIN__",
+        "[admin]\nlisten = \"127.0.0.1:9092\"\n[[admin.token]]\nname=\"x\"\ntoken=\"t\"\nrole=\"root\"\n",
+    );
+    assert!(matches!(
+        load_from_str_with_env(&bad_role, &MapEnv::new([])).unwrap_err(),
+        LoadError::Compile(_)
+    ));
+
+    let bad_listen = ADMIN_BASE.replace(
+        "__ADMIN__",
+        "[admin]\nlisten = \"not-an-addr\"\n[[admin.token]]\nname=\"x\"\ntoken=\"t\"\nrole=\"admin\"\n",
+    );
+    assert!(matches!(
+        load_from_str_with_env(&bad_listen, &MapEnv::new([])).unwrap_err(),
+        LoadError::Compile(_)
+    ));
+}
+
 #[test]
 fn unknown_codec_is_a_compile_error() {
     let env = MapEnv::new([]);

@@ -71,6 +71,17 @@ pub struct Config {
     pub observability: ObservabilityConfig,
     pub webhooks: WebhooksConfig,
     pub hep: HepConfig,
+    /// `[admin]` — the authenticated admin API. `None` when no `[admin]`
+    /// block is configured, in which case `/admin/*` is not served.
+    pub admin: Option<AdminConfig>,
+}
+
+/// Compiled `[admin]` — the admin API listener address plus the
+/// bearer-token auth table (tokens stored hashed). `docs/DESIGN_ADMIN_AUTH.md`.
+#[derive(Debug, Clone)]
+pub struct AdminConfig {
+    pub listen_addr: SocketAddr,
+    pub auth: siphon_ai_telemetry::AdminAuth,
 }
 
 /// Compiled `[conference]` — conference rooms (0.7.0). Fail-closed:
@@ -703,6 +714,26 @@ pub enum CompileError {
     #[error("[observability].http_listen is required when [observability].enabled = true")]
     ObservabilityListenRequired,
 
+    #[error("[admin].listen {0:?} is not a valid socket address: {1}")]
+    BadAdminListen(String, std::net::AddrParseError),
+
+    #[error("[admin] is configured but has no [[admin.token]] entries; an admin listener with no tokens can authenticate no one")]
+    AdminNoTokens,
+
+    #[error("[[admin.token]] has an empty name")]
+    AdminTokenEmptyName,
+
+    #[error("[[admin.token]] name {0:?} is used more than once")]
+    AdminDuplicateTokenName(String),
+
+    #[error("[[admin.token]] {0:?} has an empty token")]
+    AdminTokenEmptySecret(String),
+
+    #[error(
+        "[[admin.token]] {0:?} role is {1:?}; expected \"readonly\", \"operator\", or \"admin\""
+    )]
+    AdminUnknownRole(String, String),
+
     #[error("[webhooks].url is required when [webhooks].enabled = true")]
     WebhooksUrlRequired,
 
@@ -801,6 +832,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let observability = compile_observability(raw.observability)?;
     let webhooks = compile_webhooks(raw.webhooks)?;
     let hep = compile_hep(raw.hep)?;
+    let admin = compile_admin(raw.admin)?;
 
     if !routes.has_default() {
         warn!(
@@ -893,6 +925,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         observability,
         webhooks,
         hep,
+        admin,
     })
 }
 
@@ -1844,6 +1877,45 @@ fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, C
         enabled: true,
         http_listen: Some(http_listen),
     })
+}
+
+fn compile_admin(raw: Option<crate::raw::RawAdmin>) -> Result<Option<AdminConfig>, CompileError> {
+    // No [admin] block → /admin/* is not served (secure default).
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let listen_addr: SocketAddr = raw
+        .listen
+        .parse()
+        .map_err(|e| CompileError::BadAdminListen(raw.listen.clone(), e))?;
+
+    // An admin listener with no tokens can authenticate nobody — refuse
+    // rather than silently lock everyone out (CLAUDE.md §4.6).
+    if raw.tokens.is_empty() {
+        return Err(CompileError::AdminNoTokens);
+    }
+
+    let mut seen_names = std::collections::HashSet::new();
+    let mut tokens = Vec::with_capacity(raw.tokens.len());
+    for t in raw.tokens {
+        if t.name.is_empty() {
+            return Err(CompileError::AdminTokenEmptyName);
+        }
+        if !seen_names.insert(t.name.clone()) {
+            return Err(CompileError::AdminDuplicateTokenName(t.name));
+        }
+        if t.token.is_empty() {
+            return Err(CompileError::AdminTokenEmptySecret(t.name));
+        }
+        let role = siphon_ai_telemetry::Role::parse(&t.role)
+            .ok_or_else(|| CompileError::AdminUnknownRole(t.name.clone(), t.role.clone()))?;
+        tokens.push(siphon_ai_telemetry::AdminToken::new(t.name, &t.token, role));
+    }
+
+    Ok(Some(AdminConfig {
+        listen_addr,
+        auth: siphon_ai_telemetry::AdminAuth::new(tokens),
+    }))
 }
 
 fn compile_hep(raw: RawHep) -> Result<HepConfig, CompileError> {

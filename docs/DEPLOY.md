@@ -310,36 +310,111 @@ Both live on the `[observability]` listener.
 
 ## Admin API
 
-`/admin/*` lives on the same port as `/metrics`. **No auth in v1** — keep
-the listener on a private network.
+`/admin/*` is served **only on the dedicated `[admin]` listener**, gated by
+a bearer token + RBAC (0.10.0). It is **no longer** on the
+`[observability].http_listen` port — that port now serves only `/metrics`,
+`/health`, `/ready`, and returns `404` for `/admin/*`. Set up the listener
+and tokens first ([Admin auth & RBAC](#admin-auth--rbac) below); every
+example in this section assumes the admin port and an
+`Authorization: Bearer …` header.
 
-| Method | Path                          | Body            | Purpose |
-|--------|-------------------------------|-----------------|---------|
-| GET    | `/admin/calls`                | —               | List active per-call SIP Call-IDs. |
-| POST   | `/admin/calls/:id/hangup`     | —               | Force-shutdown a specific call by Call-ID. |
-| GET    | `/admin/registrations`        | —               | Snapshot of every `[[register]]` row and its current state. |
-| GET    | `/admin/log`                  | —               | Current `tracing` filter directive. |
-| PUT    | `/admin/log`                  | text directive  | Replace the filter (e.g., `siphon_ai=info,siphon_ai_bridge=debug`). Returns the previous filter. |
-| POST   | `/admin/v1/calls`             | JSON (below)    | **Originate an outbound call** (0.6.0). Returns `202 {"call_id": "..."}`; the call proceeds asynchronously. `501` when `[outbound]` is disabled. |
-| GET    | `/admin/v1/conferences`       | —               | **List conference rooms** + members (0.7.0). `501` when `[conference]` is disabled. |
-| POST   | `/admin/v1/conferences`       | JSON (opt.)     | **Pre-create a room** (0.7.0). Body `{room_id?, sample_rate?}`; returns `201 {"room_id": "..."}`. |
-| DELETE | `/admin/v1/conferences/:id`   | —               | **Force-end a room** (0.7.0). Every member reverts to its direct pair (`conference_left { room_closed }`). `404` if unknown. |
-| POST   | `/admin/v1/conferences/:id/participants`          | JSON | **Add a call to a room** (0.7.0). Body `{call_id}`; `202` (dispatched). |
-| DELETE | `/admin/v1/conferences/:id/participants/:call_id` | —    | **Remove a call from a room** (0.7.0). `202` (dispatched). |
-| GET    | `/admin/v1/parked`            | —               | **List parked calls** (0.7.0). `501` when `[park]` is disabled. |
-| POST   | `/admin/v1/calls/:id/park`    | JSON (opt.)     | **Park an active call** (0.7.0). Body `{slot?}`; `202` (dispatched). `404` if no active call has that id. `501` when `[park]` is disabled. |
-| POST   | `/admin/v1/calls/:id/retrieve`| JSON (opt.)     | **Retrieve a parked call** (0.7.0). Body `{ws_url?}`; `202` (dispatched). `404` unknown call, `409` if the call isn't parked. `501` when `[park]` is disabled. |
+The **Min role** column is the lowest role a token needs to reach the
+endpoint (roles nest: `readonly` ⊂ `operator` ⊂ `admin`). Below it → `403`;
+no/invalid token → `401`.
+
+| Method | Path                          | Body            | Min role | Purpose |
+|--------|-------------------------------|-----------------|----------|---------|
+| GET    | `/admin/calls`                | —               | readonly | List active per-call SIP Call-IDs. |
+| POST   | `/admin/calls/:id/hangup`     | —               | operator | Force-shutdown a specific call by Call-ID. |
+| GET    | `/admin/registrations`        | —               | readonly | Snapshot of every `[[register]]` row and its current state. |
+| GET    | `/admin/log`                  | —               | readonly | Current `tracing` filter directive. |
+| PUT    | `/admin/log`                  | text directive  | admin    | Replace the filter (e.g., `siphon_ai=info,siphon_ai_bridge=debug`). Returns the previous filter. |
+| POST   | `/admin/hep/test`             | —               | admin    | Emit a probe HEP log packet. |
+| POST   | `/admin/v1/calls`             | JSON (below)    | admin    | **Originate an outbound call** (0.6.0). Returns `202 {"call_id": "..."}`; the call proceeds asynchronously. `501` when `[outbound]` is disabled. |
+| GET    | `/admin/v1/conferences`       | —               | readonly | **List conference rooms** + members (0.7.0). `501` when `[conference]` is disabled. |
+| POST   | `/admin/v1/conferences`       | JSON (opt.)     | operator | **Pre-create a room** (0.7.0). Body `{room_id?, sample_rate?}`; returns `201 {"room_id": "..."}`. |
+| DELETE | `/admin/v1/conferences/:id`   | —               | operator | **Force-end a room** (0.7.0). Every member reverts to its direct pair (`conference_left { room_closed }`). `404` if unknown. |
+| POST   | `/admin/v1/conferences/:id/participants`          | JSON | operator | **Add a call to a room** (0.7.0). Body `{call_id}`; `202` (dispatched). |
+| DELETE | `/admin/v1/conferences/:id/participants/:call_id` | —    | operator | **Remove a call from a room** (0.7.0). `202` (dispatched). |
+| GET    | `/admin/v1/parked`            | —               | readonly | **List parked calls** (0.7.0). `501` when `[park]` is disabled. |
+| POST   | `/admin/v1/calls/:id/park`    | JSON (opt.)     | operator | **Park an active call** (0.7.0). Body `{slot?}`; `202` (dispatched). `404` if no active call has that id. `501` when `[park]` is disabled. |
+| POST   | `/admin/v1/calls/:id/retrieve`| JSON (opt.)     | operator | **Retrieve a parked call** (0.7.0). Body `{ws_url?}`; `202` (dispatched). `404` unknown call, `409` if the call isn't parked. `501` when `[park]` is disabled. |
+
+### Admin auth & RBAC
+
+Define the listener and at least one token under `[admin]` (full field
+reference in `docs/CONFIG.md` `[admin]`):
+
+```toml
+[admin]
+# Dedicated listener for /admin/*. Bind to loopback (or a private
+# interface) — it is plain HTTP until native [admin].tls lands, so
+# front it with TLS termination if it must leave the host.
+listen = "127.0.0.1:9092"
+
+# One block per token. The secret is hashed (SHA-256) at load and
+# compared in constant time; it is never logged. role ∈ readonly |
+# operator | admin (roles nest: readonly ⊂ operator ⊂ admin).
+[[admin.token]]
+name  = "dashboard"          # actor label in audit logs (not a secret)
+token = "${SIPHON_ADMIN_RO}" # ${VAR} expansion works — keep secrets out of the file
+role  = "readonly"
+
+[[admin.token]]
+name  = "ops-oncall"
+token = "${SIPHON_ADMIN_OP}"
+role  = "operator"
+
+[[admin.token]]
+name  = "automation"
+token = "${SIPHON_ADMIN_ADMIN}"
+role  = "admin"
+```
+
+Roles, lowest to highest (each inherits everything below it):
+
+| Role       | Can do |
+|------------|--------|
+| `readonly` | All `GET` / list endpoints (calls, registrations, log, conferences, parked). |
+| `operator` | Everything `readonly` can, plus hangup, park / retrieve, and conference create / end / add / remove. |
+| `admin`    | Everything `operator` can, plus **billable** origination (`POST /admin/v1/calls`), `PUT /admin/log`, and `POST /admin/hep/test`. |
+
+Every request is audited: a structured log line (actor = token **name**,
+role, endpoint template, result, peer address — never the secret) and the
+`siphon_ai_admin_requests_total{endpoint, role, result}` counter
+(`result` ∈ `ok` | `unauthenticated` | `forbidden` | `not_found`).
+
+A bearer token goes on every call:
+
+```sh
+ADMIN=http://127.0.0.1:9092
+curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/calls
+# missing/invalid token → 401 + WWW-Authenticate: Bearer
+# token below the endpoint's min role → 403
+```
+
+> **Upgrade note (0.10.0, breaking).** Before 0.10.0 `/admin/*` was
+> unauthenticated on the `[observability].http_listen` port. It has moved
+> to the dedicated `[admin]` listener and now requires a token. **Action
+> required:** add an `[admin]` block with at least one token, point admin
+> tooling at the new port with an `Authorization: Bearer …` header, and
+> drop any `/admin/*` allow rules from the metrics port. If you omit
+> `[admin]` entirely, `/admin/*` is **not served at all** (secure default)
+> — the daemon still starts and serves metrics/health. A reverse proxy
+> that previously added auth in front of the metrics port should move that
+> auth (or hand off to the native tokens) to the admin port.
 
 ### `POST /admin/v1/calls` — outbound origination
 
 Requires `[outbound].max_concurrent > 0` and at least one `[[gateway]]` (see
-`docs/CONFIG.md`; full guide: `docs/OUTBOUND.md`). **This endpoint places billable calls and has no built-in
-auth** — restrict access to it (bind to a private network / front with an
-authenticating reverse proxy). The `max_concurrent` cap + `rate_limit_per_sec`
-are the native guardrails.
+`docs/CONFIG.md`; full guide: `docs/OUTBOUND.md`). **This endpoint places
+billable calls** and requires an **`admin`-role** token (see
+[Admin auth & RBAC](#admin-auth--rbac)). The `max_concurrent` cap +
+`rate_limit_per_sec` are the native guardrails on top of the role gate.
 
 ```sh
-curl -X POST http://localhost:9091/admin/v1/calls -d '{
+curl -X POST -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" \
+  http://127.0.0.1:9092/admin/v1/calls -d '{
   "to": "+15558675309",
   "gateway": "twilio",
   "ws_url": "wss://my-bot.example/outbound"
@@ -363,26 +438,31 @@ finishes) or `outbound_failed` (see [Lifecycle webhooks](#lifecycle-webhooks)).
 
 ### `/admin/v1/conferences` — conference admin (0.7.0)
 
-Requires `[conference].enabled = true` (all routes `501` otherwise). Same
-no-auth posture as the originate API — keep the listener private. A room is
-N calls sharing one mixed audio room; see `docs/CONFIG.md` `[conference]`
-and the WS protocol's `conference_*` messages (`docs/PROTOCOL.md` §3.12 / §4.8).
+Requires `[conference].enabled = true` (all routes `501` otherwise). The
+list route needs `readonly`; create / end / add / remove need `operator`
+(see [Admin auth & RBAC](#admin-auth--rbac)). A room is N calls sharing one
+mixed audio room; see `docs/CONFIG.md` `[conference]` and the WS protocol's
+`conference_*` messages (`docs/PROTOCOL.md` §3.12 / §4.8).
 
 ```sh
-# Who's in which room
-curl -s http://localhost:9091/admin/v1/conferences
+ADMIN=http://127.0.0.1:9092
+# Who's in which room (readonly)
+curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/v1/conferences
 # → {"count":1,"conferences":[{"room_id":"support-7","sample_rate":8000,
 #     "participants":["siphon-a","siphon-b"]}]}
 
-# Pull an active call into a room (creates it if absent)
-curl -X POST http://localhost:9091/admin/v1/conferences/support-7/participants \
+# Pull an active call into a room (creates it if absent) — operator
+curl -X POST -H "Authorization: Bearer $SIPHON_ADMIN_OP" \
+    $ADMIN/admin/v1/conferences/support-7/participants \
     -d '{"call_id":"siphon-c"}'        # → 202
 
-# Drop one call back to its private bot
-curl -X DELETE http://localhost:9091/admin/v1/conferences/support-7/participants/siphon-c  # → 202
+# Drop one call back to its private bot — operator
+curl -X DELETE -H "Authorization: Bearer $SIPHON_ADMIN_OP" \
+    $ADMIN/admin/v1/conferences/support-7/participants/siphon-c  # → 202
 
-# End the whole room (every member reverts to its direct pair)
-curl -X DELETE http://localhost:9091/admin/v1/conferences/support-7   # → 200
+# End the whole room (every member reverts to its direct pair) — operator
+curl -X DELETE -H "Authorization: Bearer $SIPHON_ADMIN_OP" \
+    $ADMIN/admin/v1/conferences/support-7   # → 200
 ```
 
 `add`/`remove` participant return **`202` (dispatched)**: the daemon signals
@@ -396,32 +476,39 @@ body omits `room_id`); `409` if the id is already live; `503` at the
 Example: bump bridge logging to debug for an incident, then revert.
 
 ```sh
-prev=$(curl -s http://localhost:9091/admin/log)
-curl -X PUT --data 'siphon_ai=info,siphon_ai_bridge=debug' \
-    http://localhost:9091/admin/log
+ADMIN=http://127.0.0.1:9092
+# GET is readonly; PUT (mutates the running filter) is admin.
+prev=$(curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/log)
+curl -X PUT -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" \
+    --data 'siphon_ai=info,siphon_ai_bridge=debug' $ADMIN/admin/log
 # … reproduce the issue …
-curl -X PUT --data "$prev" http://localhost:9091/admin/log
+curl -X PUT -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" \
+    --data "$prev" $ADMIN/admin/log
 ```
 
 ### `/admin/v1/parked` — park admin (0.7.0)
 
-Requires `[park].enabled = true` (all routes `501` otherwise). Same no-auth
-posture as the other v1 admin routes — keep the listener private. Park
-shelves a call playing hold music with **no** WS session; see
-`docs/CONFIG.md` `[park]` and the WS protocol (`docs/PROTOCOL.md` §4.9).
+Requires `[park].enabled = true` (all routes `501` otherwise). The list
+route needs `readonly`; park / retrieve need `operator` (see
+[Admin auth & RBAC](#admin-auth--rbac)). Park shelves a call playing hold
+music with **no** WS session; see `docs/CONFIG.md` `[park]` and the WS
+protocol (`docs/PROTOCOL.md` §4.9).
 
 ```sh
-# What's parked, and for how long
-curl -s http://localhost:9091/admin/v1/parked
+ADMIN=http://127.0.0.1:9092
+# What's parked, and for how long (readonly)
+curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/v1/parked
 # → {"count":1,"parked":[{"call_id":"siphon-a","slot":"lot-3","parked_secs":42}]}
 
-# Park an active call (slot label optional)
-curl -X POST http://localhost:9091/admin/v1/calls/siphon-a/park \
+# Park an active call (slot label optional) — operator
+curl -X POST -H "Authorization: Bearer $SIPHON_ADMIN_OP" \
+    $ADMIN/admin/v1/calls/siphon-a/park \
     -d '{"slot":"lot-3"}'        # → 202
 
 # Retrieve it onto a fresh WS session (ws_url optional — defaults to the
-# call's original bridge ws_url)
-curl -X POST http://localhost:9091/admin/v1/calls/siphon-a/retrieve \
+# call's original bridge ws_url) — operator
+curl -X POST -H "Authorization: Bearer $SIPHON_ADMIN_OP" \
+    $ADMIN/admin/v1/calls/siphon-a/retrieve \
     -d '{"ws_url":"wss://my-bot.example/retrieve"}'   # → 202
 ```
 
@@ -648,6 +735,7 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_parked_calls_active`         | gauge     | —                                     | Currently-parked calls (0.7.0). Incremented on park, decremented on retrieve or teardown. |
 | `siphon_ai_holds_total`                 | counter   | `result=ok\|failed`                   | Bot-initiated hold/resume re-INVITEs (0.7.2 — the WS server sends `hold`/`resume`). Covers both directions. `failed` = the re-INVITE was rejected / timed out / glared, or hold was rejected (already held by the far end, tap unavailable, not configured); the call stays in its prior media state. Does **not** count far-end (peer-initiated) holds. |
 | `siphon_ai_ws_reconnects_total`         | counter   | `result=recovered\|exhausted`         | WS reconnect episodes mid-call (0.7.3 — `[bridge].ws_reconnect_enabled`). One increment per unexpected drop that entered the reconnect path. `recovered` = re-dialed the same `ws_url` within `ws_reconnect_max_secs`; `exhausted` = the window elapsed (or the call ended mid-gap) and the call tore down (`ws_disconnect`). |
+| `siphon_ai_admin_requests_total`        | counter   | `endpoint`, `role`, `result=ok\|unauthenticated\|forbidden\|not_found` | Admin API requests on the `[admin]` listener (0.10.0). `endpoint` is the bounded route template (e.g. `POST /admin/v1/calls`, ids collapsed to `:id`), `role` is the authenticated token's role (`none` for `unauthenticated`). `unauthenticated` = 401 (missing/bad token); `forbidden` = 403 (role below the endpoint minimum). Pair with the structured audit log (actor = token name) for per-request detail. |
 | `forge_rtcp_*`                          | various   | per-call (forge-side)                 | RTP/RTCP quality. See forge-media's own metric inventory. |
 | `heplify_*`                             | various   | from the HEP collector                | Only visible if you scrape heplify too. |
 

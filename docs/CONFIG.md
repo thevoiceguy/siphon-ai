@@ -24,7 +24,8 @@ before TOML parsing. Unset variables without a default fail the load.
 [conference]      # conference rooms (0.7.0); off by default
 [park]            # media-only call park (0.7.0); off by default
 [cdr]             # call detail records: file + webhook sinks
-[observability]   # /metrics, /health, /ready, /admin
+[observability]   # /metrics, /health, /ready
+[admin]           # authenticated /admin/* listener (0.10.0); off → /admin not served
 [webhooks]        # lifecycle events (call_start, call_end, …)
 [hep]             # HEP3 shipping to Homer
 ```
@@ -542,7 +543,43 @@ regardless of sub-block state. Adding fields to the CDR schema bumps the
 | Field         | Type        | Default        | Notes |
 |---------------|-------------|----------------|-------|
 | `enabled`     | bool        | `false`        | Master switch for the HTTP server. |
-| `http_listen` | `host:port` | required if on | Exposes `/metrics`, `/health`, `/ready`, `/admin/*`. |
+| `http_listen` | `host:port` | required if on | Exposes `/metrics`, `/health`, `/ready`. **Since 0.10.0 it no longer serves `/admin/*`** (returns `404`) — admin moved to the authenticated `[admin]` listener below. |
+
+This listener is unauthenticated by design (metrics/health are safe to
+scrape). The privileged `/admin/*` surface lives on its own
+[`[admin]`](#admin) listener.
+
+## `[admin]`
+
+Authenticated admin API listener (0.10.0). Serves `/admin/*` (hangup,
+**billable** origination, conference / park control, log-filter changes)
+gated by a bearer token + role. **Omit `[admin]` entirely and `/admin/*`
+is not served at all** — a secure default; the daemon still starts and
+serves `[observability]`. Operator guide + the endpoint→role table:
+`docs/DEPLOY.md` → *Admin API* / *Admin auth & RBAC*.
+
+```toml
+[admin]
+listen = "127.0.0.1:9092"      # dedicated listener; plain HTTP (bind loopback
+                               # or front with TLS until [admin].tls lands)
+
+[[admin.token]]                # one block per token; at least one required
+name  = "ops-oncall"           # actor label in audit logs — NOT a secret
+token = "${SIPHON_ADMIN_OP}"   # the bearer secret; ${VAR} expansion works
+role  = "operator"             # readonly | operator | admin (roles nest)
+```
+
+| Field            | Type        | Default        | Notes |
+|------------------|-------------|----------------|-------|
+| `listen`         | `host:port` | required if on | Where `/admin/*` is served. A non-loopback bind logs a warning (plain HTTP). |
+| `token`          | table array | ≥ 1 required   | At least one `[[admin.token]]`; an `[admin]` block with no tokens is a fatal config error. |
+| `token[].name`   | string      | required       | Unique, non-empty label recorded as the audit-log actor. Duplicate names are a fatal error. |
+| `token[].token`  | string      | required       | The bearer secret (non-empty). Hashed (SHA-256) at load, compared in constant time, never logged. Use `${VAR}` to keep it out of the file. |
+| `token[].role`   | enum        | required       | `readonly` (GET/list) ⊂ `operator` (hangup, park/retrieve, conference CRUD) ⊂ `admin` (origination, `PUT /admin/log`, `hep/test`). Unknown value → fatal error. |
+
+Validation is at load time (CLAUDE.md §4.6): no tokens, an empty name or
+secret, a duplicate name, an unknown role, or an unparseable `listen` all
+fail the daemon at startup rather than at first request.
 
 ## `[webhooks]`
 

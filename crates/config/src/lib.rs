@@ -46,6 +46,9 @@ pub use raw::{
     RawMedia, RawNode, RawObservability, RawOutbound, RawPark, RawRegister, RawSip, RawSipTls,
     RawTrunk, RawWebhooks,
 };
+// Re-exported so the daemon binary's `check`/`print-config` can read
+// `Config.recording.mode` without a direct dep on the recording crate.
+pub use siphon_ai_recording::RecordingMode;
 
 /// Top-level error type. Loaders surface this; consumers match on
 /// the underlying variants when they need to discriminate.

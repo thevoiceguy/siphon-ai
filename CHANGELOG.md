@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-19
+
+### Added
+
+- **Native admin authentication + RBAC.** `/admin/*` is now gated by
+  bearer tokens with three nested roles — `readonly` ⊂ `operator` ⊂
+  `admin`. Tokens are declared under a new `[admin]` config block
+  (`[[admin.token]] { name, token, role }`), hashed (SHA-256) at load and
+  compared in constant time; the secret is never logged. The
+  endpoint→minimum-role map: `readonly` = all GET/list routes; `operator`
+  = hangup, park/retrieve, conference create/end/add/remove; `admin` =
+  **billable** origination (`POST /admin/v1/calls`), `PUT /admin/log`, and
+  `POST /admin/hep/test`. Missing/invalid token → `401` (+
+  `WWW-Authenticate: Bearer`); role below the minimum → `403`. Config is
+  validated at load (CLAUDE.md §4.6): an `[admin]` block with no tokens, an
+  empty/duplicate name, an empty secret, an unknown role, or an
+  unparseable `listen` fails the daemon at startup.
+- **Admin request audit + metric.** Every admin request emits a structured
+  log line (actor = token **name**, role, endpoint template, result, peer
+  — never the secret) and ticks
+  `siphon_ai_admin_requests_total{endpoint, role, result}` (`result` ∈
+  `ok` | `unauthenticated` | `forbidden` | `not_found`; `endpoint` is a
+  bounded route template with ids collapsed to `:id`).
+
+### Changed
+
+- **BREAKING: `/admin/*` moved off the metrics listener.** Admin endpoints
+  are now served **only** on the dedicated `[admin].listen`; the
+  `[observability].http_listen` port serves just `/metrics`, `/health`,
+  `/ready` and returns `404` for `/admin/*`. **Migration:** add an
+  `[admin]` block with at least one token, repoint admin tooling at the new
+  port with an `Authorization: Bearer …` header, and remove any `/admin/*`
+  allow rules (or front-proxy auth) from the metrics port. If `[admin]` is
+  omitted, `/admin/*` is **not served at all** (secure default) — the
+  daemon still starts and serves metrics/health. The admin listener is
+  plain HTTP for now (`[admin].tls` is a planned follow-up); bind it on
+  loopback or front it with TLS termination. A non-loopback bind logs a
+  warning at startup.
+
 ## [0.9.5] - 2026-06-19
 
 ### Fixed

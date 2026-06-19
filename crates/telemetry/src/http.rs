@@ -463,6 +463,65 @@ mod tests {
         server.shutdown().await;
     }
 
+    /// Send `method url` with an optional bearer token; return the status.
+    async fn send_auth(method: Method, url: String, bearer: Option<&str>) -> StatusCode {
+        let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
+        let mut b = Request::builder().method(method).uri(url);
+        if let Some(t) = bearer {
+            b = b.header(AUTHORIZATION, format!("Bearer {t}"));
+        }
+        let resp = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.request(b.body(Empty::new()).unwrap()),
+        )
+        .await
+        .expect("request returns")
+        .expect("ok");
+        resp.status()
+    }
+
+    #[tokio::test]
+    async fn admin_role_tiers_gate_by_minimum_role() {
+        // Walk the nested role ladder against representative endpoints:
+        //   GET  /admin/calls           → readonly
+        //   POST /admin/calls/:id/hangup→ operator
+        //   POST /admin/v1/calls        → admin (billable originate)
+        // A token at or above the endpoint's minimum passes the gate
+        // (never 401/403 — downstream may 404/503/501 with deps absent);
+        // a token below it is 403.
+        let (server, url) = spawn_admin_server().await;
+        let passed = |s: StatusCode| s != StatusCode::UNAUTHORIZED && s != StatusCode::FORBIDDEN;
+
+        // operator endpoint: readonly forbidden, operator + admin pass.
+        let hangup = format!("{url}/admin/calls/abc/hangup");
+        assert_eq!(
+            send_auth(Method::POST, hangup.clone(), Some("ro-tok")).await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(passed(
+            send_auth(Method::POST, hangup.clone(), Some("op-tok")).await
+        ));
+        assert!(passed(
+            send_auth(Method::POST, hangup, Some("ad-tok")).await
+        ));
+
+        // admin endpoint: readonly + operator forbidden, admin passes.
+        let originate = format!("{url}/admin/v1/calls");
+        assert_eq!(
+            send_auth(Method::POST, originate.clone(), Some("ro-tok")).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send_auth(Method::POST, originate.clone(), Some("op-tok")).await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(passed(
+            send_auth(Method::POST, originate, Some("ad-tok")).await
+        ));
+
+        server.shutdown().await;
+    }
+
     async fn get(url: String) -> (StatusCode, String) {
         let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
         let req = Request::builder()

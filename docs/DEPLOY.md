@@ -630,12 +630,17 @@ where CDRs cover bridged calls only.
 
 The webhook sink delivers the same JSON to `[cdr.webhook].url` with
 `Content-Type: application/json`. Retries on non-2xx up to
-`[cdr.webhook].retry_max` times with exponential backoff.
+`[cdr.webhook].retry_max` times with exponential backoff, then drops —
+unless `[cdr.webhook].spool_dir` is set, which makes delivery durable
+across restarts. Set `[cdr.webhook].secret` to sign each POST. See
+[Webhook delivery: signing, idempotency, durability](#webhook-delivery-signing-idempotency-durability).
 
 ## Lifecycle webhooks
 
-Off-band events (NOT the per-call WS bridge). Same retry semantics as the
-CDR webhook. Event types:
+Off-band events (NOT the per-call WS bridge). Same delivery transport as the
+CDR webhook — see [Webhook delivery: signing, idempotency,
+durability](#webhook-delivery-signing-idempotency-durability) for signing,
+the idempotency id, and the durable spool. Event types:
 
 | `type`                          | When                                             |
 |---------------------------------|--------------------------------------------------|
@@ -681,6 +686,86 @@ or (on timeout) `park_timeout`. A call may park/retrieve repeatedly.
 { "type": "park_timeout", "version": 1, "call_id": "siphon-…",
   "timestamp": "2026-06-14T10:05:00Z", "action": "hangup" }
 ```
+
+## Webhook delivery: signing, idempotency, durability
+
+Lifecycle webhooks (`[webhooks]`) and the CDR webhook (`[cdr.webhook]`)
+share one delivery transport, so the following applies identically to both
+(0.11.0). All of it is **additive** — the JSON bodies are unchanged
+(webhook + CDR schema versions are **not** bumped); these are
+transport-layer headers and behavior.
+
+### Headers on every delivery
+
+| Header | When | Purpose |
+|--------|------|---------|
+| `X-SiphonAI-Event-Id` | always | A UUIDv4 unique to one logical delivery, **stable across retries and any spool replay**. |
+| `Idempotency-Key` | always | Alias of `X-SiphonAI-Event-Id` for receivers/middleware that key on the conventional name. |
+| `X-SiphonAI-Signature` | when `secret` set | `t=<unix>,v1=<hex>` — HMAC-SHA256 over `"<unix>.<raw-body>"`. |
+
+**Idempotency.** Delivery is *at-least-once* (a retry or a post-restart
+spool replay can redeliver a body the receiver already processed but failed
+to ACK). Dedupe on `X-SiphonAI-Event-Id` — persist seen ids and skip
+duplicates.
+
+**Signature verification.** Set `secret` to enable
+`X-SiphonAI-Signature`. The timestamp is inside the signed string, so a
+captured POST can't be replayed outside your freshness window. To verify:
+split `t=`/`v1=`, recompute the HMAC over `"<t>.<raw-request-body>"` with
+your secret, compare in constant time, and reject if `t` is too old.
+
+```python
+# Flask receiver — verify a SiphonAI webhook/CDR POST.
+import hmac, hashlib, time
+from flask import request, abort
+
+SECRET = b"whsec_..."          # same value as [webhooks].secret
+MAX_SKEW = 300                 # seconds
+
+def verify(req):
+    sig = req.headers.get("X-SiphonAI-Signature", "")
+    parts = dict(p.split("=", 1) for p in sig.split(",") if "=" in p)
+    t, v1 = parts.get("t"), parts.get("v1")
+    if not t or not v1 or abs(time.time() - int(t)) > MAX_SKEW:
+        abort(401)                                   # missing / stale
+    signed = f"{t}.".encode() + req.get_data()       # raw body bytes
+    expected = hmac.new(SECRET, signed, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, v1):
+        abort(401)                                   # bad signature
+    return req.headers["X-SiphonAI-Event-Id"]        # dedupe on this
+```
+
+> Verify against the **raw request body bytes**, before any JSON
+> re-serialization — SiphonAI signs the exact bytes it sends.
+
+### Durability (spool)
+
+Without `spool_dir`, delivery is best-effort: after `retry_max` in-memory
+retries (exponential backoff) a failed delivery is logged and dropped.
+
+Set `spool_dir` to make delivery durable. A delivery that exhausts the
+in-memory budget is written to that directory and re-attempted by a
+background worker; the worker resumes pending entries after a daemon
+**restart**. The happy path is unchanged (no disk I/O — entries are only
+written on failure). Entries are retried oldest-first with capped backoff;
+a `4xx` rejection or a poison entry that never succeeds is eventually
+discarded (with a metric). The directory is created and write-probed at
+startup, so a bad path fails the daemon loudly rather than at the first
+failed delivery. Bound disk with the per-sink file cap (a full spool drops
+the newest delivery rather than evicting an already-persisted one).
+
+Point the file sink (`[cdr.file]`) at the same record stream if you want a
+second, append-only durable copy of CDRs independent of HTTP delivery.
+
+### Delivery health
+
+Watch `siphon_ai_webhook_deliveries_total{sink,result}` (terminal
+outcomes), `siphon_ai_webhook_delivery_attempts_total{sink,outcome}` (per
+HTTP attempt), `siphon_ai_webhook_spool_depth{sink}` (a rising value means
+deliveries are failing and backing up on disk), and
+`siphon_ai_webhook_delivery_seconds{sink}` (latency incl. spool dwell). See
+the [Metrics](#metrics) table. Per-delivery detail lives in the logs,
+keyed by `event_id` (the audit-friendly id, not the secret).
 
 ## HEP / Homer
 
@@ -736,6 +821,10 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_holds_total`                 | counter   | `result=ok\|failed`                   | Bot-initiated hold/resume re-INVITEs (0.7.2 — the WS server sends `hold`/`resume`). Covers both directions. `failed` = the re-INVITE was rejected / timed out / glared, or hold was rejected (already held by the far end, tap unavailable, not configured); the call stays in its prior media state. Does **not** count far-end (peer-initiated) holds. |
 | `siphon_ai_ws_reconnects_total`         | counter   | `result=recovered\|exhausted`         | WS reconnect episodes mid-call (0.7.3 — `[bridge].ws_reconnect_enabled`). One increment per unexpected drop that entered the reconnect path. `recovered` = re-dialed the same `ws_url` within `ws_reconnect_max_secs`; `exhausted` = the window elapsed (or the call ended mid-gap) and the call tore down (`ws_disconnect`). |
 | `siphon_ai_admin_requests_total`        | counter   | `endpoint`, `role`, `result=ok\|unauthenticated\|forbidden\|not_found` | Admin API requests on the `[admin]` listener (0.10.0). `endpoint` is the bounded route template (e.g. `POST /admin/v1/calls`, ids collapsed to `:id`), `role` is the authenticated token's role (`none` for `unauthenticated`). `unauthenticated` = 401 (missing/bad token); `forbidden` = 403 (role below the endpoint minimum). Pair with the structured audit log (actor = token name) for per-request detail. |
+| `siphon_ai_webhook_deliveries_total`    | counter   | `sink=lifecycle\|cdr`, `result=delivered\|spooled\|rejected\|dropped` | Terminal webhook/CDR delivery outcomes (0.11.0). One increment per logical delivery. `delivered` = 2xx; `spooled` = persisted to the durable spool after the in-memory budget; `rejected` = non-retryable 4xx; `dropped` = budget (or spool) exhausted, or payload not serializable. |
+| `siphon_ai_webhook_delivery_attempts_total` | counter | `sink`, `outcome=ok\|transient\|error\|rejected` | Individual HTTP delivery attempts (0.11.0) — a retried delivery ticks several times. `transient` = retryable 5xx/408/429; `error` = connect/timeout; `rejected` = non-retryable 4xx. Divide by `siphon_ai_webhook_deliveries_total` for attempts-per-delivery. |
+| `siphon_ai_webhook_spool_depth`         | gauge     | `sink`                                | Deliveries waiting in the durable spool (0.11.0, set when `spool_dir` is configured). Sampled by the drain worker each pass (self-correcting across restarts). Healthy = 0; a rising value means deliveries are failing and backing up on disk. |
+| `siphon_ai_webhook_delivery_seconds`    | histogram | `sink`                                | Delivery latency in seconds, accepted → 2xx (0.11.0). Includes spool dwell, so a slow/recovered receiver shows as a fat tail. Buckets 5 ms – 30 s. |
 | `forge_rtcp_*`                          | various   | per-call (forge-side)                 | RTP/RTCP quality. See forge-media's own metric inventory. |
 | `heplify_*`                             | various   | from the HEP collector                | Only visible if you scrape heplify too. |
 

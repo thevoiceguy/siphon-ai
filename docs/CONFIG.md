@@ -530,6 +530,8 @@ path    = "/var/log/siphon-ai/cdr.jsonl"
 enabled    = true
 url        = "https://billing.example.com/cdr"
 auth_header = "Bearer ${CDR_TOKEN}"
+secret     = "${CDR_WEBHOOK_SECRET}"          # optional HMAC signing (0.11.0)
+spool_dir  = "/var/lib/siphon-ai/spool/cdr"   # optional durable retry (0.11.0)
 retry_max  = 3
 timeout_ms = 5000
 ```
@@ -537,6 +539,14 @@ timeout_ms = 5000
 Both sinks can run simultaneously. Master `enabled = false` silences both
 regardless of sub-block state. Adding fields to the CDR schema bumps the
 `version` field; consumers should treat new keys as additive.
+
+The CDR webhook shares the delivery transport with `[webhooks]`, so
+`secret` (HMAC `X-SiphonAI-Signature`), `spool_dir` (durable retry), the
+`X-SiphonAI-Event-Id` idempotency header, and the `siphon_ai_webhook_*`
+delivery metrics all behave identically here (0.11.0). The CDR JSON body is
+unchanged — these are transport-layer headers/behavior, so the CDR schema
+`version` is **not** bumped. See `docs/DEPLOY.md` → *Webhook delivery:
+signing, idempotency, durability*.
 
 ## `[observability]`
 
@@ -588,9 +598,15 @@ fail the daemon at startup rather than at first request.
 | `enabled`     | bool     | `false`                | |
 | `url`         | URL      | required if on         | POST target. |
 | `auth_header` | string   | unset                  | Sent verbatim. `${VAR}` expansion works. |
+| `secret`      | string   | unset                  | HMAC-SHA256 signing secret (0.11.0). When set, every POST carries `X-SiphonAI-Signature` for authenticity + replay protection. `${VAR}` expansion works; never logged. See `docs/DEPLOY.md` → *Webhook delivery: signing, idempotency, durability*. |
+| `spool_dir`   | path     | unset                  | Durable retry spool directory (0.11.0). When set, a delivery that exhausts `retry_max` is persisted here and re-delivered by a background worker that survives restarts. Unset ⇒ best-effort (dropped after `retry_max`). Created + write-probed at startup (fail-loud). `${VAR}` expansion works. |
 | `events`      | string[] | all                    | Allowlist. Valid today: `"call_start"`, `"call_end"`, `"registration_state_changed"`, `"outbound_initiated"`, `"outbound_answered"`, `"outbound_failed"`, `"conference_created"`, `"conference_ended"`, `"call_parked"`, `"call_retrieved"`, `"park_timeout"`. |
-| `retry_max`   | integer  | `3`                    | |
+| `retry_max`   | integer  | `3`                    | In-memory retries before spooling (or dropping). |
 | `timeout_ms`  | integer  | `5000`                 | |
+
+Every delivery — webhook **and** CDR — also carries `X-SiphonAI-Event-Id`
+(+ an `Idempotency-Key` alias): a stable id, reused across retries and any
+spool replay, so a receiver can dedupe an at-least-once redelivery (0.11.0).
 
 ## `[hep]`
 

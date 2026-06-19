@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-19
+
+### Added
+
+- **Webhook & CDR delivery trust + durability.** The shared outbound HTTP
+  transport (lifecycle webhooks **and** the CDR webhook) gains, all
+  additively — bodies are unchanged, so the webhook and CDR schema
+  `version`s are **not** bumped:
+  - **Idempotency.** Every delivery carries `X-SiphonAI-Event-Id` (+ an
+    `Idempotency-Key` alias) — a UUIDv4 stable across retries and any spool
+    replay. Delivery is at-least-once; receivers dedupe on this id.
+  - **Authenticity (opt-in `secret`).** When `[webhooks].secret` /
+    `[cdr.webhook].secret` is set, deliveries carry
+    `X-SiphonAI-Signature: t=<unix>,v1=<hex>` — HMAC-SHA256 over
+    `"<unix>.<raw-body>"`. The timestamp is inside the signed string, giving
+    the receiver replay protection from a freshness window. The secret is
+    `${VAR}`-expanded and never logged.
+  - **Durability (opt-in `spool_dir`).** When `[webhooks].spool_dir` /
+    `[cdr.webhook].spool_dir` is set, a delivery that exhausts the in-memory
+    retry budget is persisted to disk and re-attempted by a background
+    worker that **resumes after a daemon restart** (spool-on-failure: the
+    happy path stays zero-disk-I/O). Oldest-first with capped backoff; a
+    `4xx` or poison entry is eventually discarded; a per-sink file cap bounds
+    disk (dropping the newest, never evicting an already-persisted entry).
+    The directory is created + write-probed at startup, so a bad path fails
+    the daemon loudly (CLAUDE.md §4.6). Unset ⇒ today's best-effort behavior,
+    unchanged.
+  - **Delivery metrics.** `siphon_ai_webhook_deliveries_total{sink,result}`,
+    `siphon_ai_webhook_delivery_attempts_total{sink,outcome}`,
+    `siphon_ai_webhook_spool_depth{sink}` (gauge), and
+    `siphon_ai_webhook_delivery_seconds{sink}` (histogram). `sink` ∈
+    `lifecycle` | `cdr`.
+
+  See `docs/DEPLOY.md` → *Webhook delivery: signing, idempotency, durability*
+  (incl. a receiver verification snippet) and the `[webhooks]` /
+  `[cdr.webhook]` config reference.
+
 ## [0.10.0] - 2026-06-19
 
 ### Added

@@ -1090,7 +1090,7 @@ any = true
 
 #[test]
 fn cdr_webhook_sink_compiles_with_url_and_auth() {
-    let env = MapEnv::new([("CDR_TOKEN", "tok-123")]);
+    let env = MapEnv::new([("CDR_TOKEN", "tok-123"), ("CDR_SECRET", "whsec-cdr")]);
     let toml = r#"
 [sip]
 listen = "127.0.0.1:5060"
@@ -1104,6 +1104,7 @@ enabled = true
 enabled = true
 url = "https://billing.example.com/cdr"
 auth_header = "Bearer ${CDR_TOKEN}"
+secret = "${CDR_SECRET}"
 retry_max = 5
 timeout_ms = 7500
 
@@ -1116,6 +1117,8 @@ any = true
     let w = cfg.cdr.webhook.expect("webhook configured");
     assert_eq!(w.url, "https://billing.example.com/cdr");
     assert_eq!(w.auth_header.as_deref(), Some("Bearer tok-123"));
+    // Signing secret arrives env-expanded.
+    assert_eq!(w.secret.as_deref(), Some("whsec-cdr"));
     assert_eq!(w.retry_max, 5);
     assert_eq!(w.timeout, std::time::Duration::from_millis(7500));
 }
@@ -1611,7 +1614,10 @@ any = true
 
 #[test]
 fn webhooks_enabled_compiles_with_url_auth_and_allowlist() {
-    let env = MapEnv::new([("WEBHOOK_TOKEN", "wh-xyz")]);
+    let env = MapEnv::new([
+        ("WEBHOOK_TOKEN", "wh-xyz"),
+        ("WEBHOOK_SECRET", "whsec-life"),
+    ]);
     let toml = r#"
 [sip]
 listen = "127.0.0.1:5060"
@@ -1623,6 +1629,7 @@ ws_url = "wss://x/y"
 enabled = true
 url = "https://ops.example.com/siphon-events"
 auth_header = "Bearer ${WEBHOOK_TOKEN}"
+secret = "${WEBHOOK_SECRET}"
 events = ["call_start", "call_end"]
 retry_max = 5
 timeout_ms = 4000
@@ -1639,6 +1646,8 @@ any = true
         Some("https://ops.example.com/siphon-events")
     );
     assert_eq!(cfg.webhooks.auth_header.as_deref(), Some("Bearer wh-xyz"));
+    // Signing secret arrives env-expanded.
+    assert_eq!(cfg.webhooks.secret.as_deref(), Some("whsec-life"));
     assert_eq!(
         cfg.webhooks.events,
         vec!["call_start".to_string(), "call_end".to_string()]

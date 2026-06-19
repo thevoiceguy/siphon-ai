@@ -3,13 +3,16 @@
 //!
 //! Each `emit` spawns the retrying POST so the per-call task never
 //! blocks on network I/O. The retry budget, exponential backoff,
-//! transient-status classification, and `Authorization` header live
-//! in `siphon-ai-http`, shared with the CDR webhook sink — so a
-//! change to delivery behavior (or future HMAC signing) happens once.
+//! transient-status classification, `Authorization` header, and HMAC
+//! signing all live in `siphon-ai-http`, shared with the CDR webhook
+//! sink — so a change to delivery behavior happens once.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use siphon_ai_http::{BuildError, PostLog, RetryingPoster, DEFAULT_RETRY_MAX, DEFAULT_TIMEOUT_MS};
+use siphon_ai_http::{
+    BuildError, PostLog, PosterConfig, RetryingPoster, SinkKind, DEFAULT_RETRY_MAX,
+    DEFAULT_TIMEOUT_MS,
+};
 
 use crate::event::WebhookEvent;
 use crate::sink::WebhookSink;
@@ -21,6 +24,11 @@ pub struct HttpSinkConfig {
     /// caller decides between `Bearer ...`, basic, or other schemes.
     #[serde(default)]
     pub auth_header: Option<String>,
+    /// Optional HMAC-SHA256 signing secret. When set, every delivery
+    /// carries `X-SiphonAI-Signature: t=<unix>,v1=<hex>` so the
+    /// receiver can verify authenticity + freshness. `None` ⇒ unsigned.
+    #[serde(default)]
+    pub secret: Option<String>,
     /// Maximum retries on transient failure. `0` = post once.
     #[serde(default = "default_retry_max")]
     pub retry_max: u32,
@@ -42,6 +50,7 @@ impl HttpSinkConfig {
         Self {
             url: url.into(),
             auth_header: None,
+            secret: None,
             retry_max: DEFAULT_RETRY_MAX,
             timeout_ms: DEFAULT_TIMEOUT_MS,
         }
@@ -57,12 +66,14 @@ pub struct HttpSink {
 
 impl HttpSink {
     pub fn new(config: HttpSinkConfig) -> Result<Self, BuildError> {
-        let poster = RetryingPoster::new(
-            config.url,
-            config.auth_header,
-            config.retry_max,
-            config.timeout_ms,
-        )?;
+        let poster = RetryingPoster::new(PosterConfig {
+            url: config.url,
+            auth_header: config.auth_header,
+            retry_max: config.retry_max,
+            timeout_ms: config.timeout_ms,
+            secret: config.secret,
+            sink: SinkKind::Lifecycle,
+        })?;
         Ok(Self { poster })
     }
 }

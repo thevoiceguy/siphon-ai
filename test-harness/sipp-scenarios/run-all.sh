@@ -33,6 +33,12 @@ cd "$SCRIPT_DIR"
 
 SIPP_PORT=5080       # SIPp's listen port (any free port works)
 DAEMON_PORT=5070     # SiphonAI's listen port (matches local-dev.toml)
+# Admin API (0.10.0): /admin/* moved to its own authenticated listener,
+# separate from the open [observability] /metrics port. Phases that drive
+# the admin API ([admin] block + these on a bearer token); phases run
+# sequentially so one fixed port/token is reused.
+ADMIN_API_PORT=9191
+ADMIN_TOKEN="sipp-harness-admin"
 DAEMON_BIN="${DAEMON_BIN:-$REPO_ROOT/target/debug/siphon-ai}"
 DAEMON_CONFIG="${SIPHON_AI_CONFIG:-$REPO_ROOT/configs/local-dev.toml}"
 
@@ -362,6 +368,12 @@ ws_url = "ws://127.0.0.1:$OB_WS_PORT/"
 [observability]
 enabled = true
 http_listen = "127.0.0.1:$OB_ADMIN_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
 [outbound]
 max_concurrent = 2
 [[gateway]]
@@ -408,7 +420,7 @@ sleep 0.3
 # Place the call. 202 + a call_id means admitted; the rest plays out
 # between the daemon, SIPp, and the echo-ws hangup.
 ob_resp=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X POST "http://127.0.0.1:$OB_ADMIN_PORT/admin/v1/calls" \
+    -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$ADMIN_API_PORT/admin/v1/calls" \
     -d '{"to": "7001", "gateway": "sipp"}')
 if [[ "$ob_resp" == "202" ]] && wait "$OB_SIPP_PID"; then
     # SIPp saw INVITE → ACK → BYE. Cross-check the daemon agrees the
@@ -454,6 +466,12 @@ ws_url = "ws://127.0.0.1:$ODO_WS_PORT/"
 [observability]
 enabled = true
 http_listen = "127.0.0.1:$ODO_ADMIN_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
 [outbound]
 max_concurrent = 2
 [[gateway]]
@@ -492,7 +510,7 @@ sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/outbound_delayed_uas.xml" \
 ODO_SIPP_PID=$!
 sleep 0.3
 odo_resp=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X POST "http://127.0.0.1:$ODO_ADMIN_PORT/admin/v1/calls" \
+    -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$ADMIN_API_PORT/admin/v1/calls" \
     -d '{"to": "7001", "gateway": "sipp", "delayed_offer": true}')
 if [[ "$odo_resp" == "202" ]] && wait "$ODO_SIPP_PID"; then
     if curl -s "http://127.0.0.1:$ODO_ADMIN_PORT/metrics" \
@@ -535,6 +553,12 @@ ws_url = "ws://127.0.0.1:$ODS_WS_PORT/"
 [observability]
 enabled = true
 http_listen = "127.0.0.1:$ODS_ADMIN_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
 [outbound]
 max_concurrent = 2
 [[gateway]]
@@ -574,7 +598,7 @@ sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/outbound_delayed_srtp_uas.xml" \
 ODS_SIPP_PID=$!
 sleep 0.3
 ods_resp=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X POST "http://127.0.0.1:$ODS_ADMIN_PORT/admin/v1/calls" \
+    -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$ADMIN_API_PORT/admin/v1/calls" \
     -d '{"to": "7001", "gateway": "sipp", "delayed_offer": true}')
 if [[ "$ods_resp" == "202" ]] && wait "$ODS_SIPP_PID"; then
     if curl -s "http://127.0.0.1:$ODS_ADMIN_PORT/metrics" \
@@ -618,6 +642,12 @@ ws_url = "ws://127.0.0.1:$ODD_WS_PORT/"
 [observability]
 enabled = true
 http_listen = "127.0.0.1:$ODD_ADMIN_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
 [outbound]
 max_concurrent = 2
 [[gateway]]
@@ -657,7 +687,7 @@ sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/outbound_delayed_dtls_uas.xml" \
 ODD_SIPP_PID=$!
 sleep 0.3
 odd_resp=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X POST "http://127.0.0.1:$ODD_ADMIN_PORT/admin/v1/calls" \
+    -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$ADMIN_API_PORT/admin/v1/calls" \
     -d '{"to": "7001", "gateway": "sipp", "delayed_offer": true}')
 if [[ "$odd_resp" == "202" ]] && wait "$ODD_SIPP_PID"; then
     if curl -s "http://127.0.0.1:$ODD_ADMIN_PORT/metrics" \
@@ -709,6 +739,12 @@ ws_url = "ws://127.0.0.1:$AT_A_WS_PORT/"
 [observability]
 enabled = true
 http_listen = "127.0.0.1:$AT_ADMIN_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
 [outbound]
 max_concurrent = 2
 [[gateway]]
@@ -756,7 +792,7 @@ sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/outbound_uas_answer.xml" \
     -m 1 -timeout 20s -trace_err -p "$AT_CONSULT_PORT" >/dev/null 2>&1 &
 AT_C_SIPP_PID=$!
 sleep 0.3
-at_consult_id=$(curl -s -X POST "http://127.0.0.1:$AT_ADMIN_PORT/admin/v1/calls" \
+at_consult_id=$(curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$ADMIN_API_PORT/admin/v1/calls" \
     -d "{\"to\": \"agent\", \"gateway\": \"sipp\", \"ws_url\": \"ws://127.0.0.1:$AT_C_WS_PORT/\"}" \
     | sed -n 's/.*"call_id":"\([^"]*\)".*/\1/p')
 
@@ -829,6 +865,12 @@ ws_url = "ws://127.0.0.1:$PK_WS_PORT/"
 [observability]
 enabled = true
 http_listen = "127.0.0.1:$PK_ADMIN_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
 [park]
 enabled = true
 timeout_secs = 1
@@ -904,6 +946,12 @@ ws_url = "ws://127.0.0.1:$PR_WS_A_PORT/"
 [observability]
 enabled = true
 http_listen = "127.0.0.1:$PR_ADMIN_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
 [park]
 enabled = true
 timeout_secs = 0
@@ -947,7 +995,7 @@ sleep 0.3
 # Wait until the call is parked, then grab its bridge call_id.
 parked_id=""
 for _ in $(seq 1 25); do
-    parked_id=$(curl -s "http://127.0.0.1:$PR_ADMIN_PORT/admin/v1/parked" \
+    parked_id=$(curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$ADMIN_API_PORT/admin/v1/parked" \
         | sed -n 's/.*"call_id":"\([^"]*\)".*/\1/p' | head -1)
     [[ -n "$parked_id" ]] && break
     sleep 0.2
@@ -955,7 +1003,7 @@ done
 
 if [[ -n "$parked_id" ]]; then
     curl -s -o /dev/null -X POST \
-        "http://127.0.0.1:$PR_ADMIN_PORT/admin/v1/calls/$parked_id/retrieve" \
+        -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$ADMIN_API_PORT/admin/v1/calls/$parked_id/retrieve" \
         -d "{\"ws_url\": \"ws://127.0.0.1:$PR_WS_B_PORT/\"}"
     # echo-ws B hangs up → SiphonAI BYEs the caller → SIPp completes.
     if wait "$PR_SIPP_PID" && curl -s "http://127.0.0.1:$PR_ADMIN_PORT/metrics" \
@@ -1000,6 +1048,12 @@ ws_url = "ws://127.0.0.1:$CF_WS_PORT/"
 [observability]
 enabled = true
 http_listen = "127.0.0.1:$CF_ADMIN_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
 [conference]
 enabled = true
 [[route]]
@@ -1095,6 +1149,12 @@ ws_url = "ws://127.0.0.1:$OBS_WS_PORT/"
 [observability]
 enabled = true
 http_listen = "127.0.0.1:$OBS_ADMIN_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
 [outbound]
 max_concurrent = 2
 [[gateway]]
@@ -1135,7 +1195,7 @@ sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/outbound_srtp_uas_answer.xml" \
 OBS_SIPP_PID=$!
 sleep 0.3
 obs_resp=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X POST "http://127.0.0.1:$OBS_ADMIN_PORT/admin/v1/calls" \
+    -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$ADMIN_API_PORT/admin/v1/calls" \
     -d '{"to": "7002", "gateway": "sipp"}')
 if [[ "$obs_resp" == "202" ]] && wait "$OBS_SIPP_PID"; then
     if curl -s "http://127.0.0.1:$OBS_ADMIN_PORT/metrics" \
@@ -1179,6 +1239,12 @@ ws_url = "ws://127.0.0.1:$BH_WS_PORT/"
 [observability]
 enabled = true
 http_listen = "127.0.0.1:$BH_ADMIN_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
 [[route]]
 name = "default"
 [route.match]
@@ -1254,6 +1320,12 @@ ws_reconnect_max_secs = 10
 [observability]
 enabled = true
 http_listen = "127.0.0.1:$RC_ADMIN_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
 [[route]]
 name = "default"
 [route.match]
@@ -1327,6 +1399,12 @@ ws_reconnect_max_secs = 10
 [observability]
 enabled = true
 http_listen = "127.0.0.1:$OR_ADMIN_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
 [outbound]
 max_concurrent = 2
 [[gateway]]
@@ -1366,7 +1444,7 @@ sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/outbound_uas_answer.xml" \
 OR_SIPP_PID=$!
 sleep 0.3
 or_resp=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X POST "http://127.0.0.1:$OR_ADMIN_PORT/admin/v1/calls" \
+    -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$ADMIN_API_PORT/admin/v1/calls" \
     -d '{"to": "7001", "gateway": "sipp"}')
 if [[ "$or_resp" == "202" ]] && wait "$OR_SIPP_PID"; then
     if curl -s "http://127.0.0.1:$OR_ADMIN_PORT/metrics" \
@@ -1411,6 +1489,12 @@ ws_url = "ws://127.0.0.1:$OH_WS_PORT/"
 [observability]
 enabled = true
 http_listen = "127.0.0.1:$OH_ADMIN_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
 [outbound]
 max_concurrent = 2
 [[gateway]]
@@ -1450,7 +1534,7 @@ sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/outbound_bot_hold_uas.xml" \
 OH_SIPP_PID=$!
 sleep 0.3
 oh_resp=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X POST "http://127.0.0.1:$OH_ADMIN_PORT/admin/v1/calls" \
+    -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$ADMIN_API_PORT/admin/v1/calls" \
     -d '{"to": "7001", "gateway": "sipp"}')
 if [[ "$oh_resp" == "202" ]] && wait "$OH_SIPP_PID"; then
     if curl -s "http://127.0.0.1:$OH_ADMIN_PORT/metrics" \

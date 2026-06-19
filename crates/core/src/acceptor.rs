@@ -2132,6 +2132,64 @@ pub(crate) fn termination_label(cause: CdrTerminationCause) -> &'static str {
         CdrTerminationCause::LocalShutdown => "local_shutdown",
         CdrTerminationCause::BridgeEnded => "bridge_ended",
         CdrTerminationCause::TapEnded => "tap_ended",
+        // Delayed-offer negotiation failures (v2). These don't reach the
+        // active-call CDR path (they're emitted directly), but the match
+        // must be exhaustive.
+        CdrTerminationCause::AckTimeout => "ack_timeout",
+        CdrTerminationCause::MissingSdpAnswer => "missing_sdp_answer",
+        CdrTerminationCause::InvalidSdpAnswer => "invalid_sdp_answer",
+        CdrTerminationCause::NoCompatibleCodec => "no_compatible_codec",
+        CdrTerminationCause::InvalidRemoteMedia => "invalid_remote_media",
+    }
+}
+
+/// Build the CDR for a delayed-offer call that failed negotiation after
+/// the 200-OK-with-offer was sent but before it went active (the ACK
+/// answer never arrived or was unusable). No codec was negotiated and no
+/// controller ran, so `audio` is empty and the disconnect detail strings
+/// are blank. `cause` is one of the v2 delayed-offer failure variants.
+#[allow(clippy::too_many_arguments)]
+fn build_delayed_failure_cdr(
+    cause: CdrTerminationCause,
+    bridge_call_id: &BridgeCallId,
+    sip_call_id: &str,
+    from: &str,
+    to: &str,
+    route: &str,
+    ws_url: &str,
+    started_at: DateTime<Utc>,
+) -> CdrRecord {
+    let ended_at = Utc::now();
+    let duration_ms = (ended_at - started_at).num_milliseconds().max(0) as u64;
+    CdrRecord {
+        version: CDR_VERSION,
+        call_id: bridge_call_id.as_str().to_string(),
+        sip_call_id: sip_call_id.to_string(),
+        started_at,
+        ended_at,
+        duration_ms,
+        from: from.to_string(),
+        to: to.to_string(),
+        direction: CdrDirection::Inbound,
+        route: route.to_string(),
+        ws_url: ws_url.to_string(),
+        audio: CdrAudioInfo {
+            codec: String::new(),
+            payload_type: 0,
+            sample_rate: 0,
+        },
+        termination: CdrTerminationInfo {
+            cause,
+            bridge_disconnect: String::new(),
+            tap_disconnect: String::new(),
+        },
+        verstat_attest: None,
+        verstat_passed: None,
+        recording_id: None,
+        recording_path: None,
+        park: None,
+        hold: None,
+        reconnect: None,
     }
 }
 
@@ -3433,6 +3491,14 @@ struct PendingDelayedOffer {
     /// `finalize_delayed_offer` must enable DTLS from the peer's answered
     /// fingerprint in the ACK rather than expect an SDES key.
     offered_dtls: bool,
+    /// When the 200-OK-with-offer was sent — the CDR `started_at` for a
+    /// call that fails negotiation before going active.
+    started_at: DateTime<Utc>,
+    /// From / To user parts (CDR), captured from the INVITE facts.
+    cdr_from: String,
+    cdr_to: String,
+    /// WS URL the call would have bridged to (CDR).
+    cdr_ws_url: String,
 }
 
 impl BridgingAcceptor {
@@ -3644,6 +3710,9 @@ impl BridgingAcceptor {
             sip_call_id = %sip_call_id,
             "delayed-offer 200 OK sent; awaiting ACK answer"
         );
+        let cdr_from = call.facts.from_user.clone();
+        let cdr_to = call.facts.request_uri_user.clone();
+        let cdr_ws_url = bridge_config.ws_url.clone();
         self.pending_delayed.write().insert(
             dialog_id.clone(),
             PendingDelayedOffer {
@@ -3663,6 +3732,10 @@ impl BridgingAcceptor {
                 session_timer,
                 flow: DialogFlow::from_transport(call.transport),
                 offered_dtls: offer_dtls,
+                started_at: Utc::now(),
+                cdr_from,
+                cdr_to,
+                cdr_ws_url,
             },
         );
 
@@ -3670,6 +3743,7 @@ impl BridgingAcceptor {
         // reclaim the parked media and record `ack_timeout`.
         let pending = Arc::clone(&self.pending_delayed);
         let media = Arc::clone(&self.media);
+        let cdr_sink = Arc::clone(&self.cdr_sink);
         tokio::spawn(async move {
             tokio::time::sleep(DELAYED_OFFER_ACK_TIMEOUT).await;
             // Bind out of the guard's scope before any await — parking_lot
@@ -3681,6 +3755,18 @@ impl BridgingAcceptor {
                     "delayed-offer ACK timeout (no answer within Timer H); tearing down"
                 );
                 metrics::counter!(DELAYED_OFFER_TOTAL, "result" => "ack_timeout").increment(1);
+                cdr_sink
+                    .emit(build_delayed_failure_cdr(
+                        CdrTerminationCause::AckTimeout,
+                        &stale.bridge_call_id,
+                        &stale.sip_call_id,
+                        &stale.cdr_from,
+                        &stale.cdr_to,
+                        &stale.route_name,
+                        &stale.cdr_ws_url,
+                        stale.started_at,
+                    ))
+                    .await;
                 let _ = media
                     .session_manager()
                     .stop_session(&stale.forge_call_id)
@@ -3721,7 +3807,25 @@ impl BridgingAcceptor {
             session_timer,
             flow,
             offered_dtls,
+            started_at,
+            cdr_from,
+            cdr_to,
+            cdr_ws_url,
         } = pending;
+
+        // Emit a CDR for a negotiation that fails here (post-200, pre-active).
+        let fail_cdr = |cause: CdrTerminationCause| {
+            build_delayed_failure_cdr(
+                cause,
+                &bridge_call_id,
+                &sip_call_id,
+                &cdr_from,
+                &cdr_to,
+                &route_name,
+                &cdr_ws_url,
+                started_at,
+            )
+        };
 
         let answer_sdp = match std::str::from_utf8(call.request.body()) {
             Ok(s) => s.to_string(),
@@ -3729,6 +3833,9 @@ impl BridgingAcceptor {
                 warn!(call_id = %bridge_call_id, "delayed-offer ACK body is not UTF-8");
                 metrics::counter!(DELAYED_OFFER_TOTAL, "result" => "invalid_sdp_answer")
                     .increment(1);
+                self.cdr_sink
+                    .emit(fail_cdr(CdrTerminationCause::InvalidSdpAnswer))
+                    .await;
                 let _ = self
                     .media
                     .session_manager()
@@ -3750,6 +3857,9 @@ impl BridgingAcceptor {
                 let result = delayed_answer_error_result(&e);
                 warn!(call_id = %bridge_call_id, error = %e, result, "delayed-offer answer rejected");
                 metrics::counter!(DELAYED_OFFER_TOTAL, "result" => result).increment(1);
+                self.cdr_sink
+                    .emit(fail_cdr(delayed_answer_cdr_cause(&e)))
+                    .await;
                 return;
             }
         };
@@ -3787,6 +3897,9 @@ impl BridgingAcceptor {
                         warn!(call_id = %bridge_call_id, error = %e, "delayed-offer DTLS enable failed");
                         metrics::counter!(DELAYED_OFFER_TOTAL, "result" => "invalid_remote_media")
                             .increment(1);
+                        self.cdr_sink
+                            .emit(fail_cdr(CdrTerminationCause::InvalidRemoteMedia))
+                            .await;
                         let _ = self
                             .media
                             .session_manager()
@@ -3806,6 +3919,9 @@ impl BridgingAcceptor {
                     warn!(call_id = %bridge_call_id, "delayed-offer DTLS answer has no fingerprint");
                     metrics::counter!(DELAYED_OFFER_TOTAL, "result" => "invalid_remote_media")
                         .increment(1);
+                    self.cdr_sink
+                        .emit(fail_cdr(CdrTerminationCause::InvalidRemoteMedia))
+                        .await;
                     let _ = self
                         .media
                         .session_manager()
@@ -3883,6 +3999,18 @@ fn delayed_answer_error_result(e: &SetupError) -> &'static str {
             "invalid_remote_media"
         }
         _ => "invalid_sdp_answer",
+    }
+}
+
+/// The CDR [`CdrTerminationCause`] for an `apply_answer` failure on the
+/// delayed-offer path — the typed twin of [`delayed_answer_error_result`].
+fn delayed_answer_cdr_cause(e: &SetupError) -> CdrTerminationCause {
+    match e {
+        SetupError::Sdp(SdpError::NoCommonCodec) => CdrTerminationCause::NoCompatibleCodec,
+        SetupError::Sdp(SdpError::NoAudio) | SetupError::Sdp(SdpError::AudioRejected) => {
+            CdrTerminationCause::InvalidRemoteMedia
+        }
+        _ => CdrTerminationCause::InvalidSdpAnswer,
     }
 }
 

@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-06-19
+
+### Fixed
+
+- **Inbound delayed offer never bridged** (regression latent since 0.9.0).
+  The daemon's packet pump special-cased ACK — it cleared the 200-OK
+  retransmit timer and returned *without* dispatching the request to the
+  UAS — so `on_ack` never fired and the delayed-offer call was never
+  finalized from the ACK's SDP answer. Early-offer calls were unaffected
+  (their ACK carries no body and needs no handling). The 200 OK with our
+  offer was sent and the dialog looked up (so a BYE got a 200), which is
+  why the SIPp tests — which only asserted the 200 OK content — missed
+  it. Now a **body-carrying ACK is dispatched to the UAS** (`on_ack` →
+  `finalize_delayed_offer` → bridge); body-less ACKs keep the
+  timer-only fast path. The `delayed_offer` SIPp phase now also asserts
+  the bridge actually connected.
+
+### Added
+
+- **Per-call CDR for delayed-offer negotiations that fail before going
+  active.** A delayed-offer call whose ACK answer never arrives or is
+  unusable (the 200-with-offer was sent but the call never reached a
+  controller) now writes a CDR, not just a metric + log. Five new
+  `TerminationCause` variants — `ack_timeout`, `missing_sdp_answer`,
+  `invalid_sdp_answer`, `no_compatible_codec`, `invalid_remote_media` —
+  carry the reason; `audio` is empty (no codec was negotiated) and the
+  disconnect detail strings are blank. **CDR schema `version` → 2**: a
+  strict consumer that exhaustively matched the v1 cause set won't
+  recognise the new values, so the version is bumped per CLAUDE.md §7.7
+  (the record shape is otherwise unchanged).
+
 ## [0.9.4] - 2026-06-18
 
 ### Added

@@ -16,10 +16,13 @@
 > 200 OK offer DTLS (`build_dtls_srtp_offer` patches the plaintext offer
 > to SAVPF + our fingerprint + setup:actpass), and the ACK answer's
 > fingerprint drives role negotiation + `enable_dtls`. **SRTP for delayed
-> offer is now complete** (SDES + DTLS, both directions). Remaining
-> follow-up (not blocking): a per-call CDR for negotiations that fail
-> before going active (today a metric + warn). Protocol stayed
-> `version: "1"`, CDR version unchanged.
+> offer is now complete** (SDES + DTLS, both directions). v0.9.5
+> delivered the **per-call CDR** for negotiations that fail before going
+> active (CDR schema → v2) **and fixed a latent bug**: the daemon's
+> packet pump was dropping the body-carrying ACK (never dispatching it to
+> `on_ack`), so inbound delayed offer never actually bridged — the
+> 200-OK tests masked it. All delayed-offer follow-ups are now done. WS
+> protocol stayed `version: "1"`; CDR schema is v2.
 >
 > Outbound delayed offer (chunk 2): `POST /admin/v1/calls` with
 > `delayed_offer: true` dials an offerless INVITE; the gateway UAC's

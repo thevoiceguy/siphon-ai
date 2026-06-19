@@ -1,0 +1,13 @@
+The following events occurred:
+2026-06-18	20:38:03.395059	1781829483.395059: Aborting call on unexpected message for Call-Id '1-2220040@127.0.0.1': while expecting '200' (index 1), received 'SIP/2.0 100 Trying
+Via: SIP/2.0/UDP 127.0.0.1:5086;branch=z9hG4bK-2220040-1-0
+From: <sip:bad@127.0.0.1>;tag=1
+Call-ID: 1-2220040@127.0.0.1
+CSeq: 1 INVITE
+To: <sip:1000@127.0.0.1>
+Contact: <sip:siphon@127.0.0.1:5085;transport=udp>
+Allow: INVITE, ACK, BYE, CANCEL, OPTIONS
+Server: siphon-rs/0.1.0
+Content-Length: 0
+
+'

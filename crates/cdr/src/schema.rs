@@ -14,6 +14,13 @@
 //! version, document the change in `docs/CDR.md` (when that lands),
 //! and link the PR in the commit message per CLAUDE.md §7.7.
 //!
+//! **v2 (0.9.5):** added five [`TerminationCause`] variants for
+//! delayed-offer negotiations that fail *before* the call goes active
+//! (`ack_timeout`, `missing_sdp_answer`, `invalid_sdp_answer`,
+//! `no_compatible_codec`, `invalid_remote_media`). A strict consumer
+//! that exhaustively matched the v1 cause set would not recognise these,
+//! so the version is bumped even though the field shape is unchanged.
+//!
 //! ## What we record vs. what we don't
 //!
 //! - **From / To** users only — full SIP URIs are recorded as the
@@ -30,7 +37,7 @@ use serde::{Deserialize, Serialize};
 
 /// Schema version of the CDR record. Bump per CLAUDE.md §7.7
 /// whenever a change could break consumer parsers.
-pub const CDR_VERSION: u32 = 1;
+pub const CDR_VERSION: u32 = 2;
 
 /// One call's complete record. Always serialised as a single JSON
 /// object on a single line for JSONL file sinks.
@@ -195,6 +202,24 @@ pub enum TerminationCause {
     BridgeEnded,
     /// Media tap sub-task ended first (RTP ended, tap detached).
     TapEnded,
+
+    // ─── Delayed-offer negotiation failures (v2, 0.9.5) ───────────
+    // These end a call that was half-established (200 OK with our
+    // offer was sent) but never went active — the ACK answer never
+    // arrived or was unusable. The call never reached a controller, so
+    // `bridge_disconnect` / `tap_disconnect` are empty and `audio` is
+    // unpopulated (no codec was negotiated).
+    /// No ACK (with the SDP answer) arrived before SIP Timer H (~32 s).
+    AckTimeout,
+    /// The ACK arrived but carried no SDP body.
+    MissingSdpAnswer,
+    /// The ACK's SDP answer was present but unparseable.
+    InvalidSdpAnswer,
+    /// The answer selected no codec we offered.
+    NoCompatibleCodec,
+    /// The answer's RTP address/port was unusable, the audio stream was
+    /// rejected, or its SRTP keying (DTLS/SDES) could not be established.
+    InvalidRemoteMedia,
 }
 
 #[cfg(test)]
@@ -276,16 +301,33 @@ mod tests {
         rec.route = "twilio_main".into(); // gateway name, not a route
         let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
         assert_eq!(v["direction"], serde_json::json!("outbound"));
-        assert_eq!(v["version"], serde_json::json!(1));
         let back: CdrRecord = serde_json::from_value(v).unwrap();
         assert_eq!(back.direction, Direction::Outbound);
     }
 
     #[test]
-    fn version_field_is_present_and_starts_at_1() {
-        assert_eq!(CDR_VERSION, 1);
+    fn version_field_is_present_and_is_2() {
+        // Bumped to 2 in 0.9.5 (new delayed-offer-failure termination
+        // causes — see the module versioning note).
+        assert_eq!(CDR_VERSION, 2);
         let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
-        assert_eq!(v["version"], serde_json::json!(1));
+        assert_eq!(v["version"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn delayed_offer_failure_causes_round_trip_snake_case() {
+        for (cause, wire) in [
+            (TerminationCause::AckTimeout, "ack_timeout"),
+            (TerminationCause::MissingSdpAnswer, "missing_sdp_answer"),
+            (TerminationCause::InvalidSdpAnswer, "invalid_sdp_answer"),
+            (TerminationCause::NoCompatibleCodec, "no_compatible_codec"),
+            (TerminationCause::InvalidRemoteMedia, "invalid_remote_media"),
+        ] {
+            let v = serde_json::to_value(cause).unwrap();
+            assert_eq!(v, serde_json::json!(wire));
+            let back: TerminationCause = serde_json::from_value(v).unwrap();
+            assert_eq!(back, cause);
+        }
     }
 
     #[test]
@@ -293,7 +335,7 @@ mod tests {
         // Never bot-held → omitted, schema still v1.
         let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
         assert!(!v.as_object().unwrap().contains_key("hold"));
-        assert_eq!(v["version"], serde_json::json!(1));
+        assert_eq!(v["version"], serde_json::json!(2));
 
         // Held → nested {count, total_ms}; version unchanged.
         let mut rec = sample();
@@ -304,7 +346,7 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
         assert_eq!(v["hold"]["count"], serde_json::json!(2));
         assert_eq!(v["hold"]["total_ms"], serde_json::json!(4500));
-        assert_eq!(v["version"], serde_json::json!(1));
+        assert_eq!(v["version"], serde_json::json!(2));
         let back: CdrRecord = serde_json::from_value(v).unwrap();
         assert_eq!(back.hold, rec.hold);
     }
@@ -314,7 +356,7 @@ mod tests {
         // Never reconnected → omitted, schema still v1.
         let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
         assert!(!v.as_object().unwrap().contains_key("reconnect"));
-        assert_eq!(v["version"], serde_json::json!(1));
+        assert_eq!(v["version"], serde_json::json!(2));
 
         // Reconnected → nested {count, total_gap_ms}; version unchanged.
         let mut rec = sample();
@@ -325,7 +367,7 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
         assert_eq!(v["reconnect"]["count"], serde_json::json!(1));
         assert_eq!(v["reconnect"]["total_gap_ms"], serde_json::json!(1200));
-        assert_eq!(v["version"], serde_json::json!(1));
+        assert_eq!(v["version"], serde_json::json!(2));
         let back: CdrRecord = serde_json::from_value(v).unwrap();
         assert_eq!(back.reconnect, rec.reconnect);
     }
@@ -337,7 +379,7 @@ mod tests {
         let obj = v.as_object().unwrap();
         assert!(!obj.contains_key("verstat_attest"));
         assert!(!obj.contains_key("verstat_passed"));
-        assert_eq!(v["version"], serde_json::json!(1));
+        assert_eq!(v["version"], serde_json::json!(2));
 
         // Populated verdict → fields present; version unchanged.
         let mut rec = sample();
@@ -346,7 +388,7 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
         assert_eq!(v["verstat_attest"], serde_json::json!("A"));
         assert_eq!(v["verstat_passed"], serde_json::json!(true));
-        assert_eq!(v["version"], serde_json::json!(1));
+        assert_eq!(v["version"], serde_json::json!(2));
 
         // Round-trips, and a pre-0.4.0 CDR without the fields still parses.
         let back: CdrRecord = serde_json::from_value(v).unwrap();

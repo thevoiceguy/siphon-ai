@@ -42,143 +42,46 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
-**v0.7.1** — patch release. Theme: **outbound SRTP.** SiphonAI could
-*answer* an inbound SRTP offer but only ever *offered* plaintext `RTP/AVP`,
-so outbound calls couldn't carry audio on secure trunks (e.g. Twilio secure
-trunking). A gateway with `[[gateway]].srtp = "preferred" | "required"` now
-*offers* SDES SRTP (RFC 4568): SiphonAI mints the master key, sends the
-INVITE as `RTP/SAVP` + `a=crypto:`, and on acceptance installs the keys so
-the trunk leg is encrypted (`required` fails the call on a plaintext answer;
-`preferred` downgrades). `start.srtp` is now populated on outbound calls
-too, and `siphon_ai_outbound_srtp_total{result}` tracks encrypted vs
-downgraded. Self-contained — no upstream forge-media change. **Off by
-default**; protocol stays `version: "1"`; a 0.7.0 deployment upgrades with
-zero behaviour change. See [`docs/OUTBOUND.md`](docs/OUTBOUND.md). Full
-notes: [`CHANGELOG.md`](CHANGELOG.md).
-
-**v0.7.0** — eighth release. Theme: **conferencing + media-only call park.**
-Two operator-controllable multi-leg features, both **off by default**.
-Conferencing mixes N calls into one room where *every* leg keeps its own WS
-session (no single "host" bot) and each side hears the mix minus its own
-input; a WS server joins its own call (`conference_join`/`leave`), and
-operators compose rooms over `/admin/v1/conferences` (add/remove **any**
-active call, cross-call via a new bridge-id → `CallHandle` registry that keeps
-CLAUDE §4.4 intact). Call park shelves a call on hold music with **no** WS
-session — `park` detaches the bot, the SIP dialog + RTP stay up, and an
-operator **retrieves** it later onto a *fresh* session (`start.retrieved`),
-or it times out (`hangup`|`keep`). The protocol stays `version: "1"` (new
-messages/events/error codes only); a 0.6.x deployment upgrades with zero
-behaviour change. See [`docs/CONFERENCE.md`](docs/CONFERENCE.md) and
-[`docs/PARK.md`](docs/PARK.md). Full notes: [`CHANGELOG.md`](CHANGELOG.md).
-
-**v0.6.2** — patch release. Theme: **TLS trunk hardening.** Fixes found by
-running v0.6.1 against a production TLS trunk: the `Contact` on dual-listener
-daemons advertised the UDP port for TLS dialogs (losing in-dialog ACK/BYE —
-~60 s silent-tail recordings, wrong CDR cause), and daemon-initiated BYE and
-REFER on TCP/TLS dialogs dialed fresh connections nothing answered — both now
-reuse the inbound connection (RFC 5626 flow semantics). The transport
-dispatcher also grows **outbound TCP/TLS**: `[[gateway]]` / `[[register]]`
-blocks with `transport = "tcp" | "tls"` dial out through client connection
-pools, verifying peers against the bundled webpki roots plus an optional
-`[sip.tls_client].extra_ca` (signaling only — SRTP media is a follow-up). The
-Deepgram/LLM example bot gains human-handoff transfer triggers (keyword
-fast-path + a `transfer_call` LLM tool). Protocol stays `version: "1"`; CDR
-schema unchanged; a 0.6.1 deployment upgrades with zero config changes. Full
-notes: [`CHANGELOG.md`](CHANGELOG.md).
-
-**v0.6.1** — seventh release. Theme: **attended transfer.** The bot
-consults a human before handing the caller off: SiphonAI places the
-consult leg as a plain 0.6.0 outbound call (`POST /admin/v1/calls`, its
-own WS session), and the WS server completes the handoff with one
-additive protocol field — `transfer { replaces_call_id }` — which becomes
-a REFER-with-Replaces on the original call (RFC 5589), connecting the two
-humans directly. The `Refer-To` is derived from the consult dialog
-(explicit `target` overrides), outbound legs are transferable too, and
-both transfer modes now emit `siphon_ai_transfers_total{mode,result}`.
-Builds on 0.6.0's outbound origination: gateways, the originate API, the
-toll-fraud posture (private bind + reverse proxy + cap + rate limit), and
-`start.direction` are unchanged — see
-[`docs/OUTBOUND.md`](docs/OUTBOUND.md) and
-[`docs/PROTOCOL.md`](docs/PROTOCOL.md) §4.4. Full notes:
+**Current release: v0.12.1.** Production-deployed against real carriers
+(Twilio Secure Trunking, FreeSWITCH, CUCM). The WS protocol is still
+`version: "1"` — every release has been additive, so a WS server built
+against 0.1.0 keeps working unchanged, and upgrading the daemon is a
+zero-behaviour-change drop-in (every feature below is **off by default**
+until you turn it on). The full per-release history is in
 [`CHANGELOG.md`](CHANGELOG.md).
 
-**v0.5.0** — fifth release. Theme: **call recording.** Each call's audio can
-be captured to a stereo WAV (caller left, bot/WS right) for compliance and
-QA — `[recording].mode` = `off` (default) / `always` / `on_demand`, with a
-per-route `[route.recording]` override. On-demand recording is driven over
-the WS protocol (`start`/`stop`/`pause`/`resume_recording`; a pause *omits*
-the span — the PCI primitive), and surfaced on the CDR (`recording_id` /
-`recording_path`) and a `siphon_ai_recordings_total` metric. The recorder
-runs off the audio hot path — a backed-up writer drops frames (`degraded`)
-rather than ever stalling the live call. **Off by default**; a 0.4.x
-deployment upgrades with zero behaviour change. Protocol stays `version: "1"`
-and the CDR schema stays at version 1 (both additions are additive). See
-[`docs/RECORDING.md`](docs/RECORDING.md). (A timed SRTP re-key was planned to
-ride along but was deferred — forge-media has no coordinated re-key API.)
-Full notes: [`CHANGELOG.md`](CHANGELOG.md).
+### What's shipped
 
-**v0.4.1** — patch release completing the 0.4.0 STIR/SHAKEN theme: PASSporT
-`iat` freshness (replay protection, `verstat.iat_passed`), an
-`x5u_tls_extra_ca` knob for privately-hosted `x5u`, the security-model doc
-([`docs/SECURITY_STIR_SHAKEN.md`](docs/SECURITY_STIR_SHAKEN.md)), a Twilio
-`X-Twilio-VerStat` cross-check recipe, and the first CI-gated *passing*
-attestation scenario. Still off by default; protocol stays `version: "1"`.
-Full notes: [`CHANGELOG.md`](CHANGELOG.md).
+On top of the core bridge — SIP signaling, RTP, jitter buffer, barge-in,
+DTMF, and the WebSocket protocol:
 
-**v0.4.0** — fourth release. Theme: **STIR/SHAKEN call authentication.**
-Inbound INVITEs with an RFC 8224 `Identity` header are verified end-to-end
-(PASSporT/RFC 8225 decode, ES256, X.509 chain to a configured STI-PA trust
-anchor via the `x5u` cert with a TTL cache, and the `orig`/`dest` ↔
-`From`/`To` claim checks), producing a per-call *verstat* verdict. Operators
-can gate on it — `min_attestation` (403/488/606) and `require_identity`
-(428), with per-route overrides — and the verdict is surfaced on the WS
-`start` message, the CDR, a structured log line, and a new HEP3 chunk
-(`0x66`) for Homer. Everything is **off by default**: a 0.3.x deployment
-upgrades with zero behaviour change until `[security.stir_shaken].enabled
-= true`. Protocol stays at `version: "1"` — `start.verstat` is additive, so
-v1 WS servers built against earlier releases keep working unchanged. Full
-notes: [`CHANGELOG.md`](CHANGELOG.md).
+- **Codecs & media** — G.711 (µ-law/A-law) and **Opus** (negotiated at a
+  16 kHz bridge rate); **SRTP both directions** — SDES (`a=crypto:`) and
+  DTLS-SRTP, inbound and outbound; offerless / delayed-offer INVITEs (CUCM,
+  avoids a forced MTP).
+- **Call control** — bot-initiated **hold/resume** (true SIP re-INVITE +
+  hold music), blind and **attended transfer** (REFER / REFER-with-Replaces),
+  **N-way conferencing** (mixed rooms, every leg keeps its WS), and media-only
+  **call park** (retrieve onto a fresh session).
+- **Outbound origination** — `POST /admin/v1/calls` with `[[gateway]]`
+  trunks, toll-fraud guardrails (cap + rate limit), and outbound SRTP.
+- **Recording** — per-call stereo WAV (`off` / `always` / `on_demand`,
+  PCI-aware pause), written off the audio hot path.
+- **Reliability** — mid-call **WS reconnect**: an unexpected WS drop parks the
+  caller on hold music, re-dials, and resumes on a fresh session.
+- **Security** — **STIR/SHAKEN** verification + policy gate, and **native
+  admin auth + RBAC** (bearer tokens, nested `readonly` ⊂ `operator` ⊂
+  `admin` roles) on a dedicated authenticated listener.
+- **Delivery durability** — webhook + CDR **HMAC signing**
+  (`X-SiphonAI-Signature`), per-event idempotency ids, and a **durable retry
+  spool** that survives daemon restarts.
+- **Operations** — a config CLI (`siphon-ai check` / `print-config` /
+  `route-test`) and **`SIGHUP` hot-reload** of routes, webhook/CDR sinks, and
+  outbound gateways (fail-safe — a bad config is rejected and the running one
+  kept; socket-binding / concurrency changes warn restart-required).
 
-**v0.3.2** — patch release. `rtp_stats.rtcp_rtt_ms` now populates on live
-calls (forge-engine originates RTCP Sender Reports for its generated
-streams, so the carrier's Receiver Reports resolve a round-trip time per
-RFC 3550 §A.7) — closing the last open 0.3.0 item. No protocol or config
-change; the `rtp_stats` WS field and `siphon_ai_rtp_rtt_ms` histogram
-simply start carrying real values. Full notes: [`CHANGELOG.md`](CHANGELOG.md).
-
-**v0.3.1** — third release. Theme: **trust & encryption**, hardened for
-real carriers. Every transport the daemon touches can now run encrypted:
-SRTP media (SDES `a=crypto:` for classic SIP trunks **and** DTLS-SRTP for
-WebRTC bridges), mTLS with optional SPKI pinning on the bridge WebSocket
-leg, hot-reloadable SIP/TLS certs (`systemctl reload`, no in-flight call
-drops), and REGISTER over TLS. Validated end-to-end against a Twilio
-Elastic SIP Trunk's Secure Trunking (TLS + SRTP), including a round of
-SRTP/SRTCP/RTCP spec-conformance fixes that only surface against a
-spec-correct carrier. Protocol stays at `version: "1"` — additive only,
-so v1 WS servers built against 0.1.0 / 0.2.0 keep working unchanged.
-(0.3.0 was prepared but never tagged; its features ship here, hardened.)
-Full notes: [`CHANGELOG.md`](CHANGELOG.md).
-
-**v0.2.0** — second release. Adds the operator-primitive event surface
-(`silence_detected`, `dead_air_detected`, `rtp_stats`), sustained-mute
-control (`BridgeIn::Mute` / `Unmute` — distinct from one-shot `clear`),
-three configurable call-progress modes (`instant_answer` / `ringing` /
-`session_progress`), an end-to-end Twilio Elastic SIP Trunk recipe, a
-Deepgram transcription reference WS server, a CI gate on every PR
-(fmt + clippy + cargo test + SIPp regression), and the operator-facing
-TLS deployment recipe. Protocol stays at `version: "1"` — every new
-variant is additive, so v1 WS servers built against 0.1.0 keep working
-unchanged. Full notes: [`CHANGELOG.md`](CHANGELOG.md).
-
-**v0.1.0** — first public release. The audio path, WS protocol, SIP signaling,
-HEP capture, CDR/webhook sinks, and trunk-allowlist gate are in. Real-world
-FreeSWITCH-bridged calls work with sub-second user-to-audio latency on a
-Groq LLM. A 500-concurrent burst soak completes with no rejections and no
-RSS growth past the working-set; a 1-hour long-call soak holds RSS within
-±32 KB.
-
-See `docs/DEV_PLAN.md` for what's deliberately out of scope for v1
-(recording, mid-call WS reconnect, multi-tenancy, video).
+See [`docs/DEV_PLAN.md`](docs/DEV_PLAN.md) for design rationale. Still
+deliberately out of scope: multi-tenancy, video, and WebRTC client support.
 
 ## Scope
 
@@ -289,10 +192,11 @@ journal — grep `turn_summary` for SLO numbers. See
 | `crates/sip-glue/`    | Adapter from `siphon-rs` events to core |
 | `crates/media-glue/`  | Adapter from `forge-engine` to core (the audio tap) |
 | `crates/routes/`      | Route matching engine (TOML dialplan) |
-| `crates/cdr/`         | CDR generation (JSON), file sink, webhook sink |
-| `crates/webhooks/`    | Out-of-band lifecycle webhooks |
-| `crates/config/`      | TOML config + validation + reload |
-| `crates/telemetry/`   | tracing + metrics + HEP wiring + admin endpoints |
+| `crates/cdr/`         | CDR generation (JSON), file sink, signed/spooled webhook sink |
+| `crates/webhooks/`    | Out-of-band lifecycle webhooks (signed, durable spool) |
+| `crates/http/`        | Shared retrying HTTP delivery (signing, idempotency, spool) |
+| `crates/config/`      | TOML config + validation + SIGHUP reload |
+| `crates/telemetry/`   | tracing + metrics + HEP wiring + admin API (auth + RBAC) |
 | `bins/siphon-ai/`     | The daemon binary |
 | `examples/`           | Reference WS servers and the local Homer stack |
 | `scripts/`            | Idempotent Debian 13 install scripts (daemon + bot) |
@@ -309,22 +213,26 @@ cargo test --workspace
 
 ## Observability
 
-| Surface | URL / location |
-|---|---|
-| Liveness / readiness | `GET /health`, `GET /ready` |
-| Prometheus metrics | `GET /metrics` |
-| Active calls | `GET /admin/calls` |
-| Per-call hangup | `POST /admin/calls/<id>/hangup` |
-| Runtime log filter | `PUT /admin/log` |
-| HEP test packet | `POST /admin/hep/test` |
-| CDR (JSONL file) | `/var/log/siphon-ai/cdr.jsonl` |
-| Lifecycle webhooks | `[webhooks]` block in the TOML |
-| Full SIP + RTCP + CDR correlation | HEP → Homer (see `docs/HEP.md`) |
+| Surface | URL / location | Listener |
+|---|---|---|
+| Liveness / readiness | `GET /health`, `GET /ready` | `[observability]` (open) |
+| Prometheus metrics | `GET /metrics` | `[observability]` (open) |
+| Active calls | `GET /admin/calls` | `[admin]` (auth) |
+| Per-call hangup | `POST /admin/calls/<id>/hangup` | `[admin]` (auth) |
+| Outbound origination | `POST /admin/v1/calls` | `[admin]` (auth) |
+| Conference / park control | `/admin/v1/conferences`, `/admin/v1/parked` | `[admin]` (auth) |
+| Runtime log filter | `PUT /admin/log` | `[admin]` (auth) |
+| HEP test packet | `POST /admin/hep/test` | `[admin]` (auth) |
+| CDR (JSONL file) | `/var/log/siphon-ai/cdr.jsonl` | — |
+| Lifecycle webhooks | `[webhooks]` block in the TOML | — |
+| Full SIP + RTCP + CDR correlation | HEP → Homer (see `docs/HEP.md`) | — |
 
-**The admin endpoints have no built-in auth** (per the v1 threat
-model in `crates/telemetry/src/admin.rs`). The shipped Docker
-compose binds them to `127.0.0.1` only; for any other deployment
-sit them behind an authenticating reverse proxy.
+Since **v0.10.0** the admin API is **authenticated**: `/admin/*` is served
+on a dedicated `[admin]` listener gated by bearer tokens with nested
+`readonly` ⊂ `operator` ⊂ `admin` roles. `/metrics`, `/health`, and `/ready`
+stay on the open `[observability]` listener; `/admin/*` returns `404` there.
+Omit the `[admin]` block entirely and `/admin/*` is not served at all (the
+secure default). See [`docs/DEPLOY.md`](docs/DEPLOY.md) → *Admin auth & RBAC*.
 
 ## Reading order for contributors
 
@@ -334,8 +242,12 @@ sit them behind an authenticating reverse proxy.
 3. `docs/PROTOCOL.md` — the WebSocket bridge protocol contract.
 4. `docs/INSTALL_DEBIAN13.md` + `docs/FREESWITCH_INTEGRATION.md` +
    `docs/BOT_LOCALHOST_SETUP.md` — the deploy-the-thing path.
-5. `docs/CONFIG.md` — every TOML field documented.
-6. `docs/RECORDING.md` — call recording (stereo WAV, on-demand control, CDR).
+5. `docs/CONFIG.md` — every TOML field documented, plus the `check` /
+   `print-config` / `route-test` CLI and `SIGHUP` reload.
+6. `docs/DEPLOY.md` — operator surface: admin auth & RBAC, webhook/CDR
+   delivery (signing, durability), metrics, and the systemd / reload flow.
+7. Feature guides — `docs/OUTBOUND.md`, `docs/CONFERENCE.md`,
+   `docs/PARK.md`, `docs/RECORDING.md`, `docs/SECURITY_STIR_SHAKEN.md`.
 
 ## Upstream dependencies
 

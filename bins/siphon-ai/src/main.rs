@@ -19,6 +19,8 @@ use siphon_ai_telemetry::LogFilterHandle;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+mod inspect;
+
 #[derive(Parser, Debug)]
 #[command(name = "siphon-ai", version, about = "SIP-to-WebSocket media bridge")]
 struct Cli {
@@ -46,6 +48,49 @@ enum Command {
     /// config is valid, 1 otherwise. Safe as a pre-deploy / CI
     /// preflight (e.g. before `systemctl reload`).
     Check,
+
+    /// Print the effective compiled configuration (post-`${VAR}`,
+    /// post per-route merge) and exit. Secrets are redacted unless
+    /// `--show-secrets` is passed.
+    PrintConfig {
+        /// Reveal secret values (auth headers, signing secrets,
+        /// passwords) instead of `<redacted>`.
+        #[arg(long)]
+        show_secrets: bool,
+    },
+
+    /// Report which route a synthetic call matches (first-match-wins)
+    /// and its effective bridge config, then exit. Unset attributes
+    /// default to empty / `trunk`.
+    RouteTest {
+        /// Request-URI user (the dialed number on the RURI).
+        #[arg(long = "ruri-user", default_value = "")]
+        ruri_user: String,
+        /// Request-URI host.
+        #[arg(long = "ruri-host", default_value = "")]
+        ruri_host: String,
+        /// To-header user (dialed number). Also used for `--ruri-user`
+        /// when that is left empty.
+        #[arg(long, default_value = "")]
+        to: String,
+        /// To-header host.
+        #[arg(long = "to-host", default_value = "")]
+        to_host: String,
+        /// From-header user (caller).
+        #[arg(long, default_value = "")]
+        from: String,
+        /// From-header host.
+        #[arg(long = "from-host", default_value = "")]
+        from_host: String,
+        /// `register_source`: `trunk` (unregistered inbound) or a
+        /// `[[register]]` block name.
+        #[arg(long = "register-source", default_value = "trunk")]
+        register_source: String,
+        /// Repeatable SIP header, `Name: Value`, matched against
+        /// `[route.match].header.*`.
+        #[arg(long = "header", short = 'H')]
+        headers: Vec<String>,
+    },
 }
 
 /// The config path, from `--config` or `$SIPHON_AI_CONFIG`. A clap
@@ -76,8 +121,38 @@ async fn main() -> Result<()> {
     // Read-only subcommands dispatch here and exit — no tracing
     // subscriber, no socket binding, no runtime.
     if let Some(command) = &cli.command {
+        let path = config_path(&cli)?;
         match command {
-            Command::Check => run_check(&config_path(&cli)?),
+            Command::Check => run_check(&path),
+            Command::PrintConfig { show_secrets } => run_print_config(&path, *show_secrets),
+            Command::RouteTest {
+                ruri_user,
+                ruri_host,
+                to,
+                to_host,
+                from,
+                from_host,
+                register_source,
+                headers,
+            } => run_route_test(
+                &path,
+                inspect::RouteTestInput {
+                    // RURI user defaults to the To-user when unset — a
+                    // common case where they're the same dialed number.
+                    ruri_user: if ruri_user.is_empty() {
+                        to.clone()
+                    } else {
+                        ruri_user.clone()
+                    },
+                    ruri_host: ruri_host.clone(),
+                    to_user: to.clone(),
+                    to_host: to_host.clone(),
+                    from_user: from.clone(),
+                    from_host: from_host.clone(),
+                    register_source: register_source.clone(),
+                    headers: parse_headers(headers)?,
+                },
+            ),
         }
     }
 
@@ -104,21 +179,54 @@ async fn main() -> Result<()> {
     runtime.run(shutdown_signal()).await
 }
 
-/// `siphon-ai check` — load + compile the config and exit. Prints a
-/// one-screen summary on success (exit 0); prints the validation error
-/// to stderr and exits 1 on failure. Never starts the daemon.
-fn run_check(path: &Path) -> ! {
+/// Load + compile a config for a read-only subcommand, or print the
+/// validation error to stderr and exit 1. Shared by `check`,
+/// `print-config`, and `route-test`.
+fn load_or_exit(path: &Path) -> Config {
     match siphon_ai_config::load_from_path(path) {
-        Ok(config) => {
-            print_check_summary(path, &config);
-            std::process::exit(0);
-        }
+        Ok(config) => config,
         Err(e) => {
             eprintln!("config INVALID: {}", path.display());
             eprintln!("  {e}");
             std::process::exit(1);
         }
     }
+}
+
+/// `siphon-ai check` — validate + compile, print a one-screen summary
+/// (exit 0) or the error (exit 1). Never starts the daemon.
+fn run_check(path: &Path) -> ! {
+    let config = load_or_exit(path);
+    print_check_summary(path, &config);
+    std::process::exit(0);
+}
+
+/// `siphon-ai print-config` — render the effective compiled config
+/// (secrets redacted unless `show_secrets`) and exit.
+fn run_print_config(path: &Path, show_secrets: bool) -> ! {
+    let config = load_or_exit(path);
+    print!("{}", inspect::render_config(&config, show_secrets));
+    std::process::exit(0);
+}
+
+/// `siphon-ai route-test` — report the matched route + effective bridge
+/// config for the synthetic call, and exit.
+fn run_route_test(path: &Path, input: inspect::RouteTestInput) -> ! {
+    let config = load_or_exit(path);
+    print!("{}", inspect::route_test(&config, &input));
+    std::process::exit(0);
+}
+
+/// Parse `--header 'Name: Value'` flags into `(name, value)` pairs.
+fn parse_headers(raw: &[String]) -> Result<Vec<(String, String)>> {
+    raw.iter()
+        .map(|h| {
+            let (k, v) = h
+                .split_once(':')
+                .ok_or_else(|| anyhow!("bad --header {h:?}; expected 'Name: Value'"))?;
+            Ok((k.trim().to_string(), v.trim().to_string()))
+        })
+        .collect()
 }
 
 /// One-screen summary of a valid compiled config — what the daemon

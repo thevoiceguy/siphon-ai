@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use forge_core::{CallId, ParticipantId};
 use sip_core::SipUri;
@@ -76,7 +77,11 @@ pub struct OutboundGateway {
 
 /// Daemon-wide outbound-origination service.
 pub struct OutboundService {
-    gateways: HashMap<String, OutboundGateway>,
+    /// Gateway table, behind an `ArcSwap` so a SIGHUP reload can swap
+    /// the set (add / remove / modify gateways) for new originations.
+    /// In-flight outbound calls already hold their gateway's
+    /// `Arc<OutboundOriginator>`, so they keep running on it.
+    gateways: ArcSwap<HashMap<String, OutboundGateway>>,
     guard: OutboundGuard,
     defaults: BridgeDefaults,
     call_id_factory: CallIdFactory,
@@ -113,7 +118,7 @@ impl OutboundService {
         consult_registry: ConsultRegistry,
     ) -> Self {
         Self {
-            gateways,
+            gateways: ArcSwap::from_pointee(gateways),
             guard,
             defaults,
             call_id_factory,
@@ -156,12 +161,25 @@ impl OutboundService {
         self.moh_file = moh_file;
         self
     }
+
+    /// Swap the gateway table (SIGHUP reload). New originations use the
+    /// new set; in-flight calls keep the originator they captured. The
+    /// concurrency guard (`max_concurrent` / `rate_limit`) is *not*
+    /// touched — resizing a live semaphore isn't safe, so those changes
+    /// remain restart-required.
+    pub fn reload_gateways(&self, gateways: HashMap<String, OutboundGateway>) {
+        self.gateways.store(Arc::new(gateways));
+    }
 }
 
 impl OutboundOriginateHandle for OutboundService {
     fn originate(&self, req: OriginateRequest) -> Result<String, OriginateRejection> {
-        let gw = self
-            .gateways
+        // Snapshot the gateway table for this origination. The guard
+        // lives to the end of this (synchronous) method, past every
+        // `gw` read; the spawned call captures only the cloned
+        // `Arc<OutboundOriginator>`, so a concurrent reload is safe.
+        let gateways = self.gateways.load();
+        let gw = gateways
             .get(&req.gateway)
             .ok_or_else(|| OriginateRejection::UnknownGateway(req.gateway.clone()))?;
 

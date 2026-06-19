@@ -242,6 +242,10 @@ dropping calls**:
 - **`[webhooks]` + `[cdr]` sinks** — rebuilt and swapped, *unless* a
   durable `spool_dir` is active for that sink (its drain worker can't be
   hot-swapped → restart required for delivery changes there);
+- **outbound gateways** (`[[gateway]]`, 0.12.1) — the set is rebuilt +
+  swapped (add / remove / modify trunks); in-flight outbound calls keep the
+  trunk they're on. Needs outbound enabled and the `[outbound]` limits
+  unchanged;
 - the `[sip.tls]` cert (above).
 
 **Always `check` before you reload** — a reload is exactly as safe as the
@@ -259,11 +263,12 @@ file is byte-identical to the last load.
 
 **Restart-required sections.** `[sip]` listen/transports, `[node]`,
 `[media]`, `[observability]`, `[admin]`, `[hep]`,
-`[security.stir_shaken]`, and `[[gateway]]` (gateway hot-reload is a
-planned follow-up) bind sockets or build process-wide state and need a
-process **restart**. A reload that changes one of these applies the safe
-sections and logs a `warn!` naming the section(s) that did not take effect
-— grep the journal for `require a restart` after a reload to catch this.
+`[security.stir_shaken]`, and the `[outbound]` limits (`max_concurrent` /
+`rate_limit_per_sec`, which also flip outbound on/off) bind sockets or build
+process-wide state and need a process **restart**. A reload that changes one
+of these applies the safe sections and logs a `warn!` naming the section(s)
+that did not take effect — grep the journal for `require a restart` after a
+reload to catch this.
 
 ### 6. Smoke test
 

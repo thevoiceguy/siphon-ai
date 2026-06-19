@@ -48,6 +48,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -147,6 +148,23 @@ impl Runtime {
     /// Binds the UDP socket eagerly so a "port already in use" error
     /// surfaces during startup, not after we've logged "ready".
     pub async fn build(config: Config, log_filter: LogFilterHandle) -> Result<Self> {
+        Self::build_with_reload(config, None, log_filter).await
+    }
+
+    /// Like [`build`](Self::build) but with the `--config` path so a
+    /// `SIGHUP` can re-read it for hot reload. `config_path = None`
+    /// disables config reload (the daemon still claims SIGHUP for the
+    /// TLS-cert hot-reload / no-op) — used by tests that build from an
+    /// in-memory config with no backing file.
+    pub async fn build_with_reload(
+        config: Config,
+        config_path: Option<PathBuf>,
+        log_filter: LogFilterHandle,
+    ) -> Result<Self> {
+        // Fingerprint the restart-required sections before the config
+        // is destructured, so a later SIGHUP reload can detect changes
+        // to sections that need a restart.
+        let restart_fingerprints = crate::reload::restart_fingerprints(&config);
         let Config {
             node,
             sip,
@@ -186,11 +204,31 @@ impl Runtime {
             None => (None, None),
         };
 
-        let cdr_sink = build_cdr_sink(cdr, hep_telemetry.as_deref()).await?;
+        // Whether a durable spool is active — captured before the
+        // configs are moved into the sink builders. A spooling sink
+        // can't be hot-swapped (its drain worker is stateful), so a
+        // SIGHUP reload treats delivery changes there as restart-only.
+        let webhook_spool_active = webhooks.spool_dir.is_some();
+        let cdr_spool_active = cdr
+            .webhook
+            .as_ref()
+            .and_then(|w| w.spool_dir.as_ref())
+            .is_some();
+
+        // Wrap both sinks so a SIGHUP reload can swap the delegate
+        // behind them without touching the acceptor / outbound /
+        // registration handles that hold the wrapper.
+        let cdr_swap = Arc::new(crate::reload::SwappableCdrSink::new(
+            build_cdr_sink(cdr, hep_telemetry.as_deref()).await?,
+        ));
+        let cdr_sink: CdrSinkHandle = cdr_swap.clone();
         // The same sink fans out call lifecycle events from the
         // acceptor AND registration_state_changed events from the
         // per-[[register]] tasks. Cheap to share — Arc<dyn …>.
-        let webhook_sink = build_webhook_sink(webhooks)?;
+        let webhook_swap = Arc::new(crate::reload::SwappableWebhookSink::new(
+            build_webhook_sink(webhooks)?,
+        ));
+        let webhook_sink: WebhookSinkHandle = webhook_swap.clone();
         let webhook_sink_for_registrations = Arc::clone(&webhook_sink);
 
         // ─── Forge media stack ──────────────────────────────────────
@@ -369,8 +407,11 @@ impl Runtime {
         // we leave the gate unset and the routing handler accepts
         // INVITEs from any source (legacy posture, documented as
         // dev / behind-firewall only).
+        // Route table behind an ArcSwap so a SIGHUP reload can swap the
+        // dialplan for new INVITEs without dropping in-flight calls.
+        let route_swap = Arc::new(arc_swap::ArcSwap::from_pointee(routes));
         let mut routing_handler_builder =
-            RoutingHandler::new(Arc::new(routes), Arc::clone(&acceptor))
+            RoutingHandler::new(Arc::clone(&route_swap), Arc::clone(&acceptor))
                 .with_dialog_terminator(dialog_terminator)
                 .with_register_source_resolver(register_source_resolver(&registration_mgr));
         if !trunks.is_empty() {
@@ -451,7 +492,28 @@ impl Runtime {
         // When TLS is configured the handler does the cert reload;
         // when it isn't, the handler is a no-op (just consumes the
         // signal so it doesn't fire the default action).
-        spawn_sighup_handler(sip.tls.clone(), tls_server_config.clone());
+        match config_path {
+            // Daemon with a backing config file: full SIGHUP reload
+            // (config file + TLS cert).
+            Some(path) => {
+                let initial_text = std::fs::read_to_string(&path).unwrap_or_default();
+                crate::reload::spawn_reload_handler(crate::reload::ReloadContext {
+                    config_path: path,
+                    initial_text,
+                    route_swap: Arc::clone(&route_swap),
+                    webhook_swap: Arc::clone(&webhook_swap),
+                    cdr_swap: Arc::clone(&cdr_swap),
+                    hep_telemetry: hep_telemetry.clone(),
+                    webhook_spool_active,
+                    cdr_spool_active,
+                    tls: sip.tls.clone().zip(tls_server_config.clone()),
+                    restart_fingerprints,
+                });
+            }
+            // No backing file (tests): preserve the prior TLS-cert /
+            // no-op SIGHUP behavior.
+            None => spawn_sighup_handler(sip.tls.clone(), tls_server_config.clone()),
+        }
 
         // ─── Integrated UAS ────────────────────────────────────────
         let local_uri = sip_local_uri(&node, &sip);
@@ -1066,7 +1128,7 @@ fn build_tls_client_config(extra_ca: Option<&std::path::Path>) -> Result<Arc<Tls
 /// `[sip.tls]`. Failure here is fatal — operators who set
 /// `transports = ["tls"]` expect SIPS to actually work, not to
 /// silently degrade to cleartext.
-fn load_sip_tls_server_config(
+pub(crate) fn load_sip_tls_server_config(
     tls: &SipTlsConfig,
 ) -> Result<Arc<tokio_rustls::rustls::ServerConfig>> {
     let cert = tls
@@ -1225,7 +1287,7 @@ fn spawn_sighup_reloader(
 /// Build the lifecycle webhook sink from `[webhooks]` config.
 /// Returns `NullSink` when disabled. When enabled, wraps the
 /// `HttpSink` in a `FilteredSink` if an `events` allowlist is set.
-fn build_webhook_sink(cfg: WebhooksConfig) -> Result<WebhookSinkHandle> {
+pub(crate) fn build_webhook_sink(cfg: WebhooksConfig) -> Result<WebhookSinkHandle> {
     if !cfg.enabled {
         return Ok(Arc::new(WebhookNullSink));
     }
@@ -1255,7 +1317,10 @@ fn build_webhook_sink(cfg: WebhooksConfig) -> Result<WebhookSinkHandle> {
     Ok(sink)
 }
 
-async fn build_cdr_sink(cdr: CdrConfig, hep: Option<&HepTelemetry>) -> Result<CdrSinkHandle> {
+pub(crate) async fn build_cdr_sink(
+    cdr: CdrConfig,
+    hep: Option<&HepTelemetry>,
+) -> Result<CdrSinkHandle> {
     let mut sinks: Vec<CdrSinkHandle> = Vec::new();
 
     if cdr.enabled {

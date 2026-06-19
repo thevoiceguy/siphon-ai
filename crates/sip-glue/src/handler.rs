@@ -40,6 +40,7 @@
 
 use std::sync::{Arc, Weak};
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use sip_core::{Request, Response};
 use sip_dialog::Dialog;
@@ -218,7 +219,11 @@ pub trait CallAcceptor: Send + Sync {
 /// trait's default 405/501 responses; REFER (transfer) lands in a
 /// follow-up.
 pub struct RoutingHandler<A> {
-    routes: Arc<RouteSet>,
+    /// Hot-swappable route table. New INVITEs read the current value
+    /// via [`ArcSwap::load`]; a SIGHUP config reload `store`s a fresh
+    /// `RouteSet` and subsequent INVITEs pick it up. In-flight calls
+    /// already matched are unaffected (they captured their route).
+    routes: Arc<ArcSwap<RouteSet>>,
     acceptor: Arc<A>,
     resolver: RegisterSourceResolver,
     terminator: DialogTerminatorHandle,
@@ -246,7 +251,7 @@ impl<A> RoutingHandler<A> {
     /// [`Self::with_dialog_terminator`] before deploying — without
     /// it, BYEs are 200 OK'd but the per-call controller doesn't
     /// learn the SIP leg ended.
-    pub fn new(routes: Arc<RouteSet>, acceptor: Arc<A>) -> Self {
+    pub fn new(routes: Arc<ArcSwap<RouteSet>>, acceptor: Arc<A>) -> Self {
         Self {
             routes,
             acceptor,
@@ -301,8 +306,9 @@ impl<A> RoutingHandler<A> {
         self
     }
 
-    pub fn routes(&self) -> &RouteSet {
-        &self.routes
+    /// Snapshot of the current route table (after any SIGHUP reload).
+    pub fn routes(&self) -> Arc<RouteSet> {
+        self.routes.load_full()
     }
 }
 
@@ -366,7 +372,8 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
             (self.resolver)(request, ctx)
         };
 
-        match dispatch_invite(&self.routes, &register_source, request) {
+        let routes = self.routes.load();
+        match dispatch_invite(&routes, &register_source, request) {
             RouteAction::SendFinal(mut response) => {
                 self.fill_response(&mut response, ctx).await;
                 handle.send_final(response).await;
@@ -464,7 +471,7 @@ mod tests {
             }
         }
 
-        let routes = Arc::new(siphon_ai_routes::RouteSet::default());
+        let routes = Arc::new(ArcSwap::from_pointee(siphon_ai_routes::RouteSet::default()));
         let handler = RoutingHandler::new(routes, Arc::new(FakeAcceptor));
         let _: Arc<dyn UasRequestHandler> = Arc::new(handler);
     }

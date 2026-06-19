@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-06-19
+
+### Added
+
+- **Config CLI subcommands.** The daemon gains read-only subcommands;
+  running the daemon is unchanged (`siphon-ai --config X`, no subcommand).
+  - `siphon-ai check --config X` — validate + compile and exit (no sockets,
+    no runtime). Exit `0` + a one-screen summary if valid, `1` + the error
+    on stderr otherwise. The CI / pre-deploy / pre-`systemctl reload`
+    preflight. (Also fixes the documented-but-nonexistent `--check` flag in
+    `contrib/README.md`.)
+  - `siphon-ai print-config --config X [--show-secrets]` — render the
+    effective compiled config (post-`${VAR}`, post per-route merge); secrets
+    redacted by default.
+  - `siphon-ai route-test --config X --to N [...]` — run the dialplan against
+    a synthetic call (first-match-wins) and report the winning route (or
+    `NO MATCH → 404`) + its effective bridge config.
+- **`SIGHUP` config hot-reload.** `systemctl reload siphon-ai` re-reads the
+  `--config` file and hot-applies the reload-safe sections **without dropping
+  calls**: the **route table** (new INVITEs use the new dialplan; in-flight
+  calls keep their match) and the **`[webhooks]` / `[cdr]` sinks** (rebuilt +
+  swapped, unless a durable `spool_dir` is active for that sink — its drain
+  worker can't be hot-swapped). The `[sip.tls]` cert reload (0.3.0) is folded
+  into the same handler.
+  - **Fail-safe:** a config that doesn't load/compile is logged + counted and
+    the running config is kept — a bad edit can't take the daemon down.
+  - **Restart-required sections** (`[sip]` listen/transports, `[node]`,
+    `[media]`, `[observability]`, `[admin]`, `[hep]`,
+    `[security.stir_shaken]`, and `[[gateway]]` — gateway hot-reload is a
+    planned follow-up) are applied-by-restart; a reload that changes one logs
+    a warning naming it and still applies the safe sections.
+  - New metric `siphon_ai_config_reloads_total{result=applied|no_change|failed}`.
+
 ## [0.11.0] - 2026-06-19
 
 ### Added

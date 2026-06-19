@@ -1579,11 +1579,15 @@ sleep 1.2
 
 total=$((total + 1))
 echo "─── delayed_offer ─────────────────────────────────────"
-# rc 0 = both check_it asserts passed (200 carried our offer) and the
-# call completed; cross-check the daemon logged the delayed-offer accept.
+# rc 0 = the 200 carried our offer and the call completed. Cross-check
+# the daemon both ACCEPTED the offerless INVITE AND actually FINALIZED
+# from the ACK answer (the bridge connected). The bridge check guards
+# the on_ack-dispatch path: a regression that drops the body-carrying
+# ACK would still pass the 200-OK assert but never bridge.
 if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/delayed_offer_caller.xml" -m 1 -timeout 12s -trace_err \
         -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1 \
-    && grep -q "delayed-offer 200 OK sent; awaiting ACK answer" "$DO_DAEMON_LOG"; then
+    && grep -q "delayed-offer 200 OK sent; awaiting ACK answer" "$DO_DAEMON_LOG" \
+    && grep -q "bridge connected" "$DO_DAEMON_LOG"; then
     echo "  OK"
 else
     echo "  FAIL (daemon: $DO_DAEMON_LOG; ws: $DO_WS_LOG)"

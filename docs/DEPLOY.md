@@ -461,10 +461,20 @@ re-opens on `SIGHUP` (in practice — restart is simpler).
 }
 ```
 
-`termination.cause` values: `"server_hangup"`, `"local_shutdown"`,
-`"bridge_ended"`, `"tap_ended"`. `tap_disconnect` adds
-`"inactivity_timeout"` when the RTP watchdog fired. New fields are
-additive; the `version` integer bumps only on breaking changes.
+`termination.cause` values for a call that went active: `"server_hangup"`,
+`"local_shutdown"`, `"bridge_ended"`, `"tap_ended"`. `tap_disconnect`
+adds `"inactivity_timeout"` when the RTP watchdog fired.
+
+A **delayed-offer** call that fails negotiation before going active
+(0.9.5) also gets a CDR, with one of: `"ack_timeout"` (no ACK before SIP
+Timer H), `"missing_sdp_answer"`, `"invalid_sdp_answer"`,
+`"no_compatible_codec"`, or `"invalid_remote_media"`. These records have
+an **empty `audio`** block (no codec was negotiated) and blank
+`bridge_disconnect` / `tap_disconnect`.
+
+The `version` integer is **2** as of 0.9.5 — it bumps on changes that
+could break a strict consumer (here, the new `termination.cause`
+values). Adding a new optional *field* stays additive and does not bump.
 
 Two optional STIR/SHAKEN fields appear when `[security.stir_shaken]` is
 enabled (added in 0.4.0; schema stays at version 1 — both are omitted

@@ -1534,15 +1534,23 @@ async fn handle_packet(
     let ctx = TransportContext::new(tx_kind, peer, stream).with_local_addr(local);
 
     if request.method().as_str() == "ACK" {
-        // ACK doesn't open a server transaction; just notify the
-        // matching invite TM key so the UAS can clear its 200 OK
-        // retransmission timer (RFC 3261 §17.2.1, §17.1.1.3 — the
-        // ACK transaction key uses the original INVITE's method).
+        // ACK doesn't open a server transaction; notify the matching
+        // invite TM key so the UAS can clear its 200 OK retransmission
+        // timer (RFC 3261 §17.2.1, §17.1.1.3 — the ACK transaction key
+        // uses the original INVITE's method).
         if let Some(branch) = sip_transaction::request_branch_id(&request) {
             let key = sip_transaction::TransactionKey::new(branch, sip_core::Method::Invite, true);
             transaction_mgr.ack_received(&key).await;
         }
-        return;
+        // An early-offer ACK carries no SDP and needs no application
+        // handling — clearing the timer above is all there is to do. A
+        // **delayed-offer** ACK carries the peer's SDP answer, which the
+        // UAS must see (`on_ack` → finalize the call); fall through to
+        // dispatch for those. (`receive_request` makes a benign
+        // non-INVITE entry for it — the FSM sends no response to an ACK.)
+        if request.body().is_empty() {
+            return;
+        }
     }
 
     let handle = transaction_mgr

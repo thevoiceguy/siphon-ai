@@ -101,7 +101,7 @@ async fn run_call_emits_cdr_when_controller_exits() {
     assert_eq!(recs.len(), 1, "expected exactly one CDR; got {recs:?}");
     let r = &recs[0];
 
-    assert_eq!(r.version, 1);
+    assert_eq!(r.version, siphon_ai_cdr::CDR_VERSION); // 2 since 0.9.5
     assert_eq!(r.call_id, "siphon-cdr-test");
     assert_eq!(r.sip_call_id, "abc-cdr@pbx.example.com");
     assert_eq!(r.from, "+13125551234");

@@ -187,7 +187,9 @@ the listener's `ServerConfig` without dropping in-flight TLS
 sessions (RFC 5746-compliant rotation — existing dialogs keep
 using the cert they handshook with; new dialogs pick up the
 fresh cert). The systemd unit's `ExecReload=` wires `systemctl
-reload siphon-ai` to the SIGHUP.
+reload siphon-ai` to the SIGHUP. Since 0.12.0 the same `SIGHUP`
+also reloads the **config file** — see [Config file
+reload](#config-file-reload-0120) below.
 
 ```sh
 # Let's Encrypt deploy-hook (/etc/letsencrypt/renewal-hooks/deploy/)
@@ -228,6 +230,40 @@ pipeline that always restarts services on config change), the
 0.2.0 recipe still works — replace `systemctl reload` with
 `systemctl restart`. A restart drops in-flight calls; SIGHUP
 doesn't.
+
+#### Config file reload (0.12.0)
+
+The same `SIGHUP` (`systemctl reload siphon-ai`) also re-reads the
+`--config` file and **hot-applies the reload-safe sections without
+dropping calls**:
+
+- **routes** — new INVITEs use the new dialplan; in-flight calls keep the
+  route they matched;
+- **`[webhooks]` + `[cdr]` sinks** — rebuilt and swapped, *unless* a
+  durable `spool_dir` is active for that sink (its drain worker can't be
+  hot-swapped → restart required for delivery changes there);
+- the `[sip.tls]` cert (above).
+
+**Always `check` before you reload** — a reload is exactly as safe as the
+config you feed it:
+
+```sh
+siphon-ai check --config /etc/siphon-ai/config.toml && systemctl reload siphon-ai
+```
+
+**Fail-safe.** A config that doesn't load/compile is logged, the running
+config is **kept**, and `siphon_ai_config_reloads_total{result="failed"}`
+ticks — a bad edit can't take the daemon down (same posture as the cert
+reload). On success the counter ticks `applied`, or `no_change` when the
+file is byte-identical to the last load.
+
+**Restart-required sections.** `[sip]` listen/transports, `[node]`,
+`[media]`, `[observability]`, `[admin]`, `[hep]`,
+`[security.stir_shaken]`, and `[[gateway]]` (gateway hot-reload is a
+planned follow-up) bind sockets or build process-wide state and need a
+process **restart**. A reload that changes one of these applies the safe
+sections and logs a `warn!` naming the section(s) that did not take effect
+— grep the journal for `require a restart` after a reload to catch this.
 
 ### 6. Smoke test
 
@@ -810,6 +846,7 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_rtp_packet_loss_ratio`       | histogram | —                                     | Packet-loss ratio (0.0-1.0) recorded on every `rtp_stats` emission. |
 | `siphon_ai_rtp_rtt_ms`                  | histogram | —                                     | RTCP-derived round-trip time (ms) per received Receiver Report (RFC 3550 §A.7). Populated since 0.3.2 (forge originates SRs); explicit buckets 10ms–1s. Records a sample roughly every RTCP cycle (~5s) once bidirectional RTCP is flowing. |
 | `siphon_ai_sip_tls_reload_attempts_total` | counter | `outcome=ok\|failed`                  | One tick per SIGHUP cert-reload attempt. `failed` means a broken cert/key on disk; the listener keeps serving the previous cert. |
+| `siphon_ai_config_reloads_total`        | counter   | `result=applied\|no_change\|failed`   | SIGHUP config-file reloads (0.12.0). `applied` = a changed config loaded and the hot-reloadable sections (routes, webhook/CDR sinks) were swapped; `no_change` = the file was byte-identical to the last load; `failed` = the new config didn't load/compile and the running config was kept. Alert on `failed` after a deploy. |
 | `siphon_ai_conference_joins_total`      | counter   | `result=joined\|disabled\|too_many_rooms\|room_full\|rate_mismatch\|already_joined\|error` | Conference joins attempted (0.7.0). Every non-`joined` row leaves the call on its direct caller↔WS pair. |
 | `siphon_ai_conferences_active`          | gauge     | —                                     | Live conference rooms (0.7.0). A room spawns on first join and exits when its last member leaves. |
 | `siphon_ai_conference_participants`     | gauge     | —                                     | Mixer participants across all rooms (0.7.0). Each member call contributes 2 — its SIP leg and its WS session; two calls in one room read 4. |

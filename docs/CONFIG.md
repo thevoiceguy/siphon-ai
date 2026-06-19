@@ -625,9 +625,70 @@ unreachable collector flips `siphon_ai_hep_collector_up` to 0. The audio
 path never blocks on HEP (CLAUDE.md §4.7). See `docs/HEP.md` for what each
 layer ships and how Homer correlates them.
 
-## Reload
+## Validating, inspecting & reloading config
 
-The daemon does not currently support config reload — changes take effect on
-process restart. Routing changes that operators want to apply mid-shift
-should be made via the admin API (`POST /admin/calls/:id/hangup`,
-`PUT /admin/log`) rather than by reloading.
+The daemon has read-only subcommands for working with a config file without
+starting it, plus `SIGHUP` hot-reload for a subset of sections (0.12.0).
+Running the daemon is unchanged — `siphon-ai --config X` with no subcommand.
+
+### `siphon-ai check --config X`
+
+Validate and compile the config, then exit — **no sockets, no runtime**.
+Exit `0` (with a one-screen summary) if valid, `1` (with the error on
+stderr) otherwise. The CI / pre-deploy / pre-`systemctl reload` preflight.
+
+```sh
+siphon-ai check --config /etc/siphon-ai/config.toml || echo "bad config, not deploying"
+```
+
+A missing default route (`any = true`) warns but still exits `0` (matches
+the daemon's startup behavior).
+
+### `siphon-ai print-config --config X [--show-secrets]`
+
+Print the **effective** compiled config (post-`${VAR}`, post per-route
+merge) so you can see what your file actually resolved to — which `${VAR}`
+won, what each route inherits vs overrides. **Secrets are redacted** (auth
+headers, signing secrets, register/gateway passwords, admin token hashes,
+HEP password → `<redacted>`); `--show-secrets` reveals them for local
+debugging.
+
+### `siphon-ai route-test --config X --to N [...]`
+
+Run the dialplan against a synthetic call (first-match-wins) and report the
+winning route — or `NO MATCH → SIP 404` — plus its effective `ws_url` /
+codecs (route override vs `[bridge]` default). Flags: `--to` / `--from` /
+`--ruri-user` / `--ruri-host` / `--to-host` / `--from-host` /
+`--register-source` (default `trunk`) / `-H 'Name: Value'` (repeatable).
+`--ruri-user` defaults to `--to`.
+
+```sh
+siphon-ai route-test --config x.toml --to 1000 --from sip:alice@pbx --register-source trunk
+```
+
+### Hot reload (`SIGHUP` / `systemctl reload`)
+
+`SIGHUP` re-reads the **same `--config` file** and hot-applies the
+reload-safe sections without dropping calls:
+
+- **routes** — new INVITEs use the new dialplan; in-flight calls keep the
+  route they matched;
+- **webhook + CDR sinks** (`[webhooks]`, `[cdr]`) — rebuilt and swapped,
+  **unless** a durable spool (`spool_dir`) is active for that sink (its
+  background drain worker can't be hot-swapped → restart required);
+- the **`[sip.tls]` cert** is reloaded too (the 0.3.0 behavior, unchanged).
+
+**Fail-safe:** if the new config doesn't load/compile, the error is logged,
+the running config is **kept**, and `siphon_ai_config_reloads_total{result="failed"}`
+ticks — a bad edit can't take the daemon down. Run `siphon-ai check` first.
+
+**Restart-required sections.** Anything that binds a socket or builds
+process-wide state — `[sip]` listen/transports, `[node]`, `[media]`,
+`[observability]`, `[admin]`, `[hep]`, `[security.stir_shaken]`, and
+`[[gateway]]` (gateway hot-reload is a planned follow-up) — needs a process
+restart. A reload that changes one of these applies the safe sections and
+logs a warning naming the section(s) that did **not** take effect.
+
+Watch `siphon_ai_config_reloads_total{result}` (`applied` / `no_change` /
+`failed`); each reload also logs what it did. See `docs/DEPLOY.md` for the
+`systemctl reload` flow.

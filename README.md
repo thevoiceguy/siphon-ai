@@ -42,8 +42,8 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
-**Current release: v0.12.1.** Production-deployed against real carriers
-(Twilio Secure Trunking, FreeSWITCH, CUCM). The WS protocol is still
+**Current release: v0.12.2.** Production-deployed against real carriers
+(Twilio Elastic SIP Trunking, FreeSWITCH, CUCM). The WS protocol is still
 `version: "1"` — every release has been additive, so a WS server built
 against 0.1.0 keeps working unchanged, and upgrading the daemon is a
 zero-behaviour-change drop-in (every feature below is **off by default**

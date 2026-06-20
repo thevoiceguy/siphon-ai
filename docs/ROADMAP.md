@@ -53,20 +53,23 @@ path"). Combined with `SIGHUP` reload this unlocks true rolling deploys.
 ### Listener & secret hardening *(bundle)*
 - **`[admin].tls`** — native TLS on the admin listener (today it's plain HTTP,
   loopback-or-front-with-proxy only).
-- **Optional `/metrics` auth** — bearer token on `/metrics` only, off by
-  default; `/health`+`/ready` stay open. (Parked 2026-06-19 — confirmed
-  `/metrics` carries no PII, only aggregate counters + operator-chosen route/
-  register names, so this is recon-hardening, not a PII fix.)
 - **Secret-manager integration** — beyond `${VAR}`: systemd credentials /
   file-based secrets / Vault, so tokens and passwords needn't sit in the
   environment.
 
-### Inbound abuse protection
-Today the only inbound gate is the `[[trunk]]` allowlist. There's no
-rate-limiting or flood protection on the INVITE path.
+(The optional `/metrics` bearer token moved to P2 — it's recon-hardening,
+not a PII fix.)
 
-- Per-source INVITE rate limits + global admission control (a DoS posture for
-  internet-facing daemons), complementing the existing fail2ban recipe.
+### Inbound security — don't trust the network
+Today the only inbound gate is the `[[trunk]]` allowlist, and `from_hosts`
+matching is spoofable by an on-path attacker. Two complementary additions for
+internet-facing daemons (especially trunks without a static carrier IP):
+
+- **Inbound digest auth (RFC 3261 §22)** — challenge inbound INVITEs with a
+  digest credential. `docs/CONFIG.md` already names this the proper
+  "no trust in network" answer and marks it post-v1.
+- **Per-source INVITE rate limits + admission control** — a DoS posture
+  beyond the allowlist, complementing the existing fail2ban recipe.
 
 ### Signed audit-event stream
 Admin requests are logged + metered, but there's no tamper-evident, shippable
@@ -98,15 +101,78 @@ artifacts and no distributed tracing.
 
 ---
 
+## P1 — Recording: compliance & storage
+
+Recording (0.5.0) writes a plaintext WAV to a local dir — fine for a lab,
+short of what regulated industries (PCI/HIPAA/call-center) need. The gaps are
+documented in `docs/RECORDING.md`.
+
+- **Encryption at rest** — envelope encryption with a KMS hook (the
+  compliance blocker).
+- **Object-storage sink** — S3-compatible upload + a retention policy
+  (lifecycle/TTL), instead of local-disk-only.
+- **Consent / announcement hooks** — a configurable "this call may be
+  recorded" prompt before capture starts.
+- **Compression & format** — Opus / FLAC output (smaller than WAV), plus
+  path templating (`{date}/{call_id}` etc.).
+- **Outbound recording** — extend capture to outbound legs (currently
+  inbound-only).
+
+---
+
+## P1 — Protocol SDKs & machine-readable schemas
+
+The WS protocol (`docs/PROTOCOL.md`) is the product contract, but every
+integrator hand-rolls JSON + 20 ms audio framing from prose. Lower the
+barrier and make the contract testable:
+
+- **JSON Schema** for every WS message (generated from / checked against the
+  Rust types in `crates/bridge`).
+- **Server SDKs** — TypeScript and Python, handling framing, audio
+  endianness/rate, and the message envelope, so a bot author writes handlers
+  not wire code.
+- **Conformance suite + protocol testkit** — a harness that replays a
+  scripted call against a candidate WS server and validates its responses,
+  plus a local mock daemon for SDK CI.
+
+---
+
+## P1 — Per-call quality telemetry (live + history)
+
+`/metrics` is aggregate and HEP is operator-side; there's no first-class way
+to feed a per-call view into the operator's own dashboards. Complements the
+CDR quality fields below (CDR = end-of-call record; this = the live stream +
+queryable history).
+
+- **Live per-call stats** — richer `rtp_stats` (jitter/loss/RTT, audio
+  timing, barge-in) streamed over the WS and/or an out-of-band webhook during
+  the call.
+- **History** — a queryable store / export so dashboards can chart per-call
+  quality over time, not just scrape Prometheus aggregates.
+
+---
+
 ## P2 — High-value call features
 
-- **Outbound call recording** — recording (0.5.0) is inbound-only; extend it
-  to outbound legs.
 - **AMD (answering-machine / voicemail detection)** — human-vs-machine on
   answered outbound calls, surfaced as a WS event. Needs a `forge-amd`
   sibling to `forge-vad` (*upstream-gated*).
 - **WS-failure prompt playback** — on a WS failure, play a configurable prompt
   before teardown instead of only `hangup`.
+
+---
+
+## P2 — Security & CDR (small, high-signal)
+
+- **Optional `/metrics` bearer auth** — token on `/metrics` only, off by
+  default; `/health`+`/ready` stay open. Defense-in-depth for deployments
+  that expose the observability port widely. (Confirmed `/metrics` carries no
+  PII — only aggregate counters + operator-chosen route/register names — so
+  this is recon-hardening, not a PII fix.)
+- **CDR call-quality fields** — add `first_audio_out_ms` (bridge-connected →
+  first WS audio reaching the caller) and `barge_in_count`; both are flagged
+  as gaps in `docs/OPERATIONS.md`. Small, high-signal; bumps `CDR_VERSION`.
+  (The delayed-offer setup-failure CDR already shipped in 0.9.5.)
 
 ---
 

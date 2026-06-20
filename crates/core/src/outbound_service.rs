@@ -232,6 +232,12 @@ impl OutboundOriginateHandle for OutboundService {
             auth_header: self.defaults.auth_header.clone(),
             connect_timeout: self.defaults.connect_timeout,
             tls: self.defaults.bridge_tls.clone(),
+            // WS liveness (PROTOCOL.md §5.6 / §3.1) applies to outbound
+            // legs too — a slow/hung WS server wedges an outbound call the
+            // same way it would an inbound one.
+            ping_interval: self.defaults.ws_ping_interval,
+            pong_timeout: self.defaults.ws_pong_timeout,
+            start_deadline: self.defaults.server_start_deadline,
         };
         let from = req.from.clone().unwrap_or_else(|| gw.from.clone());
         let to = req.to.clone();

@@ -131,6 +131,7 @@ fn make_controller_reconnect(
             auth_header: None,
             connect_timeout: Duration::from_secs(2),
             tls: None,
+            ..Default::default()
         },
         start: start_msg(call_id),
         media_tap: tap,
@@ -208,6 +209,7 @@ fn make_controller_full(
             auth_header: None,
             connect_timeout: Duration::from_secs(2),
             tls: None,
+            ..Default::default()
         },
         start: start_msg(call_id),
         media_tap: tap,

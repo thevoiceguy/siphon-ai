@@ -155,6 +155,18 @@ pub struct BridgeDefaults {
     /// Default `Some(5000ms)` per `docs/design/DEV_PLAN_0.2.0.md` §9.3,
     /// mirroring RTCP §6.2's compound-report cadence.
     pub rtp_stats_interval: Option<Duration>,
+    /// WS keepalive ping cadence (PROTOCOL.md §5.6). `Duration::ZERO`
+    /// disables keepalive. Default 15 s. Flows to
+    /// [`siphon_ai_bridge::BridgeConfig::ping_interval`].
+    pub ws_ping_interval: Duration,
+    /// Keepalive pong deadline (PROTOCOL.md §5.6). `Duration::ZERO`
+    /// disables. Default 10 s. → `BridgeConfig::pong_timeout`.
+    pub ws_pong_timeout: Duration,
+    /// `server_too_slow` start-deadline (PROTOCOL.md §3.1): the WS server
+    /// must send its first audio frame (or `hangup`) within this window
+    /// of `start`. `Duration::ZERO` disables. Default 5 s. →
+    /// `BridgeConfig::start_deadline`.
+    pub server_start_deadline: Duration,
     /// Default SRTP negotiation mode from `[media].srtp`. Routes can
     /// override via `[route.media].srtp` (see [`resolve_srtp_mode`]).
     /// Default [`SrtpMode::Off`] — plaintext-RTP only, matching v0.2.0.
@@ -292,6 +304,9 @@ impl Default for BridgeDefaults {
             silence_threshold: Some(Duration::from_millis(3000)),
             dead_air_threshold: Some(Duration::from_millis(10000)),
             rtp_stats_interval: Some(Duration::from_millis(5000)),
+            ws_ping_interval: Duration::from_secs(15),
+            ws_pong_timeout: Duration::from_secs(10),
+            server_start_deadline: Duration::from_secs(5),
             srtp_mode: SrtpMode::Off,
             offer_dtls_srtp: false,
             bridge_tls: None,
@@ -612,6 +627,11 @@ pub fn build_bridge_config(
         // (`[route.bridge.tls]`) is a follow-up — for now every call
         // shares the global config.
         tls: defaults.bridge_tls.clone(),
+        // WS liveness (PROTOCOL.md §5.6 / §3.1) — daemon-wide `[bridge]`
+        // settings, not route-overridable. `Duration::ZERO` = disabled.
+        ping_interval: defaults.ws_ping_interval,
+        pong_timeout: defaults.ws_pong_timeout,
+        start_deadline: defaults.server_start_deadline,
     })
 }
 
@@ -2209,6 +2229,7 @@ fn bridge_detail(res: Option<Result<DisconnectReason, siphon_ai_bridge::BridgeEr
             DisconnectReason::StopSent => "stop_sent".into(),
             DisconnectReason::ServerClosed => "server_closed".into(),
             DisconnectReason::ControllerHungUp => "controller_hung_up".into(),
+            DisconnectReason::ServerTooSlow => "server_too_slow".into(),
         },
         Some(Err(e)) => format!("error: {e}"),
     }

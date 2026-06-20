@@ -722,6 +722,19 @@ pub struct RawBridge {
     /// = disable the event entirely.
     #[serde(default)]
     pub rtp_stats_interval_ms: Option<u64>,
+    /// WS keepalive ping cadence in seconds (PROTOCOL.md §5.6). `None`
+    /// (unset) = 15 s default; `0` = disable keepalive.
+    #[serde(default)]
+    pub ws_ping_interval_secs: Option<u64>,
+    /// Pong deadline in seconds for the keepalive ping (PROTOCOL.md §5.6).
+    /// `None` = 10 s default; `0` = disable keepalive.
+    #[serde(default)]
+    pub ws_pong_timeout_secs: Option<u64>,
+    /// `server_too_slow` start-deadline in seconds (PROTOCOL.md §3.1): the
+    /// WS server must send its first audio frame (or `hangup`) within this
+    /// window of `start`. `None` = 5 s default; `0` = disable.
+    #[serde(default)]
+    pub server_start_deadline_secs: Option<u64>,
     /// `[bridge.tls]` — mTLS for the WS bridge connection (W4 Part A).
     /// Absent = use the existing plaintext / webpki path. Present =
     /// build a custom rustls ClientConfig carrying the client cert

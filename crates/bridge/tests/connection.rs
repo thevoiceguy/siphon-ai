@@ -42,6 +42,12 @@ struct CapturedRequest {
 struct ServerOpts {
     echo_subprotocol: bool,
     require_auth: Option<String>,
+    /// When true the server completes the WS handshake but then never
+    /// reads from the socket — so tungstenite never auto-responds to a
+    /// Ping with a Pong. This is the only faithful way to simulate a
+    /// half-open / hung server for the keepalive test (an app-level
+    /// "ignore pings" doesn't work: tungstenite auto-pongs during reads).
+    hang_after_handshake: bool,
 }
 
 impl ServerOpts {
@@ -49,6 +55,7 @@ impl ServerOpts {
         Self {
             echo_subprotocol: true,
             require_auth: None,
+            hang_after_handshake: false,
         }
     }
 }
@@ -87,6 +94,7 @@ async fn spawn_server(opts: ServerOpts) -> ServerHandle {
 
         let echo_subprotocol = opts.echo_subprotocol;
         let require_auth = opts.require_auth.clone();
+        let hang_after_handshake = opts.hang_after_handshake;
         let captured_for_callback = Arc::clone(&captured_clone);
 
         // `ErrorResponse` (the tungstenite handshake-rejection type) is
@@ -152,6 +160,13 @@ async fn spawn_server(opts: ServerOpts) -> ServerHandle {
         };
 
         let (mut sink, mut stream) = ws.split();
+
+        if hang_after_handshake {
+            // Hold the connection open but never read → tungstenite can't
+            // auto-pong. Keeping `sink`/`stream` alive keeps the TCP up.
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            return;
+        }
 
         loop {
             tokio::select! {
@@ -259,6 +274,7 @@ fn fixture_config(url: String) -> BridgeConfig {
         auth_header: None,
         connect_timeout: Duration::from_secs(2),
         tls: None,
+        ..Default::default()
     }
 }
 
@@ -628,6 +644,7 @@ async fn unsupported_url_returns_invalid_config_or_ws_error() {
         auth_header: None,
         connect_timeout: Duration::from_millis(500),
         tls: None,
+        ..Default::default()
     };
     let result = connect_and_run(cfg, fixture_start("c"), chans).await;
     assert!(
@@ -644,6 +661,7 @@ async fn auth_failure_at_upgrade_time_propagates_as_websocket_error() {
     let server = spawn_server(ServerOpts {
         echo_subprotocol: true,
         require_auth: Some("expected".into()),
+        ..Default::default()
     })
     .await;
     let (chans, _audio_out, _control_out, _audio_in, _control_in) = fixture_channels();
@@ -678,4 +696,157 @@ async fn dropped_audio_in_rx_disconnects_with_controller_hung_up() {
         .unwrap()
         .expect("clean disconnect");
     assert_eq!(result, DisconnectReason::ControllerHungUp);
+}
+
+// ─── Liveness: keepalive + start-deadline (PROTOCOL.md §5.6 / §3.1) ──────────
+
+/// A `BridgeConfig` with explicit liveness timers (the default fixture
+/// disables them so the rest of the suite is unaffected).
+fn liveness_config(
+    url: String,
+    ping_interval: Duration,
+    pong_timeout: Duration,
+    start_deadline: Duration,
+) -> BridgeConfig {
+    BridgeConfig {
+        ws_url: url,
+        connect_timeout: Duration::from_secs(2),
+        ping_interval,
+        pong_timeout,
+        start_deadline,
+        ..Default::default()
+    }
+}
+
+/// Server that connects but never sends audio → the start-deadline trips
+/// `server_too_slow`, and the conn emits a fatal `error` + `stop` first.
+#[tokio::test]
+async fn silent_server_trips_server_too_slow() {
+    let mut server = spawn_server(ServerOpts::echoing()).await;
+    let (chans, _audio_out, _control_out, _audio_in, _control_in) = fixture_channels();
+
+    // Keepalive disabled (zero); 200 ms start-deadline.
+    let cfg = liveness_config(
+        server.ws_url(),
+        Duration::ZERO,
+        Duration::ZERO,
+        Duration::from_millis(200),
+    );
+    let conn = tokio::spawn(connect_and_run(cfg, fixture_start("slow"), chans));
+
+    let result = tokio::time::timeout(Duration::from_secs(2), conn)
+        .await
+        .expect("conn returns")
+        .unwrap()
+        .expect("clean disconnect");
+    assert_eq!(result, DisconnectReason::ServerTooSlow);
+
+    // The conn should have sent `start`, then `error{server_too_slow}`,
+    // then `stop` before closing. The server forwards received text
+    // frames asynchronously, so drain with a short await rather than an
+    // immediate try_recv (which would race the forwarding).
+    let mut saw_error = false;
+    let mut saw_stop = false;
+    while let Ok(Some(text)) =
+        tokio::time::timeout(Duration::from_millis(500), server.client_text_rx.recv()).await
+    {
+        if text.contains("\"server_too_slow\"") {
+            saw_error = true;
+        }
+        if text.contains("\"type\":\"stop\"") {
+            saw_stop = true;
+        }
+        if saw_error && saw_stop {
+            break;
+        }
+    }
+    assert!(saw_error, "expected an error{{server_too_slow}} frame");
+    assert!(saw_stop, "a fatal error must be followed by stop (§3.10)");
+}
+
+/// First inbound audio frame satisfies the start-deadline, so a server
+/// that speaks promptly is NOT torn down as `server_too_slow`.
+#[tokio::test]
+async fn audio_before_deadline_keeps_call_alive() {
+    let server = spawn_server(ServerOpts::echoing()).await;
+    let (chans, _audio_out, _control_out, _audio_in, _control_in) = fixture_channels();
+
+    let cfg = liveness_config(
+        server.ws_url(),
+        Duration::ZERO,
+        Duration::ZERO,
+        Duration::from_millis(200),
+    );
+    let conn = tokio::spawn(connect_and_run(cfg, fixture_start("fast"), chans));
+
+    // Server sends an audio frame well within the deadline.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    server
+        .server_send_tx
+        .send(WsMessage::Binary(vec![0u8; 320]))
+        .expect("server send audio");
+
+    // Past the deadline, the conn must still be running (no server_too_slow).
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(!conn.is_finished(), "call torn down despite timely audio");
+
+    conn.abort();
+}
+
+/// Server that stays connected but never pongs → keepalive trips,
+/// surfacing as a reconnect-eligible `KeepaliveTimeout` error.
+#[tokio::test]
+async fn unponged_pings_trip_keepalive_timeout() {
+    let server = spawn_server(ServerOpts {
+        echo_subprotocol: true,
+        require_auth: None,
+        hang_after_handshake: true,
+    })
+    .await;
+    let (chans, _audio_out, _control_out, _audio_in, _control_in) = fixture_channels();
+
+    // Ping every 100 ms, 100 ms pong deadline; start-deadline disabled so
+    // only keepalive can fire.
+    let cfg = liveness_config(
+        server.ws_url(),
+        Duration::from_millis(100),
+        Duration::from_millis(100),
+        Duration::ZERO,
+    );
+    let conn = tokio::spawn(connect_and_run(cfg, fixture_start("hung"), chans));
+
+    let err = tokio::time::timeout(Duration::from_secs(2), conn)
+        .await
+        .expect("conn returns")
+        .unwrap()
+        .expect_err("keepalive timeout is an error");
+    assert!(
+        matches!(err, BridgeError::KeepaliveTimeout(_)),
+        "expected KeepaliveTimeout, got {err:?}"
+    );
+}
+
+/// A server that pongs keeps the call alive past several keepalive
+/// rounds — the happy path must not false-positive.
+#[tokio::test]
+async fn ponged_pings_keep_call_alive() {
+    let server = spawn_server(ServerOpts::echoing()).await; // auto-pongs
+    let (chans, _audio_out, _control_out, _audio_in, _control_in) = fixture_channels();
+
+    let cfg = liveness_config(
+        server.ws_url(),
+        Duration::from_millis(100),
+        Duration::from_millis(100),
+        Duration::ZERO,
+    );
+    let conn = tokio::spawn(connect_and_run(cfg, fixture_start("healthy"), chans));
+
+    // Several ping/pong rounds.
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    assert!(
+        !conn.is_finished(),
+        "call torn down despite the server ponging"
+    );
+
+    conn.abort();
 }

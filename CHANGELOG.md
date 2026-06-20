@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Bumped the forge-media pin to `049a19983a95` (forge-media PR #76):
+  `forge-core`'s `EventBus::publish` no longer logs a spurious `WARN` when
+  it has no subscribers. Drops log noise on the per-call event path;
+  logging-only, no API or behavior change.
+
 ## [0.12.2] - 2026-06-20
 
 ### Fixed

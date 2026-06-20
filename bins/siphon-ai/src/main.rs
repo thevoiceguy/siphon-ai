@@ -118,8 +118,16 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Read-only subcommands dispatch here and exit — no tracing
-    // subscriber, no socket binding, no runtime.
+    // Install tracing before anything that loads config — including the
+    // read-only subcommands. `siphon-ai check` must surface the same
+    // load-time `warn!`s the daemon prints at boot (e.g. the
+    // SRTP-key-in-cleartext footgun); without a subscriber those are
+    // silently dropped and the preflight is less informative than a real
+    // boot.
+    let log_filter = init_tracing(cli.log.as_deref());
+
+    // Read-only subcommands dispatch here and exit — no socket binding,
+    // no runtime (but tracing is live, so config warnings show).
     if let Some(command) = &cli.command {
         let path = config_path(&cli)?;
         match command {
@@ -156,9 +164,9 @@ async fn main() -> Result<()> {
         }
     }
 
-    // No subcommand → run the daemon.
+    // No subcommand → run the daemon. (`log_filter` / tracing already
+    // installed above.)
     let config_path = config_path(&cli)?;
-    let log_filter = init_tracing(cli.log.as_deref());
 
     info!(config = %config_path.display(), "loading configuration");
     let config = siphon_ai_config::load_from_path(&config_path)

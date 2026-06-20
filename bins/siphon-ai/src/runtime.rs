@@ -214,6 +214,10 @@ impl Runtime {
             .as_ref()
             .and_then(|w| w.spool_dir.as_ref())
             .is_some();
+        // Baseline sink fingerprints so a reload only touches (and only
+        // warns about) a sink whose config actually changed.
+        let webhook_fingerprint = format!("{:?}", webhooks);
+        let cdr_fingerprint = format!("{:?}", cdr);
 
         // Wrap both sinks so a SIGHUP reload can swap the delegate
         // behind them without touching the acceptor / outbound /
@@ -690,6 +694,8 @@ impl Runtime {
                     hep_telemetry: hep_telemetry.clone(),
                     webhook_spool_active,
                     cdr_spool_active,
+                    webhook_fingerprint,
+                    cdr_fingerprint,
                     outbound: outbound_reload,
                     tls: sip.tls.clone().zip(tls_for_reload),
                     restart_fingerprints,

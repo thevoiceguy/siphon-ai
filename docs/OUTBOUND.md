@@ -86,7 +86,7 @@ endpoint can place calls billed to your trunk. Premium-rate fraud burns
 thousands of dollars in hours, so treat the endpoint like a payment API.
 
 **The originate API has no built-in authentication** (a deliberate 0.6.0
-decision — see `docs/DEV_PLAN_0.6.0.md` §9.5). The intended posture:
+decision — see `docs/design/DEV_PLAN_0.6.0.md` §9.5). The intended posture:
 
 1. **Bind the admin API to localhost or a private network**
    (`http_listen = "127.0.0.1:9091"`, the documented default posture) and

@@ -3,7 +3,7 @@
 > **Status: APPROVED — decisions LOCKED (§10).** Pins the WS surface, the
 > SIP re-INVITE mechanics, the media handling, and the controller
 > interaction before implementation — the same design-first pass we did
-> for park (`docs/DESIGN_0.7.0_PARK.md`), because this is invasive SIP
+> for park (`docs/design/DESIGN_0.7.0_PARK.md`), because this is invasive SIP
 > work (we become the re-INVITE *offerer* for the first time). The build
 > follows this; deviations get noted back here.
 

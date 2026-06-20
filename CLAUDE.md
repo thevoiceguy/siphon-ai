@@ -69,7 +69,8 @@ siphon-ai/
 │   ├── DIALPLAN.md               # Route matching semantics with examples
 │   ├── HEP.md                    # HEP integration setup and Homer correlation
 │   ├── DEPLOY.md
-│   └── REGISTRATION.md
+│   ├── REGISTRATION.md
+│   └── design/                   # design notes + historical dev plans (internal)
 └── test-harness/
     ├── sipp-scenarios/           # SIPp test scripts
     ├── hep-collector-stub/       # Tiny HEP3 receiver for tests

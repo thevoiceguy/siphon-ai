@@ -91,7 +91,7 @@ pub struct RawConfig {
 
 /// `[admin]` — bearer-token-authenticated admin API on its own listener
 /// (separate from `[observability]`'s open metrics/health). See
-/// `docs/DESIGN_ADMIN_AUTH.md`.
+/// `docs/design/DESIGN_ADMIN_AUTH.md`.
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawAdmin {
@@ -193,7 +193,7 @@ fn default_true() -> bool {
 
 /// `[sip.call_progress]` — what — if any — provisional response
 /// `siphon-ai` layers on top of `IntegratedUAS`'s `100 Trying`
-/// before the 2xx. See `docs/DEV_PLAN_0.2.0.md` §4.1.
+/// before the 2xx. See `docs/design/DEV_PLAN_0.2.0.md` §4.1.
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawCallProgress {
@@ -459,7 +459,7 @@ pub struct RawGateway {
 
 /// `[outbound]` — global outbound-origination controls (0.6.0). The native
 /// guardrails for the originate path (which has no built-in auth — the
-/// endpoint is fronted by a reverse proxy, see `docs/DEV_PLAN_0.6.0.md` §9.5).
+/// endpoint is fronted by a reverse proxy, see `docs/design/DEV_PLAN_0.6.0.md` §9.5).
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct RawOutbound {
     /// Max simultaneous outbound calls. `0` (the default) disables outbound

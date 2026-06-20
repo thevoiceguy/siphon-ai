@@ -144,15 +144,15 @@ pub struct BridgeDefaults {
     /// Default one-sided silence threshold: emit `silence_detected`
     /// when the caller has been silent for this long (forge-vad
     /// drives the underlying "speech" signal). `None` disables.
-    /// Default `Some(3000ms)` per `docs/DEV_PLAN_0.2.0.md` §9.2.
+    /// Default `Some(3000ms)` per `docs/design/DEV_PLAN_0.2.0.md` §9.2.
     pub silence_threshold: Option<Duration>,
     /// Default two-sided dead-air threshold: emit `dead_air_detected`
     /// when neither caller speech nor outbound WS audio has been
     /// observed for this long. `None` disables. Default
-    /// `Some(10000ms)` per `docs/DEV_PLAN_0.2.0.md` §9.2.
+    /// `Some(10000ms)` per `docs/design/DEV_PLAN_0.2.0.md` §9.2.
     pub dead_air_threshold: Option<Duration>,
     /// Default cadence for `rtp_stats` events. `None` disables.
-    /// Default `Some(5000ms)` per `docs/DEV_PLAN_0.2.0.md` §9.3,
+    /// Default `Some(5000ms)` per `docs/design/DEV_PLAN_0.2.0.md` §9.3,
     /// mirroring RTCP §6.2's compound-report cadence.
     pub rtp_stats_interval: Option<Duration>,
     /// Default SRTP negotiation mode from `[media].srtp`. Routes can
@@ -224,7 +224,7 @@ impl Default for BargeInConfig {
 }
 
 /// How the UAS responds to inbound INVITEs before the 200 OK
-/// (per `docs/DEV_PLAN_0.2.0.md` §4.1). All three modes still emit
+/// (per `docs/design/DEV_PLAN_0.2.0.md` §4.1). All three modes still emit
 /// `100 Trying` from `IntegratedUAS`; this enum picks what — if
 /// anything — siphon-ai layers on top before the 2xx.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -251,7 +251,7 @@ pub enum CallProgressMode {
 }
 
 /// SRTP negotiation mode for the inbound INVITE answer path
-/// (per `docs/DEV_PLAN_0.3.0.md` §4.1). The mode picks how the
+/// (per `docs/design/DEV_PLAN_0.3.0.md` §4.1). The mode picks how the
 /// daemon reacts to the offer's `m=` profile:
 ///
 ///   * [`Off`][SrtpMode::Off] — only plaintext (`RTP/AVP`) is

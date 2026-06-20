@@ -3,7 +3,7 @@
 //! The `/admin/*` surface can hang up calls, originate **billable**
 //! outbound calls, manage conferences, retrieve parked calls, and change
 //! log filters. This module is the daemon-native gate for it
-//! (`docs/DESIGN_ADMIN_AUTH.md`): a bearer token in
+//! (`docs/design/DESIGN_ADMIN_AUTH.md`): a bearer token in
 //! `Authorization: Bearer <token>` is hashed (SHA-256) and compared in
 //! **constant time** against the configured tokens; each token carries
 //! one [`Role`], and every endpoint declares a minimum role.

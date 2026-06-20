@@ -77,7 +77,7 @@ pub struct Config {
 }
 
 /// Compiled `[admin]` — the admin API listener address plus the
-/// bearer-token auth table (tokens stored hashed). `docs/DESIGN_ADMIN_AUTH.md`.
+/// bearer-token auth table (tokens stored hashed). `docs/design/DESIGN_ADMIN_AUTH.md`.
 #[derive(Debug, Clone)]
 pub struct AdminConfig {
     pub listen_addr: SocketAddr,
@@ -163,7 +163,7 @@ pub struct OutboundConfig {
 
 impl OutboundConfig {
     /// Outbound origination is enabled only when a positive concurrency cap
-    /// is set (fail-closed — see `docs/DEV_PLAN_0.6.0.md` §9.5/§9.6).
+    /// is set (fail-closed — see `docs/design/DEV_PLAN_0.6.0.md` §9.5/§9.6).
     pub fn enabled(&self) -> bool {
         self.max_concurrent > 0
     }

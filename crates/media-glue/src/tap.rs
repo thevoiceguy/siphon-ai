@@ -1,7 +1,7 @@
 //! Bidirectional audio tap on top of forge-engine's `MediaBridgeManager`.
 //!
 //! This is the integration point identified by the Week-1 spike
-//! (`docs/SPIKE_MEDIA_TAP.md`): one tap per call, attached to forge's
+//! (`docs/design/SPIKE_MEDIA_TAP.md`): one tap per call, attached to forge's
 //! `MediaBridgeManager`, exposing PCM16-LE byte channels the
 //! `CallController` wires straight into the bridge crate.
 //!

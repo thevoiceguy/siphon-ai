@@ -80,8 +80,11 @@ Frame cadence is **50 fps** (every 20 ms). Servers SHOULD pace outbound
 audio at the same cadence to avoid buffer churn; SiphonAI tolerates
 bursts up to the 200 ms outbound buffer (§5.5).
 
-Frames of the wrong size, the wrong sample rate, or non-mono content are
-rejected with `error { code: "audio_format" }` and the call is torn down.
+A frame of the wrong **size** (not the negotiated 20 ms — 320 bytes @ 8 kHz,
+640 @ 16 kHz) is rejected with `error { code: "audio_format" }`. A raw PCM16
+frame carries no sample-rate or channel metadata, so the daemon validates
+only the byte length and otherwise assumes the negotiated rate + mono — send
+the wrong rate or stereo and it is interpreted, not detected.
 
 ---
 
@@ -329,8 +332,7 @@ then closes the WebSocket cleanly (close code 1000).
 | Code | Meaning |
 |---|---|
 | `rtp_timeout` | No incoming RTP for the configured idle period (`media.rtp_idle_timeout_ms`). |
-| `codec_unsupported` | SDP offered no codec SiphonAI supports. |
-| `audio_format` | Server sent audio with an unexpected size, sample rate, or layout. |
+| `audio_format` | Server sent an audio frame of an unexpected **size** — not the negotiated 20 ms frame (320 bytes @ 8 kHz, 640 @ 16 kHz). Only the byte length is checkable: a binary audio frame carries no sample-rate or channel metadata, so the daemon assumes the negotiated rate + mono. |
 | `protocol_error` | A WS message was malformed JSON, used an unknown `type`, or had a `call_id` that doesn't match the connection. |
 | `server_too_slow` | Server didn't begin sending audio within 5 s of `start`. |
 | `transfer_failed` | A REFER was attempted but the far end rejected it. |
@@ -344,6 +346,13 @@ A **fatal** `error` is always followed by `stop` (with `reason:
 `conference_failed`, `park_failed`, and `hold_failed` — are the exception:
 they report a rejected control request, the call continues, and no `stop`
 follows.
+
+> **Codec negotiation failure is not a WS error.** There is no
+> `codec_unsupported` code: codec selection happens entirely at the SIP
+> layer, and an INVITE whose SDP offers no codec SiphonAI supports is
+> rejected with **`488 Not Acceptable Here`** — *before* any WS bridge is
+> opened. The WS connection only exists once a codec is agreed, so a
+> codec mismatch can never surface here.
 
 ### 3.11 `recording_started` / `recording_stopped` / `recording_failed` — recording lifecycle (0.5.0)
 

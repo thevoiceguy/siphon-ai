@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-06-20
+
+### Fixed
+
+- **`siphon-ai check` silently swallowed config load-time warnings**
+  (security-relevant). The read-only subcommands (`check` / `print-config`
+  / `route-test`) installed no tracing subscriber, so compile-time
+  `warn!`s — notably the **SRTP-master-key-in-cleartext** footgun (a
+  gateway with `srtp != off` but a non-TLS transport) — were dropped,
+  making the documented pre-deploy preflight strictly *less* informative
+  than a real boot. Tracing is now installed before the read-only
+  subcommands, so `check` surfaces exactly what the daemon prints at
+  startup (then still reports `config OK` + exit 0, since these are
+  warnings, not errors).
+- **SIGHUP webhook/CDR-spool reload warning over-fired.** With a
+  `spool_dir` configured, every reload logged "delivery changes require a
+  restart" even when `[webhooks]` / `[cdr]` hadn't changed. The warning now
+  fires only when the sink's own config actually changed (and the reload no
+  longer needlessly rebuilds an unchanged sink).
+- **`[media]` restart-required check missed codec / DTMF changes** (silent
+  config drift). The reload's restart-required fingerprint hashed only
+  `rtp_port_range` / `moh_file` / `srtp`, so changing `[media].codecs` (or
+  any `[bridge]` default) and reloading was silently swallowed — not
+  hot-applied and with no restart-required warning. The fingerprint now
+  covers the full `[media]` block plus the bridge/codec defaults, so any
+  such change surfaces as restart-required.
+
 ## [0.12.1] - 2026-06-19
 
 ### Added

@@ -22,12 +22,14 @@
 //! pre-reload preflight).
 //!
 //! Sections that bind sockets or build process-wide state (`[sip]`
-//! listen/transports, `[node]`, `[observability]`, `[admin]`,
-//! `[media]`, `[hep]`, `[security.stir_shaken]`, and `[outbound]`
-//! limits — the concurrency cap / rate limit, which also flip outbound
-//! on/off) **require a restart**. A reload whose value for any of those
-//! differs from the running one applies the safe sections and logs a
-//! prominent warning naming them.
+//! listen/transports, `[node]`, `[media]` + the `[bridge]`/codec
+//! defaults — `[media].codecs` / `.dtmf` compile into the bridge
+//! defaults — `[observability]`, `[admin]`, `[hep]`,
+//! `[security.stir_shaken]`, and `[outbound]` limits — the concurrency
+//! cap / rate limit, which also flip outbound on/off) **require a
+//! restart**. A reload whose value for any of those differs from the
+//! running one applies the safe sections and logs a prominent warning
+//! naming them.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -119,12 +121,16 @@ pub fn restart_fingerprints(c: &Config) -> Vec<(&'static str, String)> {
         ("[sip].listen", c.sip.listen_addr.to_string()),
         ("[sip].transports", format!("{:?}", c.sip.transports)),
         ("[node]", format!("{}|{}", c.node.id, c.node.public_address)),
+        // `[media]` proper (rtp port range, MOH, SRTP).
+        ("[media]", format!("{:?}", c.media)),
+        // Bridge/codec defaults — `[media].codecs` / `.dtmf` compile in
+        // here, along with `[bridge]` ws_url / auth_header / barge-in /
+        // timeouts. None of it is hot-reloaded, so fingerprint the whole
+        // struct: a change to any of it (codecs, DTMF, …) must surface as
+        // restart-required rather than being silently swallowed.
         (
-            "[media]",
-            format!(
-                "{:?}|{:?}|{:?}",
-                c.media.rtp_port_range, c.media.moh_file, c.media.srtp
-            ),
+            "[bridge]/[media] defaults",
+            format!("{:?}", c.bridge_defaults),
         ),
         (
             "[observability]",
@@ -177,6 +183,31 @@ pub fn gateway_fingerprint(outbound: &OutboundConfig) -> String {
     gws.join(",")
 }
 
+/// What a SIGHUP reload should do with a sink whose config we re-read.
+/// A sink is touched only when its config actually changed; when its
+/// durable spool is active the change can't be hot-applied (the drain
+/// worker is stateful).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SinkReload {
+    /// Config identical to the running one — leave the sink alone (and,
+    /// crucially, don't warn about a spool that isn't being changed).
+    Unchanged,
+    /// Changed, no spool — rebuild + swap.
+    Swap,
+    /// Changed, but a spool is active — warn restart-required.
+    RestartRequired,
+}
+
+fn decide_sink_reload(changed: bool, spool_active: bool) -> SinkReload {
+    if !changed {
+        SinkReload::Unchanged
+    } else if spool_active {
+        SinkReload::RestartRequired
+    } else {
+        SinkReload::Swap
+    }
+}
+
 // ─── SIGHUP reload handler ──────────────────────────────────────────
 
 /// The outbound service + its gateway-build deps, kept so a reload can
@@ -204,6 +235,10 @@ pub struct ReloadContext {
     pub webhook_spool_active: bool,
     /// `[cdr.webhook].spool_dir` set on the running config.
     pub cdr_spool_active: bool,
+    /// `[webhooks]` / `[cdr]` fingerprints at startup (so a reload only
+    /// touches a sink when its config actually changed).
+    pub webhook_fingerprint: String,
+    pub cdr_fingerprint: String,
     /// Outbound gateway hot-reload handle; `None` when outbound is off.
     pub outbound: Option<OutboundReload>,
     /// `Some` when TLS is configured — the cert is reloaded too (the
@@ -237,6 +272,8 @@ pub fn spawn_reload_handler(ctx: ReloadContext) {
         let mut fingerprints = ctx.restart_fingerprints;
         let mut webhook_spool_active = ctx.webhook_spool_active;
         let mut cdr_spool_active = ctx.cdr_spool_active;
+        let mut webhook_fp = ctx.webhook_fingerprint;
+        let mut cdr_fp = ctx.cdr_fingerprint;
         let mut gateway_fp = ctx
             .outbound
             .as_ref()
@@ -293,6 +330,8 @@ pub fn spawn_reload_handler(ctx: ReloadContext) {
                 webhook_spool_active,
                 cdr_spool_active,
                 &gateway_fp,
+                &webhook_fp,
+                &cdr_fp,
             )
             .await;
 
@@ -306,6 +345,8 @@ pub fn spawn_reload_handler(ctx: ReloadContext) {
             fingerprints = applied.fingerprints;
             webhook_spool_active = applied.webhook_spool_active;
             cdr_spool_active = applied.cdr_spool_active;
+            webhook_fp = applied.webhook_fingerprint;
+            cdr_fp = applied.cdr_fingerprint;
             gateway_fp = applied.gateway_fingerprint;
         }
         warn!("SIGHUP signal stream ended; config hot-reload offline");
@@ -322,6 +363,11 @@ pub(crate) struct ReloadApplied {
     pub cdr_spool_active: bool,
     /// Fresh gateway-set fingerprint (carried to the next reload).
     pub gateway_fingerprint: String,
+    /// Fresh `[webhooks]` / `[cdr]` fingerprints (carried forward, so a
+    /// reload only touches a sink — and only warns about its spool —
+    /// when that sink's config actually changed).
+    pub webhook_fingerprint: String,
+    pub cdr_fingerprint: String,
 }
 
 /// Hot-apply the reload-safe sections of a freshly-loaded config: store
@@ -343,6 +389,8 @@ pub(crate) async fn apply_reload(
     prev_webhook_spool: bool,
     prev_cdr_spool: bool,
     prev_gateway_fp: &str,
+    prev_webhook_fp: &str,
+    prev_cdr_fp: &str,
 ) -> ReloadApplied {
     let new_fp = restart_fingerprints(&new);
     let restart_required: Vec<&'static str> = prev_fingerprints
@@ -353,8 +401,8 @@ pub(crate) async fn apply_reload(
         .collect();
     let new_gateway_fp = gateway_fingerprint(&new.outbound);
 
-    // Snapshot the new spool state, then take the sections we hot-apply
-    // (partial move out of `new`).
+    // Snapshot the new spool state + sink fingerprints, then take the
+    // sections we hot-apply (partial move out of `new`).
     let new_webhook_spool = new.webhooks.spool_dir.is_some();
     let new_cdr_spool = new
         .cdr
@@ -362,6 +410,8 @@ pub(crate) async fn apply_reload(
         .as_ref()
         .and_then(|w| w.spool_dir.as_ref())
         .is_some();
+    let new_webhook_fp = format!("{:?}", new.webhooks);
+    let new_cdr_fp = format!("{:?}", new.cdr);
     let Config {
         routes,
         webhooks,
@@ -373,25 +423,33 @@ pub(crate) async fn apply_reload(
     // Routes: always reload-safe.
     route_swap.store(Arc::new(routes));
 
-    // Webhook sink: hot-swap unless a spool is (or becomes) active —
-    // its drain worker can't be hot-swapped.
-    if prev_webhook_spool || new_webhook_spool {
-        warn!("SIGHUP: [webhooks] spool is active; webhook delivery changes require a restart (not hot-applied)");
-    } else {
-        match crate::runtime::build_webhook_sink(webhooks) {
+    // Webhook sink: act only when `[webhooks]` actually changed. Hot-swap
+    // unless a spool is (or becomes) active — its drain worker can't be
+    // hot-swapped. (Warning only on a real change, not every reload.)
+    match decide_sink_reload(
+        new_webhook_fp != prev_webhook_fp,
+        prev_webhook_spool || new_webhook_spool,
+    ) {
+        SinkReload::Unchanged => {}
+        SinkReload::RestartRequired => {
+            warn!("SIGHUP: [webhooks] changed but its durable spool is active; webhook delivery changes require a restart (not hot-applied)")
+        }
+        SinkReload::Swap => match crate::runtime::build_webhook_sink(webhooks) {
             Ok(sink) => webhook_swap.store(sink),
             Err(e) => warn!(error = %e, "SIGHUP: rebuilding webhook sink failed; keeping previous"),
-        }
+        },
     }
 
-    // CDR sink: same spool caveat.
-    if prev_cdr_spool || new_cdr_spool {
-        warn!("SIGHUP: [cdr.webhook] spool is active; CDR delivery changes require a restart (not hot-applied)");
-    } else {
-        match crate::runtime::build_cdr_sink(cdr, hep).await {
+    // CDR sink: same change-gated logic.
+    match decide_sink_reload(new_cdr_fp != prev_cdr_fp, prev_cdr_spool || new_cdr_spool) {
+        SinkReload::Unchanged => {}
+        SinkReload::RestartRequired => {
+            warn!("SIGHUP: [cdr] changed but its durable spool is active; CDR delivery changes require a restart (not hot-applied)")
+        }
+        SinkReload::Swap => match crate::runtime::build_cdr_sink(cdr, hep).await {
             Ok(sink) => cdr_swap.store(sink),
             Err(e) => warn!(error = %e, "SIGHUP: rebuilding CDR sink failed; keeping previous"),
-        }
+        },
     }
 
     // Gateways: rebuild + swap the set when outbound is running, its
@@ -420,6 +478,8 @@ pub(crate) async fn apply_reload(
         webhook_spool_active: new_webhook_spool,
         cdr_spool_active: new_cdr_spool,
         gateway_fingerprint: new_gateway_fp,
+        webhook_fingerprint: new_webhook_fp,
+        cdr_fingerprint: new_cdr_fp,
     }
 }
 
@@ -467,6 +527,8 @@ any = true
             false,
             false,
             "",
+            "",
+            "",
         )
         .await;
 
@@ -496,6 +558,8 @@ any = true
             &fp,
             false,
             false,
+            "",
+            "",
             "",
         )
         .await;
@@ -564,5 +628,53 @@ any = true
             .map(|(a, _)| a.0)
             .collect();
         assert_eq!(changed, vec!["[outbound].limits"]);
+    }
+
+    // Bug 3: a `[media].codecs` change must be flagged restart-required,
+    // not silently swallowed.
+    #[test]
+    fn media_codecs_change_is_restart_required() {
+        const WITH_CODECS: &str = r#"
+[node]
+id = "x"
+[sip]
+listen = "127.0.0.1:5060"
+[media]
+codecs = ["pcmu", "pcma"]
+[bridge]
+ws_url = "wss://b/ws"
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+        let base = restart_fingerprints(&cfg(WITH_CODECS));
+        let changed_cfg =
+            cfg(&WITH_CODECS.replace(r#"codecs = ["pcmu", "pcma"]"#, r#"codecs = ["pcma"]"#));
+        let changed: Vec<_> = base
+            .iter()
+            .zip(&restart_fingerprints(&changed_cfg))
+            .filter(|(a, b)| a.1 != b.1)
+            .map(|(a, _)| a.0)
+            .collect();
+        assert_eq!(
+            changed,
+            vec!["[bridge]/[media] defaults"],
+            "a codec change must surface as restart-required"
+        );
+    }
+
+    // Bug 2: the spool warning fires only on a real `[webhooks]` change,
+    // not on every reload while a spool is configured.
+    #[test]
+    fn sink_reload_decision_only_acts_on_change() {
+        // Unchanged + spool active → leave it alone (no warning).
+        assert_eq!(decide_sink_reload(false, true), SinkReload::Unchanged);
+        // Unchanged + no spool → still nothing (don't needlessly rebuild).
+        assert_eq!(decide_sink_reload(false, false), SinkReload::Unchanged);
+        // Changed + spool active → restart-required (warn).
+        assert_eq!(decide_sink_reload(true, true), SinkReload::RestartRequired);
+        // Changed + no spool → hot-swap.
+        assert_eq!(decide_sink_reload(true, false), SinkReload::Swap);
     }
 }

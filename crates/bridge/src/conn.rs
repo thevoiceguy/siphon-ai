@@ -32,12 +32,21 @@
 //!   needs to frame the WS message;
 //! - never blocks (channel send/recv yield instead).
 //!
-//! ## Not yet implemented
+//! ## Liveness
 //!
-//! - WS keepalive (PROTOCOL.md §5.6: ping every 15 s, 10 s pong
-//!   deadline). Tracked as a follow-up; the underlying WS lib will
-//!   surface a hard error if the TCP connection dies, so v0.0.0 still
-//!   detects total disconnects.
+//! Two timers guard against a non-responsive WS server (both
+//! configurable under `[bridge]`; a zero duration disables each):
+//!
+//! - **Keepalive** (PROTOCOL.md §5.6): a WS Ping every
+//!   `ws_ping_interval_secs` (default 15 s); if no Pong lands within
+//!   `ws_pong_timeout_secs` (default 10 s) the connection is half-open
+//!   and the session drops with [`BridgeError::KeepaliveTimeout`]
+//!   (reconnect-eligible — see `core`'s 0.7.3 reconnect path).
+//! - **Start-deadline** (PROTOCOL.md §3.1): the server must send its
+//!   first audio frame (or `hangup`) within `server_start_deadline_secs`
+//!   (default 5 s) of `start`, else the call is torn down with
+//!   `error { code: "server_too_slow" }`
+//!   ([`DisconnectReason::ServerTooSlow`], a definitive teardown).
 
 use std::time::Duration;
 
@@ -82,6 +91,21 @@ pub struct BridgeConfig {
     /// cert + optional SPKI pin and handed to tokio-tungstenite's
     /// `Connector::Rustls`. See [`crate::tls`] for the verifier shape.
     pub tls: Option<crate::tls::BridgeTlsConfig>,
+    /// WS keepalive ping cadence (PROTOCOL.md §5.6). The conn sends a WS
+    /// Ping every interval and tears the session down if no Pong arrives
+    /// within [`Self::pong_timeout`]. `Duration::ZERO` on either disables
+    /// keepalive. Sourced from `[bridge].ws_ping_interval_secs`
+    /// (default 15 s).
+    pub ping_interval: Duration,
+    /// Pong deadline for [`Self::ping_interval`] (default 10 s);
+    /// `[bridge].ws_pong_timeout_secs`. `Duration::ZERO` disables.
+    pub pong_timeout: Duration,
+    /// `server_too_slow` start-deadline (PROTOCOL.md §3.1): the server
+    /// must send its first audio frame (or `hangup`) within this window
+    /// of `start`, else the call is torn down with
+    /// `error { code: "server_too_slow" }`. `Duration::ZERO` disables.
+    /// Sourced from `[bridge].server_start_deadline_secs` (default 5 s).
+    pub start_deadline: Duration,
 }
 
 impl Default for BridgeConfig {
@@ -91,6 +115,13 @@ impl Default for BridgeConfig {
             auth_header: None,
             connect_timeout: Duration::from_secs(5),
             tls: None,
+            // Disabled by default so unit/integration fixtures that build a
+            // bare `BridgeConfig` keep their prior behaviour. The daemon
+            // path (`acceptor::build_bridge_config`) always populates these
+            // from `[bridge]` (defaults 15 s / 10 s / 5 s).
+            ping_interval: Duration::ZERO,
+            pong_timeout: Duration::ZERO,
+            start_deadline: Duration::ZERO,
         }
     }
 }
@@ -239,6 +270,12 @@ pub enum DisconnectReason {
     /// Conn synthesized a `stop { reason: error }` to keep the spec
     /// invariant ("`stop` is always the last message") and closed.
     ControllerHungUp,
+    /// The server didn't send its first audio frame (or `hangup`) within
+    /// the start-deadline (PROTOCOL.md §3.1). The conn emitted
+    /// `error { code: "server_too_slow" }` + `stop` and closed. A
+    /// definitive teardown — never reconnect-eligible (redialing the same
+    /// slow server wouldn't help).
+    ServerTooSlow,
 }
 
 #[derive(Debug, Error)]
@@ -262,6 +299,12 @@ pub enum BridgeError {
 
     #[error("internal: {0}")]
     Internal(String),
+
+    /// No Pong arrived within the keepalive deadline (PROTOCOL.md §5.6) —
+    /// a half-open connection. Treated as an unexpected drop, so it is
+    /// reconnect-eligible when `[bridge].ws_reconnect_enabled`.
+    #[error("ws keepalive timeout (no pong within {0:?})")]
+    KeepaliveTimeout(Duration),
 }
 
 impl From<WsError> for BridgeError {
@@ -341,7 +384,12 @@ pub async fn connect_and_run_with_ready(
     }
     info!("bridge connected");
 
-    run_loop(ws, start, channels, call_id, ready_tx).await
+    let liveness = Liveness {
+        ping_interval: config.ping_interval,
+        pong_timeout: config.pong_timeout,
+        start_deadline: config.start_deadline,
+    };
+    run_loop(ws, start, channels, call_id, ready_tx, liveness).await
 }
 
 fn build_upgrade_request(
@@ -413,12 +461,21 @@ pub fn normalize_auth_header(value: &str) -> String {
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// Per-session liveness timers resolved from [`BridgeConfig`]. A
+/// `Duration::ZERO` disables the corresponding guard.
+struct Liveness {
+    ping_interval: Duration,
+    pong_timeout: Duration,
+    start_deadline: Duration,
+}
+
 async fn run_loop(
     ws: WsStream,
     start: StartMsg,
     channels: BridgeChannels,
     call_id: CallId,
     ready_tx: Option<oneshot::Sender<()>>,
+    liveness: Liveness,
 ) -> Result<DisconnectReason, BridgeError> {
     let BridgeChannels {
         mut audio_out_rx,
@@ -442,6 +499,32 @@ async fn run_loop(
 
     // Subsequent SiphonAI→server messages use seq starting at 1.
     let mut seq: Seq = 1;
+
+    // --- WS keepalive (PROTOCOL.md §5.6) -----------------------------
+    // Send a Ping every `ping_interval`; if no Pong lands within
+    // `pong_timeout` of an outstanding ping, the connection is half-open
+    // → tear down (reconnect-eligible). Either duration zero disables it.
+    let keepalive_on = !liveness.ping_interval.is_zero() && !liveness.pong_timeout.is_zero();
+    let ping_period = if keepalive_on {
+        liveness.ping_interval
+    } else {
+        // Parked far out; the branch is guarded off anyway. A non-zero
+        // period is required — `interval*` panics on a zero period.
+        Duration::from_secs(3600)
+    };
+    // `interval_at` so the FIRST ping fires one period out, not immediately.
+    let mut ping_timer =
+        tokio::time::interval_at(tokio::time::Instant::now() + ping_period, ping_period);
+    ping_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Absolute deadline an outstanding ping must be ponged by; `None` =
+    // no ping in flight.
+    let mut pong_deadline: Option<tokio::time::Instant> = None;
+
+    // --- server_too_slow start-deadline (PROTOCOL.md §3.1) -----------
+    // Armed now (`start` is on the wire); disarmed by the first inbound
+    // audio frame or a `hangup`. `None` = disabled or already satisfied.
+    let mut start_deadline: Option<tokio::time::Instant> = (!liveness.start_deadline.is_zero())
+        .then(|| tokio::time::Instant::now() + liveness.start_deadline);
 
     loop {
         tokio::select! {
@@ -493,6 +576,9 @@ async fn run_loop(
                         // when triaging WS payout issues without
                         // drowning their dashboards at info.
                         tracing::trace!(bytes = data.len(), "ws inbound audio");
+                        // First server audio satisfies the start-deadline
+                        // (§3.1) — the strict "begin sending audio" rule.
+                        start_deadline = None;
                         if audio_in_tx.send(data).await.is_err() {
                             return Ok(DisconnectReason::ControllerHungUp);
                         }
@@ -514,6 +600,12 @@ async fn run_loop(
                         // see exactly what the WS server sent. Audio
                         // frames live one notch lower (trace).
                         tracing::debug!(?parsed, "ws inbound control");
+                        // A `hangup` also satisfies the start-deadline:
+                        // the server chose to end the call rather than
+                        // speak (§3.1 — "or send `hangup`").
+                        if matches!(parsed, BridgeIn::Hangup { .. }) {
+                            start_deadline = None;
+                        }
                         if control_in_tx.send(parsed).await.is_err() {
                             return Ok(DisconnectReason::ControllerHungUp);
                         }
@@ -522,7 +614,8 @@ async fn run_loop(
                         sink.send(Message::Pong(payload)).await?;
                     }
                     Some(Ok(Message::Pong(_))) => {
-                        // Liveness ack; nothing to do until keepalive lands.
+                        // Liveness ack — clear the outstanding-ping deadline.
+                        pong_deadline = None;
                     }
                     Some(Ok(Message::Close(frame))) => {
                         debug!(?frame, "server initiated close");
@@ -535,6 +628,48 @@ async fn run_loop(
                     Some(Err(e)) => return Err(BridgeError::from(e)),
                     None => return Ok(DisconnectReason::ServerClosed),
                 }
+            }
+
+            // --- keepalive: send a Ping, arm the pong deadline ---------
+            _ = ping_timer.tick(), if keepalive_on => {
+                // A send error means the socket is already gone — surface
+                // it as a (reconnect-eligible) WS error.
+                sink.send(Message::Ping(Vec::new())).await?;
+                if pong_deadline.is_none() {
+                    pong_deadline = Some(tokio::time::Instant::now() + liveness.pong_timeout);
+                }
+            }
+
+            // --- keepalive: no Pong within the deadline → half-open ----
+            _ = async { tokio::time::sleep_until(pong_deadline.unwrap()).await },
+                if pong_deadline.is_some() =>
+            {
+                warn!(call_id = %call_id, timeout = ?liveness.pong_timeout,
+                    "ws keepalive timeout — no pong; dropping session");
+                // Best-effort fatal `error` + `stop` (§5.6 / §3.10). The
+                // peer is unresponsive, so bound the emit with a short
+                // timeout and ignore failures, then report the drop.
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    emit_fatal(&mut sink, &call_id, &mut seq,
+                        ErrorCode::Internal, "ws keepalive timeout"),
+                )
+                .await;
+                return Err(BridgeError::KeepaliveTimeout(liveness.pong_timeout));
+            }
+
+            // --- start-deadline: server never spoke → server_too_slow --
+            _ = async { tokio::time::sleep_until(start_deadline.unwrap()).await },
+                if start_deadline.is_some() =>
+            {
+                warn!(call_id = %call_id, deadline = ?liveness.start_deadline,
+                    "server sent no audio within start-deadline — server_too_slow");
+                // The connection is healthy here, so the `error` + `stop`
+                // will actually reach the server before we close.
+                let _ = emit_fatal(&mut sink, &call_id, &mut seq,
+                    ErrorCode::ServerTooSlow, "no audio within start deadline").await;
+                let _ = close_clean(&mut sink).await;
+                return Ok(DisconnectReason::ServerTooSlow);
             }
         }
     }
@@ -550,6 +685,39 @@ where
     };
     sink.send(Message::Close(Some(frame))).await?;
     let _ = sink.close().await;
+    Ok(())
+}
+
+/// Emit a fatal `error` followed by `stop { reason: error }` — the §3.10
+/// invariant that a fatal error is always the penultimate message and
+/// `stop` the last. Used by the liveness timeouts; `seq` is advanced for
+/// each. Returns the first send error so callers can decide whether the
+/// peer is reachable (the keepalive path treats it as best-effort).
+async fn emit_fatal<S>(
+    sink: &mut S,
+    call_id: &CallId,
+    seq: &mut Seq,
+    code: ErrorCode,
+    message: &str,
+) -> Result<(), BridgeError>
+where
+    S: SinkExt<Message, Error = WsError> + Unpin,
+{
+    let err = BridgeOut::Error {
+        call_id: call_id.clone(),
+        seq: *seq,
+        code,
+        message: message.to_string(),
+    };
+    *seq = seq.wrapping_add(1);
+    sink.send(Message::Text(serialize_or_drop(&err))).await?;
+    let stop = BridgeOut::Stop {
+        call_id: call_id.clone(),
+        seq: *seq,
+        reason: StopReason::Error,
+    };
+    *seq = seq.wrapping_add(1);
+    sink.send(Message::Text(serialize_or_drop(&stop))).await?;
     Ok(())
 }
 

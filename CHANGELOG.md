@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **WS liveness: keepalive + start-deadline** (PROTOCOL.md §5.6 / §3.1) —
+  two documented MUSTs that were never implemented, so a non-responsive
+  WS server could wedge a live call indefinitely. Now:
+  - **Keepalive** — SiphonAI sends a WS Ping every
+    `[bridge].ws_ping_interval_secs` (default 15 s) and, if no Pong lands
+    within `[bridge].ws_pong_timeout_secs` (default 10 s), treats the
+    connection as half-open and drops the session
+    (`error { code: "internal", message: "ws keepalive timeout" }`,
+    best-effort). A keepalive timeout is reconnect-eligible when
+    `[bridge].ws_reconnect_enabled` (0.7.3), else it tears the call down.
+    Previously only a *total* TCP disconnect was detected — a hung server
+    on a live socket was invisible.
+  - **Start-deadline** — the WS server must send its first audio frame
+    (or `hangup`) within `[bridge].server_start_deadline_secs` (default
+    5 s) of `start`, else the call is torn down with
+    `error { code: "server_too_slow" }` + `stop`. A definitive teardown
+    (not reconnect-eligible — redialing a slow server wouldn't help).
+  - All three knobs default to the spec values; `0` disables the
+    corresponding guard. Daemon-wide `[bridge]` settings; applies to
+    inbound, outbound, and reconnect/retrieve WS sessions alike.
+
 ### Changed
 
 - Bumped the forge-media pin to `049a19983a95` (forge-media PR #76):

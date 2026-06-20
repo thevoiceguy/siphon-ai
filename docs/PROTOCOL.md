@@ -190,9 +190,14 @@ The daemon's own `min_attestation` gate is a separate operator switch —
 see [`docs/CONFIG.md`](CONFIG.md) `[security]` for it and the
 attestation-gate policy matrix.
 
-A server MUST begin sending audio (or send a `hangup`) within 5 seconds
+A server MUST begin sending audio (or send a `hangup`) within the
+**start-deadline** (default 5 s, `[bridge].server_start_deadline_secs`)
 of receiving `start`, otherwise SiphonAI emits
-`error { code: "server_too_slow" }` and tears down.
+`error { code: "server_too_slow" }`, follows it with `stop`, and tears
+down. Only the *first audio frame* (or a `hangup`) satisfies the
+deadline — a control message alone (e.g. `mark`) does not. Operators
+whose servers legitimately need longer to first audio (cold-start
+LLM/TTS) can raise the value; `0` disables the deadline.
 
 ### 3.2 `speech_started` / `speech_stopped` — VAD events (optional)
 
@@ -334,12 +339,12 @@ then closes the WebSocket cleanly (close code 1000).
 | `rtp_timeout` | No incoming RTP for the configured idle period (`media.rtp_idle_timeout_ms`). |
 | `audio_format` | Server sent an audio frame of an unexpected **size** — not the negotiated 20 ms frame (320 bytes @ 8 kHz, 640 @ 16 kHz). Only the byte length is checkable: a binary audio frame carries no sample-rate or channel metadata, so the daemon assumes the negotiated rate + mono. |
 | `protocol_error` | A WS message was malformed JSON, used an unknown `type`, or had a `call_id` that doesn't match the connection. |
-| `server_too_slow` | Server didn't begin sending audio within 5 s of `start`. |
+| `server_too_slow` | Server didn't send its first audio frame (or a `hangup`) within the start-deadline of `start` — `[bridge].server_start_deadline_secs`, default 5 s (§3.1). |
 | `transfer_failed` | A REFER was attempted but the far end rejected it. |
 | `conference_failed` | A `conference_join` (§4.8) was refused: conferencing disabled, room or per-room cap reached, sample-rate mismatch, or already joined. The call continues on its direct pair. |
 | `park_failed` | A `park` (§4.9) was refused: park disabled (`[park].enabled = false`) or `[park].max_parked` reached. The call continues unparked on its current WS session — no `stop` follows this `error`. |
 | `hold_failed` | A `hold` / `resume` (§4.10) re-INVITE was rejected by the peer, timed out, or lost glare resolution. The call stays in its **prior** media state (a failed hold never drops it) — no `stop` follows this `error`. |
-| `internal` | SiphonAI internal error. The `message` field has details. |
+| `internal` | SiphonAI internal error. The `message` field has details — e.g. `ws keepalive timeout` when a half-open connection fails the §5.6 keepalive (best-effort: an unresponsive peer may never receive it). |
 
 A **fatal** `error` is always followed by `stop` (with `reason:
 "error"`) and a clean close. The **non-fatal** refusals —
@@ -716,10 +721,17 @@ audio has actually been played, rather than counting bytes sent.
 
 ### 5.6 Liveness
 
-WebSocket ping/pong is enabled. SiphonAI sends a ping every 15 s; if a
-server fails to pong within 10 s, SiphonAI emits
-`error { code: "internal", message: "ws keepalive timeout" }` and tears
-down. Servers MAY ping SiphonAI; SiphonAI always pongs.
+WebSocket keepalive is enabled by default. SiphonAI sends a ping every
+`[bridge].ws_ping_interval_secs` (default 15 s); if a server fails to
+pong within `[bridge].ws_pong_timeout_secs` (default 10 s) of an
+outstanding ping, SiphonAI treats the connection as half-open. It makes
+a best-effort emit of
+`error { code: "internal", message: "ws keepalive timeout" }` (the peer
+is, by definition, unresponsive — so this may not arrive) and drops the
+session. With `[bridge].ws_reconnect_enabled` a keepalive timeout is an
+**unexpected drop** that enters the reconnect path (§5.7); otherwise it
+tears the call down. Setting either interval to `0` disables keepalive.
+Servers MAY ping SiphonAI; SiphonAI always pongs.
 
 ### 5.7 WS disconnect mid-call
 

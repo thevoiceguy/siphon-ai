@@ -1855,6 +1855,9 @@ fn reconnect_eligible(outcome: &Result<DisconnectReason, BridgeError>) -> bool {
     match outcome {
         Ok(DisconnectReason::ServerClosed) => true,
         Ok(DisconnectReason::StopSent | DisconnectReason::ControllerHungUp) => false,
+        // `server_too_slow` is a healthy connection with a slow server —
+        // redialing the same endpoint wouldn't help. Definitive teardown.
+        Ok(DisconnectReason::ServerTooSlow) => false,
         Err(_) => true,
     }
 }

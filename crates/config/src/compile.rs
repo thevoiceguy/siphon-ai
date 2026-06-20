@@ -1473,6 +1473,22 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         Some(ms) => Some(Duration::from_millis(ms)),
     };
 
+    // WS liveness (PROTOCOL.md §5.6 keepalive, §3.1 start-deadline).
+    // `None` = spec default; `Some(0)` = disable (resolves to
+    // `Duration::ZERO`, which the bridge treats as off); `Some(n)` = n s.
+    let ws_ping_interval = match raw.ws_ping_interval_secs {
+        None => Duration::from_secs(15),
+        Some(s) => Duration::from_secs(s),
+    };
+    let ws_pong_timeout = match raw.ws_pong_timeout_secs {
+        None => Duration::from_secs(10),
+        Some(s) => Duration::from_secs(s),
+    };
+    let server_start_deadline = match raw.server_start_deadline_secs {
+        None => Duration::from_secs(5),
+        Some(s) => Duration::from_secs(s),
+    };
+
     // `[media].srtp` resolved to the typed enum form via the same
     // strict-matching path the route-level override uses
     // (`compile_srtp_mode`). Default — and any unset value — is `Off`.
@@ -1511,6 +1527,9 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         silence_threshold,
         dead_air_threshold,
         rtp_stats_interval,
+        ws_ping_interval,
+        ws_pong_timeout,
+        server_start_deadline,
         srtp_mode,
         offer_dtls_srtp,
         bridge_tls,

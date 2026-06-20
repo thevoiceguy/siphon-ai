@@ -45,7 +45,8 @@ operator's network, and the daemon container.
 | `[sip].listen`    | TCP    | TOML           | inbound   | Same port number when `transports` includes `"tcp"`. |
 | `[sip.tls].listen`| TCP    | TOML           | inbound   | TLS signaling. Defaults to the SIP IP + 5061. |
 | `[media].rtp_port_range` | UDP | TOML       | both      | RTP/RTCP. Forge allocates one even-numbered RTP port + the next odd RTCP port per call. Forward the whole range. |
-| `[observability].http_listen` | TCP | TOML  | inbound (cluster-local) | `/metrics`, `/health`, `/ready`, `/admin/*`. Don't expose this to the public internet — `/admin/*` has no auth in v1. |
+| `[observability].http_listen` | TCP | TOML  | inbound (cluster-local) | `/metrics`, `/health`, `/ready`. Unauthenticated — keep it cluster-local. Since 0.10.0 `/admin/*` is **not** served here (returns `404`); it moved to the dedicated `[admin]` listener below. |
+| `[admin].listen`  | TCP    | TOML           | inbound (cluster-local) | `/admin/*` control plane (0.10.0). Bearer-token auth + RBAC (`readonly` ⊂ `operator` ⊂ `admin`); omit `[admin]` and `/admin/*` isn't served at all. Still keep it off the public internet. |
 | Outbound, dynamic | TCP    | `[bridge].ws_url` (per route) | outbound | WebSocket from daemon to operator's WS server. |
 | Outbound, dynamic | TCP    | `[cdr.webhook].url`, `[webhooks].url` | outbound | HTTP POSTs for CDRs and lifecycle webhooks. |
 | Outbound 9060     | UDP    | `[hep].collector` | outbound | HEP3 to Homer. UDP only in v1. |

@@ -119,10 +119,11 @@ step "Section 1: Install packages"
 # though Debian's package metadata only declares one of them hard.
 #
 #   fail2ban           — the daemon itself.
-#   python3-systemd    — required by the journal backend our jails
-#                        use. Already a Depends of fail2ban; listed
-#                        here for explicitness so a future repackage
-#                        wouldn't silently break us.
+#   python3-systemd    — required by the systemd journal backend the
+#                        siphon-ai jail uses (recidive reads a file,
+#                        not the journal). Already a Depends of
+#                        fail2ban; listed here for explicitness so a
+#                        future repackage wouldn't silently break us.
 #   nftables           — provides `nft` and the kernel module our
 #                        action (`nftables-allports`) writes rules
 #                        through. Debian only marks this as Recommends
@@ -377,6 +378,22 @@ fi
 if status=$(sudo fail2ban-client status recidive 2>&1); then
   ok "recidive jail active."
   printf '%s\n' "$status" | sed 's/^/    /'
+
+  # recidive watches fail2ban's OWN ban events, which land in a FILE
+  # (logtarget = /var/log/fail2ban.log), NOT the journal — fail2ban's
+  # per-ban `NOTICE [jail] Ban <ip>` lines never reach the journal. A
+  # recidive jail pointed at the systemd backend matches zero events
+  # and silently never fires (status shows `Journal matches:` and
+  # `Total failed: 0` forever, even while siphon-ai racks up bans).
+  # Assert it's reading the file so that misconfiguration is caught
+  # HERE, at install time, instead of in an incident months later.
+  if ! printf '%s\n' "$status" | grep -q "File list:.*fail2ban\.log"; then
+    warn "recidive is up but is NOT reading /var/log/fail2ban.log (no \
+'File list:' in status). It will never fire — fail2ban logs bans to that \
+file, not the journal. Ensure jail.d/recidive.local uses 'backend = auto' \
++ 'logpath = /var/log/fail2ban.log' (or, if you set fail2ban's \
+logtarget = SYSTEMD-JOURNAL, switch recidive back to 'backend = systemd')."
+  fi
 else
   warn "recidive jail not active (this is unusual — was the file installed?)."
 fi

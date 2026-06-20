@@ -137,6 +137,20 @@ The recidive filter is bundled with the fail2ban package
 (`/etc/fail2ban/filter.d/recidive.conf`); we only ship the jail
 snippet.
 
+> **Why recidive reads a file, not the journal.** The `siphon-ai`
+> jail uses `backend = systemd` because the SiphonAI *daemon* logs
+> to journald. fail2ban *itself* does not — by default it logs to
+> `/var/log/fail2ban.log` (`logtarget` in `fail2ban.conf`), so its
+> per-ban `NOTICE [siphon-ai] Ban <ip>` lines never reach the
+> journal. recidive therefore reads that **file**
+> (`backend = auto`, `logpath = /var/log/fail2ban.log`). A recidive
+> jail pointed at `_SYSTEMD_UNIT=fail2ban.service` matches **zero**
+> ban events and silently never fires — confirm with
+> `fail2ban-client status recidive`: if `Total failed: 0` while the
+> siphon-ai jail is banning, the source is wrong. (If you set
+> fail2ban's `logtarget = SYSTEMD-JOURNAL`, switch recidive back to
+> the systemd backend.)
+
 ### Stack the two
 
 To get progressively longer recidive bans, enable
@@ -170,7 +184,7 @@ sudo fail2ban-client status recidive
 # |- Filter
 # |  |- Currently failed: 0
 # |  |- Total failed:     12
-# |  `- Journal matches:  _SYSTEMD_UNIT=fail2ban.service
+# |  `- File list:        /var/log/fail2ban.log
 # `- Actions
 #    |- Currently banned: 2
 #    |- Total banned:     4

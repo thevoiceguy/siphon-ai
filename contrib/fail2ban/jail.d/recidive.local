@@ -3,17 +3,28 @@
 # per-jail policy: a bot that gets siphon-ai-banned 3 times in
 # a week lands here for a week, then a month, etc.
 #
-# Watches fail2ban's OWN journal (`fail2ban.service`) for
-# `[<jail>] Ban <IP>` events. Filter ships with the fail2ban
-# package — no custom regex needed.
+# Watches fail2ban's OWN log for `[<jail>] Ban <IP>` events.
+# Filter ships with the fail2ban package — no custom regex needed.
+#
+# IMPORTANT — read the FILE, not the journal. Unlike the siphon-ai
+# jail (systemd backend, because the SiphonAI *daemon* logs to
+# journald), recidive watches fail2ban's own ban notices — and
+# fail2ban logs to a FILE by default (`logtarget = /var/log/fail2ban.log`
+# in fail2ban.conf). Its per-ban `NOTICE ... Ban <ip>` lines never
+# reach the journal, so a `backend = systemd` +
+# `journalmatch = fail2ban.service` jail matches ZERO ban events and
+# never fires — symptom: `fail2ban-client status recidive` shows
+# `Total failed: 0` even while the siphon-ai jail racks up bans.
+# (If you instead set fail2ban's `logtarget = SYSTEMD-JOURNAL`, switch
+# this jail back to `backend = systemd` to match.)
 #
 # Drop in /etc/fail2ban/jail.d/ alongside siphon-ai.local.
 
 [recidive]
 enabled      = true
 filter       = recidive
-backend      = systemd
-journalmatch = _SYSTEMD_UNIT=fail2ban.service
+backend      = auto
+logpath      = /var/log/fail2ban.log
 
 # How many *bans* (not failed logins — bans!) before recidive
 # escalates. 3 across the findtime window. Bots that come back

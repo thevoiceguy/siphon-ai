@@ -21,13 +21,13 @@
 //! take the daemon down (this is why `siphon-ai check` is the right
 //! pre-reload preflight).
 //!
-//! Sections that bind sockets or build process-wide state (`[sip]`
-//! listen/transports, `[node]`, `[media]` + the `[bridge]`/codec
-//! defaults — `[media].codecs` / `.dtmf` compile into the bridge
-//! defaults — `[observability]`, `[admin]`, `[hep]`,
-//! `[security.stir_shaken]`, and `[outbound]` limits — the concurrency
-//! cap / rate limit, which also flip outbound on/off) **require a
-//! restart**. A reload whose value for any of those differs from the
+//! Every **other** section is consumed only at startup (binds sockets,
+//! builds process-wide state, or spawns tasks) and is **restart-required**
+//! — `[node]`, `[sip]`, `[media]` + the `[bridge]`/codec defaults
+//! (`[media].codecs` / `.dtmf` compile in here), `[[trunk]]`,
+//! `[[register]]`, `[security]`, `[recording]`, `[conference]`, `[park]`,
+//! `[observability]`, `[admin]` (incl. the token table), `[hep]`, and the
+//! `[outbound]` limits. A reload whose value for any of those differs from the
 //! running one applies the safe sections and logs a prominent warning
 //! naming them.
 
@@ -108,46 +108,54 @@ impl CdrSink for SwappableCdrSink {
 
 // ─── Restart-required fingerprints ──────────────────────────────────
 
-/// Fingerprint the config sections that require a daemon **restart** to
-/// change (they bind sockets / build process-wide state). A reload
-/// compares these against the running values and warns on any diff.
+/// Hash an arbitrary `Debug` rendering to an opaque 64-bit fingerprint.
+/// Used so the rolling fingerprints **never retain cleartext** — several
+/// of the fingerprinted sections carry secrets (`[bridge].ws_auth_header`,
+/// `[[register]].password`, `[hep].capture_password`, gateway
+/// credentials). The transient `Debug` string is hashed and dropped; only
+/// the hash is stored, and fingerprint *values* are never logged (only the
+/// section names in a restart-required warning are). `DefaultHasher` is
+/// deterministic within a process, which is all change-detection needs.
+fn fp_hash<T: std::fmt::Debug>(value: &T) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{value:?}").hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// Fingerprint **every** config section that is consumed only at startup
+/// (binds sockets, builds process-wide state, spawns tasks) and is **not**
+/// hot-reloaded. A reload compares these against the running values and
+/// warns `restart-required` on any diff — so editing one of these and
+/// sending SIGHUP can never silently do nothing.
 ///
-/// `[outbound].limits` (the concurrency cap + rate limit, which also
-/// flips outbound on/off) is restart-required — resizing the live
-/// admission semaphore isn't safe. The *gateway set* itself is
-/// hot-reloadable (see [`gateway_fingerprint`]) and is **not** here.
+/// The hot-reloadable sections — routes, webhook/CDR sinks, and the
+/// gateway *set* ([`gateway_fingerprint`]) — are tracked separately and
+/// are deliberately **not** here. `[outbound].limits` (the concurrency cap
+/// / rate limit, which also flip outbound on/off) IS here — resizing the
+/// live admission semaphore isn't safe — but only the limits, not the
+/// gateways (which would otherwise double-count).
 pub fn restart_fingerprints(c: &Config) -> Vec<(&'static str, String)> {
     vec![
-        ("[sip].listen", c.sip.listen_addr.to_string()),
-        ("[sip].transports", format!("{:?}", c.sip.transports)),
-        ("[node]", format!("{}|{}", c.node.id, c.node.public_address)),
-        // `[media]` proper (rtp port range, MOH, SRTP).
-        ("[media]", format!("{:?}", c.media)),
-        // Bridge/codec defaults — `[media].codecs` / `.dtmf` compile in
-        // here, along with `[bridge]` ws_url / auth_header / barge-in /
-        // timeouts. None of it is hot-reloaded, so fingerprint the whole
-        // struct: a change to any of it (codecs, DTMF, …) must surface as
-        // restart-required rather than being silently swallowed.
-        (
-            "[bridge]/[media] defaults",
-            format!("{:?}", c.bridge_defaults),
-        ),
-        (
-            "[observability]",
-            format!(
-                "{}|{:?}",
-                c.observability.enabled, c.observability.http_listen
-            ),
-        ),
-        (
-            "[admin]",
-            format!("{:?}", c.admin.as_ref().map(|a| a.listen_addr)),
-        ),
-        ("[hep]", format!("{}|{:?}", c.hep.enabled, c.hep.collector)),
-        (
-            "[security.stir_shaken]",
-            c.security.stir_shaken.enabled.to_string(),
-        ),
+        ("[node]", fp_hash(&c.node)),
+        ("[sip]", fp_hash(&c.sip)),
+        ("[media]", fp_hash(&c.media)),
+        // `[media].codecs` / `.dtmf` compile into the bridge defaults.
+        ("[bridge]/[media] defaults", fp_hash(&c.bridge_defaults)),
+        ("[[trunk]]", fp_hash(&c.trunks)),
+        ("[[register]]", fp_hash(&c.registrations)),
+        // Whole `[security]` — `min_attestation` + its response code +
+        // `[security.stir_shaken]`, not just the enabled bool.
+        ("[security]", fp_hash(&c.security)),
+        ("[recording]", fp_hash(&c.recording)),
+        ("[conference]", fp_hash(&c.conference)),
+        ("[park]", fp_hash(&c.park)),
+        ("[observability]", fp_hash(&c.observability)),
+        // Whole `[admin]` — the token table too (so a rotated / revoked
+        // token is at least flagged restart-required), not just the listen
+        // address. The token hashes are what change; no cleartext.
+        ("[admin]", fp_hash(&c.admin)),
+        ("[hep]", fp_hash(&c.hep)),
         (
             "[outbound].limits",
             format!(
@@ -160,8 +168,10 @@ pub fn restart_fingerprints(c: &Config) -> Vec<(&'static str, String)> {
 
 /// Fingerprint the **gateway set** (hot-reloadable). Captures every field
 /// that affects how a gateway dials, sorted + joined so the order in the
-/// file doesn't matter. A change here, with `[outbound].limits`
-/// unchanged, triggers a gateway rebuild on reload.
+/// file doesn't matter. A change here, with `[outbound].limits` unchanged,
+/// triggers a gateway rebuild on reload. Credentials are folded in as a
+/// **hash** (not `is_some()`, and not cleartext) so rotating a trunk
+/// `auth_password` is detected and re-applied.
 pub fn gateway_fingerprint(outbound: &OutboundConfig) -> String {
     let mut gws: Vec<String> = outbound
         .gateways
@@ -175,7 +185,7 @@ pub fn gateway_fingerprint(outbound: &OutboundConfig) -> String {
                 g.transport.uri_param(),
                 g.from,
                 g.srtp,
-                g.credentials.is_some(),
+                fp_hash(&g.credentials),
             )
         })
         .collect();
@@ -269,16 +279,18 @@ pub fn spawn_reload_handler(ctx: ReloadContext) {
         );
 
         let mut last_text = ctx.initial_text;
-        let mut fingerprints = ctx.restart_fingerprints;
-        let mut webhook_spool_active = ctx.webhook_spool_active;
-        let mut cdr_spool_active = ctx.cdr_spool_active;
-        let mut webhook_fp = ctx.webhook_fingerprint;
-        let mut cdr_fp = ctx.cdr_fingerprint;
-        let mut gateway_fp = ctx
-            .outbound
-            .as_ref()
-            .map(|o| o.gateway_fingerprint.clone())
-            .unwrap_or_default();
+        let mut state = ReloadState {
+            restart_baseline: ctx.restart_fingerprints,
+            webhook_fp: ctx.webhook_fingerprint,
+            webhook_spool: ctx.webhook_spool_active,
+            cdr_fp: ctx.cdr_fingerprint,
+            cdr_spool: ctx.cdr_spool_active,
+            gateway_fp: ctx
+                .outbound
+                .as_ref()
+                .map(|o| o.gateway_fingerprint.clone())
+                .unwrap_or_default(),
+        };
 
         while stream.recv().await.is_some() {
             // 1. TLS cert reload (independent of the config file).
@@ -319,65 +331,59 @@ pub fn spawn_reload_handler(ctx: ReloadContext) {
                 }
             };
 
-            let applied = apply_reload(
+            // `apply_reload` mutates `state` in place — advancing a
+            // fingerprint ONLY for a section it actually applied, so a
+            // section that was warned restart-required (or skipped) keeps
+            // its old baseline and is re-detected on the next reload.
+            let restart_required = apply_reload(
                 new,
                 &ctx.route_swap,
                 &ctx.webhook_swap,
                 &ctx.cdr_swap,
                 ctx.hep_telemetry.as_deref(),
                 ctx.outbound.as_ref(),
-                &fingerprints,
-                webhook_spool_active,
-                cdr_spool_active,
-                &gateway_fp,
-                &webhook_fp,
-                &cdr_fp,
+                &mut state,
             )
             .await;
 
-            if !applied.restart_required.is_empty() {
-                warn!(sections = ?applied.restart_required, "SIGHUP: these sections changed but require a restart to take effect; NOT applied");
+            if !restart_required.is_empty() {
+                warn!(sections = ?restart_required, "SIGHUP: these sections changed but require a restart to take effect; NOT applied");
             }
             info!("SIGHUP: config reload applied");
             metrics::counter!(CONFIG_RELOADS_TOTAL, "result" => "applied").increment(1);
 
             last_text = text;
-            fingerprints = applied.fingerprints;
-            webhook_spool_active = applied.webhook_spool_active;
-            cdr_spool_active = applied.cdr_spool_active;
-            webhook_fp = applied.webhook_fingerprint;
-            cdr_fp = applied.cdr_fingerprint;
-            gateway_fp = applied.gateway_fingerprint;
         }
         warn!("SIGHUP signal stream ended; config hot-reload offline");
     });
 }
 
-/// Outcome of applying one (already-loaded, changed) config.
-pub(crate) struct ReloadApplied {
-    /// Restart-required sections whose value changed (for the warning).
-    pub restart_required: Vec<&'static str>,
-    /// Fresh restart-section fingerprints (carried to the next reload).
-    pub fingerprints: Vec<(&'static str, String)>,
-    pub webhook_spool_active: bool,
-    pub cdr_spool_active: bool,
-    /// Fresh gateway-set fingerprint (carried to the next reload).
-    pub gateway_fingerprint: String,
-    /// Fresh `[webhooks]` / `[cdr]` fingerprints (carried forward, so a
-    /// reload only touches a sink — and only warns about its spool —
-    /// when that sink's config actually changed).
-    pub webhook_fingerprint: String,
-    pub cdr_fingerprint: String,
+/// Rolling reload baseline, carried across SIGHUPs. A fingerprint here is
+/// advanced **only** when the corresponding section was actually applied —
+/// so a section that was warned restart-required (or whose swap was
+/// skipped/failed) keeps its previous baseline and is re-detected on the
+/// next reload (and reverting a restart-required edit correctly stops
+/// warning). `restart_baseline` is the **startup** fingerprint set and is
+/// immutable within a process: the live values of restart-required
+/// sections never change without a restart, so every reload compares the
+/// new file against startup.
+pub(crate) struct ReloadState {
+    pub restart_baseline: Vec<(&'static str, String)>,
+    pub webhook_fp: String,
+    pub webhook_spool: bool,
+    pub cdr_fp: String,
+    pub cdr_spool: bool,
+    pub gateway_fp: String,
 }
 
 /// Hot-apply the reload-safe sections of a freshly-loaded config: store
 /// the new route table, rebuild + swap the webhook / CDR sinks (unless a
 /// durable spool is active for that sink), and rebuild + swap the
 /// outbound gateway set (when outbound is enabled and its `limits` are
-/// unchanged). Returns which restart-required sections changed and the
-/// updated rolling state. Split out from the SIGHUP loop so it's
-/// unit-testable without signals.
-#[allow(clippy::too_many_arguments)]
+/// unchanged). Mutates `state` in place — advancing a fingerprint only for
+/// a section it actually applied (see [`ReloadState`]) — and returns the
+/// restart-required sections that changed (for the warning). Split out
+/// from the SIGHUP loop so it's unit-testable without signals.
 pub(crate) async fn apply_reload(
     new: Config,
     route_swap: &ArcSwap<RouteSet>,
@@ -385,15 +391,12 @@ pub(crate) async fn apply_reload(
     cdr_swap: &SwappableCdrSink,
     hep: Option<&HepTelemetry>,
     outbound_reload: Option<&OutboundReload>,
-    prev_fingerprints: &[(&'static str, String)],
-    prev_webhook_spool: bool,
-    prev_cdr_spool: bool,
-    prev_gateway_fp: &str,
-    prev_webhook_fp: &str,
-    prev_cdr_fp: &str,
-) -> ReloadApplied {
+    state: &mut ReloadState,
+) -> Vec<&'static str> {
+    // Restart-required diff: new file vs the IMMUTABLE startup baseline.
     let new_fp = restart_fingerprints(&new);
-    let restart_required: Vec<&'static str> = prev_fingerprints
+    let restart_required: Vec<&'static str> = state
+        .restart_baseline
         .iter()
         .zip(&new_fp)
         .filter(|(old, new)| old.1 != new.1)
@@ -425,44 +428,58 @@ pub(crate) async fn apply_reload(
 
     // Webhook sink: act only when `[webhooks]` actually changed. Hot-swap
     // unless a spool is (or becomes) active — its drain worker can't be
-    // hot-swapped. (Warning only on a real change, not every reload.)
+    // hot-swapped. The fingerprint/spool baseline advances ONLY on a
+    // successful swap, so a restart-required (or failed) change stays
+    // detected next time.
     match decide_sink_reload(
-        new_webhook_fp != prev_webhook_fp,
-        prev_webhook_spool || new_webhook_spool,
+        new_webhook_fp != state.webhook_fp,
+        state.webhook_spool || new_webhook_spool,
     ) {
         SinkReload::Unchanged => {}
         SinkReload::RestartRequired => {
             warn!("SIGHUP: [webhooks] changed but its durable spool is active; webhook delivery changes require a restart (not hot-applied)")
         }
         SinkReload::Swap => match crate::runtime::build_webhook_sink(webhooks) {
-            Ok(sink) => webhook_swap.store(sink),
+            Ok(sink) => {
+                webhook_swap.store(sink);
+                state.webhook_fp = new_webhook_fp;
+                state.webhook_spool = new_webhook_spool;
+            }
             Err(e) => warn!(error = %e, "SIGHUP: rebuilding webhook sink failed; keeping previous"),
         },
     }
 
-    // CDR sink: same change-gated logic.
-    match decide_sink_reload(new_cdr_fp != prev_cdr_fp, prev_cdr_spool || new_cdr_spool) {
+    // CDR sink: same change-gated, advance-on-apply logic.
+    match decide_sink_reload(new_cdr_fp != state.cdr_fp, state.cdr_spool || new_cdr_spool) {
         SinkReload::Unchanged => {}
         SinkReload::RestartRequired => {
             warn!("SIGHUP: [cdr] changed but its durable spool is active; CDR delivery changes require a restart (not hot-applied)")
         }
         SinkReload::Swap => match crate::runtime::build_cdr_sink(cdr, hep).await {
-            Ok(sink) => cdr_swap.store(sink),
+            Ok(sink) => {
+                cdr_swap.store(sink);
+                state.cdr_fp = new_cdr_fp;
+                state.cdr_spool = new_cdr_spool;
+            }
             Err(e) => warn!(error = %e, "SIGHUP: rebuilding CDR sink failed; keeping previous"),
         },
     }
 
     // Gateways: rebuild + swap the set when outbound is running, its
     // `limits` (cap/rate — restart-required) didn't change, and the
-    // gateway set actually differs. Enable/disable + cap changes are
-    // covered by the `[outbound].limits` restart-required warning.
+    // gateway set actually differs. The baseline advances ONLY on a
+    // successful swap — so a swap skipped because `limits` changed doesn't
+    // mask a later real gateway change (it stays detected once limits are
+    // reverted). Enable/disable + cap changes ride the `[outbound].limits`
+    // restart-required warning.
     if let Some(ob) = outbound_reload {
         let limits_changed = restart_required.contains(&"[outbound].limits");
-        if outbound.enabled() && !limits_changed && new_gateway_fp != prev_gateway_fp {
+        if outbound.enabled() && !limits_changed && new_gateway_fp != state.gateway_fp {
             match crate::runtime::build_gateways(&outbound, &ob.deps) {
                 Ok(gateways) => {
                     let n = gateways.len();
                     ob.service.reload_gateways(gateways);
+                    state.gateway_fp = new_gateway_fp;
                     info!(gateways = n, "SIGHUP: outbound gateways reloaded");
                 }
                 Err(e) => {
@@ -472,15 +489,7 @@ pub(crate) async fn apply_reload(
         }
     }
 
-    ReloadApplied {
-        restart_required,
-        fingerprints: new_fp,
-        webhook_spool_active: new_webhook_spool,
-        cdr_spool_active: new_cdr_spool,
-        gateway_fingerprint: new_gateway_fp,
-        webhook_fingerprint: new_webhook_fp,
-        cdr_fingerprint: new_cdr_fp,
-    }
+    restart_required
 }
 
 #[cfg(test)]
@@ -505,36 +514,43 @@ any = true
         load_from_str(s).expect("valid config")
     }
 
+    /// A fresh rolling state with `c` as the startup baseline.
+    fn state(c: &Config) -> ReloadState {
+        ReloadState {
+            restart_baseline: restart_fingerprints(c),
+            webhook_fp: format!("{:?}", c.webhooks),
+            webhook_spool: c.webhooks.spool_dir.is_some(),
+            cdr_fp: format!("{:?}", c.cdr),
+            cdr_spool: c
+                .cdr
+                .webhook
+                .as_ref()
+                .and_then(|w| w.spool_dir.as_ref())
+                .is_some(),
+            gateway_fp: gateway_fingerprint(&c.outbound),
+        }
+    }
+
+    fn null_sinks() -> (SwappableWebhookSink, SwappableCdrSink) {
+        (
+            SwappableWebhookSink::new(Arc::new(siphon_ai_webhooks::NullSink)),
+            SwappableCdrSink::new(Arc::new(siphon_ai_cdr::NullSink)),
+        )
+    }
+
     #[tokio::test]
     async fn apply_reload_swaps_routes() {
         let route_swap = ArcSwap::from_pointee(cfg(BASE).routes);
-        let wh = SwappableWebhookSink::new(Arc::new(siphon_ai_webhooks::NullSink));
-        let cd = SwappableCdrSink::new(Arc::new(siphon_ai_cdr::NullSink));
-        // Before: the route table that matches `default`.
+        let (wh, cd) = null_sinks();
+        let mut st = state(&cfg(BASE));
         assert_eq!(route_swap.load().iter().next().unwrap().name, "default");
 
-        // New config renames the route; reload should swap it in.
         let new = cfg(&BASE.replace("name = \"default\"", "name = \"renamed\""));
-        let fp = restart_fingerprints(&cfg(BASE));
-        let out = apply_reload(
-            new,
-            &route_swap,
-            &wh,
-            &cd,
-            None,
-            None,
-            &fp,
-            false,
-            false,
-            "",
-            "",
-            "",
-        )
-        .await;
+        let restart_required = apply_reload(new, &route_swap, &wh, &cd, None, None, &mut st).await;
 
         assert_eq!(route_swap.load().iter().next().unwrap().name, "renamed");
         assert!(
-            out.restart_required.is_empty(),
+            restart_required.is_empty(),
             "only the route changed; nothing restart-required"
         );
     }
@@ -542,32 +558,38 @@ any = true
     #[tokio::test]
     async fn apply_reload_flags_restart_required_sections() {
         let route_swap = ArcSwap::from_pointee(cfg(BASE).routes);
-        let wh = SwappableWebhookSink::new(Arc::new(siphon_ai_webhooks::NullSink));
-        let cd = SwappableCdrSink::new(Arc::new(siphon_ai_cdr::NullSink));
-        let fp = restart_fingerprints(&cfg(BASE));
+        let (wh, cd) = null_sinks();
+        let mut st = state(&cfg(BASE));
 
         // Change the SIP listen port — a restart-required section.
         let new = cfg(&BASE.replace("127.0.0.1:5060", "127.0.0.1:5999"));
-        let out = apply_reload(
-            new,
-            &route_swap,
-            &wh,
-            &cd,
-            None,
-            None,
-            &fp,
-            false,
-            false,
-            "",
-            "",
-            "",
-        )
-        .await;
+        let restart_required = apply_reload(new, &route_swap, &wh, &cd, None, None, &mut st).await;
 
         assert!(
-            out.restart_required.contains(&"[sip].listen"),
-            "changed listen should be flagged restart-required: {:?}",
-            out.restart_required
+            restart_required.contains(&"[sip]"),
+            "changed listen should be flagged restart-required: {restart_required:?}"
+        );
+    }
+
+    // Bug 3: the restart-required baseline must NOT advance past an
+    // un-applied value — reverting a restart-required edit stops warning.
+    #[tokio::test]
+    async fn restart_required_edit_then_revert_stops_warning() {
+        let route_swap = ArcSwap::from_pointee(cfg(BASE).routes);
+        let (wh, cd) = null_sinks();
+        let mut st = state(&cfg(BASE));
+
+        // Edit a restart-required section — warned, not applied.
+        let edited = cfg(&BASE.replace("127.0.0.1:5060", "127.0.0.1:5999"));
+        let rr1 = apply_reload(edited, &route_swap, &wh, &cd, None, None, &mut st).await;
+        assert!(rr1.contains(&"[sip]"));
+
+        // Revert it — must NOT warn (baseline stayed at startup).
+        let reverted = cfg(BASE);
+        let rr2 = apply_reload(reverted, &route_swap, &wh, &cd, None, None, &mut st).await;
+        assert!(
+            rr2.is_empty(),
+            "reverting a restart-required edit must not warn: {rr2:?}"
         );
     }
 
@@ -664,8 +686,8 @@ any = true
         );
     }
 
-    // Bug 2: the spool warning fires only on a real `[webhooks]` change,
-    // not on every reload while a spool is configured.
+    // Spool warning fires only on a real `[webhooks]` change, not on every
+    // reload while a spool is configured.
     #[test]
     fn sink_reload_decision_only_acts_on_change() {
         // Unchanged + spool active → leave it alone (no warning).
@@ -676,5 +698,106 @@ any = true
         assert_eq!(decide_sink_reload(true, true), SinkReload::RestartRequired);
         // Changed + no spool → hot-swap.
         assert_eq!(decide_sink_reload(true, false), SinkReload::Swap);
+    }
+
+    // Bug 1: every non-hot-reloadable section is fingerprinted, so a change
+    // to it surfaces as restart-required instead of silently doing nothing.
+    #[test]
+    fn restart_fingerprints_cover_all_non_hot_reloadable_sections() {
+        let labels: Vec<&str> = restart_fingerprints(&cfg(BASE))
+            .into_iter()
+            .map(|(l, _)| l)
+            .collect();
+        for expected in [
+            "[node]",
+            "[sip]",
+            "[media]",
+            "[bridge]/[media] defaults",
+            "[[trunk]]",
+            "[[register]]",
+            "[security]",
+            "[recording]",
+            "[conference]",
+            "[park]",
+            "[observability]",
+            "[admin]",
+            "[hep]",
+            "[outbound].limits",
+        ] {
+            assert!(
+                labels.contains(&expected),
+                "restart fingerprint missing {expected} (silent-drift risk)"
+            );
+        }
+    }
+
+    // Bug 1 (concrete): tightening the inbound `[[trunk]]` allowlist is a
+    // restart-required change, not a silent no-op.
+    #[test]
+    fn trunk_change_is_restart_required() {
+        const WITH_TRUNK: &str = r#"
+[node]
+id = "x"
+[sip]
+listen = "127.0.0.1:5060"
+[bridge]
+ws_url = "wss://b/ws"
+[[trunk]]
+name = "carrier"
+peer_addrs = ["203.0.113.10"]
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+        let base = restart_fingerprints(&cfg(WITH_TRUNK));
+        let changed = cfg(&WITH_TRUNK.replace("203.0.113.10", "203.0.113.20"));
+        let diff: Vec<_> = base
+            .iter()
+            .zip(&restart_fingerprints(&changed))
+            .filter(|(a, b)| a.1 != b.1)
+            .map(|(a, _)| a.0)
+            .collect();
+        assert_eq!(diff, vec!["[[trunk]]"]);
+    }
+
+    // Bug 2: rotating a gateway `auth_password` (Some -> Some) changes the
+    // gateway fingerprint so the swap actually re-applies it. The
+    // fingerprint folds in a HASH, never the cleartext.
+    #[test]
+    fn gateway_credential_rotation_changes_fingerprint() {
+        const WITH_CREDS: &str = r#"
+[node]
+id = "x"
+[sip]
+listen = "127.0.0.1:5060"
+[bridge]
+ws_url = "wss://b/ws"
+[outbound]
+max_concurrent = 2
+[[gateway]]
+name = "twilio"
+proxy = "sip.twilio.example"
+transport = "tls"
+from = "sip:+1@x"
+auth_username = "u"
+auth_password = "secret-OLD"
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+        let base = gateway_fingerprint(&cfg(WITH_CREDS).outbound);
+        let rotated =
+            gateway_fingerprint(&cfg(&WITH_CREDS.replace("secret-OLD", "secret-NEW")).outbound);
+        assert_ne!(
+            base, rotated,
+            "rotating auth_password must change the gateway fingerprint"
+        );
+        // Defense-in-depth: the cleartext password is not in the fingerprint.
+        assert!(
+            !base.contains("secret-OLD"),
+            "fingerprint leaked the password"
+        );
     }
 }

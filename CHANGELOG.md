@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-06-20
+
 ### Added
 
 - **WS liveness: keepalive + start-deadline** (PROTOCOL.md §5.6 / §3.1) —
@@ -1541,7 +1543,8 @@ the WebSocket server's job.
 - Reference WebSocket servers in `examples/`: echo (Python / Node),
   an OpenAI Realtime bridge, and a Deepgram + LLM voice bot.
 
-[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.12.2...v0.13.0
 [0.6.2]: https://github.com/thevoiceguy/siphon-ai/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.5.0...v0.6.0

@@ -37,5 +37,10 @@ __pycache__/
 /test-harness/**/*.pcap
 /test-harness/**/*.wav
 
+# SIPp run artifacts — error traces (`*_errors.log`) and temp scenarios
+# land in the current working directory, which is often the repo root.
+*.log
+/tmp.*
+
 # Docker
 docker/.data/

@@ -16,7 +16,7 @@ Three roadmap items need re-casting before they can be planned:
 | **Higher-level AI events** (`intent_detected`, `caller_frustration`, `voicemail_detected`, `compliance_risk_detected`, etc.) | Split: media-derivable primitives (`silence_detected`, `dead_air_detected`, RTP stats) → siphon-ai event channel. Semantic AI events → emitted *by* the WS server, optionally forwarded via siphon-ai's lifecycle-webhook surface as a generic `event_forwarded` type. siphon-ai does not infer them. |
 | **Media-aware orchestration engine**                                                                                        | Not a feature — a north star. Delivered piecemeal across 0.2.0+.                                                                                                                                                                                                                            |
 
-Without this re-casting, the binary gains a `forge-ai-stream`-like dep chain — exactly the thing we stripped out for 0.1.0 (`docs/SPIKE_MEDIA_TAP.md` §"Transitive AI dependency").
+Without this re-casting, the binary gains a `forge-ai-stream`-like dep chain — exactly the thing we stripped out for 0.1.0 (`docs/design/SPIKE_MEDIA_TAP.md` §"Transitive AI dependency").
 
 ## 2. Already Shipped in v0.1.0 (Do Not Re-Build)
 

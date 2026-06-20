@@ -29,6 +29,17 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  doc-links:
+    name: doc links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Validates relative Markdown links across docs/ + README + CLAUDE
+      # so a moved/renamed doc can't silently break a reference. Pure
+      # Python (stdlib), no toolchain needed — runs in seconds.
+      - name: Check relative Markdown links
+        run: python3 scripts/check-doc-links.py
+
   lint-and-test:
     name: fmt + clippy + cargo test
     runs-on: ubuntu-latest

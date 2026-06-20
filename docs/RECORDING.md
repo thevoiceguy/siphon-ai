@@ -162,4 +162,4 @@ call. A recording is always best-effort; it never degrades call quality.
   for normal call lengths.
 
 The compressed-format and object-storage sinks are tracked as 0.5.x
-stretch items (see `docs/DEV_PLAN_0.5.0.md` §4).
+stretch items (see `docs/design/DEV_PLAN_0.5.0.md` §4).

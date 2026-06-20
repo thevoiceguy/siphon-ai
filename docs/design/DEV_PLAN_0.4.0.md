@@ -9,7 +9,7 @@
 > scenario** (needs a trusted local HTTPS `x5u` fixture — the reject-path
 > 428/403 scenarios shipped), the standalone **`docs/SECURITY_STIR_SHAKEN.md`**
 > (§11), and upstream `sip-identity` **`iat`-freshness** (orig/dest claim checks
-> shipped app-side). See [`CHANGELOG.md`](../CHANGELOG.md) for the shipped notes.
+> shipped app-side). See [`CHANGELOG.md`](../../CHANGELOG.md) for the shipped notes.
 
 **Theme: call authentication — every inbound call gets a trust verdict.**
 

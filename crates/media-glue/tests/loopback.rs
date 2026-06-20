@@ -7,7 +7,7 @@
 //! application-facing `MediaBridgeHandle` is the surface SiphonAI's bridge
 //! crate will sit on.
 //!
-//! See `docs/SPIKE_MEDIA_TAP.md` for the full writeup.
+//! See `docs/design/SPIKE_MEDIA_TAP.md` for the full writeup.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

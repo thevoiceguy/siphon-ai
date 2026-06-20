@@ -386,7 +386,7 @@ siphon-ai enablement → harness/docs/release).
   follow-up.** Opus is correct without it (the `/2` rtpmap is emitted and
   forge decodes mono regardless); the params interact with the answer's
   dynamic PT and want validation against a real softphone/carrier
-  (`docs/DESIGN_OPUS.md` §7.5).
+  (`docs/design/DESIGN_OPUS.md` §7.5).
 
 ## [0.7.5] - 2026-06-17
 
@@ -699,7 +699,7 @@ message, event, or error code.
   + RTP stay up, and the call is later **retrieved** onto a *fresh* WS session
   (or times out / hangs up). The one chunk that reworks the per-call
   controller lifecycle — the media tap becomes the durable owner and the WS
-  bridge becomes swappable. `docs/PARK.md`, `docs/DESIGN_0.7.0_PARK.md`.
+  bridge becomes swappable. `docs/PARK.md`, `docs/design/DESIGN_0.7.0_PARK.md`.
   * `[park]` config block (`enabled` — **off by default**; `moh_file`
     optional, validated + decoded at load, comfort noise when unset or on a
     sample-rate mismatch; `timeout_secs` 300 / `0` = indefinite;
@@ -990,7 +990,7 @@ version 1 (the new fields are additive optionals).
 - **SRTP re-key on a timer** was planned to ride along but was **deferred**:
   forge-media has no coordinated mid-call re-key (DTLS renegotiation is
   blocked; a unilateral key swap would break media), so it needs upstream
-  work first. See `docs/DEV_PLAN_0.5.0.md` §3.2 / §6.
+  work first. See `docs/design/DEV_PLAN_0.5.0.md` §3.2 / §6.
 
 ## [0.4.1] - 2026-06-07
 
@@ -1422,7 +1422,7 @@ so v1 WS servers built against 0.1.0 keep working unchanged.
 - **Configurable SIP call progress** (`[sip.call_progress]`). New `mode` field selects what — if any — provisional response the UAS sends before the `200 OK`:
   - `instant_answer` (default; v0.1.0 behaviour): skip extra provisionals.
   - `ringing`: send `180 Ringing` (no body) before the 2xx.
-  - `session_progress`: send `183 Session Progress` with the negotiated answer SDP before the 2xx (Flavour B per `docs/DEV_PLAN_0.2.0.md` §9.1 — best-effort, no `100rel`). Peers that include `Require: 100rel` in the INVITE fall back to `instant_answer` with a `warn!` log; reliable provisionals are deferred to 0.2.1 / 0.3.0.
+  - `session_progress`: send `183 Session Progress` with the negotiated answer SDP before the 2xx (Flavour B per `docs/design/DEV_PLAN_0.2.0.md` §9.1 — best-effort, no `100rel`). Peers that include `Require: 100rel` in the INVITE fall back to `instant_answer` with a `warn!` log; reliable provisionals are deferred to 0.2.1 / 0.3.0.
 
   Backwards-compatible: existing configs without the `[sip.call_progress]` block keep v0.1.0 behaviour.
 
@@ -1444,7 +1444,7 @@ These are documented because they're DoD adjacent and worth setting expectation 
 
 ### Deferred to 0.2.1 (Sprint 1 §5 stretch slip)
 
-`docs/DEV_PLAN_0.2.0.md` §5 listed three stretch items that slip to 0.2.1 per the plan's own policy ("Stretch items slot into spare time, in §5 order. If stretch eats more than Week 5, bump them to 0.2.1."). For clarity:
+`docs/design/DEV_PLAN_0.2.0.md` §5 listed three stretch items that slip to 0.2.1 per the plan's own policy ("Stretch items slot into spare time, in §5 order. If stretch eats more than Week 5, bump them to 0.2.1."). For clarity:
 
 - **mTLS for the bridge WebSocket connection** and wire-format validation against the WS server's cert. The 0.2.0 TLS recipe in `docs/DEPLOY.md` covers SIP/TLS + server-auth WSS + cert rotation; client-cert auth on the WS leg would need a `[bridge.tls.client_cert]` / `[bridge.tls.client_key]` config surface and the matching rustls connector wiring — not in 0.2.0.
 - **Attended transfer (REFER with Replaces)** — depends on siphon-rs UAC capability that wasn't ready in time.

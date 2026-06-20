@@ -1,8 +1,8 @@
 # Design note — WS reconnect mid-call
 
 > **Status: APPROVED — decisions LOCKED (§10, 2026-06-16).** Same
-> design-first pass we did for park (`docs/DESIGN_0.7.0_PARK.md`) and hold
-> (`docs/DESIGN_HOLD.md`), because this changes a published protocol
+> design-first pass we did for park (`docs/design/DESIGN_0.7.0_PARK.md`) and hold
+> (`docs/design/DESIGN_HOLD.md`), because this changes a published protocol
 > contract (PROTOCOL.md §5.7, which today says reconnect is *not*
 > supported) and touches the controller's teardown path. The build
 > follows this; deviations get noted back here.

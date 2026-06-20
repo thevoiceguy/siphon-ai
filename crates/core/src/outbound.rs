@@ -675,7 +675,7 @@ pub enum OutboundRejection {
 }
 
 /// The native guardrails on the originate path (the originate API has no
-/// built-in auth — see `docs/DEV_PLAN_0.6.0.md` §9.5/§9.6). A
+/// built-in auth — see `docs/design/DEV_PLAN_0.6.0.md` §9.5/§9.6). A
 /// `max_concurrent` semaphore plus an optional per-second token-bucket rate
 /// limit. Acquire a permit before placing a call; hold it for the call's
 /// lifetime (dropping it frees the slot).

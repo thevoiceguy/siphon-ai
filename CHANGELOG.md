@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Error-signaling: `rtp_timeout`, `audio_format`, `protocol_error`**
+  (PROTOCOL.md §2.2 / §3.10) — the last three documented `error` codes the
+  daemon detected (or could trivially detect) but never emitted. Closes the
+  protocol doc↔impl drift (bug #4).
+  - **`rtp_timeout`** — when the media inactivity watchdog fires (no inbound
+    RTP for `[media].inactivity_timeout_secs`), the WS server is now told
+    *why* (`error{rtp_timeout}` + `stop`) before the socket closes, instead
+    of seeing a bare close.
+  - **`audio_format`** — inbound binary frames are validated against the
+    negotiated frame size (320 B @ 8 kHz, 640 B @ 16 kHz). A wrong-size frame
+    is **dropped** (non-fatal) and reported via `error{audio_format}`,
+    **rate-limited** to the first bad frame + at most one/sec. The call stays
+    up — one malformed frame can't kill it; persistent failure is still
+    caught by the dead-air / rtp watchdog.
+  - **`protocol_error`** — malformed JSON, an unknown message `type`, or a
+    `call_id` that doesn't match the connection now emits
+    `error{protocol_error}` + `stop` before closing. A **definitive**
+    teardown (new `DisconnectReason::ProtocolError`, not reconnect-eligible —
+    a buggy server would just repeat the violation). Previously these
+    conditions tore down silently and *were* reconnect-eligible.
+
 ## [0.13.0] - 2026-06-20
 
 ### Added

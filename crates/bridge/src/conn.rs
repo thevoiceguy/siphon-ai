@@ -276,6 +276,13 @@ pub enum DisconnectReason {
     /// definitive teardown — never reconnect-eligible (redialing the same
     /// slow server wouldn't help).
     ServerTooSlow,
+    /// The server sent an invalid WS message — malformed JSON, an unknown
+    /// `type`, or a `call_id` that doesn't match the connection
+    /// (PROTOCOL.md §3.10 `protocol_error`). The conn emitted
+    /// `error { code: "protocol_error" }` + `stop` and closed. A
+    /// definitive teardown — never reconnect-eligible (a buggy server
+    /// would just repeat the violation).
+    ProtocolError,
 }
 
 #[derive(Debug, Error)]
@@ -486,6 +493,15 @@ async fn run_loop(
 
     let (mut sink, mut stream) = ws.split();
 
+    // Expected inbound audio-frame size from the negotiated format, for the
+    // §2.2 `audio_format` check. PCM16 = 2 bytes/sample; e.g. 8 kHz/20 ms/mono
+    // = 320 B, 16 kHz = 640 B. `0` (an unset/odd format) disables the check.
+    // Captured before `start` is moved into the `Start` message below.
+    let expected_audio_bytes = (start.audio.sample_rate as usize / 1000)
+        * start.audio.frame_ms as usize
+        * start.audio.channels as usize
+        * 2;
+
     // Send `start` as the first message. `seq = 0` already enforced.
     let start_json = serde_json::to_string(&BridgeOut::Start(start))
         .map_err(|e| BridgeError::Internal(format!("serialize start: {e}")))?;
@@ -525,6 +541,11 @@ async fn run_loop(
     // audio frame or a `hangup`. `None` = disabled or already satisfied.
     let mut start_deadline: Option<tokio::time::Instant> = (!liveness.start_deadline.is_zero())
         .then(|| tokio::time::Instant::now() + liveness.start_deadline);
+
+    // Rate-limit `audio_format` emits (§2.2): a server stuck sending
+    // wrong-size frames shouldn't flood the WS with one error per frame
+    // (~50/s). Emit on the first bad frame, then at most one per second.
+    let mut last_audio_format_emit: Option<tokio::time::Instant> = None;
 
     loop {
         tokio::select! {
@@ -576,22 +597,74 @@ async fn run_loop(
                         // when triaging WS payout issues without
                         // drowning their dashboards at info.
                         tracing::trace!(bytes = data.len(), "ws inbound audio");
-                        // First server audio satisfies the start-deadline
-                        // (§3.1) — the strict "begin sending audio" rule.
+                        // §2.2 audio_format: a frame whose size doesn't
+                        // match the negotiated format is a server bug.
+                        // Drop it and tell the server (rate-limited,
+                        // NON-fatal — no `stop`), but keep the call up:
+                        // one bad frame mustn't kill a live call, and
+                        // persistent failure is caught by the dead-air /
+                        // rtp watchdog. A dropped frame does NOT satisfy
+                        // the start-deadline.
+                        if expected_audio_bytes > 0 && data.len() != expected_audio_bytes {
+                            let now = tokio::time::Instant::now();
+                            let emit = last_audio_format_emit
+                                .map(|t| now.duration_since(t) >= Duration::from_secs(1))
+                                .unwrap_or(true);
+                            if emit {
+                                last_audio_format_emit = Some(now);
+                                warn!(call_id = %call_id, got = data.len(),
+                                    expected = expected_audio_bytes,
+                                    "dropping wrong-size audio frame (audio_format)");
+                                let err = BridgeOut::Error {
+                                    call_id: call_id.clone(),
+                                    seq,
+                                    code: ErrorCode::AudioFormat,
+                                    message: format!(
+                                        "expected {expected_audio_bytes}-byte PCM16 frame, got {}",
+                                        data.len()
+                                    ),
+                                };
+                                seq = seq.wrapping_add(1);
+                                sink.send(Message::Text(serialize_or_drop(&err))).await?;
+                            }
+                            continue;
+                        }
+                        // First (valid) server audio satisfies the
+                        // start-deadline (§3.1) — the strict "begin
+                        // sending audio" rule.
                         start_deadline = None;
                         if audio_in_tx.send(data).await.is_err() {
                             return Ok(DisconnectReason::ControllerHungUp);
                         }
                     }
                     Some(Ok(Message::Text(text))) => {
-                        let parsed: BridgeIn = serde_json::from_str(&text)
-                            .map_err(|e| BridgeError::BadJson(e.to_string()))?;
+                        // §3.10 protocol_error: malformed JSON or an
+                        // unknown `type` (serde rejects both identically)
+                        // is a fatal protocol violation. Tell the server
+                        // (`error{protocol_error}` + `stop`) then close.
+                        // Definitive teardown — a buggy server would just
+                        // repeat it, so NOT reconnect-eligible.
+                        let parsed: BridgeIn = match serde_json::from_str(&text) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                warn!(call_id = %call_id, error = %e,
+                                    "malformed or unknown WS message from server");
+                                let _ = emit_fatal(&mut sink, &call_id, &mut seq,
+                                    ErrorCode::ProtocolError,
+                                    "malformed or unknown message").await;
+                                let _ = close_clean(&mut sink).await;
+                                return Ok(DisconnectReason::ProtocolError);
+                            }
+                        };
                         let got = bridge_in_call_id(&parsed);
                         if got != call_id.as_str() {
-                            return Err(BridgeError::CallIdMismatch {
-                                expected: call_id.0.clone(),
-                                got: got.to_string(),
-                            });
+                            warn!(call_id = %call_id, got,
+                                "WS message call_id does not match the connection");
+                            let _ = emit_fatal(&mut sink, &call_id, &mut seq,
+                                ErrorCode::ProtocolError,
+                                "call_id does not match the connection").await;
+                            let _ = close_clean(&mut sink).await;
+                            return Ok(DisconnectReason::ProtocolError);
                         }
                         // Debug-level: every received control message
                         // (Clear, Mark, Hangup, Transfer, SendDtmf).

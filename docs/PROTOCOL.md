@@ -81,10 +81,14 @@ audio at the same cadence to avoid buffer churn; SiphonAI tolerates
 bursts up to the 200 ms outbound buffer (§5.5).
 
 A frame of the wrong **size** (not the negotiated 20 ms — 320 bytes @ 8 kHz,
-640 @ 16 kHz) is rejected with `error { code: "audio_format" }`. A raw PCM16
-frame carries no sample-rate or channel metadata, so the daemon validates
-only the byte length and otherwise assumes the negotiated rate + mono — send
-the wrong rate or stereo and it is interpreted, not detected.
+640 @ 16 kHz) is **dropped** and the server is told with
+`error { code: "audio_format" }`. This is **non-fatal**: the bad frame is
+discarded, the call continues, and the error is **rate-limited** (the first
+bad frame, then at most one per second) so a misconfigured server can't
+flood the WS. A raw PCM16 frame carries no sample-rate or channel metadata,
+so the daemon validates only the byte length and otherwise assumes the
+negotiated rate + mono — send the wrong rate or stereo and it is
+interpreted, not detected.
 
 ---
 
@@ -337,8 +341,8 @@ then closes the WebSocket cleanly (close code 1000).
 | Code | Meaning |
 |---|---|
 | `rtp_timeout` | No incoming RTP for the configured idle period (`media.rtp_idle_timeout_ms`). |
-| `audio_format` | Server sent an audio frame of an unexpected **size** — not the negotiated 20 ms frame (320 bytes @ 8 kHz, 640 @ 16 kHz). Only the byte length is checkable: a binary audio frame carries no sample-rate or channel metadata, so the daemon assumes the negotiated rate + mono. |
-| `protocol_error` | A WS message was malformed JSON, used an unknown `type`, or had a `call_id` that doesn't match the connection. |
+| `audio_format` | Server sent an audio frame of an unexpected **size** — not the negotiated 20 ms frame (320 bytes @ 8 kHz, 640 @ 16 kHz). Only the byte length is checkable: a binary audio frame carries no sample-rate or channel metadata, so the daemon assumes the negotiated rate + mono. **Non-fatal:** the frame is dropped, the call continues, and the error is rate-limited (§2.2) — no `stop` follows. |
+| `protocol_error` | A WS message was malformed JSON, used an unknown `type`, or had a `call_id` that doesn't match the connection. **Fatal** and definitive — the call is torn down and (with `ws_reconnect_enabled`) **not** reconnected, since a buggy server would just repeat it. |
 | `server_too_slow` | Server didn't send its first audio frame (or a `hangup`) within the start-deadline of `start` — `[bridge].server_start_deadline_secs`, default 5 s (§3.1). |
 | `transfer_failed` | A REFER was attempted but the far end rejected it. |
 | `conference_failed` | A `conference_join` (§4.8) was refused: conferencing disabled, room or per-room cap reached, sample-rate mismatch, or already joined. The call continues on its direct pair. |
@@ -347,10 +351,10 @@ then closes the WebSocket cleanly (close code 1000).
 | `internal` | SiphonAI internal error. The `message` field has details — e.g. `ws keepalive timeout` when a half-open connection fails the §5.6 keepalive (best-effort: an unresponsive peer may never receive it). |
 
 A **fatal** `error` is always followed by `stop` (with `reason:
-"error"`) and a clean close. The **non-fatal** refusals —
-`conference_failed`, `park_failed`, and `hold_failed` — are the exception:
-they report a rejected control request, the call continues, and no `stop`
-follows.
+"error"`) and a clean close. The **non-fatal** codes —
+`conference_failed`, `park_failed`, `hold_failed`, and `audio_format` — are
+the exception: they report a rejected control request or a discarded frame,
+the call continues, and no `stop` follows.
 
 > **Codec negotiation failure is not a WS error.** There is no
 > `codec_unsupported` code: codec selection happens entirely at the SIP

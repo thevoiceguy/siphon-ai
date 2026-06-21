@@ -418,7 +418,9 @@ async fn audio_frames_round_trip_to_server_and_back() {
     // Wait for `start` so the server is in steady state.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let frame = vec![0xAB, 0xCD, 0xEF, 0x01];
+    // 320 B = the negotiated 8 kHz/20 ms/mono frame, so the echoed copy
+    // passes the inbound §2.2 size check rather than being dropped.
+    let frame = vec![0xAB; 320];
     audio_out.send(frame.clone()).await.unwrap();
 
     let echoed = tokio::time::timeout(Duration::from_millis(500), audio_in.recv())
@@ -531,9 +533,22 @@ async fn server_sent_bridge_in_messages_are_parsed_and_dispatched() {
     let _ = conn.await.unwrap();
 }
 
+/// Drain the server's received text frames (up to a timeout) and return
+/// true once one contains `needle`.
+async fn server_saw_text(server: &mut ServerHandle, needle: &str) -> bool {
+    while let Ok(Some(text)) =
+        tokio::time::timeout(Duration::from_millis(500), server.client_text_rx.recv()).await
+    {
+        if text.contains(needle) {
+            return true;
+        }
+    }
+    false
+}
+
 #[tokio::test]
-async fn mismatched_call_id_yields_error() {
-    let server = spawn_server(ServerOpts::echoing()).await;
+async fn mismatched_call_id_yields_protocol_error() {
+    let mut server = spawn_server(ServerOpts::echoing()).await;
     let (chans, _audio_out, _control_out, _audio_in, _control_in) = fixture_channels();
     let conn = tokio::spawn(connect_and_run(
         fixture_config(server.ws_url()),
@@ -553,18 +568,20 @@ async fn mismatched_call_id_yields_error() {
         .await
         .expect("conn task should return")
         .unwrap();
-    match result {
-        Err(BridgeError::CallIdMismatch { expected, got }) => {
-            assert_eq!(expected, "expected-id");
-            assert_eq!(got, "WRONG");
-        }
-        other => panic!("expected CallIdMismatch, got {other:?}"),
-    }
+    assert_eq!(
+        result.expect("a protocol_error is a clean teardown, not an Err"),
+        DisconnectReason::ProtocolError
+    );
+    // The server is told why before the close (§3.10 fatal: error + stop).
+    assert!(
+        server_saw_text(&mut server, "\"protocol_error\"").await,
+        "expected an error{{protocol_error}} frame"
+    );
 }
 
 #[tokio::test]
 async fn malformed_json_from_server_is_a_protocol_error() {
-    let server = spawn_server(ServerOpts::echoing()).await;
+    let mut server = spawn_server(ServerOpts::echoing()).await;
     let (chans, _audio_out, _control_out, _audio_in, _control_in) = fixture_channels();
     let conn = tokio::spawn(connect_and_run(
         fixture_config(server.ws_url()),
@@ -582,10 +599,55 @@ async fn malformed_json_from_server_is_a_protocol_error() {
         .await
         .expect("conn task should return")
         .unwrap();
-    assert!(
-        matches!(result, Err(BridgeError::BadJson(_))),
-        "got {result:?}"
+    assert_eq!(
+        result.expect("protocol_error is a clean teardown"),
+        DisconnectReason::ProtocolError
     );
+    assert!(
+        server_saw_text(&mut server, "\"protocol_error\"").await,
+        "expected an error{{protocol_error}} frame"
+    );
+}
+
+/// A wrong-size audio frame is dropped (non-fatal) — the server is told
+/// via `error{audio_format}`, the call stays up, and a correctly-sized
+/// frame still flows through to the audio-in channel.
+#[tokio::test]
+async fn wrong_size_audio_frame_is_dropped_not_fatal() {
+    let mut server = spawn_server(ServerOpts::echoing()).await;
+    let (chans, _audio_out, _control_out, mut audio_in, _control_in) = fixture_channels();
+    // fixture_start negotiates 8 kHz/20 ms/mono → 320-byte frames.
+    let conn = tokio::spawn(connect_and_run(
+        fixture_config(server.ws_url()),
+        fixture_start("c"),
+        chans,
+    ));
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wrong size (200 B): dropped, must NOT reach audio_in.
+    server
+        .server_send_tx
+        .send(WsMessage::Binary(vec![0u8; 200]))
+        .unwrap();
+    assert!(
+        server_saw_text(&mut server, "\"audio_format\"").await,
+        "expected an error{{audio_format}} frame for the bad size"
+    );
+
+    // Correct size (320 B): flows through.
+    server
+        .server_send_tx
+        .send(WsMessage::Binary(vec![1u8; 320]))
+        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(1), audio_in.recv())
+        .await
+        .expect("a valid frame should arrive")
+        .expect("audio_in channel open");
+    assert_eq!(got.len(), 320, "the valid frame should pass unmodified");
+
+    // The call is still alive — neither frame tore it down.
+    assert!(!conn.is_finished(), "a bad frame must not be fatal");
+    conn.abort();
 }
 
 #[tokio::test]
@@ -688,7 +750,10 @@ async fn dropped_audio_in_rx_disconnects_with_controller_hung_up() {
     ));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    audio_out.send(vec![1, 2, 3, 4]).await.unwrap();
+    // 320 B so the echoed frame passes the §2.2 size check and is actually
+    // forwarded to the (now-closed) audio_in — which is what trips the
+    // ControllerHungUp path under test.
+    audio_out.send(vec![1u8; 320]).await.unwrap();
 
     let result = tokio::time::timeout(Duration::from_secs(1), conn)
         .await

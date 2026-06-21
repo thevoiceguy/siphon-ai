@@ -1642,6 +1642,28 @@ impl CallController {
                             return Err(CallError::TaskJoin(join_err));
                         }
                     }
+                    // PROTOCOL.md §3.10 `rtp_timeout`: the media inactivity
+                    // watchdog fired (no inbound RTP for
+                    // `[media].inactivity_timeout_secs`). Tell the WS server
+                    // *why* before we close — queue `error{rtp_timeout}` +
+                    // `stop`; the conn drains both (biased recv) and emits
+                    // them before teardown drops `control_out_tx`.
+                    // Best-effort: the bridge may already be gone. The CDR
+                    // termination cause stays `TapEnded` (the rtp timeout is
+                    // the cause; the stop is just the mechanism).
+                    if matches!(tap_result, Some(Ok(TapDisconnect::InactivityTimeout))) {
+                        let _ = control_out_tx
+                            .send(OutgoingEvent::Error {
+                                code: ErrorCode::RtpTimeout,
+                                message: "no inbound RTP within the inactivity timeout".into(),
+                            })
+                            .await;
+                        let _ = control_out_tx
+                            .send(OutgoingEvent::Stop {
+                                reason: StopReason::Error,
+                            })
+                            .await;
+                    }
                     termination = CallTermination::TapEnded;
                     break;
                 }
@@ -1858,6 +1880,9 @@ fn reconnect_eligible(outcome: &Result<DisconnectReason, BridgeError>) -> bool {
         // `server_too_slow` is a healthy connection with a slow server —
         // redialing the same endpoint wouldn't help. Definitive teardown.
         Ok(DisconnectReason::ServerTooSlow) => false,
+        // `protocol_error` is a buggy server sending invalid frames —
+        // redialing just repeats the violation. Definitive teardown.
+        Ok(DisconnectReason::ProtocolError) => false,
         Err(_) => true,
     }
 }

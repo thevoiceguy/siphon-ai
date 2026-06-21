@@ -298,12 +298,10 @@ pub enum BridgeError {
     #[error("connect timed out after {0:?}")]
     ConnectTimeout(Duration),
 
-    #[error("server returned malformed JSON: {0}")]
-    BadJson(String),
-
-    #[error("server message has wrong call_id (expected {expected}, got {got})")]
-    CallIdMismatch { expected: String, got: String },
-
+    // Note: malformed JSON, an unknown `type`, and a mismatched `call_id`
+    // are no longer surfaced as `BridgeError`s — since 0.14.0 they emit
+    // `error { code: "protocol_error" }` + `stop` and return
+    // `DisconnectReason::ProtocolError` (a definitive teardown) instead.
     #[error("internal: {0}")]
     Internal(String),
 

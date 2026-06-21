@@ -225,6 +225,47 @@ fn make_controller_full(
     CallController::new(cfg)
 }
 
+/// Controller whose tap arms the RTP inactivity watchdog with a short
+/// window — used to drive the `rtp_timeout` path (0.13.x). No real RTP
+/// peer feeds the tap, so the watchdog fires after `timeout`.
+fn make_controller_inactivity(
+    port: u16,
+    call_id: &str,
+    timeout: Duration,
+) -> (CallController, siphon_ai_core::CallHandle) {
+    let manager = Arc::new(MediaBridgeManager::new());
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        ForgeCallId::new(call_id),
+        8000,
+    )
+    .expect("attach tap")
+    .with_inactivity_timeout(Some(timeout));
+    Box::leak(Box::new(manager));
+    let cfg = CallControllerConfig {
+        call_id: CallId::new(call_id),
+        bridge: BridgeConfig {
+            ws_url: format!("ws://127.0.0.1:{port}/"),
+            auth_header: None,
+            connect_timeout: Duration::from_secs(2),
+            tls: None,
+            ..Default::default()
+        },
+        start: start_msg(call_id),
+        media_tap: tap,
+        transfer: None,
+        recording: None,
+        conference: None,
+        park: None,
+        hold: None,
+        ws_reconnect_enabled: false,
+        ws_reconnect_max: Duration::from_secs(30),
+        ws_reconnect_moh_file: None,
+    };
+    CallController::new(cfg)
+}
+
 /// A park context for tests: an enabled registry, no MOH file (comfort
 /// noise — no fixture needed), no webhook sink, and a caller-supplied
 /// timeout policy.
@@ -687,4 +728,43 @@ async fn caller_bye_while_parked_tears_down() {
     let outcome = run.await.expect("join").expect("run");
     assert_eq!(outcome.termination, CallTermination::LocalShutdown);
     assert_eq!(outcome.park.expect("park summary").count, 1);
+}
+
+#[tokio::test]
+async fn rtp_inactivity_emits_rtp_timeout_then_stop() {
+    // Server reads frames and forwards text to a channel; it never sends
+    // hangup or closes itself, so the ONLY thing that can end the call is
+    // the tap's RTP inactivity watchdog → `rtp_timeout`.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let port = one_shot_server(move |mut ws| async move {
+        while let Some(Ok(msg)) = ws.next().await {
+            if let Message::Text(t) = msg {
+                let _ = tx.send(t);
+            }
+        }
+    })
+    .await;
+
+    let (controller, _handle) =
+        make_controller_inactivity(port, "rtp-1", Duration::from_millis(200));
+    let outcome = controller.run().await.expect("run");
+    assert_eq!(outcome.termination, CallTermination::TapEnded);
+
+    // Before the close, the server must have been told why: error{rtp_timeout}
+    // followed by stop (§3.10 fatal invariant).
+    let mut saw_rtp_timeout = false;
+    let mut saw_stop = false;
+    while let Ok(Some(text)) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+        if text.contains("\"rtp_timeout\"") {
+            saw_rtp_timeout = true;
+        }
+        if text.contains("\"type\":\"stop\"") {
+            saw_stop = true;
+        }
+    }
+    assert!(
+        saw_rtp_timeout,
+        "server should receive error{{rtp_timeout}}"
+    );
+    assert!(saw_stop, "a fatal error must be followed by stop");
 }

@@ -2230,6 +2230,7 @@ fn bridge_detail(res: Option<Result<DisconnectReason, siphon_ai_bridge::BridgeEr
             DisconnectReason::ServerClosed => "server_closed".into(),
             DisconnectReason::ControllerHungUp => "controller_hung_up".into(),
             DisconnectReason::ServerTooSlow => "server_too_slow".into(),
+            DisconnectReason::ProtocolError => "protocol_error".into(),
         },
         Some(Err(e)) => format!("error: {e}"),
     }

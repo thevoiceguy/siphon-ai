@@ -203,16 +203,30 @@ deadline — a control message alone (e.g. `mark`) does not. Operators
 whose servers legitimately need longer to first audio (cold-start
 LLM/TTS) can raise the value; `0` disables the deadline.
 
-### 3.2 `speech_started` / `speech_stopped` — VAD events (optional)
+### 3.2 `speech_started` / `speech_stopped` — VAD events
 
-Emitted only when `bridge.vad = true` is configured. Default off.
+Emitted whenever SiphonAI's voice-activity detector (forge-vad) sees the
+caller **start** and **stop** speaking. They are **always emitted** — there
+is no enable flag; a server that doesn't need them just ignores them. (These
+are the same VAD signals that drive barge-in — see `[bridge.barge_in]` in
+`docs/CONFIG.md`.)
 
 ```json
 { "type": "speech_started", "call_id": "...", "seq": 42, "ts_ms": 1234 }
 { "type": "speech_stopped", "call_id": "...", "seq": 67, "ts_ms": 1890, "duration_ms": 656 }
 ```
 
-`ts_ms` is monotonic milliseconds since `start` was sent (NOT wall-clock).
+`ts_ms` is monotonic milliseconds since `start` was sent (NOT wall-clock);
+`speech_stopped` also carries `duration_ms` (the length of the speech run).
+
+The barge-in **mode** doesn't change *whether* these are sent, only what
+SiphonAI does alongside a `speech_started`: `auto_clear` (the default) also
+flushes pending outbound playout; `notify_only` leaves that to the server.
+One nuance: with `auto_clear` **and** a configured
+`[bridge.barge_in].debounce_ms`, a `speech_started` that the debounce gate
+classifies as the bot's own echo/noise (a brief start→stop while the bot is
+playing) is suppressed together with its `speech_stopped`, so the server
+never sees that provisional pair.
 
 ### 3.3 `hold` / `resume` — peer paused or resumed media
 

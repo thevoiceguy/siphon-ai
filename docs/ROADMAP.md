@@ -162,6 +162,43 @@ queryable history).
 
 ---
 
+## P2 — Registration management (admin)
+
+Today a `[[register]]` row only re-REGISTERs on its own refresh timer (or a
+daemon restart). When an upstream (e.g. CUCM) drops or stales a binding,
+operators have no way to force it back without bouncing the daemon — which
+interrupts active calls. Extends the existing read-only `GET
+/admin/registrations` (0.10.0) on the authenticated `[admin]` listener with
+two write actions (operator role), neither of which touches media:
+
+- **`POST /admin/registrations/{name}/refresh`** — fire an immediate
+  authenticated REGISTER for one binding, off-cycle, without a restart.
+  Implementation: give each registration task a `Notify` (or a small command
+  channel) and have its loop select over all three wake sources —
+
+  ```rust
+  tokio::select! {
+      _ = tokio::time::sleep(refresh_delay)   => {}  // normal cadence
+      _ = refresh_signal.notified()           => {}  // operator-triggered
+      _ = shutdown_signal.cancelled()         => return,
+  }
+  ```
+
+  so a refresh just nudges the existing loop rather than spawning anything.
+
+- **`POST /admin/registrations/{name}/restart`** — full unregister/register
+  cycle: REGISTER with `Expires: 0` to clear the binding, then a fresh
+  authenticated REGISTER. For when a refresh isn't enough (server-side stale
+  state, contact rebinding after an IP change).
+
+Both return the resulting registration state (reuse the `GET` snapshot
+shape). `404` for an unknown `{name}`; bounded-cardinality metric on
+trigger; audit-logged (actor = token name) like every other admin write.
+Per-binding only — no global "refresh all" in the first cut (operators can
+script the list).
+
+---
+
 ## P2 — Security & CDR (small, high-signal)
 
 - **Optional `/metrics` bearer auth** — token on `/metrics` only, off by
@@ -212,3 +249,29 @@ Not roadmap items — deliberate non-goals (`CLAUDE.md` §8, `DEV_PLAN.md` §1):
 AI-provider code (the WS server's job), multi-tenancy, video, WebRTC client
 support, YAML/JSON config, in-daemon acoustic echo cancellation, per-call log
 files.
+
+Good feature addition
+
+A useful future endpoint would be:
+
+POST /admin/registrations/{name}/refresh
+
+For example:
+
+curl -X POST \
+  -H "Authorization: Bearer ${SIPHON_ADMIN_TOKEN}" \
+  http://127.0.0.1:9092/admin/registrations/cucm-phone/refresh
+
+Internally, each registration task could listen for three events:
+
+tokio::select! {
+    _ = tokio::time::sleep(refresh_delay) => {}
+    _ = refresh_signal.notified() => {}
+    _ = shutdown_signal.cancelled() => return,
+}
+
+That would permit an immediate authenticated REGISTER without restarting SiphonAI or interrupting active calls. A second endpoint could support a full unregister/register cycle:
+
+POST /admin/registrations/{name}/restart
+
+That operation would send REGISTER with Expires: 0, followed by a fresh authenticated REGISTER.

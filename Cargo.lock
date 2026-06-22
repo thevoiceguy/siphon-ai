@@ -2896,7 +2896,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2937,7 +2937,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-bridge"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "base64",
  "bytes",
@@ -2958,7 +2958,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-cdr"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2975,7 +2975,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-config"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "regex",
  "serde",
@@ -2993,7 +2993,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-core"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3035,7 +3035,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-http"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "hmac",
  "http-body-util",
@@ -3055,7 +3055,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-media-glue"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3079,7 +3079,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-recording"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "thiserror 1.0.69",
  "tokio",
@@ -3088,7 +3088,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-routes"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "regex",
  "serde",
@@ -3099,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-security"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3108,7 +3108,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-sip-glue"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3132,7 +3132,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-stir-shaken"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "base64",
  "rcgen",
@@ -3150,7 +3150,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-telemetry"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "forge-hep",
@@ -3173,7 +3173,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-webhooks"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-trait",
  "chrono",

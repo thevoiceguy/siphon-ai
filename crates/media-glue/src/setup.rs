@@ -28,9 +28,14 @@
 //!
 //! ## What this module does NOT do
 //!
-//! - **Doesn't start RTP forwarding.** Forwarding belongs after the
-//!   200 OK is on the wire (and arguably after ACK) — call
-//!   `SessionManager::start_session` from the controller's lifecycle.
+//! - **The early-offer inbound path doesn't start RTP forwarding here.**
+//!   For an inbound early offer the remote is known up front, but
+//!   forwarding belongs after the 200 OK is on the wire — the acceptor
+//!   calls `SessionManager::start_session` explicitly at that point.
+//!   (The offer/answer paths are different: [`MediaSetup::apply_answer`]
+//!   activates the session itself, since it's the one place every
+//!   offer/answer call — outbound + inbound delayed offer — converges and
+//!   the remote isn't known until the answer arrives.)
 //! - **Doesn't build the bridge `StartMsg`.** That stitches in
 //!   SIP-side facts (From/To/Call-ID) the SDP layer has no view of.
 //!   `CallController`'s caller composes the message from the answer
@@ -600,6 +605,23 @@ impl MediaSetup {
         .with_idle_thresholds(tap.silence_threshold, tap.dead_air_threshold)
         .with_rtp_stats_interval(tap.rtp_stats_interval);
 
+        // (4) Activate the forge session: Initializing → Active, which spawns
+        //     the RTP forwarding task (decode/forward inbound, send outbound).
+        //     Without this the session stays Initializing forever and **no RTP
+        //     flows** — the tap still attaches (its timers fire `rtp_stats` /
+        //     `silence_detected`), but nothing is bridged. Every offer/answer
+        //     path funnels through `apply_answer` (outbound origination,
+        //     outbound + inbound delayed offer), so this is their single media
+        //     activation point — the mirror of the early-offer inbound path's
+        //     explicit `start_session` before its 200 OK. forge requires the
+        //     Initializing → Active transition exactly once; `apply_answer` is
+        //     called once per call, before the remote is bound above. Done
+        //     before `guard.disarm()` so a failure still rolls the session back.
+        self.session_manager
+            .start_session(&call_id)
+            .await
+            .map_err(SetupError::from)?;
+
         guard.disarm();
 
         info!(
@@ -830,6 +852,16 @@ a=sendrecv\r\n"
         // The session survived — still allocated, not rolled back.
         let (allocated, _) = session_mgr.port_pool_stats().await;
         assert_eq!(allocated, 1);
+        // Regression — the delayed-offer / outbound "no audio" bug: apply_answer
+        // must ACTIVATE the session (start forge's RTP forwarding), not merely
+        // bind the codec + attach the tap. A session left in `Initializing`
+        // never spawns the forwarding task, so no RTP flows in either direction
+        // (the tap attaches and its timers fire, but nothing is bridged).
+        assert_eq!(
+            accepted.session.state().await,
+            forge_engine::SessionState::Active,
+            "apply_answer must start RTP forwarding (Initializing → Active)"
+        );
     }
 
     #[tokio::test]

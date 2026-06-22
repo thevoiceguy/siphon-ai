@@ -1,0 +1,10 @@
+# OpenAI SDK (STT + chat completions + TTS), the WS transport, and a VAD
+# for turn-taking. Kept short for readability; pin + audit for production.
+openai>=1.40
+websockets>=13
+# Prebuilt webrtcvad wheels — the plain `webrtcvad` sdist needs a C compiler.
+# Imported as `webrtcvad`.
+webrtcvad-wheels>=2.0.14
+# `audioop` is stdlib through Python 3.12; this backport supplies it on 3.13+
+# (used only for TTS rate conversion). Installs as the `audioop` module.
+audioop-lts>=0.2.1; python_version >= "3.13"

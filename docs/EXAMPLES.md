@@ -73,6 +73,28 @@ production bridge looks like; copy it if you want a starting point.
 Requires an `OPENAI_API_KEY`. See the README inside the directory for
 the full setup.
 
+## `examples/openai-pipeline-bot-py/`
+
+The **cascaded** counterpart to the Realtime bridge above: a closed-loop
+voice agent that uses only OpenAI, but as three independent calls —
+Whisper/gpt-4o-transcribe (STT) → chat completions (LLM) →
+gpt-4o-mini-tts/tts-1 (TTS). Reach for this when you want to pick each
+model independently, mix providers, or inspect the transcript and LLM
+turns; reach for `openai-realtime-bridge-py` when you want the lowest
+latency from a single speech-to-speech session.
+
+- Does its **own turn-taking** with `webrtcvad` over the inbound 20 ms
+  frames, so it needs no SiphonAI VAD config — works with the same default
+  route as the echo server.
+- Greets the caller on `start` (which also satisfies the `server_too_slow`
+  start-deadline), and handles barge-in by cancelling the in-flight
+  response and sending `clear`.
+- Resamples OpenAI's 24 kHz TTS down to the call rate and re-chunks into
+  exact 20 ms frames.
+- Offline smoke test (helpers + endpointer) that needs no API key.
+
+Requires an `OPENAI_API_KEY`. See the README inside the directory.
+
 ## `examples/homer-stack/`
 
 A local Homer + heplify-server + Postgres stack via `docker compose up`,

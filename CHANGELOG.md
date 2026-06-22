@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Delayed-offer and outbound calls never bridged audio** (no RTP in
+  either direction). Every offer/answer media path — inbound delayed offer
+  (offerless INVITE → offer in 200 OK → answer in ACK) and outbound
+  origination — funnels through `MediaSetup::apply_answer`, which bound the
+  codec + remote address and attached the tap but **never activated the
+  forge session**. The session stayed in `Initializing`, so forge's RTP
+  forwarding task was never spawned: nothing was decoded inbound or sent
+  outbound. The tap still attached (its timers fired `rtp_stats` /
+  `silence_detected`), which masked the dead media — and on inbound calls
+  the v0.13.0 start-deadline then tore the call down with `server_too_slow`.
+  `apply_answer` now activates the session (`Initializing → Active`, starting
+  forwarding), mirroring what the early-offer inbound path already did via
+  `start_session` before its 200 OK. Only the early-offer inbound path
+  (INVITE-with-SDP) was unaffected, which is why forcing CUCM Early Offer /
+  an MTP appeared to "fix" it. Regression test asserts the session reaches
+  `Active` after `apply_answer`.
+
 ## [0.14.0] - 2026-06-20
 
 ### Added

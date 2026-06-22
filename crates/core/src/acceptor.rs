@@ -3615,8 +3615,12 @@ impl BridgingAcceptor {
         };
 
         // Build OUR offer + allocate the forge session. This mirrors
-        // outbound origination, which never calls `start_session`
-        // explicitly — `apply_answer` + the controller bring media up.
+        // outbound origination: the forge session is created here
+        // (Initializing) and `apply_answer` — once the peer's answer
+        // arrives in the ACK — binds the remote and **activates** it
+        // (Initializing → Active, starting RTP forwarding). The early-offer
+        // inbound path instead activates explicitly via `start_session`
+        // before its 200 OK, because it knows the remote up front.
         // `srtp` makes the offer SDES per the resolved policy above.
         let offer = match self
             .media

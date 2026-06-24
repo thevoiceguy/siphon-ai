@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-06-24
+
 ### Added
 
 - **Per-route `[route.bridge.tls]` override** — a route can now carry its

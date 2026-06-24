@@ -14,3 +14,9 @@ toml.workspace       = true
 regex.workspace      = true
 thiserror.workspace  = true
 tracing.workspace    = true
+# For the per-route `[route.bridge.tls]` override: the compiled
+# `BridgeTlsConfig` lives on `CompiledRoute` so it swaps atomically with
+# the route table on SIGHUP reload (rather than in a separate non-reloaded
+# map). Internal workspace edge only — no new external crate, no cycle
+# (bridge does not depend on routes).
+siphon-ai-bridge.workspace = true

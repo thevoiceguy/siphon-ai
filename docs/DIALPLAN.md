@@ -47,7 +47,9 @@ Each `[[route]]` has:
   metrics labels, and HEP correlation.
 - `[route.match]` — predicate(s) the call must satisfy.
 - `[route.bridge]` *(optional)* — overrides for the global
-  `[bridge]` block. Anything not specified inherits.
+  `[bridge]` block. Anything not specified inherits. Includes
+  `[route.bridge.tls]` — a per-route mTLS client config that **fully
+  replaces** the global `[bridge.tls]` for this route (§5.5).
 - `[route.media]` *(optional)* — overrides for the global `[media]`
   block. Same merge rules.
 - `[route.security]` *(optional)* — overrides for the global
@@ -317,6 +319,39 @@ name = "default"
 any = true
 [route.bridge]
 ws_url = "wss://shared.example.com/sip-bridge"
+```
+
+### 5.5 Per-route mTLS to the WS server (0.15.0)
+
+`[route.bridge.tls]` overrides the global `[bridge.tls]` for one route's
+WS leg — for sending a different client certificate (or pin) to a
+particular bot, e.g. a pinned internal handler alongside a publicly-trusted
+shared one. When present it **fully replaces** the global block (it's a
+complete client config, not a field-by-field merge); a route without it
+inherits `[bridge.tls]`. Same field shape as the global block, validated
+(cert/key loaded, pin parsed) at config load — a bad path fails at startup,
+not on the first matching call — and it reloads with the route table on
+`SIGHUP`.
+
+```toml
+[[route]]
+name = "internal_pinned"
+[route.match]
+register_source = "internal-pbx"
+[route.bridge]
+ws_url = "wss://internal.example.com/sip-bridge"
+[route.bridge.tls]
+client_cert   = "/etc/siphon-ai/internal/client.pem"
+client_key    = "/etc/siphon-ai/internal/client.key"
+# pinned_sha256 = "…64 hex…"   # optional SPKI pin, as in [bridge.tls]
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+[route.bridge]
+ws_url = "wss://shared.example.com/sip-bridge"
+# inherits the global [bridge.tls] (or plaintext/webpki if none set)
 ```
 
 ---

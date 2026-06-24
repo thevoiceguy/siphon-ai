@@ -238,7 +238,6 @@ script the list).
 
 - `print-config --format json` (config CLI nicety).
 - CSV CDR output (alongside JSON/JSONL).
-- Per-route `[route.bridge.tls]` override (global mTLS shipped in 0.3.0).
 - Marker-bit fix — pending forge-media PR, then bump the pins.
 
 ---

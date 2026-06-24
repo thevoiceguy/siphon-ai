@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-route `[route.bridge.tls]` override** — a route can now carry its
+  own mTLS client config for the WS leg (client cert/key + optional SPKI
+  pin), e.g. a pinned internal handler alongside a publicly-trusted shared
+  one. When present it **fully replaces** the global `[bridge.tls]` for
+  matching calls; routes without it inherit the global. Compiled (cert/key
+  loaded, pin parsed) at config load — a bad path fails at startup, not on
+  the first matching call — and lives on `CompiledRoute`, so it swaps
+  atomically with the route table on `SIGHUP` reload like the rest of
+  `[route.bridge]`. The `routes` crate gains an internal `siphon-ai-bridge`
+  edge (no new external crate, no cycle). `print-config` / `route-test`
+  show whether a route's bridge mTLS is on. See `docs/DIALPLAN.md` §5.5.
+
 ## [0.14.1] - 2026-06-22
 
 ### Fixed

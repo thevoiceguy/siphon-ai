@@ -58,6 +58,14 @@ pub enum RouteError {
         first: usize,
         second: usize,
     },
+
+    #[error("route #{index} ({name:?}) [route.bridge.tls] is invalid: {source}")]
+    BadBridgeTls {
+        index: usize,
+        name: String,
+        #[source]
+        source: siphon_ai_bridge::tls::TlsConfigError,
+    },
 }
 
 /// Compile a deserialized route file into a ready-to-evaluate
@@ -107,6 +115,7 @@ fn compile_one(index: usize, route: RawRoute) -> Result<CompiledRoute, RouteErro
     } = route;
 
     let compiled_match = compile_match(index, &name, match_)?;
+    let bridge_tls = compile_bridge_tls(index, &name, &bridge)?;
 
     Ok(CompiledRoute {
         name,
@@ -115,7 +124,34 @@ fn compile_one(index: usize, route: RawRoute) -> Result<CompiledRoute, RouteErro
         media,
         security,
         recording,
+        bridge_tls,
     })
+}
+
+/// Load `[route.bridge.tls]` (cert/key from disk, optional pin) into a
+/// `BridgeTlsConfig` at config-compile time, so a bad path/cert fails
+/// loud at startup rather than on the first matching call. `None` when
+/// the route didn't set the block (it then inherits the global
+/// `[bridge.tls]` at accept time).
+fn compile_bridge_tls(
+    index: usize,
+    name: &str,
+    bridge: &crate::raw::BridgeOverride,
+) -> Result<Option<siphon_ai_bridge::tls::BridgeTlsConfig>, RouteError> {
+    let Some(tls) = bridge.tls.as_ref() else {
+        return Ok(None);
+    };
+    let cfg = siphon_ai_bridge::tls::BridgeTlsConfig::from_paths(
+        std::path::Path::new(&tls.client_cert),
+        std::path::Path::new(&tls.client_key),
+        tls.pinned_sha256.as_deref(),
+    )
+    .map_err(|source| RouteError::BadBridgeTls {
+        index,
+        name: name.to_string(),
+        source,
+    })?;
+    Ok(Some(cfg))
 }
 
 fn compile_match(
@@ -321,6 +357,75 @@ mod tests {
             RouteError::BadRegex { key, .. } => assert_eq!(key, "request_uri_user"),
             other => panic!("expected BadRegex, got {other:?}"),
         }
+    }
+
+    fn fixture(name: &str) -> String {
+        format!("{}/src/testdata/{name}", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn raw_with_bridge(name: &str, bridge: BridgeOverride) -> RawRoute {
+        RawRoute {
+            name: name.into(),
+            match_: RawRouteMatch {
+                any: true,
+                ..Default::default()
+            },
+            bridge,
+            media: MediaOverride::default(),
+            security: SecurityOverride::default(),
+            recording: RecordingOverride::default(),
+        }
+    }
+
+    #[test]
+    fn route_without_tls_compiles_to_none() {
+        let set = compile(RawRouteFile {
+            routes: vec![raw_with_bridge("r", BridgeOverride::default())],
+        })
+        .expect("compiles");
+        assert!(set.iter().next().unwrap().bridge_tls.is_none());
+    }
+
+    #[test]
+    fn route_with_valid_tls_compiles_to_some() {
+        use crate::raw::BridgeTlsOverride;
+        let bridge = BridgeOverride {
+            tls: Some(BridgeTlsOverride {
+                client_cert: fixture("client_cert.pem"),
+                client_key: fixture("client_key.pem"),
+                pinned_sha256: None,
+            }),
+            ..Default::default()
+        };
+        let set = compile(RawRouteFile {
+            routes: vec![raw_with_bridge("secure", bridge)],
+        })
+        .expect("compiles with valid cert/key");
+        assert!(
+            set.iter().next().unwrap().bridge_tls.is_some(),
+            "valid [route.bridge.tls] should compile to Some"
+        );
+    }
+
+    #[test]
+    fn route_with_bad_tls_path_is_rejected() {
+        use crate::raw::BridgeTlsOverride;
+        let bridge = BridgeOverride {
+            tls: Some(BridgeTlsOverride {
+                client_cert: "/nonexistent/cert.pem".into(),
+                client_key: "/nonexistent/key.pem".into(),
+                pinned_sha256: None,
+            }),
+            ..Default::default()
+        };
+        let err = compile(RawRouteFile {
+            routes: vec![raw_with_bridge("secure", bridge)],
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, RouteError::BadBridgeTls { ref name, .. } if name == "secure"),
+            "expected BadBridgeTls, got {err:?}"
+        );
     }
 
     #[test]

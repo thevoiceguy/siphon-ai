@@ -176,9 +176,12 @@ Absent means the existing plaintext / webpki path. See
 | `client_key`   | string | —       | Required. Path to a PEM file containing the private key matching `client_cert`'s leaf. PKCS#8 / RSA / SEC1 all accepted. |
 | `pinned_sha256`| string | unset   | Optional. 64-hex-char SHA-256 of the **server's** SubjectPublicKeyInfo. When set, replaces default CA verification with exact-match. Survives cert rotation as long as the key pair stays stable (RFC 7469 §3). |
 
-Per-route override (`[route.bridge.tls]`) is deferred to a 0.3.1
-follow-up — every accepted call shares the daemon-wide config in
-0.3.0.
+Per-route override (`[route.bridge.tls]`, 0.15.0) — a `[route.bridge.tls]`
+block on a `[[route]]` **fully replaces** this global block for calls that
+match that route (same field shape; a complete client config, not a
+field-by-field merge). Routes without it inherit the global. Validated at
+config load and reloaded with the route table on `SIGHUP`. See
+`docs/DIALPLAN.md` §5.5.
 
 ## `[[route]]`
 

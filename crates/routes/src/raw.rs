@@ -113,6 +113,31 @@ pub struct BridgeOverride {
     /// Per-route override of `[bridge].rtp_stats_interval_ms`. Same
     /// shape: `None` = inherit, `Some(0)` = disable, `Some(n)` = ms.
     pub rtp_stats_interval_ms: Option<u64>,
+
+    /// Per-route override of `[bridge.tls]` — mTLS for this route's WS
+    /// leg. `None` inherits the global `[bridge.tls]`. When present it
+    /// **fully replaces** the global (it is a complete client-cert
+    /// config, not a field-by-field merge), so a route can switch to a
+    /// different client identity / pin than the daemon default.
+    pub tls: Option<BridgeTlsOverride>,
+}
+
+/// `[route.bridge.tls]` — a complete mTLS client config for one route's
+/// WS leg. Mirrors the global `[bridge.tls]` shape (`crates/config`'s
+/// `RawBridgeTls`). Both paths are required; `pinned_sha256` is optional.
+/// Compiled (cert/key loaded, pin parsed) at config-load time into
+/// [`crate::CompiledRoute::bridge_tls`] so a bad path fails loud at
+/// startup, not on the first call that matches the route.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct BridgeTlsOverride {
+    /// PEM client certificate chain, leaf first.
+    pub client_cert: String,
+    /// PEM client private key matching the leaf cert.
+    pub client_key: String,
+    /// Optional SPKI SHA-256 pin (64 hex chars) — replaces CA
+    /// verification with exact-match, same as the global block.
+    #[serde(default)]
+    pub pinned_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

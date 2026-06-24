@@ -3092,6 +3092,7 @@ version = "0.14.1"
 dependencies = [
  "regex",
  "serde",
+ "siphon-ai-bridge",
  "thiserror 1.0.69",
  "toml",
  "tracing",

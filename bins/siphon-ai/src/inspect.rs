@@ -174,6 +174,9 @@ pub fn render_config(config: &Config, show_secrets: bool) -> String {
         if let Some(a) = &r.security.min_attestation {
             let _ = writeln!(s, "        min_attestation -> {a}");
         }
+        if r.bridge_tls.is_some() {
+            let _ = writeln!(s, "        bridge.tls   -> set (overrides global)");
+        }
     }
 
     // [[register]]
@@ -459,6 +462,17 @@ pub fn route_test(config: &Config, input: &RouteTestInput) -> String {
             if let Some(m) = &r.recording.mode {
                 let _ = writeln!(s, "  recording = {m} (route override)");
             }
+            let _ = writeln!(
+                s,
+                "  bridge mTLS = {}",
+                if r.bridge_tls.is_some() {
+                    "on (route override)"
+                } else if config.bridge_defaults.bridge_tls.is_some() {
+                    "on ([bridge.tls] default)"
+                } else {
+                    "off"
+                }
+            );
         }
     }
     o

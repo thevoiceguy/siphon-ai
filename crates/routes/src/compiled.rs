@@ -9,6 +9,7 @@
 //! across the per-call tasks via `Arc`.
 
 use regex::Regex;
+use siphon_ai_bridge::tls::BridgeTlsConfig;
 
 use crate::raw::{BridgeOverride, MediaOverride, RecordingOverride, SecurityOverride};
 
@@ -86,6 +87,13 @@ pub struct CompiledRoute {
     pub media: MediaOverride,
     pub security: SecurityOverride,
     pub recording: RecordingOverride,
+    /// Compiled per-route mTLS for the WS leg, from `[route.bridge.tls]`
+    /// (cert/key loaded, pin parsed at config-load time). `None` inherits
+    /// the global `[bridge.tls]`. Lives here — not in a side map — so it
+    /// swaps atomically with the route table on SIGHUP reload, matching
+    /// the rest of `[route.bridge]`. Resolved in
+    /// `siphon_ai_core::acceptor::build_bridge_config`.
+    pub bridge_tls: Option<BridgeTlsConfig>,
 }
 
 impl CompiledRoute {

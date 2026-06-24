@@ -622,11 +622,14 @@ pub fn build_bridge_config(
         ws_url,
         auth_header,
         connect_timeout,
-        // mTLS for the WS leg comes from the daemon-wide
-        // `[bridge.tls]` block (W4 Part A). Per-route override
-        // (`[route.bridge.tls]`) is a follow-up — for now every call
-        // shares the global config.
-        tls: defaults.bridge_tls.clone(),
+        // mTLS for the WS leg: the per-route `[route.bridge.tls]`
+        // (compiled onto the route, so it reloads with the route table)
+        // fully replaces the daemon-wide `[bridge.tls]` when set;
+        // otherwise the call inherits the global config.
+        tls: route
+            .bridge_tls
+            .clone()
+            .or_else(|| defaults.bridge_tls.clone()),
         // WS liveness (PROTOCOL.md §5.6 / §3.1) — daemon-wide `[bridge]`
         // settings, not route-overridable. `Duration::ZERO` = disabled.
         ping_interval: defaults.ws_ping_interval,

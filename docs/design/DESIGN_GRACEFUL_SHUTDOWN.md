@@ -245,11 +245,18 @@ into `[node]`); recommend a dedicated `[shutdown]` block.
    finish within the window drain cleanly; stragglers are still dropped at the
    deadline (parity with today for the timeout case, but now bounded and
    observed). `[shutdown]` is restart-required on reload.
-2. **Graceful straggler termination.** Read the controller teardown path
-   (§3.4 spike), then end deadline-survivors with a real `BYE` + WS `hangup`
-   (via `CallHandle` notify and/or `DialogTerminator`),
-   `calls_drain_forced_total`, second-signal-forces escape hatch, optional
-   CDR `termination_cause`.
+2. **Graceful straggler termination.** ✅ **DELIVERED.** Spike result:
+   notifying the `CallHandle` alone drives the full graceful teardown —
+   the controller sends the WS `stop` and breaks, then the acceptor's
+   per-call cleanup task sends the outbound `BYE` (when `!remote_bye`),
+   removes the registry entry, stops forge, emits CDR/webhook. So the drain
+   loop just flags each deadline-survivor `mark_drain_forced()` + `shutdown()`,
+   counts it on `siphon_ai_calls_drain_forced_total`, and waits a brief grace
+   (2 s) for the BYEs to flush before teardown — no direct `DialogTerminator`
+   drive needed. Added: `CallTermination::DrainForced` → CDR cause
+   `drain_forced` (CDR_VERSION → 3) + `calls_total{cause="drain_forced"}`, and
+   the second-signal-forces escape hatch (`run()` selects a fresh
+   `shutdown_signal()` against drain completion).
 3. **Surface + docs + release.** `/admin` drain status, `docs/DEPLOY.md`
    (rolling-deploy guidance: drain ≤ `terminationGracePeriodSeconds`, the
    `/ready` + 503 interplay, `preStop`/systemd notes), `docs/OPERATIONS.md`

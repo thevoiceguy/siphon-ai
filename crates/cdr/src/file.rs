@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(lines.len(), 2, "expected 2 lines, got: {body:?}");
         for line in &lines {
             let v: Value = serde_json::from_str(line).expect("each line is valid JSON");
-            assert_eq!(v["version"], serde_json::json!(2));
+            assert_eq!(v["version"], serde_json::json!(CDR_VERSION));
             assert_eq!(v["direction"], serde_json::json!("inbound"));
         }
         let v0: Value = serde_json::from_str(lines[0]).unwrap();
@@ -269,7 +269,7 @@ mod tests {
         for line in &lines {
             let v: Value =
                 serde_json::from_str(line).unwrap_or_else(|e| panic!("torn line {line:?}: {e}"));
-            assert_eq!(v["version"], serde_json::json!(2));
+            assert_eq!(v["version"], serde_json::json!(CDR_VERSION));
         }
     }
 }

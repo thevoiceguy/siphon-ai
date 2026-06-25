@@ -2153,6 +2153,7 @@ pub(crate) fn termination_label(cause: CdrTerminationCause) -> &'static str {
     match cause {
         CdrTerminationCause::ServerHangup => "server_hangup",
         CdrTerminationCause::LocalShutdown => "local_shutdown",
+        CdrTerminationCause::DrainForced => "drain_forced",
         CdrTerminationCause::BridgeEnded => "bridge_ended",
         CdrTerminationCause::TapEnded => "tap_ended",
         // Delayed-offer negotiation failures (v2). These don't reach the
@@ -2220,6 +2221,7 @@ fn map_cause(t: CallTermination) -> CdrTerminationCause {
     match t {
         CallTermination::ServerHangup => CdrTerminationCause::ServerHangup,
         CallTermination::LocalShutdown => CdrTerminationCause::LocalShutdown,
+        CallTermination::DrainForced => CdrTerminationCause::DrainForced,
         CallTermination::BridgeEnded => CdrTerminationCause::BridgeEnded,
         CallTermination::TapEnded => CdrTerminationCause::TapEnded,
     }
@@ -4050,6 +4052,21 @@ mod tests {
     use sip_core::{Headers as SipHeaders, Method, Request, RequestLine, SipUri};
     use siphon_ai_media_glue::{AnswerOutcome, Codec};
     use siphon_ai_routes::load_from_toml;
+
+    #[test]
+    fn drain_forced_termination_maps_and_labels() {
+        // 0.17.0: a drain-forced call is attributed distinctly from a
+        // generic local shutdown all the way to the CDR cause + metric
+        // label.
+        let cause = map_cause(CallTermination::DrainForced);
+        assert_eq!(cause, CdrTerminationCause::DrainForced);
+        assert_eq!(termination_label(cause), "drain_forced");
+        // The pre-existing local-shutdown path is unchanged.
+        assert_eq!(
+            termination_label(map_cause(CallTermination::LocalShutdown)),
+            "local_shutdown"
+        );
+    }
 
     mod dialog_flow {
         use super::super::{DialogFlow, TransportContext, TransportKind};

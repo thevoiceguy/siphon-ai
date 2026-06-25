@@ -169,6 +169,16 @@ pub const WS_RECONNECTS_TOTAL: &str = "siphon_ai_ws_reconnects_total";
 /// kept). One increment per `SIGHUP`. Emitted from the daemon binary.
 pub const CONFIG_RELOADS_TOTAL: &str = "siphon_ai_config_reloads_total";
 
+/// Calls force-terminated at the graceful-shutdown drain deadline
+/// (0.17.0): they were still active when `[shutdown].drain_timeout_secs`
+/// elapsed, so the drain ended them with a real BYE + WS hangup instead
+/// of leaving them to finish. `0` after a clean rolling deploy (all
+/// calls drained naturally); a non-zero value means the drain window
+/// was too short for the call mix. Emitted once per straggler from the
+/// runtime's drain phase. Unlabeled — these also appear on
+/// `siphon_ai_calls_total{cause="drain_forced"}` and per-call on the CDR.
+pub const CALLS_DRAIN_FORCED_TOTAL: &str = "siphon_ai_calls_drain_forced_total";
+
 /// Outbound webhook / CDR deliveries by terminal outcome (0.11.0).
 /// Labeled by `sink` (`lifecycle` / `cdr`) and `result`: `delivered`
 /// (2xx), `rejected` (non-retryable 4xx), `dropped` (retry budget
@@ -363,7 +373,11 @@ pub fn register_descriptions() {
     );
     describe_counter!(
         CALLS_TOTAL,
-        "Completed calls by termination cause (server_hangup, local_shutdown, bridge_ended, tap_ended)."
+        "Completed calls by termination cause (server_hangup, local_shutdown, drain_forced, bridge_ended, tap_ended)."
+    );
+    describe_counter!(
+        CALLS_DRAIN_FORCED_TOTAL,
+        "Calls force-terminated (BYE + WS hangup) at the graceful-shutdown drain deadline."
     );
     describe_counter!(ROUTE_MATCH_TOTAL, "Calls accepted by matched route name.");
     describe_counter!(

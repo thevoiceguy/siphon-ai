@@ -95,7 +95,8 @@ use siphon_ai_telemetry::{
         CallRegistryHandle, RegistrationRow,
     },
     install_recorder, AdminServer, HepTelemetry, HepTelemetryBuild, HepWorkerHandle,
-    LogFilterHandle, ObservabilityServer, ReadinessFlag, DRAINING, DRAIN_SECONDS,
+    LogFilterHandle, ObservabilityServer, ReadinessFlag, CALLS_DRAIN_FORCED_TOTAL, DRAINING,
+    DRAIN_SECONDS,
 };
 use siphon_ai_webhooks::{
     FilteredSink as WebhookFilteredSink, HttpSink as WebhookHttpSink,
@@ -834,10 +835,32 @@ impl Runtime {
         // Between the signal and teardown, let active calls finish.
         // `None` timeout = opt-out (`[shutdown].drain_timeout_secs =
         // 0`): skip straight to teardown, today's behaviour. Stragglers
-        // still up at the deadline are dropped by the existing teardown
-        // below (chunk 1) — chunk 2 ends them with a real BYE + hangup.
+        // still up at the deadline are ended with a real BYE + WS
+        // hangup (see `terminate_stragglers`).
+        //
+        // A *second* shutdown signal during the drain forces immediate
+        // teardown (operator Ctrl-C twice, or a re-sent SIGTERM) — the
+        // escape hatch from DESIGN_GRACEFUL_SHUTDOWN §3.5. We listen for
+        // it with a fresh `shutdown_signal()` (the first one was already
+        // consumed above); in tests, which drive `run()` with a plain
+        // future and send no signals, this arm simply never fires.
         if let Some(timeout) = self.drain_timeout {
-            drain_calls(&self.registry, &self.drain, &self.readiness, timeout).await;
+            tokio::select! {
+                biased;
+                _ = wait_for_force_signal() => {
+                    warn!(
+                        "second shutdown signal during drain; forcing immediate teardown \
+                         (active calls will be dropped without a BYE)"
+                    );
+                    // Make sure the drain flag + /ready flip stuck even
+                    // if the force raced `drain_calls` before its first
+                    // statements ran.
+                    self.drain.begin();
+                    self.readiness.mark_not_ready();
+                    metrics::gauge!(DRAINING).set(1.0);
+                }
+                _ = drain_calls(&self.registry, &self.drain, &self.readiness, timeout) => {}
+            }
         }
 
         info!("tearing down");
@@ -900,6 +923,13 @@ const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// How often the drain phase logs a "still draining, N remaining" line.
 const DRAIN_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
+/// After force-terminating stragglers at the deadline, how long to wait
+/// for their cleanup tasks to send the BYE + remove the registry entry
+/// before proceeding to teardown (which drops the SIP transport and
+/// would strand an un-flushed BYE). One transaction round-trip is
+/// plenty; this is a backstop, not the common path.
+const DRAIN_FORCE_GRACE: Duration = Duration::from_secs(2);
+
 /// Outcome of the drain wait — a clean drain (registry emptied before
 /// the deadline) vs a forced one (deadline hit with calls still up).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -942,11 +972,77 @@ async fn drain_calls(
             elapsed_secs = elapsed.as_secs_f64(),
             "drain complete; all calls ended"
         ),
-        DrainOutcome::Forced(remaining) => warn!(
-            remaining,
-            elapsed_secs = elapsed.as_secs_f64(),
-            timeout_secs = timeout.as_secs(),
-            "drain timeout reached; {remaining} call(s) still active will be dropped"
+        DrainOutcome::Forced(remaining) => {
+            warn!(
+                remaining,
+                elapsed_secs = elapsed.as_secs_f64(),
+                timeout_secs = timeout.as_secs(),
+                "drain timeout reached; force-terminating {remaining} straggler call(s)"
+            );
+            terminate_stragglers(registry).await;
+        }
+    }
+}
+
+/// Wait for a *subsequent* SIGTERM/SIGINT — the drain phase's
+/// force-escape (DESIGN_GRACEFUL_SHUTDOWN §3.5). The initial signal is
+/// delivered via the `shutdown` future passed to [`Runtime::run`]; a
+/// second one during drain has to be observed from inside the lib (the
+/// bin's own `shutdown_signal` isn't reachable here). In tests, which
+/// drive `run()` with a plain future and send no signals, this never
+/// resolves. If the handler can't be installed, the escape is disabled
+/// (waits forever) rather than aborting an in-progress drain.
+#[cfg(unix)]
+async fn wait_for_force_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let (mut sigterm, mut sigint) = match (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    ) {
+        (Ok(t), Ok(i)) => (t, i),
+        _ => return std::future::pending().await,
+    };
+    tokio::select! {
+        _ = sigterm.recv() => {}
+        _ = sigint.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_force_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+/// Force-terminate every call still in the registry at the drain
+/// deadline: flag each as drain-forced, signal a cooperative shutdown
+/// (which drives a clean WS `stop` + the acceptor's outbound `BYE` —
+/// see the §3.4 spike), count it, then wait a brief grace for those
+/// BYEs to flush and the cleanup tasks to drain the registry before the
+/// caller proceeds to transport teardown.
+async fn terminate_stragglers(registry: &CallRegistry) {
+    let ids = registry.snapshot_call_ids();
+    let mut forced = 0usize;
+    for cid in &ids {
+        if let Some(handle) = registry.lookup(cid) {
+            handle.mark_drain_forced();
+            handle.shutdown();
+            metrics::counter!(CALLS_DRAIN_FORCED_TOTAL).increment(1);
+            forced += 1;
+        }
+    }
+    info!(
+        forced,
+        grace_secs = DRAIN_FORCE_GRACE.as_secs(),
+        "signalled drain-forced teardown (BYE + WS hangup); waiting for it to flush"
+    );
+    // Reuse the poll loop to wait for the cleanup tasks to remove the
+    // entries (they remove only *after* the BYE is sent).
+    match drain_wait(|| registry.len(), DRAIN_FORCE_GRACE, DRAIN_POLL_INTERVAL).await {
+        DrainOutcome::Emptied => info!("drain-forced calls torn down cleanly"),
+        DrainOutcome::Forced(left) => warn!(
+            remaining = left,
+            grace_secs = DRAIN_FORCE_GRACE.as_secs(),
+            "grace elapsed with {left} call(s) not fully torn down; their BYE may not have flushed"
         ),
     }
 }

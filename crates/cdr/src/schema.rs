@@ -21,6 +21,10 @@
 //! that exhaustively matched the v1 cause set would not recognise these,
 //! so the version is bumped even though the field shape is unchanged.
 //!
+//! **v3 (0.17.0):** added the `drain_forced` [`TerminationCause`] variant
+//! for calls force-ended at the graceful-shutdown drain deadline. Same
+//! rationale as v2 — a new cause value, no field shape change.
+//!
 //! ## What we record vs. what we don't
 //!
 //! - **From / To** users only — full SIP URIs are recorded as the
@@ -37,7 +41,12 @@ use serde::{Deserialize, Serialize};
 
 /// Schema version of the CDR record. Bump per CLAUDE.md §7.7
 /// whenever a change could break consumer parsers.
-pub const CDR_VERSION: u32 = 2;
+///
+/// v3 (0.17.0): adds the `drain_forced` `termination.cause` value for
+/// calls force-ended at the graceful-shutdown drain deadline — a new
+/// value in an existing enum field, so a strict parser pinning the
+/// cause set could reject it. No field added/removed.
+pub const CDR_VERSION: u32 = 3;
 
 /// One call's complete record. Always serialised as a single JSON
 /// object on a single line for JSONL file sinks.
@@ -197,6 +206,13 @@ pub enum TerminationCause {
     /// Local control path (BYE/CANCEL/admin) asked the controller
     /// to shut down.
     LocalShutdown,
+    /// The daemon force-terminated this call at the graceful-shutdown
+    /// drain deadline (0.17.0): it was still active when
+    /// `[shutdown].drain_timeout_secs` elapsed, so it was ended with a
+    /// real BYE + WS hangup rather than left to finish. Distinct from
+    /// `local_shutdown` so a deploy's forced terminations are
+    /// attributable per-call.
+    DrainForced,
     /// Bridge sub-task ended first (clean WS close, server
     /// disconnect, or a bridge-side error).
     BridgeEnded,
@@ -282,6 +298,8 @@ mod tests {
         assert_eq!(v, serde_json::json!("server_hangup"));
         let v = serde_json::to_value(TerminationCause::LocalShutdown).unwrap();
         assert_eq!(v, serde_json::json!("local_shutdown"));
+        let v = serde_json::to_value(TerminationCause::DrainForced).unwrap();
+        assert_eq!(v, serde_json::json!("drain_forced"));
     }
 
     #[test]
@@ -306,12 +324,13 @@ mod tests {
     }
 
     #[test]
-    fn version_field_is_present_and_is_2() {
-        // Bumped to 2 in 0.9.5 (new delayed-offer-failure termination
-        // causes — see the module versioning note).
-        assert_eq!(CDR_VERSION, 2);
+    fn version_field_is_present_and_is_3() {
+        // Bumped to 3 in 0.17.0 (new `drain_forced` termination cause —
+        // see the module versioning note). Was 2 in 0.9.5 (delayed-offer
+        // failure causes).
+        assert_eq!(CDR_VERSION, 3);
         let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
-        assert_eq!(v["version"], serde_json::json!(2));
+        assert_eq!(v["version"], serde_json::json!(3));
     }
 
     #[test]
@@ -335,7 +354,7 @@ mod tests {
         // Never bot-held → omitted, schema still v1.
         let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
         assert!(!v.as_object().unwrap().contains_key("hold"));
-        assert_eq!(v["version"], serde_json::json!(2));
+        assert_eq!(v["version"], serde_json::json!(CDR_VERSION));
 
         // Held → nested {count, total_ms}; version unchanged.
         let mut rec = sample();
@@ -346,7 +365,7 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
         assert_eq!(v["hold"]["count"], serde_json::json!(2));
         assert_eq!(v["hold"]["total_ms"], serde_json::json!(4500));
-        assert_eq!(v["version"], serde_json::json!(2));
+        assert_eq!(v["version"], serde_json::json!(CDR_VERSION));
         let back: CdrRecord = serde_json::from_value(v).unwrap();
         assert_eq!(back.hold, rec.hold);
     }
@@ -356,7 +375,7 @@ mod tests {
         // Never reconnected → omitted, schema still v1.
         let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
         assert!(!v.as_object().unwrap().contains_key("reconnect"));
-        assert_eq!(v["version"], serde_json::json!(2));
+        assert_eq!(v["version"], serde_json::json!(CDR_VERSION));
 
         // Reconnected → nested {count, total_gap_ms}; version unchanged.
         let mut rec = sample();
@@ -367,7 +386,7 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
         assert_eq!(v["reconnect"]["count"], serde_json::json!(1));
         assert_eq!(v["reconnect"]["total_gap_ms"], serde_json::json!(1200));
-        assert_eq!(v["version"], serde_json::json!(2));
+        assert_eq!(v["version"], serde_json::json!(CDR_VERSION));
         let back: CdrRecord = serde_json::from_value(v).unwrap();
         assert_eq!(back.reconnect, rec.reconnect);
     }
@@ -379,7 +398,7 @@ mod tests {
         let obj = v.as_object().unwrap();
         assert!(!obj.contains_key("verstat_attest"));
         assert!(!obj.contains_key("verstat_passed"));
-        assert_eq!(v["version"], serde_json::json!(2));
+        assert_eq!(v["version"], serde_json::json!(CDR_VERSION));
 
         // Populated verdict → fields present; version unchanged.
         let mut rec = sample();
@@ -388,7 +407,7 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
         assert_eq!(v["verstat_attest"], serde_json::json!("A"));
         assert_eq!(v["verstat_passed"], serde_json::json!(true));
-        assert_eq!(v["version"], serde_json::json!(2));
+        assert_eq!(v["version"], serde_json::json!(CDR_VERSION));
 
         // Round-trips, and a pre-0.4.0 CDR without the fields still parses.
         let back: CdrRecord = serde_json::from_value(v).unwrap();

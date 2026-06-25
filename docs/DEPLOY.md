@@ -4,6 +4,74 @@ This is the operator's reference for running `siphon-ai` in something other
 than `cargo run`. For configuration semantics see `docs/CONFIG.md`; for the
 observability bar (the §11.8 ten questions) see `docs/OPERATIONS.md`.
 
+## Install from a release
+
+Every [GitHub release](https://github.com/thevoiceguy/siphon-ai/releases)
+ships prebuilt, **statically-linked musl** artifacts for `x86_64` and
+`aarch64` — no need to build from source. Each release carries:
+
+| Artifact | What it is |
+|---|---|
+| `siphon-ai-<ver>-<target>.tar.gz` | Standalone static binary (+ licenses, README). |
+| `siphon-ai_<ver>-1_<arch>.deb` | Debian/Ubuntu package (`amd64` / `arm64`). |
+| `ghcr.io/thevoiceguy/siphon-ai:<ver>` | Multi-arch container (`linux/amd64` + `linux/arm64`). |
+| `siphon-ai-<ver>-sbom.cdx.json` | CycloneDX SBOM. |
+| `SHA256SUMS`, `SHA256SUMS.cosign.bundle` | Checksums + a keyless [cosign](https://docs.sigstore.dev/) signature over them. |
+
+The binaries are the same artifacts the container is built from — byte-for-byte
+per arch.
+
+### Verify before installing
+
+```sh
+# Integrity: checksums cover the tarballs, the .deb packages, and the SBOM.
+sha256sum -c SHA256SUMS
+
+# Provenance: the cosign bundle is signed by the release workflow's GitHub
+# OIDC identity (keyless — no public key to distribute).
+cosign verify-blob --bundle SHA256SUMS.cosign.bundle \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp 'release\.yml@refs/tags/' \
+  SHA256SUMS
+```
+
+### Binary tarball
+
+```sh
+tar xzf siphon-ai-<ver>-x86_64-unknown-linux-musl.tar.gz
+sudo install -m255 siphon-ai-<ver>-*/siphon-ai /usr/local/bin/siphon-ai
+siphon-ai --version
+```
+
+### Debian / Ubuntu package
+
+```sh
+sudo apt install ./siphon-ai_<ver>-1_amd64.deb   # resolves ca-certificates + adduser
+```
+
+The package installs the binary to `/usr/bin/siphon-ai`, a default config to
+`/etc/siphon-ai/config.toml` (a dpkg *conffile* — your edits survive
+upgrades), and a hardened systemd unit. It creates the `siphon-ai` service
+user and `/var/{lib,log}/siphon-ai`, and **enables but does not start** the
+service — the default config points at a placeholder `[bridge].ws_url`. Edit
+the config, then `sudo systemctl start siphon-ai`. (`systemctl reload`
+hot-applies route/gateway/webhook changes via `SIGHUP`.)
+
+### Container
+
+```sh
+docker pull ghcr.io/thevoiceguy/siphon-ai:<ver>
+# Verify the image signature (same keyless identity as the blob above):
+cosign verify ghcr.io/thevoiceguy/siphon-ai:<ver> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp 'release\.yml@refs/tags/'
+
+docker run --rm -v "$PWD/config.toml:/app/config.toml" \
+  ghcr.io/thevoiceguy/siphon-ai:<ver>
+```
+
+To build the container yourself instead, see **Container image** below.
+
 ## Build prerequisites
 
 The daemon links **libopus** (Opus codec support, 0.8.0) — built from source

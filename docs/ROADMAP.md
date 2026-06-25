@@ -38,17 +38,21 @@ These are the gaps that bite real deployments today.
   hardened container variant — both structured as additive follow-ups (a
   sibling packaging step / a swapped runtime base), not rework.
 
-### Graceful shutdown & zero-drop deploys
-*The remaining open P0.*
-The daemon aborts its listeners on `SIGTERM`; in-flight calls are not drained
-(`runtime.rs` explicitly notes "v1 doesn't have a 'drain calls cleanly'
-path"). Combined with `SIGHUP` reload this unlocks true rolling deploys.
+### Graceful shutdown & zero-drop deploys — ✅ delivered in v0.17.0
+*Was the remaining open P0.* Shipped over three chunks (design note
+`docs/design/DESIGN_GRACEFUL_SHUTDOWN.md`). Combined with `SIGHUP` reload this
+unlocks true rolling deploys:
 
-- On `SIGTERM`: stop accepting new INVITEs, let active calls finish, bound by
-  a configurable drain timeout, then exit.
-- A `503`/`486` posture for new inbound during drain; `/ready` flips to
-  not-ready so a load balancer stops routing.
-- Drain status surfaced on `/admin` + a metric.
+- On `SIGTERM`/`SIGINT`: flip `/ready` to not-ready, reject new INVITEs with
+  `503` + `Retry-After`, let active calls finish (bound by
+  `[shutdown].drain_timeout_secs`, default 30 s), then force-terminate
+  stragglers at the deadline with a real `BYE` + WS `hangup`. A second signal
+  forces an immediate exit.
+- Drain status on `GET /admin/v1/drain` + metrics (`siphon_ai_draining`,
+  `siphon_ai_drain_seconds`, `siphon_ai_calls_drain_forced_total`) + a
+  `drain_forced` CDR cause (CDR v3).
+
+*With both P0s delivered, the next theme is P1 (security & abuse hardening).*
 
 ---
 

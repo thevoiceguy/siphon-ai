@@ -19,7 +19,7 @@ evidence and flags any gaps.
 | Homer UI (`http://.../`)            | SIP call flow + RTCP + CDR + log chunks correlated by SIP `Call-ID`                    |
 | Prometheus `/metrics`               | Counters / histograms; `siphon_ai_*` for app-level, `forge_*` for media, `heplify_*` for collector  |
 | CDR (file / webhook)                | One JSON record per ended call with codec, route, termination cause, durations         |
-| `/admin/*`                          | Live state — active calls, registration status, log filter, HEP probe                  |
+| `/admin/*`                          | Live state — active calls, registration status, log filter, HEP probe, drain status     |
 
 ## The §11.8 ten questions
 
@@ -256,3 +256,30 @@ busy spans (`sip_uas`, `sip_transaction`, `sip_transport`,
 
 All of the above are reachable without restart via
 `PUT /admin/log`.
+
+## Draining for a deploy / restart (0.17.0)
+
+On `SIGTERM`/`SIGINT` the daemon drains instead of dropping calls: `/ready`
+flips false, new INVITEs get `503`, in-flight calls finish (up to
+`[shutdown].drain_timeout_secs`), then stragglers get a clean `BYE`. Full
+behaviour + k8s/systemd setup is in `DEPLOY.md` → *Graceful shutdown &
+rolling deploys*. To watch one happen:
+
+```text
+INFO drain started active_calls=7 timeout_secs=30
+INFO draining remaining=3
+INFO drain complete; all calls ended elapsed_secs=12.4
+# …or, if calls outlived the window:
+WARN drain timeout reached; force-terminating 2 straggler call(s)
+INFO signalled drain-forced teardown (BYE + WS hangup); waiting for it to flush
+```
+
+| Want to know… | Look at |
+|---------------|---------|
+| Is this pod draining right now? | `siphon_ai_draining` gauge (1), or `GET /admin/v1/drain` `{draining, active_calls, remaining_secs}` |
+| How long did the last drain take? | `siphon_ai_drain_seconds` histogram (near the timeout = calls didn't finish) |
+| Are deploys force-killing calls? | `siphon_ai_calls_drain_forced_total` — if regularly non-zero, raise `drain_timeout_secs` (and the supervisor's kill grace) |
+| Which calls were force-ended? | CDR `termination.cause == "drain_forced"` (CDR v3) |
+
+If a drain is taking too long (an operator wants out *now*), send a **second**
+`SIGTERM`/`SIGINT` — it forces immediate teardown, dropping whatever's left.

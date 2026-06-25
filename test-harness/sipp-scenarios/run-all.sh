@@ -1863,6 +1863,116 @@ EOF
     trap - EXIT
 fi
 
+# ─── Always-on auxiliary phase: graceful drain ────────────────────
+# Exercises the 0.17.0 SIGTERM drain end-to-end (DESIGN_GRACEFUL_SHUTDOWN
+# §5):
+#   * a call still up at the deadline is force-terminated *gracefully* —
+#     the daemon sends it a real BYE (drain_graceful_bye.xml),
+#   * a NEW INVITE arriving mid-drain is rejected 503 (drain_invite_503),
+#   * the daemon exits within the drain window + grace.
+# A short drain_timeout_secs keeps the phase quick. Self-contained echo
+# WS on its own port. The straggler SIPp uses a different local port than
+# the 503 probe so the two instances don't fight over one bind.
+echo
+echo "─── auxiliary phase: graceful drain ───────────────────"
+DRAIN_TIMEOUT_SECS=4
+DRAIN_WS_PORT=8767
+DRAIN_SIPP_PORT=5082          # straggler UAC (distinct from $SIPP_PORT)
+DRAIN_WS_LOG=$(mktemp -t echo-ws-drain.XXXXXX.log)
+DRAIN_DAEMON_LOG=$(mktemp -t siphon-ai-drain.XXXXXX.log)
+DRAIN_CONFIG=$(mktemp -t siphon-ai-drain.XXXXXX.toml)
+cat >"$DRAIN_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-drain"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$DRAIN_WS_PORT/"
+[shutdown]
+drain_timeout_secs = $DRAIN_TIMEOUT_SECS
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+DRAIN_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$DRAIN_PYTHON" ]] || DRAIN_PYTHON=python3
+"$DRAIN_PYTHON" \
+    "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$DRAIN_WS_PORT" \
+    >"$DRAIN_WS_LOG" 2>&1 &
+DRAIN_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$DRAIN_CONFIG" \
+    >"$DRAIN_DAEMON_LOG" 2>&1 &
+DRAIN_DAEMON_PID=$!
+drain_cleanup() {
+    kill "$DRAIN_WS_PID" "$DRAIN_DAEMON_PID" 2>/dev/null || true
+    wait "$DRAIN_WS_PID" "$DRAIN_DAEMON_PID" 2>/dev/null || true
+}
+trap drain_cleanup EXIT
+sleep 1.2
+
+# 1) Place a call that stays up — it becomes the deadline straggler.
+sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/drain_graceful_bye.xml" \
+    -m 1 -timeout 20s -trace_err \
+    -p "$DRAIN_SIPP_PORT" -s 1000 \
+    "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1 &
+DRAIN_STRAGGLER_PID=$!
+sleep 1.5     # let the call establish before we pull the trigger
+
+# 2) Trigger the drain.
+echo "  sending SIGTERM to draining daemon (pid $DRAIN_DAEMON_PID)"
+kill -TERM "$DRAIN_DAEMON_PID" 2>/dev/null || true
+
+# 3) New INVITE mid-drain → 503.
+sleep 0.4
+total=$((total + 1))
+echo "─── drain_invite_503 ─────────────────────────────────"
+if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/drain_invite_503.xml" \
+        -m 1 -timeout 8s -trace_err \
+        -p "$SIPP_PORT" -s 1000 \
+        "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1; then
+    echo "  OK"
+else
+    echo "  FAIL (new INVITE not 503'd; daemon: $DRAIN_DAEMON_LOG)"
+    failures=$((failures + 1))
+fi
+
+# 4) The straggler must receive a graceful BYE at the deadline.
+total=$((total + 1))
+echo "─── drain_graceful_bye ───────────────────────────────"
+if wait "$DRAIN_STRAGGLER_PID"; then
+    echo "  OK"
+else
+    echo "  FAIL (straggler got no BYE; daemon: $DRAIN_DAEMON_LOG)"
+    failures=$((failures + 1))
+fi
+
+# 5) The daemon must exit on its own within the drain window + grace.
+total=$((total + 1))
+echo "─── drain_daemon_exits ───────────────────────────────"
+exited=0
+for _ in $(seq 1 24); do      # up to ~12s (timeout 4s + grace 2s + slack)
+    if ! kill -0 "$DRAIN_DAEMON_PID" 2>/dev/null; then
+        exited=1
+        break
+    fi
+    sleep 0.5
+done
+if (( exited == 1 )); then
+    echo "  OK"
+else
+    echo "  FAIL (daemon still alive after drain; log: $DRAIN_DAEMON_LOG)"
+    failures=$((failures + 1))
+fi
+
+drain_cleanup
+trap - EXIT
+
 echo
 if (( failures == 0 )); then
     echo "all $total scenarios passed"

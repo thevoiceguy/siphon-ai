@@ -1,8 +1,8 @@
 # Design: graceful shutdown & connection draining
 
-Status: **DECISIONS LOCKED (2026-06-24) — ready to implement** (forks locked
-in §4; now chunked PRs, same cadence as config-CLI → v0.12.0 and
-release-packaging → v0.16.0).
+Status: **DELIVERED (2026-06-25) — all three chunks shipped in v0.17.0.**
+(Decisions locked 2026-06-24 in §4; chunked PRs, same cadence as config-CLI
+→ v0.12.0 and release-packaging → v0.16.0. See the ✅ markers in §6.)
 
 Theme: **P0 from `docs/ROADMAP.md`** ("Production operability → Graceful
 shutdown & zero-drop deploys") — the remaining open P0 now that release &
@@ -257,7 +257,11 @@ into `[node]`); recommend a dedicated `[shutdown]` block.
    `drain_forced` (CDR_VERSION → 3) + `calls_total{cause="drain_forced"}`, and
    the second-signal-forces escape hatch (`run()` selects a fresh
    `shutdown_signal()` against drain completion).
-3. **Surface + docs + release.** `/admin` drain status, `docs/DEPLOY.md`
-   (rolling-deploy guidance: drain ≤ `terminationGracePeriodSeconds`, the
-   `/ready` + 503 interplay, `preStop`/systemd notes), `docs/OPERATIONS.md`
-   runbook line, CHANGELOG, tag ~v0.17.0.
+3. **Surface + docs + release.** ✅ **DELIVERED.** `GET /admin/v1/drain`
+   status (`draining` / `active_calls` / `drain_timeout_secs` /
+   `remaining_secs`), `docs/DEPLOY.md` *Graceful shutdown & rolling deploys*
+   (drain ≤ `terminationGracePeriodSeconds` / `TimeoutStopSec`, the `/ready`
+   + 503 interplay, k8s/systemd notes), `docs/OPERATIONS.md` drain runbook,
+   a SIPp graceful-drain phase (`drain_graceful_bye` + `drain_invite_503`:
+   straggler BYE, mid-drain 503, daemon exits), CHANGELOG + version bump to
+   v0.17.0.

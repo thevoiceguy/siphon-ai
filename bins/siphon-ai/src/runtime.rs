@@ -49,8 +49,9 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -92,7 +93,7 @@ use siphon_ai_sip_glue::{
 use siphon_ai_telemetry::{
     admin::{
         AdminCallRegistry, AdminConference, AdminOutbound, AdminPark, AdminState,
-        CallRegistryHandle, RegistrationRow,
+        CallRegistryHandle, DrainStatus, DrainStatusFn, RegistrationRow,
     },
     install_recorder, AdminServer, HepTelemetry, HepTelemetryBuild, HepWorkerHandle,
     LogFilterHandle, ObservabilityServer, ReadinessFlag, CALLS_DRAIN_FORCED_TOTAL, DRAINING,
@@ -150,6 +151,9 @@ pub struct Runtime {
     readiness: ReadinessFlag,
     registry: CallRegistry,
     drain_timeout: Option<Duration>,
+    /// Drain deadline (epoch-millis, `0` until drain starts). Published
+    /// by the drain phase and read by `GET /admin/v1/drain`.
+    drain_deadline_ms: Arc<AtomicU64>,
 }
 
 impl Runtime {
@@ -440,6 +444,10 @@ impl Runtime {
             .drain_timeout
             .map(|d| d.as_secs().max(1).min(u32::MAX as u64) as u32)
             .unwrap_or(5);
+        // Drain deadline as epoch-millis, published when the drain phase
+        // starts (0 = not draining). Feeds `GET /admin/v1/drain`'s
+        // `remaining_secs` countdown; shared with `drain_calls`.
+        let drain_deadline_ms = Arc::new(AtomicU64::new(0));
         let mut routing_handler_builder =
             RoutingHandler::new(Arc::clone(&route_swap), Arc::clone(&acceptor))
                 .with_dialog_terminator(dialog_terminator)
@@ -741,6 +749,28 @@ impl Runtime {
         // crashing — see telemetry::admin docs.
         let call_registry_for_admin = acceptor.registry().clone();
         let registration_mgr_for_admin = registration_mgr.clone();
+        // `GET /admin/v1/drain` status closure (0.17.0). Reads the live
+        // drain flag + registry depth + published deadline. Installed
+        // unconditionally — drain state exists regardless of `[shutdown]`.
+        let drain_status_fn: DrainStatusFn = {
+            let drain = drain.clone();
+            let registry = registry_for_drain.clone();
+            let deadline = Arc::clone(&drain_deadline_ms);
+            let timeout_secs = shutdown.drain_timeout.map(|d| d.as_secs()).unwrap_or(0);
+            Arc::new(move || {
+                let draining = drain.is_draining();
+                let remaining_secs = draining.then(|| {
+                    let deadline_ms = deadline.load(Ordering::Acquire);
+                    deadline_ms.saturating_sub(now_epoch_ms()) / 1000
+                });
+                DrainStatus {
+                    draining,
+                    active_calls: registry.len(),
+                    drain_timeout_secs: timeout_secs,
+                    remaining_secs,
+                }
+            })
+        };
         let admin_state = AdminState {
             call_registry: Some(Arc::new(RuntimeCallRegistry {
                 inner: call_registry_for_admin,
@@ -768,6 +798,7 @@ impl Runtime {
                     control_registry.clone(),
                 )) as AdminPark
             }),
+            drain: Some(drain_status_fn),
         };
         let observability_server =
             build_observability(observability, readiness.clone(), prometheus_handle).await?;
@@ -796,6 +827,7 @@ impl Runtime {
             readiness,
             registry: registry_for_drain,
             drain_timeout: shutdown.drain_timeout,
+            drain_deadline_ms,
         })
     }
 
@@ -859,7 +891,13 @@ impl Runtime {
                     self.readiness.mark_not_ready();
                     metrics::gauge!(DRAINING).set(1.0);
                 }
-                _ = drain_calls(&self.registry, &self.drain, &self.readiness, timeout) => {}
+                _ = drain_calls(
+                    &self.registry,
+                    &self.drain,
+                    &self.readiness,
+                    &self.drain_deadline_ms,
+                    timeout,
+                ) => {}
             }
         }
 
@@ -902,10 +940,11 @@ impl Runtime {
         }
 
         // Drop the UAS / TM Arcs so any per-call task that's still
-        // holding a clone tears down cleanly. We don't wait for
-        // active calls — they'll see their channels close and exit
-        // on their own. v1 doesn't have a "drain calls cleanly"
-        // story; that's a follow-up alongside SIGTERM-with-grace.
+        // holding a clone tears down cleanly. By here the drain phase
+        // (0.17.0) has already let active calls finish or force-ended
+        // them with a BYE + WS hangup; anything still holding a clone
+        // (drain disabled, force-quit, or a straggler whose BYE didn't
+        // flush in the grace window) sees its channels close and exits.
         let _ = self.transaction_mgr;
         let _ = self.uas;
         let _ = self.udp_socket;
@@ -930,6 +969,17 @@ const DRAIN_LOG_INTERVAL: Duration = Duration::from_secs(5);
 /// plenty; this is a backstop, not the common path.
 const DRAIN_FORCE_GRACE: Duration = Duration::from_secs(2);
 
+/// Wall-clock milliseconds since the UNIX epoch. Used only for the
+/// `GET /admin/v1/drain` deadline countdown (an operator-facing display
+/// value, not call logic) — the drain *wait* itself is driven by a
+/// monotonic `Instant`, immune to clock steps.
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 /// Outcome of the drain wait — a clean drain (registry emptied before
 /// the deadline) vs a forced one (deadline hit with calls still up).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -947,6 +997,7 @@ async fn drain_calls(
     registry: &CallRegistry,
     drain: &DrainFlag,
     readiness: &ReadinessFlag,
+    deadline_ms: &AtomicU64,
     timeout: Duration,
 ) {
     // Flip into draining BEFORE anything else so new INVITEs get 503'd
@@ -954,6 +1005,11 @@ async fn drain_calls(
     drain.begin();
     readiness.mark_not_ready();
     metrics::gauge!(DRAINING).set(1.0);
+    // Publish the deadline for `GET /admin/v1/drain`'s countdown.
+    deadline_ms.store(
+        now_epoch_ms().saturating_add(timeout.as_millis() as u64),
+        Ordering::Release,
+    );
 
     let active = registry.len();
     info!(

@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-06-25
+
+### Added
+
+- **Graceful shutdown & connection draining** (P0 "Production operability").
+  On `SIGTERM`/`SIGINT` the daemon now **drains** instead of dropping calls
+  mid-conversation: it flips `/ready` to not-ready, rejects new inbound
+  INVITEs with `503 Service Unavailable` + `Retry-After` (so an upstream
+  proxy/LB routes elsewhere), lets in-flight calls finish — bounded by
+  `[shutdown].drain_timeout_secs` (default `30`; `0` = pre-0.17.0 immediate
+  exit) — then **force-terminates any stragglers at the deadline with a real
+  `BYE` + WS `hangup`** rather than a silent RTP stop. In-dialog requests
+  (re-INVITE/ACK/BYE) for calls already up keep flowing so the drained calls
+  aren't broken. A **second** shutdown signal during the drain forces an
+  immediate exit (operator escape hatch). This is what makes zero-drop
+  rolling deploys possible — pair `drain_timeout_secs` with the supervisor's
+  kill grace (`terminationGracePeriodSeconds` / `TimeoutStopSec`). See
+  `docs/design/DESIGN_GRACEFUL_SHUTDOWN.md` and `docs/DEPLOY.md` →
+  *Graceful shutdown & rolling deploys*.
+- **`[shutdown]` config table** with `drain_timeout_secs` (`docs/CONFIG.md`).
+  Restart-required on SIGHUP (read once at startup).
+- **`GET /admin/v1/drain`** — live drain status
+  `{draining, active_calls, drain_timeout_secs, remaining_secs}` for deploy
+  scripts to confirm a pod entered drain and watch the countdown (readonly
+  role).
+- **Drain observability:** `siphon_ai_draining` gauge (1 while draining),
+  `siphon_ai_drain_seconds` histogram (how long the drain took), and
+  `siphon_ai_calls_drain_forced_total` counter (calls force-ended at the
+  deadline). Drain lifecycle logs throughout.
+- **SIPp coverage:** a graceful-drain phase in `test-harness/sipp-scenarios`
+  (`drain_graceful_bye.xml` + `drain_invite_503.xml`) asserts end-to-end that
+  a deadline straggler gets a real BYE, a new INVITE mid-drain is 503'd, and
+  the daemon exits within the window.
+
+### Changed
+
+- **CDR schema → version 3.** Adds the `drain_forced` `termination.cause`
+  value (calls force-ended at the drain deadline), distinct from
+  `local_shutdown`, so a deploy's forced terminations are attributable
+  per-call. Also surfaced on `siphon_ai_calls_total{cause="drain_forced"}`.
+  A new value in an existing enum field — no field added or removed.
+- The systemd unit sketch (`docs/DEPLOY.md`) gains `TimeoutStopSec=40` so the
+  default 30 s drain window fits inside systemd's stop timeout.
+
 ## [0.16.0] - 2026-06-24
 
 ### Added

@@ -21,21 +21,25 @@ tag-after-merge). Anything marked *upstream-gated* depends on a capability in
 
 These are the gaps that bite real deployments today.
 
-### Release & packaging
-*The most-flagged drift.* Releases are hand-cut and there are no installable
-artifacts beyond from-source scripts + a Docker image.
+### Release & packaging — ✅ delivered in v0.16.0
+*Was the most-flagged drift.* Shipped a tag-triggered release workflow
+(`.github/workflows/release.yml`, design note
+`docs/design/DESIGN_RELEASE_PACKAGING.md`, runbook `RELEASING.md`):
 
-- Prebuilt, multi-arch release binaries attached to each GitHub release
-  (x86_64 + aarch64, musl static).
-- Automated release workflow: tag → build → SBOM → checksums/signatures →
-  GitHub release → container push to GHCR.
-- Native packages: `.deb` (Debian/Ubuntu) at minimum; `.rpm` as a stretch.
-- **CI version-consistency gate** — fail the build if `Cargo.toml`,
-  `CHANGELOG.md`, and `README.md` disagree on the version / status (this
-  repo has already drifted twice).
-- Distroless / hardened container variant.
+- Prebuilt multi-arch (`x86_64` + `aarch64`, musl-static) binaries on each
+  GitHub release, cross-compiled with cargo-zigbuild.
+- Automated `tag → build → SBOM (syft) → checksums + cosign-keyless
+  signatures → GitHub release → multi-arch GHCR container (cosign-signed)`.
+- `.deb` packages (`amd64` + `arm64`) via cargo-deb.
+- **CI version-consistency gate** (`scripts/check-version-consistency.py`) —
+  fails the build if `Cargo.toml`, `CHANGELOG.md`, and `README.md` disagree.
+
+  *Still open (deferred, low priority):* `.rpm` packages and a distroless /
+  hardened container variant — both structured as additive follow-ups (a
+  sibling packaging step / a swapped runtime base), not rework.
 
 ### Graceful shutdown & zero-drop deploys
+*The remaining open P0.*
 The daemon aborts its listeners on `SIGTERM`; in-flight calls are not drained
 (`runtime.rs` explicitly notes "v1 doesn't have a 'drain calls cleanly'
 path"). Combined with `SIGHUP` reload this unlocks true rolling deploys.
@@ -248,29 +252,3 @@ Not roadmap items — deliberate non-goals (`CLAUDE.md` §8, `DEV_PLAN.md` §1):
 AI-provider code (the WS server's job), multi-tenancy, video, WebRTC client
 support, YAML/JSON config, in-daemon acoustic echo cancellation, per-call log
 files.
-
-Good feature addition
-
-A useful future endpoint would be:
-
-POST /admin/registrations/{name}/refresh
-
-For example:
-
-curl -X POST \
-  -H "Authorization: Bearer ${SIPHON_ADMIN_TOKEN}" \
-  http://127.0.0.1:9092/admin/registrations/cucm-phone/refresh
-
-Internally, each registration task could listen for three events:
-
-tokio::select! {
-    _ = tokio::time::sleep(refresh_delay) => {}
-    _ = refresh_signal.notified() => {}
-    _ = shutdown_signal.cancelled() => return,
-}
-
-That would permit an immediate authenticated REGISTER without restarting SiphonAI or interrupting active calls. A second endpoint could support a full unregister/register cycle:
-
-POST /admin/registrations/{name}/restart
-
-That operation would send REGISTER with Expires: 0, followed by a fresh authenticated REGISTER.

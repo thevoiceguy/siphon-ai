@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Docs: installing from a release + a releasing runbook.**
+  `docs/DEPLOY.md` gains an *Install from a release* section (verify
+  checksums + cosign signature, then install the binary, the `.deb`, or the
+  signed container), and a new top-level `RELEASING.md` documents the
+  "bump, then tag and push" flow the workflow automates. Final chunk of the
+  P0 "Release & packaging" theme.
 - **Automated release workflow** (`.github/workflows/release.yml`). Pushing
   a `v*` tag now builds multi-arch static-musl binaries (`x86_64` +
   `aarch64`, cross-compiled with cargo-zigbuild), packages them as

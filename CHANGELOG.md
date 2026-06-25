@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Automated release workflow** (`.github/workflows/release.yml`). Pushing
+  a `v*` tag now builds multi-arch static-musl binaries (`x86_64` +
+  `aarch64`, cross-compiled with cargo-zigbuild), packages them as
+  per-arch `.tar.gz`, emits a `SHA256SUMS`, and creates the GitHub release
+  with notes extracted from `CHANGELOG.md` (pre-release tags like
+  `v0.16.0-rc.1` are marked accordingly, never latest). A `preflight` job
+  re-asserts tag == workspace version before anything is built. Second
+  chunk of the P0 "Release & packaging" theme; signing + SBOM + GHCR
+  container and `.deb` packages follow.
+
 ### Changed
 
 - **CI: version-consistency gate.** A new `version consistency` job

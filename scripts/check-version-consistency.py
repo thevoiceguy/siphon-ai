@@ -22,6 +22,10 @@ Usage:
   check-version-consistency.py --tag vX.Y.Z   # also assert tag == version
   check-version-consistency.py --selftest     # run embedded fixtures
 
+A final `--tag vX.Y.Z` must equal the workspace version. A pre-release
+tag (`vX.Y.Z-rc.N`) only needs base >= workspace, so the release pipeline
+can be validated for an upcoming version before the version bump.
+
 Exits 0 when consistent, 1 (listing each mismatch on stderr) otherwise.
 Stdlib-only, mirroring scripts/check-doc-links.py.
 """
@@ -100,14 +104,43 @@ def check(cargo_text, readme_text, changelog_text, tag=None):
         )
 
     if tag is not None:
-        tag_version = tag[1:] if tag.startswith("v") else tag
-        if tag_version != version:
-            errors.append(
-                f"tag {tag}: version {tag_version} != workspace "
-                f"version {version}"
-            )
+        errors.extend(_check_tag(tag, version))
 
     return errors
+
+
+def _ver_tuple(semver):
+    return tuple(int(p) for p in semver.split("."))
+
+
+def _check_tag(tag, version):
+    """Validate a release tag against the workspace version.
+
+    A *final* tag (`vX.Y.Z`) must equal the workspace version exactly —
+    you can't tag a version the tree doesn't claim to be. A *pre-release*
+    tag (`vX.Y.Z-rc.N`) is allowed to target the current or a future
+    version (base >= workspace) so the release pipeline can be exercised
+    for an upcoming version without a premature version bump; the release
+    workflow marks these as pre-releases (never latest).
+    """
+    raw = tag[1:] if tag.startswith("v") else tag
+    base = raw.split("-", 1)[0]
+    is_prerelease = "-" in raw
+
+    if not re.fullmatch(SEMVER, base):
+        return [f"tag {tag}: '{base}' is not an X.Y.Z version"]
+    if is_prerelease:
+        if _ver_tuple(base) < _ver_tuple(version):
+            return [
+                f"tag {tag}: pre-release base {base} is older than "
+                f"workspace version {version}"
+            ]
+        return []
+    if base != version:
+        return [
+            f"tag {tag}: version {base} != workspace version {version}"
+        ]
+    return []
 
 
 def _read(path):
@@ -182,12 +215,48 @@ def selftest():
             ["CHANGELOG.md"],
         ),
         (
-            "tag mismatches",
+            "final tag mismatches",
             cargo,
             readme,
             changelog,
             "v0.14.0",
             ["tag v0.14.0"],
+        ),
+        (
+            # final tag of a future version still requires the bump
+            "final future tag rejected",
+            cargo,
+            readme,
+            changelog,
+            "v0.16.0",
+            ["tag v0.16.0"],
+        ),
+        (
+            # pre-release of a future version: allowed pre-bump
+            "prerelease future tag allowed",
+            cargo,
+            readme,
+            changelog,
+            "v0.16.0-rc.1",
+            [],
+        ),
+        (
+            # pre-release of the current version: allowed
+            "prerelease current tag allowed",
+            cargo,
+            readme,
+            changelog,
+            "v0.15.0-rc.2",
+            [],
+        ),
+        (
+            # pre-release of an older version: rejected
+            "prerelease older tag rejected",
+            cargo,
+            readme,
+            changelog,
+            "v0.14.0-rc.1",
+            ["older than workspace"],
         ),
         (
             "cargo version missing",

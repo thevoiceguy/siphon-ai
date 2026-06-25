@@ -1,0 +1,30 @@
+[Unit]
+Description=SiphonAI — SIP-to-WebSocket media bridge
+Documentation=https://github.com/thevoiceguy/siphon-ai
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=siphon-ai
+Group=siphon-ai
+# Optional secrets for ${VAR} expansion in the config (created empty by
+# the package; the `-` means "ignore if absent").
+EnvironmentFile=-/etc/siphon-ai/env
+ExecStart=/usr/bin/siphon-ai --config /etc/siphon-ai/config.toml
+# SIGHUP hot-reloads routes/gateways/webhook+CDR sinks (see CONFIG.md).
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+
+# Hardening — the daemon binds unprivileged ports (SIP 5060, RTP
+# 40000-40100) and needs no root at runtime.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/siphon-ai /var/lib/siphon-ai
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

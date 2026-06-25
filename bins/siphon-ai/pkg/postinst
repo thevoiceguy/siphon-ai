@@ -1,0 +1,49 @@
+#!/bin/sh
+# postinst — create the service account + runtime dirs. cargo-deb
+# injects the systemd helper commands at the marker near the end.
+set -e
+
+SVC_USER=siphon-ai
+SVC_GROUP=siphon-ai
+SVC_HOME=/var/lib/siphon-ai
+LOG_DIR=/var/log/siphon-ai
+
+case "$1" in
+    configure)
+        if ! getent group "$SVC_GROUP" >/dev/null; then
+            addgroup --system "$SVC_GROUP"
+        fi
+        if ! getent passwd "$SVC_USER" >/dev/null; then
+            adduser --system --no-create-home \
+                --home "$SVC_HOME" \
+                --shell /usr/sbin/nologin \
+                --ingroup "$SVC_GROUP" \
+                "$SVC_USER"
+        fi
+
+        # State + log dirs owned by the service account.
+        for dir in "$SVC_HOME" "$LOG_DIR"; do
+            mkdir -p "$dir"
+            chown "$SVC_USER:$SVC_GROUP" "$dir"
+            chmod 0750 "$dir"
+        done
+
+        # The config may carry secrets (auth headers, passwords) — keep
+        # it readable only by root and the service group.
+        if [ -e /etc/siphon-ai/config.toml ]; then
+            chown root:"$SVC_GROUP" /etc/siphon-ai/config.toml
+            chmod 0640 /etc/siphon-ai/config.toml
+        fi
+
+        # Empty env file for ${VAR} expansion (operator fills it in).
+        if [ ! -e /etc/siphon-ai/env ]; then
+            touch /etc/siphon-ai/env
+            chown root:"$SVC_GROUP" /etc/siphon-ai/env
+            chmod 0640 /etc/siphon-ai/env
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

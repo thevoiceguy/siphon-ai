@@ -1,0 +1,10 @@
+#!/bin/sh
+# postrm — the injected helper marker (below) handles the systemd unit
+# (daemon-reload, reset). We deliberately leave the siphon-ai user,
+# /var/log/siphon-ai, and /var/lib/siphon-ai in place on purge so
+# CDRs/recordings aren't lost; remove them by hand for a clean slate.
+set -e
+
+#DEBHELPER#
+
+exit 0

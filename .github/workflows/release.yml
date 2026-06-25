@@ -142,8 +142,19 @@ jobs:
       - name: Release notes from CHANGELOG
         run: |
           version="${TAG#v}"
+          base="${version%%-*}"   # strip any -rc.N suffix
+          # A final tag has its own dated CHANGELOG section. A pre-release
+          # for an upcoming version may not be documented yet — fall back
+          # to the base version's section, then to a generic note.
+          if python3 scripts/extract-changelog.py "$version" > body.md 2>/dev/null; then
+            :
+          elif python3 scripts/extract-changelog.py "$base" > body.md 2>/dev/null; then
+            :
+          else
+            echo "Pre-release \`$TAG\` for pipeline validation." > body.md
+          fi
           {
-            python3 scripts/extract-changelog.py "$version"
+            cat body.md
             echo
             echo "---"
             echo

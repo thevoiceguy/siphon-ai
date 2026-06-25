@@ -18,7 +18,13 @@
 # carries an x86_64-unknown-linux-musl target via the musl libc on
 # the system, so `cargo build --target x86_64-unknown-linux-musl`
 # Just Works — no rustup target add dance required.
-FROM rust:1.85-alpine AS builder
+#
+# Track `rust-toolchain.toml` (channel 1.95.0). The previous `1.85`
+# base was below the workspace MSRV (1.89) and only built at all
+# because `rust-toolchain.toml` made rustup fetch 1.95.0 on top of it
+# — wasteful and misleading. Bump this in lockstep with the toolchain
+# file. (rustup still honors the exact pin inside the build.)
+FROM rust:1.95-alpine AS builder
 
 # Musl + the C build tools forge-codecs and friends invoke at
 # compile time. `linux-headers` is required by tokio's TCP/UDP code

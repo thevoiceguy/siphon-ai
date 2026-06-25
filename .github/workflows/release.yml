@@ -4,14 +4,17 @@ name: release
 # manual release flow — bump version, tag, push). `workflow_dispatch` is
 # a re-run escape hatch (supply the existing tag).
 #
-# Chunk 2 of the Release & packaging theme: multi-arch musl-static
-# binaries + SHA256SUMS, with release notes extracted from CHANGELOG.md.
-# Signing + SBOM + GHCR container (chunk 3) and the .deb (chunk 4) add
-# jobs/steps to this file; they don't replace it.
+# Release & packaging theme. Chunk 2: multi-arch musl-static binaries +
+# SHA256SUMS, release notes extracted from CHANGELOG.md. Chunk 3: a
+# CycloneDX SBOM (syft), cosign keyless signatures over the checksums,
+# and a multi-arch GHCR container (also cosign-signed). The .deb (chunk
+# 4) adds to this file; it doesn't replace it.
 #
 # Cross-compilation is cargo-zigbuild: one x86 runner builds both the
 # x86_64 and aarch64 musl targets via the zig linker — no QEMU, no
-# Docker-in-CI (DESIGN_RELEASE_PACKAGING.md §3.2, decision 3).
+# Docker-in-CI (DESIGN_RELEASE_PACKAGING.md §3.2, decision 3). The
+# container reuses those exact binaries (COPY, never recompile), so the
+# image and the standalone binary are byte-identical per arch.
 
 on:
   push:
@@ -24,6 +27,8 @@ on:
 
 permissions:
   contents: write # create the release + upload assets
+  packages: write # push the container image to GHCR
+  id-token: write # cosign keyless signing via GitHub OIDC
 
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref_name }}
@@ -159,10 +164,34 @@ jobs:
           merge-multiple: true
           path: dist
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: SBOM (CycloneDX, from Cargo.lock)
+        run: |
+          version="${TAG#v}"
+          syft scan dir:. \
+            -o cyclonedx-json="dist/siphon-ai-${version}-sbom.cdx.json"
+
+      # SHA256SUMS covers the tarballs *and* the SBOM, so the single
+      # cosign signature below vouches for everything that ships.
       - name: Checksums
         run: |
           cd dist
-          sha256sum *.tar.gz | tee SHA256SUMS
+          sha256sum *.tar.gz *.cdx.json | tee SHA256SUMS
+
+      # Keyless: the signature is bound to this workflow's OIDC identity
+      # (verify with `cosign verify-blob --bundle SHA256SUMS.cosign.bundle
+      #  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      #  --certificate-identity-regexp '.../release.yml@.*' SHA256SUMS`).
+      - name: Sign checksums (cosign keyless)
+        run: |
+          cosign sign-blob --yes \
+            --bundle dist/SHA256SUMS.cosign.bundle \
+            dist/SHA256SUMS
 
       - name: Release notes from CHANGELOG
         run: |
@@ -178,13 +207,26 @@ jobs:
           else
             echo "Pre-release \`$TAG\` for pipeline validation." > body.md
           fi
+          repo="${{ github.repository }}"
           {
             cat body.md
             echo
             echo "---"
             echo
-            echo "Static musl binaries for \`x86_64\` and \`aarch64\`."
-            echo "Verify with \`sha256sum -c SHA256SUMS\`."
+            echo "**Artifacts**"
+            echo
+            echo "- Static musl binaries for \`x86_64\` and \`aarch64\` (\`.tar.gz\`)."
+            echo "- \`SHA256SUMS\` — verify with \`sha256sum -c SHA256SUMS\`."
+            echo "- \`*-sbom.cdx.json\` — CycloneDX SBOM."
+            echo "- \`SHA256SUMS.cosign.bundle\` — cosign keyless signature over the checksums."
+            echo "- Container: \`ghcr.io/${repo}:${TAG}\` (multi-arch, cosign-signed)."
+            echo
+            echo "Verify the checksums signature:"
+            echo '```'
+            echo "cosign verify-blob --bundle SHA256SUMS.cosign.bundle \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  --certificate-identity-regexp 'release.yml@' SHA256SUMS"
+            echo '```'
           } > notes.md
 
       # Pre-release for any tag with a pre-release suffix (e.g.
@@ -205,3 +247,78 @@ jobs:
               --notes-file notes.md \
               $channel
           fi
+
+  # Multi-arch image assembled from the *prebuilt* release binaries (no
+  # recompile, no QEMU — the Dockerfile only COPYs per-arch binaries), so
+  # the image matches the standalone binaries byte-for-byte. Pushed to
+  # GHCR and signed with the same cosign keyless identity.
+  container:
+    name: container (GHCR)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      # Lay the static binaries out by Docker arch so the release
+      # Dockerfile can `COPY ctx/${TARGETARCH}/siphon-ai`.
+      - name: Stage per-arch binaries
+        run: |
+          set -euo pipefail
+          mkdir -p ctx
+          for pair in \
+            "x86_64-unknown-linux-musl:amd64" \
+            "aarch64-unknown-linux-musl:arm64"; do
+            triple="${pair%%:*}"; arch="${pair##*:}"
+            tar -xzf dist/siphon-ai-*-"${triple}".tar.gz
+            mkdir -p "ctx/${arch}"
+            cp siphon-ai-*-"${triple}"/siphon-ai "ctx/${arch}/siphon-ai"
+            rm -rf siphon-ai-*-"${triple}"
+          done
+          ls -lR ctx
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # `:latest` only for a final release, never a pre-release.
+      - name: Build + push multi-arch image
+        id: build
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${{ github.repository }}"
+          tags=(-t "${image}:${TAG}")
+          if [[ "$TAG" != *-* ]]; then
+            tags+=(-t "${image}:latest")
+          fi
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -f docker/Dockerfile.release \
+            "${tags[@]}" \
+            --metadata-file metadata.json \
+            --push ctx
+          digest="$(jq -r '.["containerimage.digest"]' metadata.json)"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign the image (cosign keyless)
+        run: |
+          cosign sign --yes \
+            "${{ steps.build.outputs.image }}@${{ steps.build.outputs.digest }}"

@@ -1,0 +1,44 @@
+# Release container for the SiphonAI daemon.
+#
+# Unlike docker/Dockerfile (which builds from source for local dev),
+# this image is assembled by the release workflow from the *prebuilt*
+# static-musl binaries that ship on the GitHub release — it only COPYs
+# the right binary per arch, never compiles. That keeps the image and
+# the standalone release binary byte-identical, and lets a single
+# `docker buildx --platform linux/amd64,linux/arm64` produce a
+# multi-arch manifest without QEMU (no target code runs during build).
+#
+# Build context must contain `amd64/siphon-ai` and `arm64/siphon-ai`
+# (the release workflow stages these from the per-arch tarballs).
+
+FROM alpine:3
+
+RUN apk add --no-cache ca-certificates
+
+# Non-root user. SIP and RTP bind unprivileged ports by default
+# (5070 for SIP, 40000-40100 for RTP), so root is not needed at runtime.
+ARG UID=10001
+RUN addgroup -S -g ${UID} siphon \
+ && adduser -S -D -H -u ${UID} -G siphon siphon
+USER siphon
+
+WORKDIR /app
+
+# `TARGETARCH` is set by buildx per platform (amd64 / arm64); it selects
+# which prebuilt static binary to install.
+ARG TARGETARCH
+COPY ${TARGETARCH}/siphon-ai /usr/local/bin/siphon-ai
+
+# Default config path. Operators override via `-v ./my.toml:/app/config.toml`.
+ENV SIPHON_AI_CONFIG=/app/config.toml
+
+# Document the runtime surface (compose / k8s overrides as needed):
+#   5070/udp        — SIP signaling
+#   5070/tcp        — SIP TCP (when transports = ["tcp"])
+#   5061/tcp        — SIPS (when transports = ["tls"])
+#   9091/tcp        — Prometheus metrics + /health + /ready
+#   40000-40100/udp — RTP port pool (matches local-dev.toml default)
+EXPOSE 5070/udp 5070/tcp 5061/tcp 9091/tcp 40000-40100/udp
+
+ENTRYPOINT ["/usr/local/bin/siphon-ai"]
+CMD ["--config", "/app/config.toml"]

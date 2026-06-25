@@ -16,10 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with notes extracted from `CHANGELOG.md` (pre-release tags like
   `v0.16.0-rc.1` are marked accordingly, never latest). A `preflight` job
   re-asserts tag == workspace version before anything is built. Second
-  chunk of the P0 "Release & packaging" theme; signing + SBOM + GHCR
-  container and `.deb` packages follow.
+  chunk of the P0 "Release & packaging" theme; `.deb` packages follow.
+- **Release supply chain: SBOM, signatures, and a published container.**
+  Each release now ships a CycloneDX SBOM (syft), a cosign **keyless**
+  signature over `SHA256SUMS` (`SHA256SUMS.cosign.bundle`, verifiable
+  against the workflow's GitHub OIDC identity), and a multi-arch
+  (`linux/amd64` + `linux/arm64`) container at
+  `ghcr.io/thevoiceguy/siphon-ai:<tag>` (also cosign-signed; `:latest`
+  only for final releases). The image is assembled from the same prebuilt
+  static binaries that ship on the release — byte-identical, no recompile.
+  Third chunk of the P0 "Release & packaging" theme.
 
 ### Changed
+
+- **Docker dev image tracks the toolchain.** `docker/Dockerfile` now uses
+  `rust:1.95-alpine` (matching `rust-toolchain.toml`) instead of the stale
+  `rust:1.85` base, which sat below the workspace MSRV and only built
+  because `rust-toolchain.toml` forced a 1.95.0 download on top of it.
 
 - **CI: version-consistency gate.** A new `version consistency` job
   (`scripts/check-version-consistency.py`) fails the build if the

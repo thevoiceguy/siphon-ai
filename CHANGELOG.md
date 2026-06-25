@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI: version-consistency gate.** A new `version consistency` job
+  (`scripts/check-version-consistency.py`) fails the build if the
+  workspace `Cargo.toml` version, the README "Current release" marker, and
+  the `CHANGELOG.md` dated heading disagree — closing the drift that left
+  the README at v0.12.2 while the latest tag was v0.15.0 (README corrected
+  to v0.15.0). First chunk of the P0 "Release & packaging" theme
+  (`docs/design/DESIGN_RELEASE_PACKAGING.md`).
+
 ## [0.15.0] - 2026-06-24
 
 ### Added

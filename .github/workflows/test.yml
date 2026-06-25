@@ -40,6 +40,22 @@ jobs:
       - name: Check relative Markdown links
         run: python3 scripts/check-doc-links.py
 
+  version-consistency:
+    name: version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Fails if Cargo.toml (source of truth), the README "Current
+      # release" marker, and the CHANGELOG's dated heading disagree on
+      # the version — the drift that left README at v0.12.2 while the tag
+      # was v0.15.0. Pure Python (stdlib); the checker self-tests via
+      # --selftest. The release workflow reuses this with --tag to assert
+      # the pushed tag equals the workspace version.
+      - name: Self-test the checker
+        run: python3 scripts/check-version-consistency.py --selftest
+      - name: Check version consistency
+        run: python3 scripts/check-version-consistency.py
+
   lint-and-test:
     name: fmt + clippy + cargo test
     runs-on: ubuntu-latest

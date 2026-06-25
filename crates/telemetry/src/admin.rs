@@ -23,6 +23,7 @@
 //! | GET    | `/admin/v1/parked`            | List parked calls (0.7.0)            |
 //! | POST   | `/admin/v1/calls/:id/park`    | Park a call (0.7.0)                  |
 //! | POST   | `/admin/v1/calls/:id/retrieve`| Retrieve a parked call (0.7.0)       |
+//! | GET    | `/admin/v1/drain`             | Graceful-shutdown drain status (0.17.0) |
 //!
 //! ## Threat model
 //!
@@ -75,7 +76,35 @@ pub struct AdminState {
     /// Park admin handle (0.7.0). `None` when `[park]` is disabled —
     /// the park/retrieve/parked routes then return 501.
     pub park: Option<AdminPark>,
+    /// Graceful-shutdown drain status (0.17.0). Always installed by the
+    /// runtime (drain state exists regardless of `[shutdown]`); `None`
+    /// only in partially-built test states, where `/admin/v1/drain`
+    /// then returns 503.
+    pub drain: Option<DrainStatusFn>,
 }
+
+/// Snapshot of the daemon's graceful-shutdown drain state (0.17.0),
+/// served by `GET /admin/v1/drain`. Lets an operator / deploy script
+/// confirm a pod has entered drain and watch the countdown.
+#[derive(Debug, Clone, Serialize)]
+pub struct DrainStatus {
+    /// `true` once a shutdown signal has put the daemon into drain
+    /// (new INVITEs are 503'd and `/ready` is false), until it exits.
+    pub draining: bool,
+    /// Calls still active right now (the drain waits for this to hit 0).
+    pub active_calls: usize,
+    /// Configured `[shutdown].drain_timeout_secs` (`0` = drain disabled,
+    /// immediate exit).
+    pub drain_timeout_secs: u64,
+    /// Seconds left until the drain deadline force-terminates
+    /// stragglers. `Some` only while `draining`; `None` otherwise.
+    pub remaining_secs: Option<u64>,
+}
+
+/// Closure producing a fresh [`DrainStatus`] per request. Same
+/// indirection rationale as [`CallRegistryHandle`] — keeps the drain
+/// flag / call registry types out of the telemetry crate's deps.
+pub type DrainStatusFn = Arc<dyn Fn() -> DrainStatus + Send + Sync>;
 
 /// Minimal trait surface the admin endpoints need on the call
 /// registry. Avoids a hard dep on `siphon-ai-core` here — the
@@ -296,6 +325,7 @@ pub async fn dispatch(
         (&hyper::Method::GET, "/admin/v1/conferences") => list_conferences(state),
         (&hyper::Method::POST, "/admin/v1/conferences") => create_conference(state, &body),
         (&hyper::Method::GET, "/admin/v1/parked") => list_parked(state),
+        (&hyper::Method::GET, "/admin/v1/drain") => drain_status(state),
         (m, p)
             if *m == hyper::Method::POST
                 && p.starts_with("/admin/v1/calls/")
@@ -401,6 +431,13 @@ fn list_calls(state: &AdminState) -> Response<Full<Bytes>> {
     };
     let ids = reg.snapshot_ids();
     json_response(StatusCode::OK, &json!({ "count": ids.len(), "calls": ids }))
+}
+
+fn drain_status(state: &AdminState) -> Response<Full<Bytes>> {
+    let Some(f) = state.drain.as_ref() else {
+        return service_unavailable("drain status not installed");
+    };
+    json_response(StatusCode::OK, &json!(f()))
 }
 
 fn hangup_call(state: &AdminState, sip_call_id: &str) -> Response<Full<Bytes>> {
@@ -1392,5 +1429,50 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ─── GET /admin/v1/drain (0.17.0) ────────────────────────────────
+
+    fn drain_state(status: DrainStatus) -> AdminState {
+        AdminState {
+            drain: Some(Arc::new(move || status.clone()) as DrainStatusFn),
+            ..AdminState::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_503_when_not_installed() {
+        let (status, _) = conf(hyper::Method::GET, "/admin/v1/drain", "", &empty_state()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn drain_reports_not_draining() {
+        let state = drain_state(DrainStatus {
+            draining: false,
+            active_calls: 3,
+            drain_timeout_secs: 30,
+            remaining_secs: None,
+        });
+        let (status, v) = conf(hyper::Method::GET, "/admin/v1/drain", "", &state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["draining"], serde_json::json!(false));
+        assert_eq!(v["active_calls"], serde_json::json!(3));
+        assert_eq!(v["drain_timeout_secs"], serde_json::json!(30));
+        assert_eq!(v["remaining_secs"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn drain_reports_active_drain_with_countdown() {
+        let state = drain_state(DrainStatus {
+            draining: true,
+            active_calls: 2,
+            drain_timeout_secs: 30,
+            remaining_secs: Some(18),
+        });
+        let (status, v) = conf(hyper::Method::GET, "/admin/v1/drain", "", &state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["draining"], serde_json::json!(true));
+        assert_eq!(v["remaining_secs"], serde_json::json!(18));
     }
 }

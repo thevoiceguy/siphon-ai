@@ -381,6 +381,12 @@ ExecStart=/usr/local/bin/siphon-ai --config /etc/siphon-ai/siphon-ai.toml
 # SIGHUP triggers SIP/TLS cert hot-reload (0.3.0+). `systemctl
 # reload siphon-ai` invokes this — see §5 above for renewal flow.
 ExecReload=/bin/kill -HUP $MAINPID
+# On stop, systemd sends SIGTERM; the daemon drains active calls
+# (0.17.0, [shutdown].drain_timeout_secs). Give it longer than that
+# window + a couple seconds of BYE-flush grace, or systemd SIGKILLs
+# mid-drain. Default drain is 30 s → 40 s here. A second SIGTERM
+# (systemctl stop twice) forces an immediate exit.
+TimeoutStopSec=40
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
@@ -420,6 +426,62 @@ the heplify collector (`heplify_*`).
 
 Both live on the `[observability]` listener.
 
+## Graceful shutdown & rolling deploys
+
+On `SIGTERM` / `SIGINT` the daemon **drains** before exiting (0.17.0,
+configured by [`[shutdown]`](CONFIG.md#shutdown)): it flips `/ready` to
+not-ready, rejects **new** inbound INVITEs with `503 Service Unavailable`
++ `Retry-After`, lets in-flight calls finish (bounded by
+`drain_timeout_secs`, default 30 s), then force-terminates any stragglers
+at the deadline with a real `BYE` + WS `hangup`. This is what makes a
+zero-drop rolling restart possible. The two signals to the outside world
+are complementary:
+
+- **`/ready` → 503** tells a load balancer / k8s readiness gate to stop
+  sending *new* calls here — but it only notices on its next poll.
+- **`503` on new INVITEs** covers the gap until then: anything an upstream
+  SIP proxy routes to this node mid-drain is rejected with a retryable
+  code so it fails over immediately.
+
+In-dialog requests (re-INVITE for hold/resume, ACK, BYE) for calls already
+up keep flowing, so the calls being drained aren't broken.
+
+**The one rule:** `drain_timeout_secs` **must be ≤** your supervisor's
+kill grace, or the supervisor `SIGKILL`s the daemon mid-drain and you lose
+the very calls you were protecting:
+
+- **systemd:** `TimeoutStopSec` (see the unit sketch above — set it a few
+  seconds *above* the drain window for the BYE-flush grace).
+- **Kubernetes:** `terminationGracePeriodSeconds` on the pod spec.
+
+### Kubernetes
+
+```yaml
+spec:
+  terminationGracePeriodSeconds: 40   # ≥ drain_timeout_secs + a few s
+  containers:
+    - name: siphon-ai
+      readinessProbe:
+        httpGet: { path: /ready, port: 9091 }
+        periodSeconds: 2
+      # No preStop hook needed: k8s sends SIGTERM directly and the daemon
+      # drains on it. (A `preStop: sleep` is only useful if your daemon
+      # ignored SIGTERM — this one doesn't.)
+```
+
+k8s removes the pod from Service endpoints and sends `SIGTERM` at the same
+time; the `503` reject path bridges the brief window before Endpoints
+propagation completes. Watch the drain with the `siphon_ai_draining` gauge
+(1 while draining), `siphon_ai_drain_seconds` (how long it took), and
+`siphon_ai_calls_drain_forced_total` (calls that didn't finish in the
+window — if this is regularly non-zero, raise `drain_timeout_secs` and the
+grace). `GET /admin/v1/drain` gives the live `{draining, active_calls,
+remaining_secs}` snapshot during a drain.
+
+Set `drain_timeout_secs = 0` to opt out and keep the pre-0.17.0 behaviour
+(immediate teardown, active calls dropped). A **second** SIGTERM/SIGINT
+during a drain forces an immediate exit (operator escape hatch).
+
 ## Admin API
 
 `/admin/*` is served **only on the dedicated `[admin]` listener**, gated by
@@ -451,6 +513,7 @@ no/invalid token → `401`.
 | GET    | `/admin/v1/parked`            | —               | readonly | **List parked calls** (0.7.0). `501` when `[park]` is disabled. |
 | POST   | `/admin/v1/calls/:id/park`    | JSON (opt.)     | operator | **Park an active call** (0.7.0). Body `{slot?}`; `202` (dispatched). `404` if no active call has that id. `501` when `[park]` is disabled. |
 | POST   | `/admin/v1/calls/:id/retrieve`| JSON (opt.)     | operator | **Retrieve a parked call** (0.7.0). Body `{ws_url?}`; `202` (dispatched). `404` unknown call, `409` if the call isn't parked. `501` when `[park]` is disabled. |
+| GET    | `/admin/v1/drain`             | —               | readonly | **Graceful-shutdown drain status** (0.17.0). Returns `{draining, active_calls, drain_timeout_secs, remaining_secs}` — `remaining_secs` is the countdown to the deadline (non-null only while draining). Lets a deploy script confirm a pod entered drain and watch it empty. |
 
 ### Admin auth & RBAC
 

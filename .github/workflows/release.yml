@@ -80,6 +80,17 @@ jobs:
         target:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
+    env:
+      # audiopus_sys decides static-vs-dynamic libopus from
+      # `#[cfg(target_env = "musl")]` in its build script — but build
+      # scripts see the *host* cfg, not the target. Cross-compiling from
+      # a glibc host, that probes false and it emits a dynamic `-lopus`
+      # that can't be resolved for a static musl binary (the native
+      # alpine Docker build dodges this only because host == musl).
+      # Force static linking, and always build the vendored libopus from
+      # source so no host-arch system opus can leak into the cross build.
+      LIBOPUS_STATIC: "1"
+      LIBOPUS_NO_PKG: "1"
     steps:
       - uses: actions/checkout@v4
         with:

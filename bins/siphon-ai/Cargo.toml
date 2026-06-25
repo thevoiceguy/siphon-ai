@@ -83,3 +83,45 @@ forge-rtp.workspace    = true
 [dev-dependencies]
 tokio        = { workspace = true, features = ["macros", "rt", "time", "net", "sync"] }
 tempfile     = "3"
+
+# Debian package (`cargo deb -p siphon-ai`). Installs the static binary,
+# a default conffile, both licenses + README as docs, and a systemd unit
+# (enabled but not started — the operator edits the config first). The
+# siphon-ai service user + /var/{lib,log}/siphon-ai are created in the
+# maintainer scripts (pkg/postinst); cargo-deb injects the systemd
+# helper at each #DEBHELPER# marker.
+[package.metadata.deb]
+maintainer = "SiphonAI contributors <noreply@github.com>"
+copyright = "2026 SiphonAI contributors. Dual-licensed MIT OR Apache-2.0."
+license-file = ["../../LICENSE-APACHE", "0"]
+section = "net"
+priority = "optional"
+# Static musl binary: no shared-lib deps, so cargo-deb's $auto would
+# resolve to nothing. Depend explicitly on ca-certificates (system trust
+# roots for outbound TLS) and adduser (postinst creates the service
+# account with addgroup/adduser; no longer priority:important on Debian
+# 13, so packages that use it must depend on it).
+depends = "ca-certificates, adduser"
+extended-description = """\
+SiphonAI is a SIP-to-WebSocket media bridge. It accepts inbound SIP \
+calls (as a trunk endpoint or a registered phone), streams the call \
+audio over a WebSocket to a developer-supplied server, and plays \
+returned audio back into the call. It contains no AI code — running \
+the AI (STT/LLM/TTS) is the WebSocket server's job."""
+conf-files = ["/etc/siphon-ai/config.toml"]
+maintainer-scripts = "pkg/"
+assets = [
+    ["target/release/siphon-ai", "usr/bin/", "755"],
+    ["pkg/config.toml", "etc/siphon-ai/config.toml", "640"],
+    ["../../README.md", "usr/share/doc/siphon-ai/README.md", "644"],
+    ["../../LICENSE-APACHE", "usr/share/doc/siphon-ai/LICENSE-APACHE", "644"],
+    ["../../LICENSE-MIT", "usr/share/doc/siphon-ai/LICENSE-MIT", "644"],
+]
+
+[package.metadata.deb.systemd-units]
+unit-name = "siphon-ai"
+unit-scripts = "pkg/"
+# Enable on install so it comes up on boot, but don't start now — the
+# default config points at a placeholder ws_url.
+enable = true
+start = false

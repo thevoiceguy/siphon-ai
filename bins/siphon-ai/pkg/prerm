@@ -1,0 +1,8 @@
+#!/bin/sh
+# prerm — the injected helper marker (below) stops/disables the systemd
+# unit on remove/upgrade.
+set -e
+
+#DEBHELPER#
+
+exit 0

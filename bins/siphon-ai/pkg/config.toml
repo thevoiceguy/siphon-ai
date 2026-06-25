@@ -1,0 +1,51 @@
+# SiphonAI default configuration (installed by the .deb package).
+#
+# This is a minimal, VALID-but-inert template: the daemon starts and
+# serves /health + /metrics on loopback, but until you set a real
+# [bridge].ws_url (your WebSocket AI server) and a [[trunk]] allowlist,
+# it won't bridge any calls. Edit this file, then:
+#
+#     sudo systemctl start siphon-ai      # first start (package enables but does not start)
+#     sudo systemctl reload siphon-ai     # apply route/gateway/webhook changes (SIGHUP)
+#
+# Full reference: /usr/share/doc/siphon-ai/ and
+# https://github.com/thevoiceguy/siphon-ai/blob/main/docs/CONFIG.md
+#
+# This is a dpkg conffile: your edits survive package upgrades.
+
+[node]
+id = "siphon-ai"
+# The address that goes into the SDP `c=` line (where callers send RTP).
+# Set this to this host's routable IP before taking real traffic.
+public_address = "127.0.0.1"
+
+[sip]
+listen = "0.0.0.0:5060"
+transports = ["udp"]
+user_agent = "SiphonAI"
+
+[media]
+codecs = ["pcmu", "pcma"]
+dtmf = "rfc2833"
+rtp_port_range = [40000, 40100]
+inactivity_timeout_secs = 60
+
+[bridge]
+# REQUIRED: the WebSocket server that runs your AI (STT/LLM/TTS).
+# Replace this placeholder before going live.
+ws_url = "ws://127.0.0.1:8080/"
+ws_connect_timeout_ms = 3000
+
+[observability]
+enabled = true
+# Loopback only by default: /metrics + /health + /ready. The admin API
+# has its own authenticated listener ([admin]); do not expose this on a
+# public interface without a fronting proxy.
+http_listen = "127.0.0.1:9091"
+
+# A default route is REQUIRED. Add [[trunk]] allowlists and more
+# specific [[route]] entries above this one (first match wins).
+[[route]]
+name = "default"
+[route.match]
+any = true

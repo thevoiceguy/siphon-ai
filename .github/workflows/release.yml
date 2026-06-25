@@ -138,11 +138,26 @@ jobs:
           tar -C staging -czf "${dist}.tar.gz" "${dist}"
           ls -l "${dist}.tar.gz"
 
+      # .deb from the *same* prebuilt static binary. --no-build reuses
+      # it; --no-strip keeps the already-stripped binary (and avoids
+      # needing an aarch64-aware `strip` on the x86 runner). cargo-deb
+      # maps the Rust target to the Debian arch (amd64/arm64).
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+      - name: Build .deb
+        run: |
+          cargo deb --no-build --no-strip \
+            -p siphon-ai --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/debian/*.deb .
+          ls -l ./*.deb
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.target }}
-          path: siphon-ai-*.tar.gz
+          path: |
+            siphon-ai-*.tar.gz
+            *.deb
           retention-days: 7
           if-no-files-found: error
 
@@ -176,12 +191,13 @@ jobs:
           syft scan dir:. \
             -o cyclonedx-json="dist/siphon-ai-${version}-sbom.cdx.json"
 
-      # SHA256SUMS covers the tarballs *and* the SBOM, so the single
-      # cosign signature below vouches for everything that ships.
+      # SHA256SUMS covers the tarballs, the .deb packages, *and* the
+      # SBOM, so the single cosign signature below vouches for everything
+      # that ships.
       - name: Checksums
         run: |
           cd dist
-          sha256sum *.tar.gz *.cdx.json | tee SHA256SUMS
+          sha256sum *.tar.gz *.deb *.cdx.json | tee SHA256SUMS
 
       # Keyless: the signature is bound to this workflow's OIDC identity
       # (verify with `cosign verify-blob --bundle SHA256SUMS.cosign.bundle
@@ -216,6 +232,7 @@ jobs:
             echo "**Artifacts**"
             echo
             echo "- Static musl binaries for \`x86_64\` and \`aarch64\` (\`.tar.gz\`)."
+            echo "- Debian packages (\`.deb\`) for \`amd64\` and \`arm64\` — \`apt install ./siphon-ai_*_amd64.deb\`."
             echo "- \`SHA256SUMS\` — verify with \`sha256sum -c SHA256SUMS\`."
             echo "- \`*-sbom.cdx.json\` — CycloneDX SBOM."
             echo "- \`SHA256SUMS.cosign.bundle\` — cosign keyless signature over the checksums."

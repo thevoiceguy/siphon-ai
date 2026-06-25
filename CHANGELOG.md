@@ -16,7 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with notes extracted from `CHANGELOG.md` (pre-release tags like
   `v0.16.0-rc.1` are marked accordingly, never latest). A `preflight` job
   re-asserts tag == workspace version before anything is built. Second
-  chunk of the P0 "Release & packaging" theme; `.deb` packages follow.
+  chunk of the P0 "Release & packaging" theme.
+- **Debian packages** (`.deb` for `amd64` + `arm64`, via cargo-deb). Each
+  release now ships installable packages built from the same prebuilt
+  static binaries: they drop the binary at `/usr/bin/siphon-ai`, a default
+  conffile at `/etc/siphon-ai/config.toml`, and a hardened systemd unit
+  (enabled but **not** started — the default config has a placeholder
+  `ws_url`), and create the `siphon-ai` service user + `/var/{lib,log}`
+  dirs in the maintainer scripts. `apt install ./siphon-ai_*_amd64.deb`.
+  Fourth chunk of the P0 "Release & packaging" theme.
 - **Release supply chain: SBOM, signatures, and a published container.**
   Each release now ships a CycloneDX SBOM (syft), a cosign **keyless**
   signature over `SHA256SUMS` (`SHA256SUMS.cosign.bundle`, verifiable

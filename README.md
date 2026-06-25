@@ -2,7 +2,7 @@
 
 A SIP-to-WebSocket media bridge written in Rust.
 
-*** AI was used to help write this application ***
+**AI was used to help write this application**
 
 SiphonAI accepts inbound SIP calls (as a trunk endpoint or as a registered
 phone on a PBX), streams the call's audio over a WebSocket to a developer-

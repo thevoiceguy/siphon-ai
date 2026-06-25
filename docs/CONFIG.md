@@ -656,8 +656,12 @@ drain_timeout_secs = 30   # default
 Omitting `[shutdown]` entirely gives the 30 s default. The value **must be
 ≤ your orchestrator's `terminationGracePeriodSeconds`** (k8s) or
 `TimeoutStopSec` (systemd), or the supervisor `SIGKILL`s the daemon
-mid-drain. Calls still active when the timeout fires are dropped (a clean
-`BYE` to those stragglers lands in a follow-up). Observe the drain with the
+mid-drain. Calls still active when the timeout fires are **force-terminated
+gracefully** — a real SIP `BYE` to the peer and a WS `hangup` — and counted
+on `siphon_ai_calls_drain_forced_total` (and attributed `drain_forced` on the
+CDR / `siphon_ai_calls_total`). A **second** shutdown signal during the drain
+(operator Ctrl-C twice, or a re-sent SIGTERM) forces immediate teardown,
+dropping any remaining calls without a BYE. Observe the drain with the
 `siphon_ai_draining` gauge (1 while draining) and the `siphon_ai_drain_seconds`
 histogram (how long the drain took).
 

@@ -202,6 +202,12 @@ pub enum CallTermination {
     ServerHangup,
     /// External signal via [`CallHandle::shutdown`].
     LocalShutdown,
+    /// Force-terminated at the graceful-shutdown drain deadline
+    /// (0.17.0) — a [`CallHandle::shutdown`] preceded by
+    /// [`CallHandle::mark_drain_forced`]. Behaves like `LocalShutdown`
+    /// (clean BYE + WS hangup) but is attributed distinctly on the CDR
+    /// and `siphon_ai_calls_total`.
+    DrainForced,
     /// The bridge sub-task ended first (clean WS close, server
     /// disconnect, or a bridge-side error).
     BridgeEnded,
@@ -361,6 +367,14 @@ pub struct CallHandle {
     /// own loop can touch it without a lock (§4.4: per-call state on the
     /// handle, not a global registry).
     peer_held: std::sync::Arc<AtomicBool>,
+    /// Set just before the graceful-shutdown drain force-terminates
+    /// this call (0.17.0). The controller reads it when its `shutdown`
+    /// notify fires to attribute the termination as `DrainForced`
+    /// rather than the generic `LocalShutdown`, so the CDR / metrics
+    /// distinguish "ended by a deploy's drain deadline" from an admin
+    /// force-hangup. Atomic, same §4.4 rationale as `remote_bye`: a
+    /// fire-and-forget flag on the handle, not shared mutable state.
+    drain_forced: std::sync::Arc<AtomicBool>,
 }
 
 /// A cross-call conference request pushed onto a [`CallHandle`] by the
@@ -402,6 +416,7 @@ impl CallHandle {
             conf_cmd_tx,
             park_cmd_tx,
             peer_held: std::sync::Arc::new(AtomicBool::new(false)),
+            drain_forced: std::sync::Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -435,6 +450,19 @@ impl CallHandle {
 
     pub fn remote_bye_received(&self) -> bool {
         self.remote_bye.load(Ordering::Acquire)
+    }
+
+    /// Flag that this call is being force-terminated by the
+    /// graceful-shutdown drain (0.17.0). Call this *before*
+    /// [`Self::shutdown`] so the controller's teardown attributes the
+    /// cause as `DrainForced`. Daemon-initiated, so `remote_bye` stays
+    /// `false` and the acceptor still sends the outbound BYE.
+    pub fn mark_drain_forced(&self) {
+        self.drain_forced.store(true, Ordering::Release);
+    }
+
+    pub fn drain_forced(&self) -> bool {
+        self.drain_forced.load(Ordering::Acquire)
     }
 
     pub fn call_id(&self) -> &CallId {
@@ -826,7 +854,15 @@ impl CallController {
                         StopReason::ServerHangup
                     };
                     info!(call_id = %call_id, ?reason, "controller shutdown requested");
-                    termination = CallTermination::LocalShutdown;
+                    // A drain-forced shutdown (deploy deadline) is
+                    // attributed distinctly from a generic local
+                    // shutdown (admin force-hangup, session expiry);
+                    // both send the same clean BYE + WS stop.
+                    termination = if handle.drain_forced() {
+                        CallTermination::DrainForced
+                    } else {
+                        CallTermination::LocalShutdown
+                    };
                     let _ = control_out_tx
                         .send(OutgoingEvent::Stop { reason })
                         .await;
@@ -2134,5 +2170,28 @@ async fn drive_hold_reinvite(
             }
             Err(e) => return Err(format!("re-INVITE failed: {e}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod handle_tests {
+    use super::*;
+
+    fn handle() -> CallHandle {
+        let (be_tx, _be_rx) = mpsc::channel(1);
+        let (conf_tx, _conf_rx) = mpsc::channel(1);
+        let (park_tx, _park_rx) = mpsc::channel(1);
+        CallHandle::new(CallId("test".into()), be_tx, conf_tx, park_tx)
+    }
+
+    #[test]
+    fn drain_forced_defaults_false_and_flips() {
+        let h = handle();
+        assert!(!h.drain_forced());
+        h.mark_drain_forced();
+        assert!(h.drain_forced());
+        // Drain-forced is daemon-initiated: it does NOT imply a remote
+        // BYE, so the acceptor still owes the peer an outbound BYE.
+        assert!(!h.remote_bye_received());
     }
 }

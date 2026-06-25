@@ -640,7 +640,7 @@ re-opens on `SIGHUP` (in practice — restart is simpler).
 
 ```json
 {
-  "version": 1,
+  "version": 3,
   "call_id": "siphon-6ce27797cc0a4997b90cbae2f46ce7a4",
   "sip_call_id": "1-2651348@127.0.0.1",
   "started_at": "2026-05-12T18:10:32.481Z",
@@ -661,8 +661,9 @@ re-opens on `SIGHUP` (in practice — restart is simpler).
 ```
 
 `termination.cause` values for a call that went active: `"server_hangup"`,
-`"local_shutdown"`, `"bridge_ended"`, `"tap_ended"`. `tap_disconnect`
-adds `"inactivity_timeout"` when the RTP watchdog fired.
+`"local_shutdown"`, `"drain_forced"` (force-ended at the graceful-shutdown
+drain deadline, 0.17.0 — CDR `version` 3), `"bridge_ended"`, `"tap_ended"`.
+`tap_disconnect` adds `"inactivity_timeout"` when the RTP watchdog fired.
 
 A **delayed-offer** call that fails negotiation before going active
 (0.9.5) also gets a CDR, with one of: `"ack_timeout"` (no ACK before SIP
@@ -901,7 +902,7 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | Metric                                  | Type      | Labels                                | What it measures |
 |-----------------------------------------|-----------|---------------------------------------|------------------|
 | `siphon_ai_invites_total`               | counter   | `result=accepted\|rejected\|rejected_attestation\|no_match` | INVITEs by acceptance outcome. `rejected_attestation` is a STIR/SHAKEN policy reject (`min_attestation` gate or `require_identity`) — separately alertable from ordinary routing/media `rejected`. |
-| `siphon_ai_calls_total`                 | counter   | `cause=server_hangup\|local_shutdown\|bridge_ended\|tap_ended` | Ended calls by termination cause. |
+| `siphon_ai_calls_total`                 | counter   | `cause=server_hangup\|local_shutdown\|drain_forced\|bridge_ended\|tap_ended` | Ended calls by termination cause. `drain_forced` (0.17.0) = force-ended at the graceful-shutdown drain deadline. |
 | `siphon_ai_calls_active`                | gauge     | —                                     | Currently-running calls. |
 | `siphon_ai_route_match_total`           | counter   | `route`                               | Calls per matched route. |
 | `siphon_ai_verstat_total`               | counter   | `result=passed\|failed\|unsigned`     | STIR/SHAKEN verification outcomes per inbound INVITE. Emitted only when `[security.stir_shaken].enabled = true`. `passed` = every check held; `failed` = `Identity` header present but verification didn't fully pass; `unsigned` = no `Identity` header. |
@@ -940,6 +941,7 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_webhook_delivery_seconds`    | histogram | `sink`                                | Delivery latency in seconds, accepted → 2xx (0.11.0). Includes spool dwell, so a slow/recovered receiver shows as a fat tail. Buckets 5 ms – 30 s. |
 | `siphon_ai_draining`                    | gauge     | —                                     | `1` while the daemon is draining for shutdown (0.17.0, `[shutdown]`), `0` otherwise. Set the instant a SIGTERM/SIGINT drain begins — new INVITEs are then `503`'d and `/ready` reports not-ready. A scraper that catches `1` knows the pod is going away. |
 | `siphon_ai_drain_seconds`               | histogram | —                                     | How long the shutdown drain took (0.17.0): drain start → registry empty or the `[shutdown].drain_timeout_secs` deadline. Observed once per process lifetime, so only a scrape catching the dying pod (or a push gateway) sees it. Buckets 0.1 s – 120 s. A value near the timeout means calls didn't finish in the window. |
+| `siphon_ai_calls_drain_forced_total`    | counter   | —                                     | Calls force-terminated (BYE + WS hangup) at the drain deadline (0.17.0) — they were still active when `[shutdown].drain_timeout_secs` elapsed. `0` after a clean rolling deploy; non-zero means the drain window was too short for the call mix. Also appear on `siphon_ai_calls_total{cause="drain_forced"}` and per-call on the CDR. |
 | `forge_rtcp_*`                          | various   | per-call (forge-side)                 | RTP/RTCP quality. See forge-media's own metric inventory. |
 | `heplify_*`                             | various   | from the HEP collector                | Only visible if you scrape heplify too. |
 

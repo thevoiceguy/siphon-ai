@@ -1,0 +1,171 @@
+name: release
+
+# Cuts a GitHub release from a pushed `v*` tag (the final step of the
+# manual release flow — bump version, tag, push). `workflow_dispatch` is
+# a re-run escape hatch (supply the existing tag).
+#
+# Chunk 2 of the Release & packaging theme: multi-arch musl-static
+# binaries + SHA256SUMS, with release notes extracted from CHANGELOG.md.
+# Signing + SBOM + GHCR container (chunk 3) and the .deb (chunk 4) add
+# jobs/steps to this file; they don't replace it.
+#
+# Cross-compilation is cargo-zigbuild: one x86 runner builds both the
+# x86_64 and aarch64 musl targets via the zig linker — no QEMU, no
+# Docker-in-CI (DESIGN_RELEASE_PACKAGING.md §3.2, decision 3).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re-)release, e.g. v0.16.0"
+        required: true
+
+permissions:
+  contents: write # create the release + upload assets
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # Resolved tag for both trigger kinds.
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  # Strip debug symbols from the release binary at compile time —
+  # arch-independent (no host `strip` needed for the aarch64 artifact).
+  CARGO_PROFILE_RELEASE_STRIP: symbols
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The tag must agree with the workspace version and have a dated
+  # CHANGELOG section before anything is built or published.
+  preflight:
+    name: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+      - name: Version consistency (incl. tag == workspace version)
+        run: |
+          python3 scripts/check-version-consistency.py --selftest
+          python3 scripts/check-version-consistency.py --tag "$TAG"
+      - name: CHANGELOG has a section for this version
+        run: |
+          python3 scripts/extract-changelog.py --selftest
+          python3 scripts/extract-changelog.py "${TAG#v}" > /dev/null
+
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    needs: preflight
+    strategy:
+      fail-fast: true
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - name: Add target ${{ matrix.target }}
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      # Zig provides the cross `cc`/linker for both musl targets.
+      # cargo-zigbuild auto-detects the pip-installed ziglang module, so
+      # no system zig / third-party action is needed.
+      - name: Install zig (ziglang) + cargo-zigbuild
+        run: |
+          python3 -m pip install --user ziglang
+          cargo install cargo-zigbuild --locked
+
+      - name: Build (release, static musl)
+        run: |
+          cargo zigbuild --release --locked \
+            -p siphon-ai --target ${{ matrix.target }}
+
+      # Package: the binary + both licenses + README into a versioned
+      # tarball. The binary is fully static, so the tarball is the whole
+      # delivery for that arch.
+      - name: Package
+        run: |
+          version="${TAG#v}"
+          dist="siphon-ai-${version}-${{ matrix.target }}"
+          mkdir -p "staging/${dist}"
+          cp "target/${{ matrix.target }}/release/siphon-ai" "staging/${dist}/"
+          cp LICENSE-APACHE LICENSE-MIT README.md "staging/${dist}/"
+          tar -C staging -czf "${dist}.tar.gz" "${dist}"
+          ls -l "${dist}.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: siphon-ai-*.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz | tee SHA256SUMS
+
+      - name: Release notes from CHANGELOG
+        run: |
+          version="${TAG#v}"
+          {
+            python3 scripts/extract-changelog.py "$version"
+            echo
+            echo "---"
+            echo
+            echo "Static musl binaries for \`x86_64\` and \`aarch64\`."
+            echo "Verify with \`sha256sum -c SHA256SUMS\`."
+          } > notes.md
+
+      # Pre-release for any tag with a pre-release suffix (e.g.
+      # v0.16.0-rc.1); these are never marked latest.
+      - name: Create or update the GitHub release
+        run: |
+          if [[ "$TAG" == *-* ]]; then
+            channel="--prerelease"
+          else
+            channel="--latest"
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" dist/* \
+              --title "$TAG" \
+              --notes-file notes.md \
+              $channel
+          fi

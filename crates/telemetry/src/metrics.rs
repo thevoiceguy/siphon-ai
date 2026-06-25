@@ -218,6 +218,13 @@ pub const CONFERENCE_PARTICIPANTS: &str = "siphon_ai_conference_participants";
 /// retrieve / teardown. Literal must match `siphon-ai-core::call`.
 pub const PARKED_CALLS_ACTIVE: &str = "siphon_ai_parked_calls_active";
 
+/// Whether the daemon is currently draining for shutdown (0.17.0):
+/// `1` from the moment a SIGTERM/SIGINT drain begins until the process
+/// exits, `0` otherwise. A scraper seeing `1` knows new INVITEs are
+/// being 503'd and `/ready` has flipped. Emitted from the runtime's
+/// drain phase.
+pub const DRAINING: &str = "siphon_ai_draining";
+
 /// Webhook/CDR deliveries currently waiting in the durable spool
 /// (0.11.0, `[webhooks].spool_dir` / `[cdr.webhook].spool_dir`).
 /// Labeled by `sink` (`lifecycle` / `cdr`). Sampled by the drain
@@ -253,6 +260,14 @@ pub const RTP_RTT_MS: &str = "siphon_ai_rtp_rtt_ms";
 /// room sits in the lowest bucket. Literal must match
 /// `siphon-ai-media-glue::room`.
 pub const ROOM_TICK_LAG_SECONDS: &str = "siphon_ai_room_tick_lag_seconds";
+
+/// How long the shutdown drain took, in **seconds** (0.17.0): from the
+/// moment draining began until the call registry emptied or the
+/// `[shutdown].drain_timeout_secs` deadline fired. Observed exactly
+/// once per process lifetime (so it's only useful via a scrape that
+/// catches the dying pod, or via push). Emitted from the runtime's
+/// drain phase.
+pub const DRAIN_SECONDS: &str = "siphon_ai_drain_seconds";
 
 /// Outbound webhook / CDR delivery latency in **seconds** (0.11.0):
 /// accepted → 2xx, recorded only on success. Labeled by `sink`
@@ -301,6 +316,9 @@ pub fn prometheus_builder() -> Result<PrometheusBuilder, InitError> {
                 Matcher::Full(WEBHOOK_DELIVERY_SECONDS.to_string()),
                 &WEBHOOK_DELIVERY_BUCKETS,
             )
+        })
+        .and_then(|b| {
+            b.set_buckets_for_metric(Matcher::Full(DRAIN_SECONDS.to_string()), &DRAIN_BUCKETS)
         })
         .map_err(|e| InitError::Install(e.to_string()))
 }
@@ -424,6 +442,11 @@ pub fn register_descriptions() {
     );
     describe_gauge!(PARKED_CALLS_ACTIVE, Unit::Count, "Currently-parked calls.");
     describe_gauge!(
+        DRAINING,
+        Unit::Count,
+        "1 while the daemon is draining for shutdown (new INVITEs 503'd, /ready false); 0 otherwise."
+    );
+    describe_gauge!(
         WEBHOOK_SPOOL_DEPTH,
         Unit::Count,
         "Webhook/CDR deliveries waiting in the durable spool, by sink (lifecycle, cdr)."
@@ -470,6 +493,11 @@ pub fn register_descriptions() {
         Unit::Seconds,
         "Outbound webhook/CDR delivery latency (accepted to 2xx), by sink."
     );
+    describe_histogram!(
+        DRAIN_SECONDS,
+        Unit::Seconds,
+        "Time the shutdown drain took (drain start to registry empty or deadline)."
+    );
 }
 
 /// Buckets for `ws_connect_seconds`. The first bucket (25ms) catches
@@ -511,6 +539,13 @@ pub const ROOM_TICK_LAG_BUCKETS: [f64; 9] =
 /// receiver — visible as a fat tail rather than clipped into +Inf.
 pub const WEBHOOK_DELIVERY_BUCKETS: [f64; 10] =
     [0.005, 0.025, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0];
+
+/// Buckets for `drain_seconds`, in **seconds**. A clean rolling deploy
+/// drains in well under a second when no calls are up (bottom buckets);
+/// the spread up to 120 s covers full-window drains against the
+/// common k8s grace periods (30/60/120 s) so a drain that ran to its
+/// deadline is visible rather than clipped into +Inf.
+pub const DRAIN_BUCKETS: [f64; 9] = [0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 90.0, 120.0];
 
 #[cfg(test)]
 mod tests {

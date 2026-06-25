@@ -87,6 +87,26 @@ pub struct RawConfig {
     /// `/admin/*` surface is not served at all (secure default).
     #[serde(default)]
     pub admin: Option<RawAdmin>,
+
+    /// `[shutdown]` — graceful drain on SIGTERM/SIGINT (0.17.0). Off by
+    /// default in the sense of "today's behaviour" only when
+    /// `drain_timeout_secs = 0`; absent → the 30 s default drain.
+    #[serde(default)]
+    pub shutdown: RawShutdown,
+}
+
+/// `[shutdown]` — graceful connection draining on a shutdown signal.
+/// See `docs/design/DESIGN_GRACEFUL_SHUTDOWN.md`.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawShutdown {
+    /// Max seconds to let active calls finish on SIGTERM/SIGINT before
+    /// forcing teardown. `None` (unset) → 30 s default. `0` → no drain
+    /// (immediate exit, today's behaviour). Must be ≤ the deployment's
+    /// `terminationGracePeriodSeconds` or the orchestrator SIGKILLs
+    /// mid-drain.
+    #[serde(default)]
+    pub drain_timeout_secs: Option<u64>,
 }
 
 /// `[admin]` — bearer-token-authenticated admin API on its own listener

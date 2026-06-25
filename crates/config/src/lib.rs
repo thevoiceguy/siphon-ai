@@ -37,14 +37,14 @@ pub use compile::{
     compile, AdminConfig, CdrConfig, CdrFileConfig, CdrWebhookConfig, CompileError,
     ConferenceConfig, Config, Gateway, GatewayCredentials, HepConfig, MediaConfig, NodeConfig,
     ObservabilityConfig, OutboundConfig, ParkConfig, ParkTimeoutAction, RegisterConfig,
-    SecurityConfig, SipConfig, SipTlsConfig, SipTransport, TrunkCidr, TrunkCidrParseError,
-    TrunkConfig, WebhooksConfig,
+    SecurityConfig, ShutdownConfig, SipConfig, SipTlsConfig, SipTransport, TrunkCidr,
+    TrunkCidrParseError, TrunkConfig, WebhooksConfig,
 };
 pub use env::{expand, expand_cow, EnvError, EnvSource, ProcessEnv};
 pub use raw::{
     RawBridge, RawCdr, RawCdrFile, RawCdrWebhook, RawConference, RawConfig, RawGateway, RawHep,
-    RawMedia, RawNode, RawObservability, RawOutbound, RawPark, RawRegister, RawSip, RawSipTls,
-    RawTrunk, RawWebhooks,
+    RawMedia, RawNode, RawObservability, RawOutbound, RawPark, RawRegister, RawShutdown, RawSip,
+    RawSipTls, RawTrunk, RawWebhooks,
 };
 // Re-exported so the daemon binary's `check`/`print-config` can read
 // `Config.recording.mode` without a direct dep on the recording crate.

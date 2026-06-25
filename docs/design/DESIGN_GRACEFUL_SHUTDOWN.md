@@ -237,12 +237,14 @@ into `[node]`); recommend a dedicated `[shutdown]` block.
 
 ## 6. Chunks (target ~v0.17.0)
 
-1. **Drain core.** `[shutdown].drain_timeout_secs` + the drain phase in
-   `run()` (flag, `mark_not_ready`, poll-until-empty-or-deadline), reject new
-   out-of-dialog INVITEs with the chosen code, `siphon_ai_draining` +
-   `drain_seconds` metrics, logs. Calls that finish within the window drain
-   cleanly; stragglers are still dropped at the deadline (parity with today
-   for the timeout case, but now bounded and observed).
+1. **Drain core.** ✅ **DELIVERED.** `[shutdown].drain_timeout_secs` + the
+   drain phase in `run()` (separate `DrainFlag`, `mark_not_ready`,
+   poll-until-empty-or-deadline on a 250 ms tick), reject new out-of-dialog
+   INVITEs with `503 Service Unavailable` + `Retry-After`, `siphon_ai_draining`
+   gauge + `siphon_ai_drain_seconds` histogram, lifecycle logs. Calls that
+   finish within the window drain cleanly; stragglers are still dropped at the
+   deadline (parity with today for the timeout case, but now bounded and
+   observed). `[shutdown]` is restart-required on reload.
 2. **Graceful straggler termination.** Read the controller teardown path
    (§3.4 spike), then end deadline-survivors with a real `BYE` + WS `hangup`
    (via `CallHandle` notify and/or `DialogTerminator`),

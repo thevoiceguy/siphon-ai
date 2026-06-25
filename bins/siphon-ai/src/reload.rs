@@ -26,7 +26,8 @@
 //! — `[node]`, `[sip]`, `[media]` + the `[bridge]`/codec defaults
 //! (`[media].codecs` / `.dtmf` compile in here), `[[trunk]]`,
 //! `[[register]]`, `[security]`, `[recording]`, `[conference]`, `[park]`,
-//! `[observability]`, `[admin]` (incl. the token table), `[hep]`, and the
+//! `[observability]`, `[admin]` (incl. the token table), `[hep]`,
+//! `[shutdown]`, and the
 //! `[outbound]` limits. A reload whose value for any of those differs from the
 //! running one applies the safe sections and logs a prominent warning
 //! naming them.
@@ -156,6 +157,10 @@ pub fn restart_fingerprints(c: &Config) -> Vec<(&'static str, String)> {
         // address. The token hashes are what change; no cleartext.
         ("[admin]", fp_hash(&c.admin)),
         ("[hep]", fp_hash(&c.hep)),
+        // `[shutdown].drain_timeout_secs` is read once at `run()` entry,
+        // so a reload can't change an in-flight drain window —
+        // restart-required.
+        ("[shutdown]", fp_hash(&c.shutdown)),
         (
             "[outbound].limits",
             format!(

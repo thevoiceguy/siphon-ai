@@ -2231,6 +2231,74 @@ timeout_action = "explode"
     assert!(err.to_string().contains("timeout_action"), "got: {err}");
 }
 
+// ─── [shutdown] graceful drain (0.17.0) ──────────────────────────
+
+#[test]
+fn shutdown_defaults_to_30s_drain_when_block_omitted() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert_eq!(cfg.shutdown.drain_timeout, Some(Duration::from_secs(30)));
+}
+
+#[test]
+fn shutdown_zero_means_no_drain() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[shutdown]
+drain_timeout_secs = 0
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert_eq!(cfg.shutdown.drain_timeout, None);
+}
+
+#[test]
+fn shutdown_explicit_timeout_is_honored() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[shutdown]
+drain_timeout_secs = 90
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    assert_eq!(cfg.shutdown.drain_timeout, Some(Duration::from_secs(90)));
+}
+
+#[test]
+fn shutdown_unknown_field_is_rejected() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[shutdown]
+drain_timeout_secs = 30
+drian_timeout_secs = 10
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err();
+    assert!(err.to_string().contains("drian_timeout_secs"), "got: {err}");
+}
+
 #[test]
 fn park_zero_max_parked_is_rejected() {
     let env = MapEnv::new([]);

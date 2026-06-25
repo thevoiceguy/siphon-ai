@@ -28,6 +28,7 @@ before TOML parsing. Unset variables without a default fail the load.
 [admin]           # authenticated /admin/* listener (0.10.0); off → /admin not served
 [webhooks]        # lifecycle events (call_start, call_end, …)
 [hep]             # HEP3 shipping to Homer
+[shutdown]        # graceful drain on SIGTERM/SIGINT (0.17.0)
 ```
 
 ## `[node]`
@@ -631,6 +632,35 @@ unreachable collector flips `siphon_ai_hep_collector_up` to 0. The audio
 path never blocks on HEP (CLAUDE.md §4.7). See `docs/HEP.md` for what each
 layer ships and how Homer correlates them.
 
+## `[shutdown]`
+
+Graceful connection draining on a shutdown signal (0.17.0). On `SIGTERM`
+or `SIGINT`, instead of tearing active calls down immediately, the daemon
+enters a *draining* state: it flips `/ready` to not-ready (so a load
+balancer stops routing to it), answers **new** inbound INVITEs with `503
+Service Unavailable` + `Retry-After` (so an upstream proxy routes
+elsewhere), and lets in-flight calls finish — bounded by a timeout — before
+exiting. In-dialog requests (re-INVITE for hold/resume, ACK, BYE) for calls
+already up keep flowing so they can drain cleanly. See
+`docs/design/DESIGN_GRACEFUL_SHUTDOWN.md`.
+
+```toml
+[shutdown]
+drain_timeout_secs = 30   # default
+```
+
+| field                | type | default | meaning |
+|----------------------|------|---------|---------|
+| `drain_timeout_secs` | int  | `30`    | Max seconds to let active calls finish before forcing teardown. `0` = **no drain** (immediate exit, pre-0.17.0 behaviour). |
+
+Omitting `[shutdown]` entirely gives the 30 s default. The value **must be
+≤ your orchestrator's `terminationGracePeriodSeconds`** (k8s) or
+`TimeoutStopSec` (systemd), or the supervisor `SIGKILL`s the daemon
+mid-drain. Calls still active when the timeout fires are dropped (a clean
+`BYE` to those stragglers lands in a follow-up). Observe the drain with the
+`siphon_ai_draining` gauge (1 while draining) and the `siphon_ai_drain_seconds`
+histogram (how long the drain took).
+
 ## Validating, inspecting & reloading config
 
 The daemon has read-only subcommands for working with a config file without
@@ -700,7 +730,8 @@ section(s)** that did not take effect (it is never silently swallowed) —
 / `.dtmf` compile in here), `[[trunk]]`, `[[register]]`, `[security]` (incl.
 `min_attestation`), `[recording]`, `[conference]`, `[park]`,
 `[observability]`, `[admin]` (incl. the token table — a rotated/revoked admin
-token keeps working **until restart**), `[hep]`, and the `[outbound]` limits
+token keeps working **until restart**), `[hep]`, `[shutdown]` (the drain
+window is read once at startup), and the `[outbound]` limits
 (`max_concurrent` / `rate_limit_per_sec`, which also flip outbound on/off —
 resizing the live admission semaphore isn't safe).
 

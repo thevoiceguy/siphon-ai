@@ -101,6 +101,29 @@ pub enum RouteAction<'a> {
     },
 }
 
+/// Build the drain-reject response for a *new* out-of-dialog INVITE
+/// when the daemon is draining for shutdown (0.17.0), or `None` when it
+/// isn't. `503 Service Unavailable` + `Retry-After` is the "this node
+/// is going away, route elsewhere / retry" posture (RFC 3261 §21.5.4).
+///
+/// Pure (no UAS auto-fill / send) so it's unit-testable like
+/// [`dispatch_invite`]; the caller applies `fill_response` and
+/// `send_final`.
+fn drain_reject_response(
+    drain: &crate::drain::DrainFlag,
+    retry_after_secs: u32,
+    request: &Request,
+) -> Option<Response> {
+    if !drain.is_draining() {
+        return None;
+    }
+    let mut response = UserAgentServer::create_response(request, 503, "Service Unavailable");
+    let _ = response
+        .headers_mut()
+        .set_or_push("Retry-After", retry_after_secs.to_string());
+    Some(response)
+}
+
 /// Decide what to do with an inbound INVITE.
 ///
 /// Pure / synchronous. The async trait wrapper [`RoutingHandler`]
@@ -242,6 +265,17 @@ pub struct RoutingHandler<A> {
     /// the daemon via `install_uas_filler` once the UAS exists;
     /// `OnceLock` because the install is one-shot at startup.
     uas_filler: std::sync::OnceLock<Weak<IntegratedUAS>>,
+    /// Graceful-shutdown drain flag (0.17.0). Default = never
+    /// draining (so `RoutingHandler::new` and tests behave exactly as
+    /// before). When the runtime's drain phase flips it, *new*
+    /// out-of-dialog INVITEs are answered `503 Service Unavailable`
+    /// before any trunk/route work; in-dialog requests (re-INVITE,
+    /// ACK, BYE) for calls already up still flow so they can drain.
+    drain: crate::drain::DrainFlag,
+    /// `Retry-After` delta-seconds put on the drain 503. Hints when
+    /// the node will be gone — the runtime sets it from
+    /// `[shutdown].drain_timeout_secs`. Ignored unless `drain` fires.
+    drain_retry_after_secs: u32,
 }
 
 impl<A> RoutingHandler<A> {
@@ -259,6 +293,8 @@ impl<A> RoutingHandler<A> {
             terminator: Arc::new(NullDialogTerminator),
             trunk_gate: None,
             uas_filler: std::sync::OnceLock::new(),
+            drain: crate::drain::DrainFlag::new(),
+            drain_retry_after_secs: 5,
         }
     }
 
@@ -306,6 +342,18 @@ impl<A> RoutingHandler<A> {
         self
     }
 
+    /// Install the graceful-shutdown drain flag (0.17.0) and the
+    /// `Retry-After` delta-seconds advertised on the drain 503. The
+    /// runtime shares one flag between its `run()` drain phase (which
+    /// flips it) and this handler (which reads it). Without this call
+    /// the handler never drains — `RoutingHandler::new`'s default flag
+    /// stays not-draining.
+    pub fn with_drain(mut self, drain: crate::drain::DrainFlag, retry_after_secs: u32) -> Self {
+        self.drain = drain;
+        self.drain_retry_after_secs = retry_after_secs;
+        self
+    }
+
     /// Snapshot of the current route table (after any SIGHUP reload).
     pub fn routes(&self) -> Arc<RouteSet> {
         self.routes.load_full()
@@ -348,6 +396,26 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                     sip_call_id,
                 })
                 .await;
+        }
+
+        // Drain gate (graceful shutdown, 0.17.0). We've already
+        // returned above for in-dialog re-INVITEs, so reaching here
+        // means this is a *new* out-of-dialog INVITE. While draining,
+        // reject it with `503 Service Unavailable` + `Retry-After` so
+        // an upstream proxy/LB routes elsewhere — complementing the
+        // `/ready` flip (which a load balancer notices only on its
+        // next poll). Runs BEFORE the trunk/route work so a node
+        // that's going away does no per-call setup.
+        if let Some(mut response) =
+            drain_reject_response(&self.drain, self.drain_retry_after_secs, request)
+        {
+            warn!(
+                peer = %ctx.peer(),
+                "INVITE rejected: draining for shutdown (503 Service Unavailable)"
+            );
+            self.fill_response(&mut response, ctx).await;
+            handle.send_final(response).await;
+            return Ok(());
         }
 
         // Trunk allowlist gate, when configured. Runs BEFORE route
@@ -474,5 +542,39 @@ mod tests {
         let routes = Arc::new(ArcSwap::from_pointee(siphon_ai_routes::RouteSet::default()));
         let handler = RoutingHandler::new(routes, Arc::new(FakeAcceptor));
         let _: Arc<dyn UasRequestHandler> = Arc::new(handler);
+    }
+
+    fn invite() -> Request {
+        use sip_core::{Headers, Method, RequestLine, SipUri};
+        let uri = SipUri::parse("sip:5000@siphon.example.com").unwrap();
+        let mut h = Headers::new();
+        h.push("Via", "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-1")
+            .unwrap();
+        h.push("From", "<sip:caller@carrier.example.net>;tag=abc")
+            .unwrap();
+        h.push("To", "<sip:5000@siphon.example.com>").unwrap();
+        h.push("Call-ID", "drain-test@example.net").unwrap();
+        h.push("CSeq", "1 INVITE").unwrap();
+        Request::new(
+            RequestLine::new(Method::Invite, uri),
+            h,
+            bytes::Bytes::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn drain_reject_is_none_when_not_draining() {
+        let drain = crate::drain::DrainFlag::new();
+        assert!(drain_reject_response(&drain, 30, &invite()).is_none());
+    }
+
+    #[test]
+    fn drain_reject_is_503_with_retry_after_when_draining() {
+        let drain = crate::drain::DrainFlag::new();
+        drain.begin();
+        let resp = drain_reject_response(&drain, 30, &invite()).expect("drain → 503");
+        assert_eq!(resp.code(), 503);
+        assert_eq!(resp.headers().get("Retry-After"), Some("30"));
     }
 }

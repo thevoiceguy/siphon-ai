@@ -74,6 +74,28 @@ pub struct Config {
     /// `[admin]` — the authenticated admin API. `None` when no `[admin]`
     /// block is configured, in which case `/admin/*` is not served.
     pub admin: Option<AdminConfig>,
+    /// `[shutdown]` — graceful drain on a shutdown signal (0.17.0).
+    pub shutdown: ShutdownConfig,
+}
+
+/// Compiled `[shutdown]` — graceful connection draining on SIGTERM/SIGINT.
+/// See `docs/design/DESIGN_GRACEFUL_SHUTDOWN.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShutdownConfig {
+    /// How long to let active calls finish before forcing teardown.
+    /// `None` = no drain (immediate exit, today's behaviour, opt-out via
+    /// `drain_timeout_secs = 0`). `Some(d)` = wait up to `d` for the
+    /// call registry to empty, then tear down.
+    pub drain_timeout: Option<Duration>,
+}
+
+impl Default for ShutdownConfig {
+    fn default() -> Self {
+        // 30 s middle ground that fits common k8s grace periods.
+        Self {
+            drain_timeout: Some(Duration::from_secs(30)),
+        }
+    }
 }
 
 /// Compiled `[admin]` — the admin API listener address plus the
@@ -841,6 +863,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let webhooks = compile_webhooks(raw.webhooks)?;
     let hep = compile_hep(raw.hep)?;
     let admin = compile_admin(raw.admin)?;
+    let shutdown = compile_shutdown(raw.shutdown);
 
     if !routes.has_default() {
         warn!(
@@ -934,7 +957,22 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         webhooks,
         hep,
         admin,
+        shutdown,
     })
+}
+
+/// Compile `[shutdown]`. Infallible: the only field is a non-negative
+/// duration. Unset → 30 s default; `0` → no drain (immediate exit).
+fn compile_shutdown(raw: crate::raw::RawShutdown) -> ShutdownConfig {
+    match raw.drain_timeout_secs {
+        None => ShutdownConfig::default(),
+        Some(0) => ShutdownConfig {
+            drain_timeout: None,
+        },
+        Some(secs) => ShutdownConfig {
+            drain_timeout: Some(Duration::from_secs(secs)),
+        },
+    }
 }
 
 fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {

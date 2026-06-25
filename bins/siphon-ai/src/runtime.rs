@@ -86,8 +86,8 @@ use siphon_ai_core::{
 };
 use siphon_ai_media_glue::MediaSetup;
 use siphon_ai_sip_glue::{
-    DialogTerminatorHandle, RegisterSourceResolver, RegistrationEntry, RegistrationManager,
-    RoutingHandler,
+    DialogTerminatorHandle, DrainFlag, RegisterSourceResolver, RegistrationEntry,
+    RegistrationManager, RoutingHandler,
 };
 use siphon_ai_telemetry::{
     admin::{
@@ -95,7 +95,7 @@ use siphon_ai_telemetry::{
         CallRegistryHandle, RegistrationRow,
     },
     install_recorder, AdminServer, HepTelemetry, HepTelemetryBuild, HepWorkerHandle,
-    LogFilterHandle, ObservabilityServer, ReadinessFlag,
+    LogFilterHandle, ObservabilityServer, ReadinessFlag, DRAINING, DRAIN_SECONDS,
 };
 use siphon_ai_webhooks::{
     FilteredSink as WebhookFilteredSink, HttpSink as WebhookHttpSink,
@@ -140,6 +140,15 @@ pub struct Runtime {
     /// so shutdown awaits them cleanly.
     registration_mgr: RegistrationManager,
     registration_listeners: Vec<JoinHandle<()>>,
+    /// Graceful-shutdown drain state (0.17.0). On a shutdown signal,
+    /// if `drain_timeout` is `Some`, `run()` flips `drain` + readiness,
+    /// then polls `registry` until it empties or the deadline fires
+    /// before teardown. `None` timeout = today's immediate-exit
+    /// behaviour (`[shutdown].drain_timeout_secs = 0`).
+    drain: DrainFlag,
+    readiness: ReadinessFlag,
+    registry: CallRegistry,
+    drain_timeout: Option<Duration>,
 }
 
 impl Runtime {
@@ -183,6 +192,7 @@ impl Runtime {
             hep,
             park,
             admin,
+            shutdown,
         } = config;
 
         // ─── Telemetry: install Prometheus recorder ─────────────────
@@ -405,6 +415,10 @@ impl Runtime {
         registration_mgr.seed(&register_entries);
 
         // ─── SIP routing handler ───────────────────────────────────
+        // Keep a registry clone (Arc inside — cheap) for the drain
+        // phase's poll-until-empty wait before the registry is moved
+        // into the dialog terminator.
+        let registry_for_drain = registry.clone();
         let dialog_terminator: DialogTerminatorHandle = Arc::new(registry);
         // Trunk allowlist gate. Installed only when the operator
         // declared one or more `[[trunk]]` blocks; with zero blocks
@@ -414,10 +428,22 @@ impl Runtime {
         // Route table behind an ArcSwap so a SIGHUP reload can swap the
         // dialplan for new INVITEs without dropping in-flight calls.
         let route_swap = Arc::new(arc_swap::ArcSwap::from_pointee(routes));
+        // Graceful-shutdown drain flag (0.17.0): shared between the
+        // inbound INVITE handler (reads it to 503 new calls while
+        // draining) and `run()`'s drain phase (flips it). The
+        // `Retry-After` advertised on the drain 503 hints when this
+        // node will be gone — the drain timeout, floored at 1 s so a
+        // sub-second timeout still yields a sane integer header.
+        let drain = DrainFlag::new();
+        let drain_retry_after_secs = shutdown
+            .drain_timeout
+            .map(|d| d.as_secs().max(1).min(u32::MAX as u64) as u32)
+            .unwrap_or(5);
         let mut routing_handler_builder =
             RoutingHandler::new(Arc::clone(&route_swap), Arc::clone(&acceptor))
                 .with_dialog_terminator(dialog_terminator)
-                .with_register_source_resolver(register_source_resolver(&registration_mgr));
+                .with_register_source_resolver(register_source_resolver(&registration_mgr))
+                .with_drain(drain.clone(), drain_retry_after_secs);
         if !trunks.is_empty() {
             let gate: Arc<dyn siphon_ai_sip_glue::TrunkAllowlist> =
                 Arc::new(ConfigTrunkAllowlist::new(trunks));
@@ -765,6 +791,10 @@ impl Runtime {
             hep_worker,
             registration_mgr,
             registration_listeners,
+            drain,
+            readiness,
+            registry: registry_for_drain,
+            drain_timeout: shutdown.drain_timeout,
         })
     }
 
@@ -798,7 +828,19 @@ impl Runtime {
     {
         info!(listen = %self.sip_listen, "siphon-ai daemon ready");
         shutdown.await;
-        info!("shutdown signal received; tearing down");
+        info!("shutdown signal received");
+
+        // ─── Graceful drain (0.17.0) ───────────────────────────────
+        // Between the signal and teardown, let active calls finish.
+        // `None` timeout = opt-out (`[shutdown].drain_timeout_secs =
+        // 0`): skip straight to teardown, today's behaviour. Stragglers
+        // still up at the deadline are dropped by the existing teardown
+        // below (chunk 1) — chunk 2 ends them with a real BYE + hangup.
+        if let Some(timeout) = self.drain_timeout {
+            drain_calls(&self.registry, &self.drain, &self.readiness, timeout).await;
+        }
+
+        info!("tearing down");
 
         for handle in self.listeners {
             handle.abort();
@@ -845,6 +887,97 @@ impl Runtime {
         let _ = self.uas;
         let _ = self.udp_socket;
         Ok(())
+    }
+}
+
+// ─── Graceful shutdown drain (0.17.0) ───────────────────────────────
+
+/// How often the drain phase polls the registry for "are we empty yet?"
+/// (DESIGN_GRACEFUL_SHUTDOWN §3.1). Short enough that a clean drain
+/// exits promptly, long enough to stay off the hot path.
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How often the drain phase logs a "still draining, N remaining" line.
+const DRAIN_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Outcome of the drain wait — a clean drain (registry emptied before
+/// the deadline) vs a forced one (deadline hit with calls still up).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainOutcome {
+    /// The active-call count reached zero before the deadline.
+    Emptied,
+    /// The deadline fired with this many calls still active.
+    Forced(usize),
+}
+
+/// Run the drain phase: flip the drain flag + `/ready`, emit the
+/// `siphon_ai_draining` gauge, poll until the registry empties or the
+/// deadline, then record `siphon_ai_drain_seconds` and log the outcome.
+async fn drain_calls(
+    registry: &CallRegistry,
+    drain: &DrainFlag,
+    readiness: &ReadinessFlag,
+    timeout: Duration,
+) {
+    // Flip into draining BEFORE anything else so new INVITEs get 503'd
+    // and the readiness probe reports not-ready from this instant.
+    drain.begin();
+    readiness.mark_not_ready();
+    metrics::gauge!(DRAINING).set(1.0);
+
+    let active = registry.len();
+    info!(
+        active_calls = active,
+        timeout_secs = timeout.as_secs(),
+        "drain started"
+    );
+
+    let start = std::time::Instant::now();
+    let outcome = drain_wait(|| registry.len(), timeout, DRAIN_POLL_INTERVAL).await;
+    let elapsed = start.elapsed();
+    metrics::histogram!(DRAIN_SECONDS).record(elapsed.as_secs_f64());
+
+    match outcome {
+        DrainOutcome::Emptied => info!(
+            elapsed_secs = elapsed.as_secs_f64(),
+            "drain complete; all calls ended"
+        ),
+        DrainOutcome::Forced(remaining) => warn!(
+            remaining,
+            elapsed_secs = elapsed.as_secs_f64(),
+            timeout_secs = timeout.as_secs(),
+            "drain timeout reached; {remaining} call(s) still active will be dropped"
+        ),
+    }
+}
+
+/// Poll `active()` until it reports zero or `timeout` elapses, logging
+/// a periodic progress line. Factored out of [`drain_calls`] so it's
+/// unit-testable without standing up a full `Runtime` — the closure
+/// stands in for `CallRegistry::len`.
+async fn drain_wait<F: Fn() -> usize>(
+    active: F,
+    timeout: Duration,
+    poll: Duration,
+) -> DrainOutcome {
+    let start = std::time::Instant::now();
+    let mut last_log = start;
+    loop {
+        let remaining = active();
+        if remaining == 0 {
+            return DrainOutcome::Emptied;
+        }
+        if start.elapsed() >= timeout {
+            return DrainOutcome::Forced(remaining);
+        }
+        if last_log.elapsed() >= DRAIN_LOG_INTERVAL {
+            info!(remaining, "draining");
+            last_log = std::time::Instant::now();
+        }
+        // Don't overshoot the deadline by a whole poll interval on the
+        // final wait — sleep at most until the deadline.
+        let to_deadline = timeout.saturating_sub(start.elapsed());
+        tokio::time::sleep(poll.min(to_deadline)).await;
     }
 }
 
@@ -2186,4 +2319,73 @@ mod tls_reload_tests {
     const FIXTURE_KEY_A: &[u8] = include_bytes!("fixtures/reload_key_a.pem");
     const FIXTURE_CERT_B: &[u8] = include_bytes!("fixtures/reload_cert_b.pem");
     const FIXTURE_KEY_B: &[u8] = include_bytes!("fixtures/reload_key_b.pem");
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    // Real (short) durations rather than tokio's paused clock so the
+    // tests don't need the `test-util` feature. A 5 ms poll keeps them
+    // in the tens-of-ms range.
+    const POLL: Duration = Duration::from_millis(5);
+
+    /// Registry empties before the deadline → clean drain, no force.
+    #[tokio::test]
+    async fn drain_wait_exits_when_count_reaches_zero() {
+        let count = Arc::new(AtomicUsize::new(3));
+        // Drop one call every poll tick; all gone well before the
+        // generous deadline.
+        let bg = {
+            let count = Arc::clone(&count);
+            tokio::spawn(async move {
+                for _ in 0..3 {
+                    tokio::time::sleep(POLL).await;
+                    count.fetch_sub(1, Ordering::SeqCst);
+                }
+            })
+        };
+        let outcome = drain_wait(
+            {
+                let count = Arc::clone(&count);
+                move || count.load(Ordering::SeqCst)
+            },
+            Duration::from_secs(5),
+            POLL,
+        )
+        .await;
+        bg.await.unwrap();
+        assert_eq!(outcome, DrainOutcome::Emptied);
+    }
+
+    /// Calls never end → deadline fires, force path reports the
+    /// stragglers, and the wait is bounded by the timeout.
+    #[tokio::test]
+    async fn drain_wait_forces_at_deadline() {
+        let count = Arc::new(AtomicUsize::new(2));
+        let timeout = Duration::from_millis(60);
+        let start = std::time::Instant::now();
+        let outcome = drain_wait(
+            {
+                let count = Arc::clone(&count);
+                move || count.load(Ordering::SeqCst)
+            },
+            timeout,
+            POLL,
+        )
+        .await;
+        assert_eq!(outcome, DrainOutcome::Forced(2));
+        // Bounded by the timeout — didn't run forever, didn't return early.
+        assert!(start.elapsed() >= timeout);
+        assert!(start.elapsed() < timeout * 5);
+    }
+
+    /// Zero active calls at entry → immediate clean drain.
+    #[tokio::test]
+    async fn drain_wait_empty_registry_returns_immediately() {
+        let outcome = drain_wait(|| 0, Duration::from_secs(5), POLL).await;
+        assert_eq!(outcome, DrainOutcome::Emptied);
+    }
 }

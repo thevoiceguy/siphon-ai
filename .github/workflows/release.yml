@@ -54,7 +54,21 @@ jobs:
       - name: CHANGELOG has a section for this version
         run: |
           python3 scripts/extract-changelog.py --selftest
-          python3 scripts/extract-changelog.py "${TAG#v}" > /dev/null
+          version="${TAG#v}"
+          # A final tag must have its own dated CHANGELOG section. A
+          # pre-release for an upcoming version may not be documented yet
+          # (the publish step falls back to the base section, then a
+          # generic note) — so it's allowed, just reported.
+          if [[ "$version" == *-* ]]; then
+            base="${version%%-*}"
+            if python3 scripts/extract-changelog.py "$base" > /dev/null 2>&1; then
+              echo "Pre-release: will use the $base CHANGELOG section."
+            else
+              echo "Pre-release: no $base CHANGELOG section yet; generic notes will be used."
+            fi
+          else
+            python3 scripts/extract-changelog.py "$version" > /dev/null
+          fi
 
   build:
     name: build ${{ matrix.target }}

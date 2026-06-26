@@ -15,11 +15,13 @@
 //!
 //! ## Admin transport security
 //!
-//! The admin listener is plain HTTP in this cut, so the bearer token
-//! travels in the clear on the wire — bind it on **loopback** (the
-//! default posture) or front it with a TLS-terminating proxy. A native
-//! `[admin].tls` is a follow-up; the runtime warns when the admin bind
-//! is not loopback.
+//! With `[admin.tls]` configured the listener serves **HTTPS**, so the
+//! bearer token is encrypted on the wire even on a routable bind. The
+//! daemon loads (and SIGHUP-reloads) the cert/key and hands us an
+//! [`AdminTlsConfigFn`]; we build a fresh `TlsAcceptor` per accepted
+//! connection from it. Without `[admin.tls]` the listener is plain HTTP
+//! — bind it on **loopback** or front it with a TLS-terminating proxy
+//! (the runtime warns on a non-loopback plain-HTTP bind).
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -33,9 +35,20 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use metrics_exporter_prometheus::PrometheusHandle;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+use tokio_rustls::{rustls::ServerConfig, TlsAcceptor};
 use tracing::{debug, error, info, warn};
+
+/// Supplies the current admin-listener TLS `ServerConfig` on demand.
+///
+/// The daemon owns the cert/key (and its SIGHUP hot-reload), so it
+/// passes a closure that returns the *live* config; calling it per
+/// accepted connection is what lets a SIGHUP cert rotation take effect
+/// without dropping the listener. Kept as a closure so this crate
+/// doesn't depend on the daemon's `arc_swap` cell.
+pub type AdminTlsConfigFn = Arc<dyn Fn() -> Arc<ServerConfig> + Send + Sync>;
 
 use crate::admin::{self, AdminState};
 use crate::auth::{route_label, AdminAuth, AuthReject};
@@ -220,12 +233,23 @@ struct AdminSharedState {
 
 impl AdminServer {
     /// Bind on `addr` and start serving the gated `/admin/*` surface.
-    pub async fn start(addr: SocketAddr, auth: AdminAuth, admin: AdminState) -> Result<Self> {
+    ///
+    /// When `tls` is `Some` the listener serves HTTPS, building a fresh
+    /// `TlsAcceptor` per connection from the supplied
+    /// [`AdminTlsConfigFn`] (so a SIGHUP cert rotation is picked up by
+    /// the next connection). When `None` it serves plain HTTP.
+    pub async fn start(
+        addr: SocketAddr,
+        auth: AdminAuth,
+        admin: AdminState,
+        tls: Option<AdminTlsConfigFn>,
+    ) -> Result<Self> {
         let listener = TcpListener::bind(addr)
             .await
             .with_context(|| format!("bind admin HTTP {}", addr))?;
         let bound_addr = listener.local_addr().unwrap_or(addr);
-        info!(addr = %bound_addr, "admin HTTP listener bound (bearer-token auth)");
+        let scheme = if tls.is_some() { "https" } else { "http" };
+        info!(addr = %bound_addr, tls = tls.is_some(), "admin {scheme} listener bound (bearer-token auth)");
 
         let state = Arc::new(AdminSharedState { admin, auth });
         let listener = tokio::spawn(async move {
@@ -238,19 +262,28 @@ impl AdminServer {
                     }
                 };
                 let state = Arc::clone(&state);
-                tokio::spawn(async move {
-                    let io = TokioIo::new(stream);
-                    let svc = service_fn(move |req| {
-                        let state = Arc::clone(&state);
-                        async move { Ok::<_, Infallible>(handle_admin_request(req, state, peer).await) }
-                    });
-                    if let Err(e) = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(io, svc)
-                        .await
-                    {
-                        debug!(peer = %peer, error = %e, "admin HTTP connection closed with error");
+                match &tls {
+                    Some(tls_fn) => {
+                        // Snapshot the live config so a SIGHUP rotation
+                        // takes effect on new connections.
+                        let acceptor = TlsAcceptor::from(tls_fn());
+                        tokio::spawn(async move {
+                            match acceptor.accept(stream).await {
+                                Ok(tls_stream) => serve_admin_conn(tls_stream, state, peer).await,
+                                Err(e) => {
+                                    // Handshake failures (bad SNI, plain
+                                    // HTTP to an HTTPS port, expired
+                                    // client clock) are noisy and benign;
+                                    // debug, not warn.
+                                    debug!(peer = %peer, error = %e, "admin TLS handshake failed");
+                                }
+                            }
+                        });
                     }
-                });
+                    None => {
+                        tokio::spawn(serve_admin_conn(stream, state, peer));
+                    }
+                }
             }
         });
 
@@ -267,6 +300,25 @@ impl AdminServer {
     pub async fn shutdown(self) {
         self.listener.abort();
         let _ = self.listener.await;
+    }
+}
+
+/// Serve one admin connection over `io` (plain TCP or a TLS stream).
+/// Generic so the plain-HTTP and HTTPS paths share the hyper plumbing.
+async fn serve_admin_conn<IO>(io: IO, state: Arc<AdminSharedState>, peer: SocketAddr)
+where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let io = TokioIo::new(io);
+    let svc = service_fn(move |req| {
+        let state = Arc::clone(&state);
+        async move { Ok::<_, Infallible>(handle_admin_request(req, state, peer).await) }
+    });
+    if let Err(e) = hyper::server::conn::http1::Builder::new()
+        .serve_connection(io, svc)
+        .await
+    {
+        debug!(peer = %peer, error = %e, "admin HTTP connection closed with error");
     }
 }
 
@@ -377,10 +429,14 @@ mod tests {
             AdminToken::new("op", "op-tok", Role::Operator),
             AdminToken::new("ad", "ad-tok", Role::Admin),
         ]);
-        let server =
-            AdminServer::start("127.0.0.1:0".parse().unwrap(), auth, AdminState::default())
-                .await
-                .expect("admin start");
+        let server = AdminServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            auth,
+            AdminState::default(),
+            None, // plain HTTP for the test
+        )
+        .await
+        .expect("admin start");
         let url = format!("http://{}", server.bound_addr());
         (server, url)
     }

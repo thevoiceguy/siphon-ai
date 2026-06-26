@@ -121,6 +121,24 @@ pub struct RawAdmin {
     /// required (an admin listener with no tokens authenticates nobody).
     #[serde(default, rename = "token")]
     pub tokens: Vec<RawAdminToken>,
+    /// Optional `[admin.tls]` — serve the admin API over HTTPS so the
+    /// bearer token isn't sent in the clear on a routable bind.
+    #[serde(default)]
+    pub tls: Option<RawAdminTls>,
+}
+
+/// `[admin.tls]` — server-side TLS for the admin listener.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawAdminTls {
+    /// PEM-encoded certificate chain (path on disk). Required when
+    /// `[admin.tls]` is present.
+    #[serde(default)]
+    pub cert: Option<String>,
+    /// PEM-encoded private key (path on disk). Required when
+    /// `[admin.tls]` is present.
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 /// One `[[admin.token]]` entry.

@@ -75,9 +75,9 @@ use siphon_ai_cdr::{
     CdrSinkHandle, FileSink, HepCdrSink, MultiSink, NullSink, WebhookSink, WebhookSinkConfig,
 };
 use siphon_ai_config::{
-    CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, HepConfig, MediaConfig, NodeConfig,
-    ObservabilityConfig, ParkTimeoutAction as ConfigParkTimeoutAction, SipConfig, SipTlsConfig,
-    SipTransport, WebhooksConfig,
+    AdminTlsConfig, CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, HepConfig, MediaConfig,
+    NodeConfig, ObservabilityConfig, ParkTimeoutAction as ConfigParkTimeoutAction, SipConfig,
+    SipTlsConfig, SipTransport, WebhooksConfig,
 };
 use siphon_ai_core::{
     default_call_id_factory, BridgingAcceptor, CallControlRegistry, CallRegistry, ConferenceAdmin,
@@ -95,9 +95,9 @@ use siphon_ai_telemetry::{
         AdminCallRegistry, AdminConference, AdminOutbound, AdminPark, AdminState,
         CallRegistryHandle, DrainStatus, DrainStatusFn, RegistrationRow,
     },
-    install_recorder, AdminServer, HepTelemetry, HepTelemetryBuild, HepWorkerHandle,
-    LogFilterHandle, ObservabilityServer, ReadinessFlag, CALLS_DRAIN_FORCED_TOTAL, DRAINING,
-    DRAIN_SECONDS,
+    install_recorder, AdminServer, AdminTlsConfigFn, HepTelemetry, HepTelemetryBuild,
+    HepWorkerHandle, LogFilterHandle, ObservabilityServer, ReadinessFlag, CALLS_DRAIN_FORCED_TOTAL,
+    DRAINING, DRAIN_SECONDS,
 };
 use siphon_ai_webhooks::{
     FilteredSink as WebhookFilteredSink, HttpSink as WebhookHttpSink,
@@ -525,6 +525,24 @@ impl Runtime {
         // listeners below, so clone it for the handler here.
         let tls_for_reload = tls_server_config.clone();
 
+        // Admin listener TLS (`[admin.tls]`), same ArcSwap-for-SIGHUP
+        // shape as `[sip.tls]`. Loaded here (not in build_admin) so a
+        // bad cert/key fails at startup, and so the swap exists before
+        // the SIGHUP handler is wired up below. The swap is consumed by
+        // build_admin further down; clone it for the reloader.
+        let admin_tls_swap: Option<Arc<arc_swap::ArcSwap<tokio_rustls::rustls::ServerConfig>>> =
+            match admin.as_ref().and_then(|a| a.tls.as_ref()) {
+                Some(tls) => {
+                    let initial = load_admin_tls_server_config(tls)?;
+                    Some(Arc::new(arc_swap::ArcSwap::from(initial)))
+                }
+                None => None,
+            };
+        let admin_tls_for_reload = admin
+            .as_ref()
+            .and_then(|a| a.tls.clone())
+            .zip(admin_tls_swap.clone());
+
         // ─── Integrated UAS ────────────────────────────────────────
         let local_uri = sip_local_uri(&node, &sip);
         let contact_uri = sip.contact.as_deref().unwrap_or(&local_uri).to_string();
@@ -733,12 +751,13 @@ impl Runtime {
                     cdr_fingerprint,
                     outbound: outbound_reload,
                     tls: sip.tls.clone().zip(tls_for_reload),
+                    admin_tls: admin_tls_for_reload,
                     restart_fingerprints,
                 });
             }
             // No backing file (tests): preserve the prior TLS-cert /
             // no-op SIGHUP behavior.
-            None => spawn_sighup_handler(sip.tls.clone(), tls_for_reload),
+            None => spawn_sighup_handler(sip.tls.clone(), tls_for_reload, admin_tls_for_reload),
         }
 
         // ─── Build admin state + observability HTTP listener ──────
@@ -806,7 +825,7 @@ impl Runtime {
         // Authenticated admin listener (0.10.0), separate from the open
         // observability listener. `None` when no `[admin]` block is
         // configured — `/admin/*` is then not served at all.
-        let admin_server = build_admin(admin, admin_state).await?;
+        let admin_server = build_admin(admin, admin_state, admin_tls_swap).await?;
 
         // We're now serving SIP — let the readiness probe flip.
         readiness.mark_ready();
@@ -1161,28 +1180,38 @@ async fn build_observability(
 
 /// Spawn the **authenticated** admin HTTP server (`[admin]`). `None`
 /// when no `[admin]` block is configured — `/admin/*` is then not served
-/// at all (the secure default). Warns when the bind is not loopback: the
-/// admin listener is plain HTTP, so the bearer token would travel in the
-/// clear on a routable address (pair with a TLS-terminating proxy until
-/// native `[admin].tls` lands).
+/// at all (the secure default).
+///
+/// With `[admin.tls]` (here as a loaded, SIGHUP-swappable `ServerConfig`)
+/// the listener serves HTTPS so the bearer token is encrypted on the
+/// wire. Without it the listener is plain HTTP; we warn loudly when such
+/// a plain-HTTP listener is bound on a non-loopback address, since the
+/// bearer token would then travel in the clear.
 async fn build_admin(
     cfg: Option<siphon_ai_config::AdminConfig>,
     admin_state: AdminState,
+    tls_swap: Option<Arc<arc_swap::ArcSwap<tokio_rustls::rustls::ServerConfig>>>,
 ) -> Result<Option<AdminServer>> {
     let Some(cfg) = cfg else {
         debug!("no [admin] block; /admin/* is not served");
         return Ok(None);
     };
-    if !cfg.listen_addr.ip().is_loopback() {
+    // Live-config closure: each accepted connection reads the current
+    // cert, so a SIGHUP rotation takes effect without a restart.
+    let tls_fn: Option<AdminTlsConfigFn> = tls_swap.map(|swap| {
+        let f: AdminTlsConfigFn = Arc::new(move || swap.load_full());
+        f
+    });
+    if tls_fn.is_none() && !cfg.listen_addr.ip().is_loopback() {
         warn!(
             target: "siphon_ai_config",
             listen = %cfg.listen_addr,
-            "[admin].listen is not a loopback address and the admin listener is plain HTTP — \
-             the bearer token travels in the clear on the wire. Bind loopback or front the \
-             admin listener with a TLS-terminating proxy."
+            "[admin].listen is not a loopback address and [admin.tls] is not configured — \
+             the bearer token travels in the CLEAR on the wire. Configure [admin.tls], bind \
+             loopback, or front the admin listener with a TLS-terminating proxy."
         );
     }
-    let server = AdminServer::start(cfg.listen_addr, cfg.auth, admin_state)
+    let server = AdminServer::start(cfg.listen_addr, cfg.auth, admin_state, tls_fn)
         .await
         .with_context(|| format!("bind admin HTTP {}", cfg.listen_addr))?;
     Ok(Some(server))
@@ -1413,6 +1442,35 @@ pub(crate) fn load_sip_tls_server_config(
     Ok(cfg)
 }
 
+/// `[admin.tls]`. Same loader as `[sip.tls]` (shared
+/// `load_rustls_server_config`); failure is fatal so an operator who
+/// asked for HTTPS on the admin listener never silently gets cleartext.
+pub(crate) fn load_admin_tls_server_config(
+    tls: &AdminTlsConfig,
+) -> Result<Arc<tokio_rustls::rustls::ServerConfig>> {
+    let cert = tls
+        .cert_path
+        .to_str()
+        .ok_or_else(|| anyhow!("[admin.tls].cert path is not valid UTF-8"))?;
+    let key = tls
+        .key_path
+        .to_str()
+        .ok_or_else(|| anyhow!("[admin.tls].key path is not valid UTF-8"))?;
+    let cfg = load_rustls_server_config(cert, key).with_context(|| {
+        format!(
+            "load admin TLS cert={} key={}",
+            tls.cert_path.display(),
+            tls.key_path.display()
+        )
+    })?;
+    info!(
+        cert = %tls.cert_path.display(),
+        key = %tls.key_path.display(),
+        "admin TLS server config loaded"
+    );
+    Ok(cfg)
+}
+
 /// Install the daemon's SIGHUP handler. Always installed —
 /// claiming the signal prevents the default Unix disposition
 /// (process termination) from firing when an operator runs
@@ -1423,19 +1481,47 @@ pub(crate) fn load_sip_tls_server_config(
 /// reload to do anything) or `None` together (handler is a no-op
 /// signal consumer). Mixed states fall back to no-op with a `warn!`
 /// — they shouldn't happen, but the daemon doesn't crash if they do.
+type TlsSwap = Arc<arc_swap::ArcSwap<tokio_rustls::rustls::ServerConfig>>;
+
 fn spawn_sighup_handler(
     tls: Option<SipTlsConfig>,
-    swappable: Option<Arc<arc_swap::ArcSwap<tokio_rustls::rustls::ServerConfig>>>,
+    swappable: Option<TlsSwap>,
+    admin_tls: Option<(AdminTlsConfig, TlsSwap)>,
 ) {
-    match (tls, swappable) {
-        (Some(tls), Some(swap)) => spawn_sighup_reloader(tls, swap),
-        (None, None) => spawn_sighup_noop(),
+    let sip = match (tls, swappable) {
+        (Some(tls), Some(swap)) => Some((tls, swap)),
+        (None, None) => None,
         _ => {
             warn!(
                 "inconsistent SIGHUP wiring (one of tls/swappable is set, the other isn't); \
-                 falling back to no-op handler"
+                 ignoring SIP/TLS hot-reload"
             );
-            spawn_sighup_noop();
+            None
+        }
+    };
+    if sip.is_none() && admin_tls.is_none() {
+        spawn_sighup_noop();
+    } else {
+        spawn_sighup_reloader(sip, admin_tls);
+    }
+}
+
+/// Reload the admin-listener TLS cert into its swap (SIGHUP). Shared by
+/// the no-config reloader here and the config-file reloader in
+/// `crate::reload`, so both paths rotate the admin cert identically.
+/// A bad PEM keeps the previous cert (nginx-style), never crashes.
+pub(crate) fn reload_admin_tls_cert(tls: &AdminTlsConfig, swap: &TlsSwap) {
+    match load_admin_tls_server_config(tls) {
+        Ok(new_cfg) => {
+            swap.store(new_cfg);
+            metrics::counter!("siphon_ai_admin_tls_reload_attempts_total", "outcome" => "ok")
+                .increment(1);
+            info!(cert = %tls.cert_path.display(), "admin TLS cert reloaded on SIGHUP");
+        }
+        Err(e) => {
+            metrics::counter!("siphon_ai_admin_tls_reload_attempts_total", "outcome" => "failed")
+                .increment(1);
+            error!(cert = %tls.cert_path.display(), error = %e, "SIGHUP admin TLS reload failed; keeping previous cert");
         }
     }
 }
@@ -1463,31 +1549,27 @@ fn spawn_sighup_noop() {
     });
 }
 
-/// Install a SIGHUP handler that hot-reloads the SIP/TLS cert.
+/// Install a SIGHUP handler that hot-reloads the SIP/TLS and/or admin
+/// TLS cert (whichever are configured). Used on the no-config-file path
+/// (tests); the config-file path folds the same reloads into
+/// [`crate::reload::spawn_reload_handler`].
 ///
-/// On every `SIGHUP`, re-reads `[sip.tls].cert` + `.key` from disk,
-/// builds a fresh `rustls::ServerConfig`, and stores it into
-/// `swappable`. The next inbound TLS connection picks up the new
-/// cert; in-flight sessions keep using the cert they handshook with
-/// (RFC 5746-compliant rotation — see siphon-rs#49 for the upstream
-/// pattern).
+/// On every `SIGHUP`, re-reads each configured cert/key from disk,
+/// builds a fresh `rustls::ServerConfig`, and stores it into the
+/// relevant swap. The next connection picks up the new cert; in-flight
+/// sessions keep using the cert they handshook with (RFC 5746-compliant
+/// rotation — see siphon-rs#49).
 ///
 /// **Failure mode.** A broken PEM file on reload doesn't kill the
-/// daemon — we log `error!` and keep the old cert in place. Same
-/// shape as nginx's `nginx -s reload` semantics: if the new config
-/// is bad, the running config keeps serving.
+/// daemon — we log `error!` and keep the old cert in place (nginx-style:
+/// the running config keeps serving).
 ///
-/// **Concurrency.** One background tokio task. Lives for the
-/// daemon's lifetime (we never deregister the signal handler). The
-/// task is detached — its `JoinHandle` isn't kept anywhere because
-/// there's nothing to do with it.
-///
-/// `tls` is cloned so the task can survive the rest of `RuntimeBuilder`
-/// going out of scope; cert/key paths are owned strings in
-/// `SipTlsConfig` so this is a cheap clone.
+/// **Concurrency.** One detached background task, alive for the daemon's
+/// lifetime. Configs are cloned so the task outlives `RuntimeBuilder`;
+/// cert/key paths are owned, so the clone is cheap.
 fn spawn_sighup_reloader(
-    tls: SipTlsConfig,
-    swappable: Arc<arc_swap::ArcSwap<tokio_rustls::rustls::ServerConfig>>,
+    sip: Option<(SipTlsConfig, TlsSwap)>,
+    admin: Option<(AdminTlsConfig, TlsSwap)>,
 ) {
     use tokio::signal::unix::{signal, SignalKind};
 
@@ -1499,47 +1581,47 @@ fn spawn_sighup_reloader(
                 // is still usable — log loud and exit the task.
                 error!(
                     error = %e,
-                    "failed to install SIGHUP handler; SIP/TLS cert hot-reload disabled",
+                    "failed to install SIGHUP handler; TLS cert hot-reload disabled",
                 );
                 return;
             }
         };
         info!(
-            cert = %tls.cert_path.display(),
-            "SIP/TLS cert hot-reload installed; send SIGHUP to rotate"
+            sip_tls = sip.is_some(),
+            admin_tls = admin.is_some(),
+            "TLS cert hot-reload installed; send SIGHUP to rotate"
         );
         while stream.recv().await.is_some() {
-            match load_sip_tls_server_config(&tls) {
-                Ok(new_cfg) => {
-                    swappable.store(new_cfg);
-                    metrics::counter!(
-                        "siphon_ai_sip_tls_reload_attempts_total",
-                        "outcome" => "ok",
-                    )
-                    .increment(1);
-                    info!(
-                        cert = %tls.cert_path.display(),
-                        "SIP/TLS cert reloaded on SIGHUP"
-                    );
-                }
-                Err(e) => {
-                    metrics::counter!(
-                        "siphon_ai_sip_tls_reload_attempts_total",
-                        "outcome" => "failed",
-                    )
-                    .increment(1);
-                    error!(
-                        cert = %tls.cert_path.display(),
-                        error = %e,
-                        "SIGHUP cert reload failed; keeping previous cert"
-                    );
-                }
+            if let Some((tls, swap)) = &sip {
+                reload_sip_tls_cert(tls, swap);
+            }
+            if let Some((tls, swap)) = &admin {
+                reload_admin_tls_cert(tls, swap);
             }
         }
         // `recv()` returns `None` only on signal-handler teardown,
         // which we don't trigger. If it ever does, log so we know.
         warn!("SIGHUP signal stream ended; cert hot-reload offline");
     });
+}
+
+/// Reload the SIP-listener TLS cert into its swap (SIGHUP). Shared by
+/// the no-config reloader and `crate::reload`, mirroring
+/// [`reload_admin_tls_cert`].
+pub(crate) fn reload_sip_tls_cert(tls: &SipTlsConfig, swap: &TlsSwap) {
+    match load_sip_tls_server_config(tls) {
+        Ok(new_cfg) => {
+            swap.store(new_cfg);
+            metrics::counter!("siphon_ai_sip_tls_reload_attempts_total", "outcome" => "ok")
+                .increment(1);
+            info!(cert = %tls.cert_path.display(), "SIP/TLS cert reloaded on SIGHUP");
+        }
+        Err(e) => {
+            metrics::counter!("siphon_ai_sip_tls_reload_attempts_total", "outcome" => "failed")
+                .increment(1);
+            error!(cert = %tls.cert_path.display(), error = %e, "SIGHUP cert reload failed; keeping previous cert");
+        }
+    }
 }
 
 /// Build the lifecycle webhook sink from `[webhooks]` config.
@@ -2462,6 +2544,54 @@ mod tls_reload_tests {
         let path = base.join(format!("siphon-ai-tls-reload-test-{pid}-{seq}"));
         std::fs::create_dir_all(&path).unwrap();
         TempDir { path }
+    }
+
+    fn fixture_admin_tls_config(
+        cert: std::path::PathBuf,
+        key: std::path::PathBuf,
+    ) -> AdminTlsConfig {
+        AdminTlsConfig {
+            cert_path: cert,
+            key_path: key,
+        }
+    }
+
+    #[test]
+    fn load_admin_tls_server_config_returns_usable_config() {
+        let tmp = tempdir_for_test();
+        let (cert, key) = write_cert_a(tmp.path());
+        let tls = fixture_admin_tls_config(cert, key);
+        let cfg = load_admin_tls_server_config(&tls).expect("load admin cert A");
+        assert_eq!(Arc::strong_count(&cfg), 1);
+    }
+
+    #[test]
+    fn admin_reload_helper_swaps_cert_and_keeps_old_on_failure() {
+        let tmp = tempdir_for_test();
+        let (cert_a, key_a) = write_cert_a(tmp.path());
+        let (cert_b, key_b) = write_cert_b(tmp.path());
+
+        let tls_a = fixture_admin_tls_config(cert_a, key_a);
+        let swap = Arc::new(arc_swap::ArcSwap::from(
+            load_admin_tls_server_config(&tls_a).expect("load admin cert A"),
+        ));
+        let before = swap.load_full();
+
+        // Good reload (cert B) via the shared SIGHUP helper → new identity.
+        let tls_b = fixture_admin_tls_config(cert_b, key_b);
+        reload_admin_tls_cert(&tls_b, &swap);
+        let after = swap.load_full();
+        assert!(!Arc::ptr_eq(&before, &after), "good reload should swap");
+
+        // Bad reload (missing files) → helper keeps the previous cert.
+        let bogus =
+            fixture_admin_tls_config(tmp.path().join("nope.pem"), tmp.path().join("nope.key"));
+        reload_admin_tls_cert(&bogus, &swap);
+        let after_bad = swap.load_full();
+        assert!(
+            Arc::ptr_eq(&after, &after_bad),
+            "failed reload must keep the previous cert"
+        );
     }
 
     // Self-signed RSA-2048 cert A. Generated with:

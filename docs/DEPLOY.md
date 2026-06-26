@@ -114,7 +114,7 @@ operator's network, and the daemon container.
 | `[sip.tls].listen`| TCP    | TOML           | inbound   | TLS signaling. Defaults to the SIP IP + 5061. |
 | `[media].rtp_port_range` | UDP | TOML       | both      | RTP/RTCP. Forge allocates one even-numbered RTP port + the next odd RTCP port per call. Forward the whole range. |
 | `[observability].http_listen` | TCP | TOML  | inbound (cluster-local) | `/metrics`, `/health`, `/ready`. Unauthenticated — keep it cluster-local. Since 0.10.0 `/admin/*` is **not** served here (returns `404`); it moved to the dedicated `[admin]` listener below. |
-| `[admin].listen`  | TCP    | TOML           | inbound (cluster-local) | `/admin/*` control plane (0.10.0). Bearer-token auth + RBAC (`readonly` ⊂ `operator` ⊂ `admin`); omit `[admin]` and `/admin/*` isn't served at all. Still keep it off the public internet. |
+| `[admin].listen`  | TCP    | TOML           | inbound (cluster-local) | `/admin/*` control plane (0.10.0). Bearer-token auth + RBAC (`readonly` ⊂ `operator` ⊂ `admin`); omit `[admin]` and `/admin/*` isn't served at all. Set `[admin.tls]` (0.18.0) to serve HTTPS so the token is encrypted on a routable bind. Still keep it off the public internet. |
 | Outbound, dynamic | TCP    | `[bridge].ws_url` (per route) | outbound | WebSocket from daemon to operator's WS server. |
 | Outbound, dynamic | TCP    | `[cdr.webhook].url`, `[webhooks].url` | outbound | HTTP POSTs for CDRs and lifecycle webhooks. |
 | Outbound 9060     | UDP    | `[hep].collector` | outbound | HEP3 to Homer. UDP only in v1. |
@@ -523,8 +523,8 @@ reference in `docs/CONFIG.md` `[admin]`):
 ```toml
 [admin]
 # Dedicated listener for /admin/*. Bind to loopback (or a private
-# interface) — it is plain HTTP until native [admin].tls lands, so
-# front it with TLS termination if it must leave the host.
+# interface). On a routable bind, set [admin.tls] below so the bearer
+# token is encrypted on the wire (otherwise it's plain HTTP).
 listen = "127.0.0.1:9092"
 
 # One block per token. The secret is hashed (SHA-256) at load and
@@ -544,6 +544,14 @@ role  = "operator"
 name  = "automation"
 token = "${SIPHON_ADMIN_ADMIN}"
 role  = "admin"
+
+# Optional (0.18.0): serve /admin/* over HTTPS so the bearer token is
+# encrypted on a routable bind — no TLS-terminating proxy needed. Both
+# cert and key are required; the cert hot-reloads on SIGHUP (same as
+# [sip.tls]). Secret paths can use ${file:…}/${cred:…} too.
+[admin.tls]
+cert = "/etc/siphon-ai/admin.crt"
+key  = "/etc/siphon-ai/admin.key"
 ```
 
 Roles, lowest to highest (each inherits everything below it):
@@ -562,7 +570,7 @@ role, endpoint template, result, peer address — never the secret) and the
 A bearer token goes on every call:
 
 ```sh
-ADMIN=http://127.0.0.1:9092
+ADMIN=http://127.0.0.1:9092          # https://… when [admin.tls] is set
 curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/calls
 # missing/invalid token → 401 + WWW-Authenticate: Bearer
 # token below the endpoint's min role → 403
@@ -986,6 +994,7 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_rtp_packet_loss_ratio`       | histogram | —                                     | Packet-loss ratio (0.0-1.0) recorded on every `rtp_stats` emission. |
 | `siphon_ai_rtp_rtt_ms`                  | histogram | —                                     | RTCP-derived round-trip time (ms) per received Receiver Report (RFC 3550 §A.7). Populated since 0.3.2 (forge originates SRs); explicit buckets 10ms–1s. Records a sample roughly every RTCP cycle (~5s) once bidirectional RTCP is flowing. |
 | `siphon_ai_sip_tls_reload_attempts_total` | counter | `outcome=ok\|failed`                  | One tick per SIGHUP cert-reload attempt. `failed` means a broken cert/key on disk; the listener keeps serving the previous cert. |
+| `siphon_ai_admin_tls_reload_attempts_total` | counter | `outcome=ok\|failed`                | Same as above for the `[admin.tls]` listener cert (0.18.0). One tick per SIGHUP admin-cert reload; `failed` keeps the previous cert. Only emitted when `[admin.tls]` is configured. |
 | `siphon_ai_config_reloads_total`        | counter   | `result=applied\|no_change\|failed`   | SIGHUP config-file reloads (0.12.0). `applied` = a changed config loaded and the hot-reloadable sections (routes, webhook/CDR sinks) were swapped; `no_change` = the file was byte-identical to the last load; `failed` = the new config didn't load/compile and the running config was kept. Alert on `failed` after a deploy. |
 | `siphon_ai_conference_joins_total`      | counter   | `result=joined\|disabled\|too_many_rooms\|room_full\|rate_mismatch\|already_joined\|error` | Conference joins attempted (0.7.0). Every non-`joined` row leaves the call on its direct caller↔WS pair. |
 | `siphon_ai_conferences_active`          | gauge     | —                                     | Live conference rooms (0.7.0). A room spawns on first join and exits when its last member leaves. |

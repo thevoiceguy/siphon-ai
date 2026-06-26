@@ -104,6 +104,17 @@ impl Default for ShutdownConfig {
 pub struct AdminConfig {
     pub listen_addr: SocketAddr,
     pub auth: siphon_ai_telemetry::AdminAuth,
+    /// `Some` when `[admin.tls]` is configured — the listener serves
+    /// HTTPS instead of plain HTTP. Loaded (and hot-reloaded on SIGHUP)
+    /// by the daemon, like `[sip.tls]`.
+    pub tls: Option<AdminTlsConfig>,
+}
+
+/// Compiled `[admin.tls]` — PEM cert/key paths for the admin listener.
+#[derive(Debug, Clone)]
+pub struct AdminTlsConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
 }
 
 /// Compiled `[conference]` — conference rooms (0.7.0). Fail-closed:
@@ -763,6 +774,12 @@ pub enum CompileError {
         "[[admin.token]] {0:?} role is {1:?}; expected \"readonly\", \"operator\", or \"admin\""
     )]
     AdminUnknownRole(String, String),
+
+    #[error("[admin.tls] is present but [admin.tls].cert is missing or empty")]
+    AdminTlsCertRequired,
+
+    #[error("[admin.tls] is present but [admin.tls].key is missing or empty")]
+    AdminTlsKeyRequired,
 
     #[error("[webhooks].url is required when [webhooks].enabled = true")]
     WebhooksUrlRequired,
@@ -1979,9 +1996,27 @@ fn compile_admin(raw: Option<crate::raw::RawAdmin>) -> Result<Option<AdminConfig
         tokens.push(siphon_ai_telemetry::AdminToken::new(t.name, &t.token, role));
     }
 
+    // [admin.tls] (optional). When present, both cert and key are
+    // required and non-empty — fail loud rather than silently serving
+    // plain HTTP.
+    let tls = match raw.tls {
+        None => None,
+        Some(t) => {
+            let cert = t.cert.filter(|s| !s.is_empty());
+            let key = t.key.filter(|s| !s.is_empty());
+            let cert_path = cert.ok_or(CompileError::AdminTlsCertRequired)?;
+            let key_path = key.ok_or(CompileError::AdminTlsKeyRequired)?;
+            Some(AdminTlsConfig {
+                cert_path: PathBuf::from(cert_path),
+                key_path: PathBuf::from(key_path),
+            })
+        }
+    };
+
     Ok(Some(AdminConfig {
         listen_addr,
         auth: siphon_ai_telemetry::AdminAuth::new(tokens),
+        tls,
     }))
 }
 

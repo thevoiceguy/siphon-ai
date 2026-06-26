@@ -1,25 +1,61 @@
-//! `${VAR}` and `${VAR:-default}` expansion at config load time.
+//! Config-load-time secret/variable expansion.
 //!
 //! Per `docs/DEV_PLAN.md` §6.6 every string value in the TOML can
-//! reference an environment variable. We expand before parsing TOML
-//! into raw types so missing env vars surface as a single
-//! [`EnvError`] with line context, rather than as a downstream
-//! parse failure on a half-substituted string.
+//! reference an environment variable via `${VAR}` / `${VAR:-default}`.
+//! As of v0.18.0 a reference can also pull a secret from outside the
+//! process environment, so operators don't have to put plaintext
+//! secrets in env vars (visible in `/proc/<pid>/environ`, dumps, unit
+//! files). Two source prefixes are recognised inside `${...}`:
 //!
-//! Resolved values are never logged in expanded form — see
-//! [`expand`] for the redaction approach.
+//! | Form | Resolves to |
+//! |---|---|
+//! | `${VAR}` / `${VAR:-default}` | process env (default; unchanged) |
+//! | `${file:/path/to/secret}`    | trimmed contents of that file |
+//! | `${cred:NAME}`               | `$CREDENTIALS_DIRECTORY/NAME` contents |
+//!
+//! `file:` covers Docker/Kubernetes secrets and Vault-Agent templated
+//! files; `cred:` covers systemd `LoadCredential=` / `ImportCredential=`.
+//! All three share one fail-loud pass: a missing env var, an unreadable
+//! file, or an unset `$CREDENTIALS_DIRECTORY` surfaces as a single
+//! [`EnvError`] *before* the daemon starts, never as a downstream parse
+//! failure on a half-substituted string.
+//!
+//! Disambiguation: the `:-` default operator is always an env reference
+//! (checked first), so a literal env var named `file` with a default
+//! (`${file:-x}`) is never mistaken for the `file:` prefix. A path that
+//! itself contains `:-` is the one ambiguous case and fails loudly as a
+//! malformed reference rather than resolving silently.
+//!
+//! Resolved values are never logged in expanded form.
 
 use std::borrow::Cow;
 
 use thiserror::Error;
 
-/// Looks up an environment variable. Pluggable so tests can drive
-/// expansion without touching the real environment.
+/// Resolves config references to their values. Pluggable so tests can
+/// drive expansion without touching the real environment or filesystem.
+///
+/// Only [`lookup`](EnvSource::lookup) is required; the file and
+/// credential resolvers default to the real OS and are overridden in
+/// tests for hermeticity.
 pub trait EnvSource {
+    /// Look up an environment variable (`${VAR}`).
     fn lookup(&self, name: &str) -> Option<String>;
+
+    /// Read the full contents of a secret file (`${file:PATH}`). The
+    /// caller trims trailing newlines. Default reads the real filesystem.
+    fn read_file(&self, path: &str) -> std::io::Result<String> {
+        std::fs::read_to_string(path)
+    }
+
+    /// The systemd credentials directory (`$CREDENTIALS_DIRECTORY`), the
+    /// base path for `${cred:NAME}`. Default reads the process env.
+    fn credentials_dir(&self) -> Option<String> {
+        std::env::var("CREDENTIALS_DIRECTORY").ok()
+    }
 }
 
-/// Default impl: reads from the process environment.
+/// Default impl: reads from the process environment and filesystem.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ProcessEnv;
 
@@ -36,7 +72,23 @@ pub enum EnvError {
     #[error("environment variable {name:?} is referenced by config but not set")]
     Missing { name: String },
 
-    /// Malformed `${...}` — unterminated, empty name, etc.
+    /// `${file:PATH}` referenced a file that couldn't be read.
+    #[error("secret file {path:?} referenced by config could not be read: {message}")]
+    FileUnreadable { path: String, message: String },
+
+    /// `${cred:NAME}` referenced a systemd credential that couldn't be read.
+    #[error("systemd credential {name:?} referenced by config could not be read: {message}")]
+    CredentialUnreadable { name: String, message: String },
+
+    /// `${cred:NAME}` was used but `$CREDENTIALS_DIRECTORY` isn't set
+    /// (the daemon wasn't started with systemd `LoadCredential=`).
+    #[error(
+        "config references credential {name:?} via `${{cred:...}}` but \
+         $CREDENTIALS_DIRECTORY is not set"
+    )]
+    CredentialsDirUnset { name: String },
+
+    /// Malformed `${...}` — unterminated, empty name/path, etc.
     #[error("malformed env reference at byte {at}: {message}")]
     Malformed { at: usize, message: String },
 }
@@ -63,23 +115,7 @@ pub fn expand<E: EnvSource>(input: &str, env: &E) -> Result<String, EnvError> {
                 message: "unterminated `${`".into(),
             })?;
             let inner = &input[i + 2..close];
-            let (name, default) = match inner.split_once(":-") {
-                Some((n, d)) => (n, Some(d)),
-                None => (inner, None),
-            };
-            if !is_valid_env_name(name) {
-                return Err(EnvError::Malformed {
-                    at: start,
-                    message: format!("invalid env var name {name:?}"),
-                });
-            }
-            match env.lookup(name) {
-                Some(value) => out.push_str(&value),
-                None => match default {
-                    Some(d) => out.push_str(d),
-                    None => return Err(EnvError::Missing { name: name.into() }),
-                },
-            }
+            out.push_str(&resolve_ref(inner, env, start)?);
             i = close + 1;
         } else {
             out.push(input[i..].chars().next().expect("non-empty slice"));
@@ -91,6 +127,98 @@ pub fn expand<E: EnvSource>(input: &str, env: &E) -> Result<String, EnvError> {
         }
     }
     Ok(out)
+}
+
+/// Resolve a single `${...}` reference (the text between the braces).
+/// Dispatches on the source prefix; `at` is the byte offset of the
+/// opening `${` for error context.
+fn resolve_ref<E: EnvSource>(inner: &str, env: &E, at: usize) -> Result<String, EnvError> {
+    // The `:-` default operator is always an env reference, checked
+    // first so `${file:-x}` (env var `file`, default `x`) is never read
+    // as the `file:` prefix.
+    if let Some((name, default)) = inner.split_once(":-") {
+        return resolve_env(name, Some(default), at, env);
+    }
+    if let Some(path) = inner.strip_prefix("file:") {
+        return resolve_file(path, env, at);
+    }
+    if let Some(name) = inner.strip_prefix("cred:") {
+        return resolve_cred(name, env, at);
+    }
+    resolve_env(inner, None, at, env)
+}
+
+fn resolve_env<E: EnvSource>(
+    name: &str,
+    default: Option<&str>,
+    at: usize,
+    env: &E,
+) -> Result<String, EnvError> {
+    if !is_valid_env_name(name) {
+        return Err(EnvError::Malformed {
+            at,
+            message: format!("invalid env var name {name:?}"),
+        });
+    }
+    match env.lookup(name) {
+        Some(value) => Ok(value),
+        None => match default {
+            Some(d) => Ok(d.to_string()),
+            None => Err(EnvError::Missing { name: name.into() }),
+        },
+    }
+}
+
+fn resolve_file<E: EnvSource>(path: &str, env: &E, at: usize) -> Result<String, EnvError> {
+    if path.is_empty() {
+        return Err(EnvError::Malformed {
+            at,
+            message: "empty file path in `${file:...}`".into(),
+        });
+    }
+    match env.read_file(path) {
+        Ok(contents) => Ok(trim_secret(&contents)),
+        Err(e) => Err(EnvError::FileUnreadable {
+            path: path.into(),
+            message: e.to_string(),
+        }),
+    }
+}
+
+fn resolve_cred<E: EnvSource>(name: &str, env: &E, at: usize) -> Result<String, EnvError> {
+    if name.is_empty() {
+        return Err(EnvError::Malformed {
+            at,
+            message: "empty credential name in `${cred:...}`".into(),
+        });
+    }
+    // Credential names are flat identifiers under $CREDENTIALS_DIRECTORY;
+    // reject anything that could escape it.
+    if name.contains('/') || name.contains("..") {
+        return Err(EnvError::Malformed {
+            at,
+            message: format!("invalid credential name {name:?} (must not contain '/' or '..')"),
+        });
+    }
+    let dir = env
+        .credentials_dir()
+        .ok_or_else(|| EnvError::CredentialsDirUnset { name: name.into() })?;
+    let path = format!("{}/{}", dir.trim_end_matches('/'), name);
+    match env.read_file(&path) {
+        Ok(contents) => Ok(trim_secret(&contents)),
+        Err(e) => Err(EnvError::CredentialUnreadable {
+            name: name.into(),
+            message: e.to_string(),
+        }),
+    }
+}
+
+/// Strip trailing CR/LF from a file-sourced secret. Secret files are
+/// conventionally written with a trailing newline (`echo "..." > f`);
+/// internal and leading bytes are preserved so a secret that genuinely
+/// contains whitespace stays intact.
+fn trim_secret(contents: &str) -> String {
+    contents.trim_end_matches(['\r', '\n']).to_string()
 }
 
 fn find_close_brace(bytes: &[u8], from: usize) -> Option<usize> {
@@ -131,21 +259,44 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    /// Test env source backed by a HashMap.
-    struct MapEnv(HashMap<String, String>);
+    /// Test env source backed by HashMaps — hermetic across env vars,
+    /// "files" (keyed by path), and a fake `$CREDENTIALS_DIRECTORY`.
+    #[derive(Default)]
+    struct MapEnv {
+        vars: HashMap<String, String>,
+        files: HashMap<String, String>,
+        cred_dir: Option<String>,
+    }
     impl MapEnv {
         fn new<I: IntoIterator<Item = (&'static str, &'static str)>>(items: I) -> Self {
-            Self(
-                items
+            Self {
+                vars: items
                     .into_iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
-            )
+                ..Default::default()
+            }
+        }
+        fn with_file(mut self, path: &str, contents: &str) -> Self {
+            self.files.insert(path.to_string(), contents.to_string());
+            self
+        }
+        fn with_cred_dir(mut self, dir: &str) -> Self {
+            self.cred_dir = Some(dir.to_string());
+            self
         }
     }
     impl EnvSource for MapEnv {
         fn lookup(&self, name: &str) -> Option<String> {
-            self.0.get(name).cloned()
+            self.vars.get(name).cloned()
+        }
+        fn read_file(&self, path: &str) -> std::io::Result<String> {
+            self.files.get(path).cloned().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no such test file")
+            })
+        }
+        fn credentials_dir(&self) -> Option<String> {
+            self.cred_dir.clone()
         }
     }
 
@@ -236,5 +387,123 @@ mod tests {
         let c = expand_cow("${X}", &env).unwrap();
         assert!(matches!(c, Cow::Owned(_)));
         assert_eq!(c, "y");
+    }
+
+    // --- file: prefix --------------------------------------------------
+
+    #[test]
+    fn file_prefix_reads_contents() {
+        let env = MapEnv::default().with_file("/run/secrets/tok", "s3cret");
+        assert_eq!(
+            expand("token=${file:/run/secrets/tok}", &env).unwrap(),
+            "token=s3cret"
+        );
+    }
+
+    #[test]
+    fn file_prefix_trims_trailing_newline() {
+        // A secret written with `echo "x" > f` has a trailing newline.
+        let env = MapEnv::default().with_file("/s", "s3cret\n");
+        assert_eq!(expand("${file:/s}", &env).unwrap(), "s3cret");
+        let env = MapEnv::default().with_file("/s", "s3cret\r\n");
+        assert_eq!(expand("${file:/s}", &env).unwrap(), "s3cret");
+    }
+
+    #[test]
+    fn file_prefix_preserves_internal_whitespace() {
+        let env = MapEnv::default().with_file("/s", "a b\tc\n");
+        assert_eq!(expand("${file:/s}", &env).unwrap(), "a b\tc");
+    }
+
+    #[test]
+    fn file_prefix_missing_file_is_an_error() {
+        let env = MapEnv::default();
+        let err = expand("${file:/nope}", &env).unwrap_err();
+        match err {
+            EnvError::FileUnreadable { path, .. } => assert_eq!(path, "/nope"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_prefix_empty_path_is_malformed() {
+        let env = MapEnv::default();
+        let err = expand("${file:}", &env).unwrap_err();
+        assert!(matches!(err, EnvError::Malformed { .. }));
+    }
+
+    // --- cred: prefix --------------------------------------------------
+
+    #[test]
+    fn cred_prefix_reads_from_credentials_dir() {
+        let env = MapEnv::default()
+            .with_cred_dir("/run/creds")
+            .with_file("/run/creds/admin_token", "abc123\n");
+        assert_eq!(
+            expand("token=${cred:admin_token}", &env).unwrap(),
+            "token=abc123"
+        );
+    }
+
+    #[test]
+    fn cred_prefix_without_dir_is_an_error() {
+        let env = MapEnv::default(); // no CREDENTIALS_DIRECTORY
+        let err = expand("${cred:admin_token}", &env).unwrap_err();
+        match err {
+            EnvError::CredentialsDirUnset { name } => assert_eq!(name, "admin_token"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cred_prefix_missing_credential_is_an_error() {
+        let env = MapEnv::default().with_cred_dir("/run/creds");
+        let err = expand("${cred:gone}", &env).unwrap_err();
+        match err {
+            EnvError::CredentialUnreadable { name, .. } => assert_eq!(name, "gone"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cred_prefix_rejects_path_traversal() {
+        let env = MapEnv::default().with_cred_dir("/run/creds");
+        for bad in ["${cred:../etc/passwd}", "${cred:sub/dir}", "${cred:}"] {
+            let err = expand(bad, &env).unwrap_err();
+            assert!(
+                matches!(err, EnvError::Malformed { .. }),
+                "expected malformed for {bad}, got {err:?}"
+            );
+        }
+    }
+
+    // --- prefix vs env-default disambiguation --------------------------
+
+    #[test]
+    fn env_default_takes_precedence_over_file_prefix() {
+        // `${file:-x}` is env var `file` with default `x`, NOT a file ref.
+        let env = MapEnv::default();
+        assert_eq!(expand("${file:-fallback}", &env).unwrap(), "fallback");
+        let env = MapEnv::new([("file", "set")]);
+        assert_eq!(expand("${file:-fallback}", &env).unwrap(), "set");
+    }
+
+    #[test]
+    fn bare_file_name_is_an_env_lookup() {
+        // `${file}` (no colon) is a plain env var named `file`.
+        let env = MapEnv::new([("file", "v")]);
+        assert_eq!(expand("${file}", &env).unwrap(), "v");
+    }
+
+    #[test]
+    fn prefixes_mix_with_env_vars_in_one_string() {
+        let env = MapEnv::new([("HOST", "h")])
+            .with_cred_dir("/c")
+            .with_file("/c/pw", "p\n")
+            .with_file("/etc/tok", "t\n");
+        assert_eq!(
+            expand("${HOST}:${cred:pw}:${file:/etc/tok}", &env).unwrap(),
+            "h:p:t"
+        );
     }
 }

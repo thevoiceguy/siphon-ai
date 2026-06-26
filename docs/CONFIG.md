@@ -5,8 +5,52 @@ on the daemon binary. TOML is the only supported format (CLAUDE.md §4.6); all
 validation runs at config load time, not first-use, so a bad config fails
 loudly at startup instead of mid-call.
 
-`${VAR}` and `${VAR:-default}` are expanded from the process environment
-before TOML parsing. Unset variables without a default fail the load.
+## Secrets & variable expansion
+
+`${...}` references in any string value are expanded before TOML parsing, in a
+single fail-loud pass — an unresolvable reference fails the load instead of a
+half-substituted string reaching a parser or a call. Three source forms are
+recognised:
+
+| Form | Resolves to | Use for |
+|---|---|---|
+| `${VAR}` / `${VAR:-default}` | a **process environment** variable (with optional default) | the default; simplest |
+| `${file:/path/to/secret}` | the **file's contents** (trailing CR/LF trimmed) | Docker / Kubernetes secrets, Vault-Agent templated files |
+| `${cred:NAME}` | the contents of `$CREDENTIALS_DIRECTORY/NAME` | systemd `LoadCredential=` / `ImportCredential=` |
+
+The `file:` and `cred:` forms (v0.18.0) let you keep secrets — admin tokens,
+SIP digest passwords, webhook/CDR HMAC secrets, the HEP password — **out of the
+process environment** entirely (where they'd otherwise be visible in
+`/proc/<pid>/environ`, core dumps, and supervisor unit files). They work
+anywhere `${VAR}` works.
+
+- **`${file:PATH}`** reads the whole file and trims trailing newlines (so a
+  secret written with `echo "x" > f` resolves to `x`, not `x\n`); leading and
+  internal bytes are preserved. A missing/unreadable file fails the load.
+- **`${cred:NAME}`** reads `$CREDENTIALS_DIRECTORY/NAME`. `NAME` is a flat
+  identifier (no `/` or `..`). Used with systemd:
+
+  ```ini
+  # siphon-ai.service
+  [Service]
+  LoadCredential=admin_token:/etc/siphon-ai/secrets/admin_token
+  ```
+  ```toml
+  # config.toml
+  [[admin.token]]
+  name  = "ops"
+  token = "${cred:admin_token}"
+  role  = "operator"
+  ```
+  Without `$CREDENTIALS_DIRECTORY` set, a `${cred:...}` reference fails the
+  load (you didn't start under systemd `LoadCredential=`).
+
+> **Disambiguation.** The `:-` default operator is always an env reference, so
+> `${file:-x}` means "env var `file`, default `x`", **not** a `file:` lookup.
+> Reference a file as `${file:/abs/path}` (a real path, no `:-`).
+
+Unset env variables without a default fail the load; so do unreadable files and
+credentials. Resolved secret values are never logged.
 
 ## Top-level layout
 

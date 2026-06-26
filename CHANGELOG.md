@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Secret resolution from files & systemd credentials** (P1 "Security &
+  abuse hardening"; first chunk of v0.18.0). Config `${...}` references can now
+  pull a secret from outside the process environment, so plaintext secrets
+  needn't sit in env vars (visible in `/proc/<pid>/environ`, dumps, unit
+  files). Two new source prefixes, usable anywhere `${VAR}` works:
+  `${file:/path/to/secret}` (trimmed file contents — Docker/Kubernetes
+  secrets, Vault-Agent templated files) and `${cred:NAME}`
+  (`$CREDENTIALS_DIRECTORY/NAME` — systemd `LoadCredential=`). Same fail-loud
+  pass as `${VAR}`: a missing file, unset `$CREDENTIALS_DIRECTORY`, or path
+  traversal in a credential name fails the load. `${VAR}`/`${VAR:-default}`
+  behaviour is unchanged (the `:-` default operator still wins, so
+  `${file:-x}` stays an env reference). See `docs/CONFIG.md` → *Secrets &
+  variable expansion*.
+
 ## [0.17.0] - 2026-06-25
 
 ### Added

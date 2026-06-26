@@ -621,26 +621,47 @@ serves `[observability]`. Operator guide + the endpoint→role table:
 
 ```toml
 [admin]
-listen = "127.0.0.1:9092"      # dedicated listener; plain HTTP (bind loopback
-                               # or front with TLS until [admin].tls lands)
+listen = "127.0.0.1:9092"      # dedicated listener
 
 [[admin.token]]                # one block per token; at least one required
 name  = "ops-oncall"           # actor label in audit logs — NOT a secret
 token = "${SIPHON_ADMIN_OP}"   # the bearer secret; ${VAR} expansion works
 role  = "operator"             # readonly | operator | admin (roles nest)
+
+[admin.tls]                    # optional — serve /admin/* over HTTPS (0.18.0)
+cert = "${file:/etc/siphon/admin.crt}"   # PEM cert chain
+key  = "${cred:admin_tls_key}"           # PEM private key
 ```
 
 | Field            | Type        | Default        | Notes |
 |------------------|-------------|----------------|-------|
-| `listen`         | `host:port` | required if on | Where `/admin/*` is served. A non-loopback bind logs a warning (plain HTTP). |
+| `listen`         | `host:port` | required if on | Where `/admin/*` is served. A non-loopback bind **without `[admin.tls]`** logs a warning (the bearer token would travel in the clear). |
 | `token`          | table array | ≥ 1 required   | At least one `[[admin.token]]`; an `[admin]` block with no tokens is a fatal config error. |
 | `token[].name`   | string      | required       | Unique, non-empty label recorded as the audit-log actor. Duplicate names are a fatal error. |
-| `token[].token`  | string      | required       | The bearer secret (non-empty). Hashed (SHA-256) at load, compared in constant time, never logged. Use `${VAR}` to keep it out of the file. |
+| `token[].token`  | string      | required       | The bearer secret (non-empty). Hashed (SHA-256) at load, compared in constant time, never logged. Use `${VAR}` / `${file:…}` / `${cred:…}` to keep it out of the file. |
 | `token[].role`   | enum        | required       | `readonly` (GET/list) ⊂ `operator` (hangup, park/retrieve, conference CRUD) ⊂ `admin` (origination, `PUT /admin/log`, `hep/test`). Unknown value → fatal error. |
+| `tls.cert`       | path        | required if `[admin.tls]` | PEM certificate chain. Present `[admin.tls]` with a missing/empty `cert` → fatal error. |
+| `tls.key`        | path        | required if `[admin.tls]` | PEM private key. Loaded at startup (fail-loud) and **hot-reloaded on `SIGHUP`** alongside `[sip.tls]`, so cert rotation needs no restart. |
+
+### `[admin.tls]` — encrypt the admin listener (0.18.0)
+
+The bearer token authenticates the operator, but on a **plain-HTTP** listener
+it travels in the clear — fine on `127.0.0.1`, not on a routable bind. Set
+`[admin.tls]` to serve `/admin/*` over HTTPS directly (no proxy needed):
+
+- Both `cert` and `key` are required when `[admin.tls]` is present; a missing
+  or empty value fails the load.
+- The cert is **hot-reloaded on `SIGHUP`** (same mechanism as `[sip.tls]`):
+  the next connection picks up the new cert, in-flight ones keep theirs. A
+  broken PEM on reload keeps the previous cert (nginx-style), never crashes.
+  The `siphon_ai_admin_tls_reload_attempts_total{outcome}` counter tracks it.
+- Without `[admin.tls]`, a non-loopback `listen` still works but logs a
+  startup warning — bind loopback or front it with a TLS-terminating proxy.
 
 Validation is at load time (CLAUDE.md §4.6): no tokens, an empty name or
-secret, a duplicate name, an unknown role, or an unparseable `listen` all
-fail the daemon at startup rather than at first request.
+secret, a duplicate name, an unknown role, an unparseable `listen`, or
+`[admin.tls]` missing a cert/key all fail the daemon at startup rather than at
+first request.
 
 ## `[webhooks]`
 

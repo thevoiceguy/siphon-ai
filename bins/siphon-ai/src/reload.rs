@@ -38,7 +38,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use siphon_ai_cdr::{CdrRecord, CdrSink, CdrSinkHandle};
-use siphon_ai_config::{Config, OutboundConfig, SipTlsConfig};
+use siphon_ai_config::{AdminTlsConfig, Config, OutboundConfig, SipTlsConfig};
 use siphon_ai_core::OutboundService;
 use siphon_ai_routes::RouteSet;
 use siphon_ai_telemetry::{HepTelemetry, CONFIG_RELOADS_TOTAL};
@@ -259,6 +259,9 @@ pub struct ReloadContext {
     /// `Some` when TLS is configured — the cert is reloaded too (the
     /// prior dedicated TLS-reload behavior, folded into this handler).
     pub tls: Option<(SipTlsConfig, Arc<ArcSwap<ServerConfig>>)>,
+    /// `Some` when `[admin.tls]` is configured — the admin-listener cert
+    /// is reloaded alongside the SIP cert on each SIGHUP.
+    pub admin_tls: Option<(AdminTlsConfig, Arc<ArcSwap<ServerConfig>>)>,
     pub restart_fingerprints: Vec<(&'static str, String)>,
 }
 
@@ -299,18 +302,13 @@ pub fn spawn_reload_handler(ctx: ReloadContext) {
 
         while stream.recv().await.is_some() {
             // 1. TLS cert reload (independent of the config file).
+            //    Both SIP and admin certs rotate via the shared helpers
+            //    in `crate::runtime`.
             if let Some((tls, swap)) = &ctx.tls {
-                match crate::runtime::load_sip_tls_server_config(tls) {
-                    Ok(new_cfg) => {
-                        swap.store(new_cfg);
-                        metrics::counter!("siphon_ai_sip_tls_reload_attempts_total", "outcome" => "ok").increment(1);
-                        info!(cert = %tls.cert_path.display(), "SIP/TLS cert reloaded on SIGHUP");
-                    }
-                    Err(e) => {
-                        metrics::counter!("siphon_ai_sip_tls_reload_attempts_total", "outcome" => "failed").increment(1);
-                        error!(cert = %tls.cert_path.display(), error = %e, "SIGHUP cert reload failed; keeping previous cert");
-                    }
-                }
+                crate::runtime::reload_sip_tls_cert(tls, swap);
+            }
+            if let Some((tls, swap)) = &ctx.admin_tls {
+                crate::runtime::reload_admin_tls_cert(tls, swap);
             }
 
             // 2. Config reload.

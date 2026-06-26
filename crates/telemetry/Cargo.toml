@@ -24,6 +24,10 @@ thiserror.workspace                   = true
 # Admin bearer-token auth: SHA-256 the token + constant-time compare.
 sha2.workspace                        = true
 subtle.workspace                      = true
+# Optional server-side TLS for the admin listener ([admin.tls]). The
+# cert/key are loaded (and SIGHUP-reloaded) by the daemon, which hands
+# us the live `ServerConfig`; we only build a `TlsAcceptor` per accept.
+tokio-rustls.workspace                = true
 
 # HEP3 / Homer shipping. Owned by us (github.com/thevoiceguy/hep-rs +
 # the sip-hep / forge-hep adapter crates). Telemetry assembles the

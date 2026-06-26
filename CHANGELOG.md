@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Admin listener TLS — `[admin.tls]`** (P1 "Security & abuse hardening";
+  second chunk of v0.18.0). The authenticated `[admin]` listener can now serve
+  **HTTPS** directly, so the bearer token is encrypted on the wire on a
+  routable bind without a TLS-terminating proxy. Set `[admin.tls].cert` +
+  `.key` (both required when the table is present; missing/empty → fatal at
+  load). The cert is loaded at startup (fail-loud) and **hot-reloaded on
+  `SIGHUP`** alongside `[sip.tls]` — the next connection picks up the new cert,
+  in-flight ones keep theirs, and a broken PEM keeps the previous cert
+  (nginx-style). New metric `siphon_ai_admin_tls_reload_attempts_total`
+  `{outcome=ok|failed}`. Without `[admin.tls]` a non-loopback bind still works
+  but logs a sharpened startup warning (the token travels in the clear). See
+  `docs/CONFIG.md` → `[admin.tls]`.
+
 - **Secret resolution from files & systemd credentials** (P1 "Security &
   abuse hardening"; first chunk of v0.18.0). Config `${...}` references can now
   pull a secret from outside the process environment, so plaintext secrets

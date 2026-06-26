@@ -376,6 +376,87 @@ fn admin_unknown_role_and_bad_listen_are_errors() {
 }
 
 #[test]
+fn admin_tls_compiles_with_cert_and_key() {
+    let toml = ADMIN_BASE.replace(
+        "__ADMIN__",
+        r#"
+[admin]
+listen = "0.0.0.0:9092"
+[[admin.token]]
+name = "ops"
+token = "t"
+role = "operator"
+[admin.tls]
+cert = "/etc/siphon/admin.crt"
+key = "/etc/siphon/admin.key"
+"#,
+    );
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    let tls = cfg
+        .admin
+        .expect("admin configured")
+        .tls
+        .expect("admin.tls configured");
+    assert_eq!(tls.cert_path.to_str(), Some("/etc/siphon/admin.crt"));
+    assert_eq!(tls.key_path.to_str(), Some("/etc/siphon/admin.key"));
+}
+
+#[test]
+fn admin_tls_without_cert_or_key_is_an_error() {
+    // cert present, key missing
+    let no_key = ADMIN_BASE.replace(
+        "__ADMIN__",
+        "[admin]\nlisten=\"127.0.0.1:9092\"\n[[admin.token]]\nname=\"x\"\ntoken=\"t\"\nrole=\"admin\"\n[admin.tls]\ncert=\"/c.crt\"\n",
+    );
+    assert!(
+        matches!(
+            load_from_str_with_env(&no_key, &MapEnv::new([])).unwrap_err(),
+            LoadError::Compile(_)
+        ),
+        "[admin.tls] with cert but no key must fail loud"
+    );
+
+    // empty cert string
+    let empty_cert = ADMIN_BASE.replace(
+        "__ADMIN__",
+        "[admin]\nlisten=\"127.0.0.1:9092\"\n[[admin.token]]\nname=\"x\"\ntoken=\"t\"\nrole=\"admin\"\n[admin.tls]\ncert=\"\"\nkey=\"/k.key\"\n",
+    );
+    assert!(
+        matches!(
+            load_from_str_with_env(&empty_cert, &MapEnv::new([])).unwrap_err(),
+            LoadError::Compile(_)
+        ),
+        "[admin.tls] with an empty cert path must fail loud"
+    );
+}
+
+#[test]
+fn admin_tls_paths_env_expand() {
+    let toml = ADMIN_BASE.replace(
+        "__ADMIN__",
+        "[admin]\nlisten=\"127.0.0.1:9092\"\n[[admin.token]]\nname=\"x\"\ntoken=\"t\"\nrole=\"admin\"\n[admin.tls]\ncert=\"${ADMIN_CRT}\"\nkey=\"${ADMIN_KEY}\"\n",
+    );
+    let cfg = load_from_str_with_env(
+        &toml,
+        &MapEnv::new([("ADMIN_CRT", "/x/a.crt"), ("ADMIN_KEY", "/x/a.key")]),
+    )
+    .expect("compiles");
+    let tls = cfg.admin.unwrap().tls.expect("admin.tls");
+    assert_eq!(tls.cert_path.to_str(), Some("/x/a.crt"));
+    assert_eq!(tls.key_path.to_str(), Some("/x/a.key"));
+}
+
+#[test]
+fn admin_without_tls_has_none() {
+    let toml = ADMIN_BASE.replace(
+        "__ADMIN__",
+        "[admin]\nlisten=\"127.0.0.1:9092\"\n[[admin.token]]\nname=\"x\"\ntoken=\"t\"\nrole=\"admin\"\n",
+    );
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    assert!(cfg.admin.unwrap().tls.is_none());
+}
+
+#[test]
 fn unknown_codec_is_a_compile_error() {
     let env = MapEnv::new([]);
     let toml = r#"

@@ -34,8 +34,11 @@
 //! observability listener no longer serves `/admin/*`. `dispatch` itself
 //! is unauthenticated by design — it runs only after `AdminServer` has
 //! authenticated the bearer token and checked the endpoint's minimum
-//! role. The admin listener is plain HTTP, so bind it on loopback or
-//! front it with TLS termination until native `[admin].tls` lands.
+//! role. Set `[admin.tls]` (0.18.0) to serve the listener over HTTPS so
+//! the bearer token is encrypted on the wire on a routable bind; without
+//! it the listener is plain HTTP — bind it on loopback or front it with
+//! a TLS-terminating proxy (the runtime warns on a non-loopback
+//! plain-HTTP bind).
 //!
 //! ## Dependency injection
 //!

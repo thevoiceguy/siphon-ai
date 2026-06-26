@@ -35,7 +35,7 @@ pub use admin::{
 };
 pub use auth::{AdminAuth, AdminToken, AuthReject, Role};
 pub use hep::{HepBuildError, HepTelemetry, HepTelemetryBuild, HepWorkerHandle};
-pub use http::{AdminServer, ObservabilityServer};
+pub use http::{AdminServer, AdminTlsConfigFn, ObservabilityServer};
 pub use log_filter::{LogFilterError, LogFilterHandle};
 
 // Re-exports for the daemon binary so it doesn't need a second

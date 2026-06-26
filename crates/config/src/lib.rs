@@ -34,7 +34,7 @@ use std::path::Path;
 use thiserror::Error;
 
 pub use compile::{
-    compile, AdminConfig, CdrConfig, CdrFileConfig, CdrWebhookConfig, CompileError,
+    compile, AdminConfig, AdminTlsConfig, CdrConfig, CdrFileConfig, CdrWebhookConfig, CompileError,
     ConferenceConfig, Config, Gateway, GatewayCredentials, HepConfig, MediaConfig, NodeConfig,
     ObservabilityConfig, OutboundConfig, ParkConfig, ParkTimeoutAction, RegisterConfig,
     SecurityConfig, ShutdownConfig, SipConfig, SipTlsConfig, SipTransport, TrunkCidr,

@@ -484,6 +484,31 @@ impl Runtime {
             ))
         });
 
+        // Inbound INVITE admission control (0.19.0). Per-source rate
+        // limit + a global concurrency cap whose live count reads the
+        // call registry. Built from `[sip.admission]`; `None` ⇒ off.
+        let admission = sip.admission.as_ref().map(|a| {
+            let registry = acceptor.registry().clone();
+            let active_count: siphon_ai_sip_glue::ActiveCallCountFn =
+                Arc::new(move || registry.len());
+            info!(
+                max_per_sec = a.max_per_sec,
+                burst = a.burst,
+                drop_after = a.drop_after,
+                max_concurrent = a.max_concurrent,
+                max_sources = a.max_sources,
+                "inbound INVITE admission control enabled ([sip.admission])"
+            );
+            Arc::new(siphon_ai_sip_glue::InviteAdmission::new(
+                a.max_per_sec,
+                a.burst,
+                a.drop_after,
+                a.max_concurrent,
+                a.max_sources,
+                active_count,
+            ))
+        });
+
         let mut routing_handler_builder =
             RoutingHandler::new(Arc::clone(&route_swap), Arc::clone(&acceptor))
                 .with_dialog_terminator(dialog_terminator)
@@ -496,6 +521,9 @@ impl Runtime {
         }
         if let Some(auth) = digest_auth {
             routing_handler_builder = routing_handler_builder.with_digest_auth(auth);
+        }
+        if let Some(adm) = admission {
+            routing_handler_builder = routing_handler_builder.with_admission(adm);
         }
         let routing_handler = Arc::new(routing_handler_builder);
 

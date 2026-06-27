@@ -406,6 +406,41 @@ outcome is counted on `siphon_ai_sip_auth_total{result}`
 (`ok`/`challenged`/`failed`/`stale`). `[sip.auth]` changes are
 restart-required on `SIGHUP` (part of `[sip]`).
 
+## `[sip.admission]` — inbound INVITE admission control (0.19.0)
+
+A DoS posture beyond the `[[trunk]]` allowlist: shed abusive inbound
+INVITEs **before** any trunk / auth / route work. Two independent,
+optional limits — a **per-source token bucket** keyed on the source IP,
+and a **global concurrency cap**. **Off by default** (omit the block, or
+leave both `max_per_sec` and `max_concurrent` at `0`). Complements the
+external `fail2ban` recipe (`docs/SECURITY_FAIL2BAN.md`) with an
+in-process, immediate response.
+
+```toml
+[sip.admission]
+max_per_sec    = 10     # per-source new-INVITE rate (token bucket); 0 = off
+burst          = 20     # per-source bucket capacity; default = max_per_sec
+drop_after     = 10     # consecutive per-source rejects → silent drop (not 503)
+max_concurrent = 500    # global cap on concurrent active calls; 0 = off
+max_sources    = 10000  # cap on tracked source IPs (bounded memory)
+```
+
+| Field        | Type | Default        | Notes |
+|--------------|------|----------------|-------|
+| `max_per_sec`    | int | `0` (off) | Per-source steady rate (tokens/sec), keyed on the transport source IP. A source over its rate is answered `503 Service Unavailable` + `Retry-After`. |
+| `burst`          | int | `max_per_sec` | Per-source bucket capacity. Must be ≥ `max_per_sec` (a smaller burst is a fatal config error). |
+| `drop_after`     | int | `10`      | After this many **consecutive** per-source rejects, further INVITEs from that source are **silently dropped** (no `503`) — an obvious flood doesn't earn a response. A single admitted INVITE resets the counter. |
+| `max_concurrent` | int | `0` (off) | Global cap on concurrent active calls (read from the call registry). A new INVITE past the cap is answered `503`. Independent of `max_per_sec`. |
+| `max_sources`    | int | `10000`   | Cap on distinct source IPs tracked. Idle (then oldest) entries are evicted past this, so the limiter can't leak memory under a spoofed-source flood. |
+
+Admission runs as the **first** gate on a new out-of-dialog INVITE
+(before drain / trunk / auth / route), so rejected load costs almost
+nothing. Outcomes are counted on
+`siphon_ai_invite_admission_total{result=accepted|rate_limited|dropped}`,
+with `siphon_ai_invite_admission_sources` gauging the live table size.
+`[sip.admission]` changes are restart-required on `SIGHUP` (part of
+`[sip]`).
+
 ## `[outbound]` + `[[gateway]]` — outbound call origination (0.6.0)
 
 SiphonAI can **place** calls (not just answer them) and bridge them to a WS

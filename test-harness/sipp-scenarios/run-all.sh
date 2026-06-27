@@ -321,6 +321,52 @@ run_scenario digest_auth_caller.xml || failures=$((failures + 1))
 da_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: INVITE admission control ──────────
+# Exercises [sip.admission] per-source rate limiting end-to-end with
+# max_per_sec = 1, burst = 1: a warmup call consumes the single token
+# (and confirms admission lets a normal call through), then a second
+# INVITE from the same source — well within the 1 s refill window — is
+# rejected with 503. A fresh daemon runs the tight config; reuses the
+# echo WS.
+echo
+echo "─── auxiliary phase: admission ────────────────────────"
+AD_DAEMON_LOG=$(mktemp -t siphon-ai-ad.XXXXXX.log)
+AD_CONFIG=$(mktemp -t siphon-ai-ad.XXXXXX.toml)
+cat >"$AD_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-ad"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[sip.admission]
+max_per_sec = 1
+burst = 1
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:8765/"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$AD_CONFIG" \
+    >"$AD_DAEMON_LOG" 2>&1 &
+AD_DAEMON_PID=$!
+ad_cleanup() {
+    kill "$AD_DAEMON_PID" 2>/dev/null || true
+    wait "$AD_DAEMON_PID" 2>/dev/null || true
+}
+trap ad_cleanup EXIT
+sleep 1.2
+
+total=$((total + 2))
+run_scenario admission_warmup.xml || failures=$((failures + 1))
+run_scenario admission_invite_503.xml || failures=$((failures + 1))
+
+ad_cleanup
+trap - EXIT
+
 # ─── Always-on auxiliary phase: recording ─────────────────────────
 # Verifies `[recording].mode = "always"` writes a valid stereo WAV. A
 # fresh daemon records to a temp dir; after one basic call we assert the

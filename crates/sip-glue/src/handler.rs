@@ -283,6 +283,11 @@ pub struct RoutingHandler<A> {
     /// allowlist, so it runs after the allowlist and before route
     /// dispatch.
     digest_auth: Option<Arc<crate::digest::InboundDigestAuth>>,
+    /// Inbound INVITE admission control (0.19.0). `None` ⇒ off (no
+    /// `[sip.admission]`). When set, it's the **first** gate on a new
+    /// INVITE — per-source rate limit + global concurrency cap — so a
+    /// flood is shed before any trunk/auth/route work.
+    admission: Option<Arc<crate::admission::InviteAdmission>>,
 }
 
 impl<A> RoutingHandler<A> {
@@ -303,6 +308,7 @@ impl<A> RoutingHandler<A> {
             drain: crate::drain::DrainFlag::new(),
             drain_retry_after_secs: 5,
             digest_auth: None,
+            admission: None,
         }
     }
 
@@ -371,6 +377,15 @@ impl<A> RoutingHandler<A> {
         self
     }
 
+    /// Install inbound INVITE admission control (0.19.0). The daemon
+    /// constructs the [`InviteAdmission`](crate::admission::InviteAdmission)
+    /// from `[sip.admission]` (the active-call count comes from the
+    /// `CallRegistry`). Without this call, no INVITE is rate-limited.
+    pub fn with_admission(mut self, admission: Arc<crate::admission::InviteAdmission>) -> Self {
+        self.admission = Some(admission);
+        self
+    }
+
     /// Snapshot of the current route table (after any SIGHUP reload).
     pub fn routes(&self) -> Arc<RouteSet> {
         self.routes.load_full()
@@ -413,6 +428,49 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                     sip_call_id,
                 })
                 .await;
+        }
+
+        // Admission control (0.19.0). The FIRST gate on a new INVITE —
+        // per-source rate limit + global concurrency cap — so a flood is
+        // shed before any drain/trunk/auth/route work. A rate trip is a
+        // retryable 503; a source flooding past the drop threshold gets
+        // no response at all (don't amplify).
+        if let Some(admission) = self.admission.as_ref() {
+            let decision = admission.check(ctx.peer().ip());
+            metrics::counter!(
+                "siphon_ai_invite_admission_total",
+                "result" => decision.metric_result(),
+            )
+            .increment(1);
+            metrics::gauge!("siphon_ai_invite_admission_sources")
+                .set(admission.source_count() as f64);
+            match decision {
+                crate::admission::AdmissionDecision::Accept => {}
+                crate::admission::AdmissionDecision::Reject503 => {
+                    warn!(
+                        peer = %ctx.peer(),
+                        "INVITE rejected: admission rate limit (503 Service Unavailable)"
+                    );
+                    let mut response =
+                        UserAgentServer::create_response(request, 503, "Service Unavailable");
+                    let _ = response.headers_mut().set_or_push(
+                        "Retry-After",
+                        crate::admission::ADMISSION_RETRY_AFTER_SECS.to_string(),
+                    );
+                    self.fill_response(&mut response, ctx).await;
+                    handle.send_final(response).await;
+                    return Ok(());
+                }
+                crate::admission::AdmissionDecision::Drop => {
+                    // Silently drop — no response. The retransmits a
+                    // flooder sends will be dropped just as cheaply.
+                    debug!(
+                        peer = %ctx.peer(),
+                        "INVITE dropped: admission flood threshold (no response)"
+                    );
+                    return Ok(());
+                }
+            }
         }
 
         // Drain gate (graceful shutdown, 0.17.0). We've already

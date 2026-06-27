@@ -21,6 +21,7 @@
 //! - register: UAC REGISTER lifecycle (Week 4)
 
 pub mod dialog;
+pub mod digest;
 pub mod drain;
 pub mod handler;
 pub mod invite;
@@ -31,6 +32,7 @@ pub use dialog::{
     dispatch_bye, dispatch_cancel, DialogAction, DialogTerminator, DialogTerminatorHandle,
     NullDialogTerminator,
 };
+pub use digest::{DigestOutcome, InboundDigestAuth};
 pub use drain::DrainFlag;
 pub use handler::{
     dispatch_invite, AckCall, CallAcceptor, MatchedCall, RegisterSourceResolver, ReinviteCall,

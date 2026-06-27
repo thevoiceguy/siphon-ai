@@ -270,6 +270,57 @@ fi
 ss_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: inbound digest auth ───────────────
+# Exercises [sip.auth] end-to-end: SIPp sends an INVITE with no
+# credentials, gets a 401 + WWW-Authenticate, retries with the digest
+# Authorization for carrier-a, and is admitted (200 → ACK → BYE). A
+# fresh daemon runs with [sip.auth] enabled; no trunks are declared, so
+# every INVITE is challenged (legacy-mode require_all).
+echo
+echo "─── auxiliary phase: digest_auth ──────────────────────"
+DA_DAEMON_LOG=$(mktemp -t siphon-ai-da.XXXXXX.log)
+DA_CONFIG=$(mktemp -t siphon-ai-da.XXXXXX.toml)
+cat >"$DA_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-da"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+# MD5 here because SIPp's [authentication] digest client only computes
+# MD5 reliably; the SHA-256 verify path is covered by the sip-glue unit
+# round-trip test. Both share the same challenge/verify code.
+[sip.auth]
+enabled = true
+realm = "siphon.example"
+algorithm = "MD5"
+[[sip.auth.user]]
+username = "carrier-a"
+password = "s3cret-sipp"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:8765/"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$DA_CONFIG" \
+    >"$DA_DAEMON_LOG" 2>&1 &
+DA_DAEMON_PID=$!
+da_cleanup() {
+    kill "$DA_DAEMON_PID" 2>/dev/null || true
+    wait "$DA_DAEMON_PID" 2>/dev/null || true
+}
+trap da_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+run_scenario digest_auth_caller.xml || failures=$((failures + 1))
+
+da_cleanup
+trap - EXIT
+
 # ─── Always-on auxiliary phase: recording ─────────────────────────
 # Verifies `[recording].mode = "always"` writes a valid stereo WAV. A
 # fresh daemon records to a temp dir; after one basic call we assert the

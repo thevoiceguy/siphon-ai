@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Inbound digest authentication — `[sip.auth]`** (P1 "Security & abuse
+  hardening"; first chunk of v0.19.0). Challenge inbound INVITEs with RFC 3261
+  §22 / RFC 7616 digest auth, so trust no longer rests on a spoofable network
+  identity (source IP / `From:` host). A new out-of-dialog INVITE that needs
+  auth and arrives without a valid `Authorization` is answered `401
+  Unauthorized` + `WWW-Authenticate` (nonce/realm/qop); the peer re-sends with
+  a digest `response` verified against the configured credentials. Replay is
+  bounded by a server nonce TTL (an expired nonce gets a `stale=true`
+  re-challenge). Configured by `[sip.auth]` (`enabled`, `realm`, `algorithm` =
+  MD5/SHA-256/SHA-512, `qop`, and `[[sip.auth.user]]` credentials) — passwords
+  resolve via `${file:…}`/`${cred:…}` (v0.18.0). Digest is an **AND-gate with
+  the `[[trunk]]` allowlist**, opt-in per trunk via `auth_required = true`, so
+  a static-IP carrier that doesn't send credentials stays allowlist-only and
+  isn't broken by enabling auth; with no trunks (legacy mode) every INVITE is
+  challenged. New metric `siphon_ai_sip_auth_total{result=ok|challenged|failed|stale}`.
+  Uses the upstream `sip-auth` server-side verifier (no siphon-rs change).
+  Off by default; no protocol/CDR/schema break. See `docs/CONFIG.md` →
+  `[sip.auth]`.
+
 ## [0.18.0] - 2026-06-26
 
 ### Added

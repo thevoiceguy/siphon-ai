@@ -288,6 +288,7 @@ trust decisions.
 | `name`       | string   | required, unique | Dialplan handle. Becomes the call's `register_source` when this trunk matches. |
 | `peer_addrs` | string[] | unset        | Allowed source addresses. Each entry is either an exact IP (`"203.0.113.10"`) or a CIDR (`"10.0.0.0/24"`, `"2001:db8::/32"`). Exact IPs are stored as `/32` (IPv4) or `/128` (IPv6). |
 | `from_hosts` | string[] | unset        | Allowed `From:` URI hostnames, case-insensitive. For trunks whose egress IP rotates but the SIP From domain is stable. |
+| `auth_required` | bool | `false`      | Require `[sip.auth]` digest authentication for INVITEs from this trunk, **in addition** to the allowlist match (0.19.0). Leave `false` for a static-IP carrier that doesn't send credentials; set `true` for a trunk with no stable egress IP. Requires `[sip.auth].enabled`. |
 
 ```toml
 [[trunk]]
@@ -344,7 +345,66 @@ request_uri_user = "9000"
   trunks should pin TLS at the transport (`transports = ["tls"]`
   with the carrier's cert pinned by the OS trust store).
 - Digest auth on inbound INVITEs (RFC 3261 §22) is the proper
-  "no trust in network" answer; it's a post-v1 feature.
+  "no trust in network" answer — shipped in 0.19.0 as
+  [`[sip.auth]`](#sipauth--inbound-digest-authentication-0190). Enable it
+  (and set `auth_required` on the trunks that need it) for any
+  internet-facing trunk without a static carrier IP.
+
+## `[sip.auth]` — inbound digest authentication (0.19.0)
+
+Challenge inbound INVITEs with RFC 3261 §22 / RFC 7616 digest auth, so
+trust no longer rests on a spoofable network identity (source IP /
+`From:` host). A new out-of-dialog INVITE that needs auth and arrives
+without a valid `Authorization` is answered `401 Unauthorized` with a
+`WWW-Authenticate` challenge (nonce, realm, qop); the peer re-sends the
+INVITE with a digest `response` computed from its shared secret, which is
+verified against the configured credentials. Replay is bounded by a
+server nonce with a TTL; an expired nonce gets a `stale=true`
+re-challenge (no user re-prompt). **Off by default.**
+
+```toml
+[sip.auth]
+enabled   = true
+realm     = "siphon.example"      # advertised in the challenge + folded into HA1
+algorithm = "SHA-256"             # MD5 | SHA-256 (default) | SHA-512
+qop       = "auth"                # auth (default) | auth-int
+
+[[sip.auth.user]]
+username = "carrier-a"
+password = "${file:/run/secrets/carrier_a_sip}"   # keep it out of the file
+
+[[sip.auth.user]]
+username = "softphone-12"
+password = "${cred:softphone_12_sip}"
+```
+
+| Field        | Type     | Default    | Notes |
+|--------------|----------|------------|-------|
+| `enabled`    | bool     | `false`    | Master switch. `false` ⇒ no INVITE is ever challenged. |
+| `realm`      | string   | required if on | The digest realm advertised in the challenge and folded into HA1. Typically your SIP domain. Empty/missing while `enabled` → fatal at load. |
+| `algorithm`  | enum     | `SHA-256`  | `MD5` \| `SHA-256` \| `SHA-512` (case-insensitive). MD5 is accepted for legacy peers but is weak (RFC 7616 §3) — prefer SHA-256. |
+| `qop`        | enum     | `auth`     | `auth` \| `auth-int`. |
+| `user[]`     | table array | ≥ 1 if on | At least one `[[sip.auth.user]]` when `enabled`. |
+| `user[].username` | string | required | SIP username presented in `Authorization`. Duplicate usernames → fatal error. |
+| `user[].password` | string | required | Shared secret. Held in memory as cleartext to recompute HA1 on verify (like `[[gateway]]`/`[[register]]`); use `${file:…}`/`${cred:…}` to keep it out of the config file. Empty → fatal error. |
+
+### Which INVITEs get challenged
+
+Digest is an **AND-gate with the `[[trunk]]` allowlist** — an INVITE must
+pass the allowlist *and* digest. Which sources are challenged depends on
+the trunk policy:
+
+- **With `[[trunk]]` blocks:** only trunks that set `auth_required = true`
+  are challenged. A static-IP carrier that doesn't send credentials stays
+  allowlist-only (set `auth_required = false` / omit it) — so enabling
+  `[sip.auth]` never breaks a trunk that isn't expecting a challenge.
+- **No `[[trunk]]` blocks (legacy mode):** every new INVITE is challenged
+  when `[sip.auth].enabled`.
+
+In-dialog requests (re-INVITE, ACK, BYE) are never re-challenged. The
+outcome is counted on `siphon_ai_sip_auth_total{result}`
+(`ok`/`challenged`/`failed`/`stale`). `[sip.auth]` changes are
+restart-required on `SIGHUP` (part of `[sip]`).
 
 ## `[outbound]` + `[[gateway]]` — outbound call origination (0.6.0)
 

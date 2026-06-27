@@ -312,6 +312,9 @@ pub struct TrunkConfig {
     /// Allowed From-URI hostnames, lowercased. Empty = skip
     /// From-host check.
     pub from_hosts: Vec<String>,
+    /// Require `[sip.auth]` digest on INVITEs from this trunk (AND the
+    /// allowlist match). Default `false` ⇒ allowlist-only.
+    pub auth_required: bool,
 }
 
 /// CIDR range matcher used by [`TrunkConfig::peer_addrs`]. Stored
@@ -513,6 +516,47 @@ pub struct SipConfig {
     /// offer in the 200 OK, read the answer from the ACK. `false`
     /// rejects an offerless INVITE with 488. Default `true`.
     pub allow_delayed_offer: bool,
+    /// `Some` when `[sip.auth].enabled` — RFC 3261 §22 inbound digest
+    /// authentication. `None` ⇒ off.
+    pub auth: Option<SipAuthConfig>,
+}
+
+/// Compiled `[sip.auth]` — inbound digest authentication policy +
+/// credential set. `algorithm`/`qop` are stored as the canonical
+/// RFC strings (validated at load) so the SIP-glue layer can hand
+/// them straight to the upstream digest parser.
+#[derive(Debug, Clone)]
+pub struct SipAuthConfig {
+    pub realm: String,
+    /// Canonical algorithm token: `MD5` | `SHA-256` | `SHA-512`.
+    pub algorithm: String,
+    /// Canonical qop token: `auth` | `auth-int`.
+    pub qop: String,
+    pub users: Vec<SipAuthUser>,
+}
+
+/// One inbound digest credential. The password is cleartext (the
+/// upstream verifier computes HA1 from it on each challenge), as with
+/// `[[gateway]]`/`[[register]]`.
+#[derive(Clone)]
+pub struct SipAuthUser {
+    pub username: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for SipAuthUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the cleartext password. A non-reversible
+        // fingerprint stands in so the SIGHUP restart-required check
+        // (which hashes the Debug form) still notices a password change.
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.password.hash(&mut h);
+        f.debug_struct("SipAuthUser")
+            .field("username", &self.username)
+            .field("password_fp", &format!("{:016x}", h.finish()))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -781,6 +825,31 @@ pub enum CompileError {
     #[error("[admin.tls] is present but [admin.tls].key is missing or empty")]
     AdminTlsKeyRequired,
 
+    #[error("[sip.auth].enabled = true but [sip.auth].realm is missing or empty")]
+    SipAuthRealmRequired,
+
+    #[error(
+        "[sip.auth].algorithm {0:?} is unknown; expected \"MD5\", \"SHA-256\", or \"SHA-512\""
+    )]
+    SipAuthUnknownAlgorithm(String),
+
+    #[error("[sip.auth].qop {0:?} is unknown; expected \"auth\" or \"auth-int\"")]
+    SipAuthUnknownQop(String),
+
+    #[error(
+        "[sip.auth].enabled = true but has no [[sip.auth.user]] entries to authenticate against"
+    )]
+    SipAuthNoUsers,
+
+    #[error("[[sip.auth.user]] has an empty username")]
+    SipAuthUserEmptyName,
+
+    #[error("[[sip.auth.user]] {0:?} has an empty password")]
+    SipAuthUserEmptySecret(String),
+
+    #[error("[[sip.auth.user]] username {0:?} is used more than once")]
+    SipAuthDuplicateUser(String),
+
     #[error("[webhooks].url is required when [webhooks].enabled = true")]
     WebhooksUrlRequired,
 
@@ -1043,6 +1112,8 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
         .preferred_session_expires_secs
         .map(|n| Duration::from_secs(n as u64));
 
+    let auth = compile_sip_auth(raw.auth)?;
+
     Ok(SipConfig {
         listen_addr,
         transports,
@@ -1054,7 +1125,73 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
         min_session_expires,
         preferred_session_expires,
         allow_delayed_offer: raw.allow_delayed_offer,
+        auth,
     })
+}
+
+/// Compile `[sip.auth]`. `None`/`enabled = false` ⇒ off. When enabled,
+/// require a realm, ≥1 user with non-empty username+password, and a
+/// recognised algorithm/qop (canonicalised to the RFC token).
+fn compile_sip_auth(
+    raw: Option<crate::raw::RawSipAuth>,
+) -> Result<Option<SipAuthConfig>, CompileError> {
+    let Some(raw) = raw else { return Ok(None) };
+    if !raw.enabled {
+        return Ok(None);
+    }
+
+    let realm = raw.realm.unwrap_or_default();
+    if realm.trim().is_empty() {
+        return Err(CompileError::SipAuthRealmRequired);
+    }
+
+    // Canonicalise algorithm/qop to the exact RFC token the upstream
+    // digest parser expects (case-insensitive in, canonical out).
+    let algorithm = match raw.algorithm.as_deref() {
+        None => "SHA-256".to_string(),
+        Some(a) => match a.to_ascii_uppercase().as_str() {
+            "MD5" => "MD5".to_string(),
+            "SHA-256" => "SHA-256".to_string(),
+            "SHA-512" => "SHA-512".to_string(),
+            _ => return Err(CompileError::SipAuthUnknownAlgorithm(a.to_string())),
+        },
+    };
+    let qop = match raw.qop.as_deref() {
+        None => "auth".to_string(),
+        Some(q) => match q.to_ascii_lowercase().as_str() {
+            "auth" => "auth".to_string(),
+            "auth-int" => "auth-int".to_string(),
+            _ => return Err(CompileError::SipAuthUnknownQop(q.to_string())),
+        },
+    };
+
+    if raw.users.is_empty() {
+        return Err(CompileError::SipAuthNoUsers);
+    }
+    let mut users = Vec::with_capacity(raw.users.len());
+    let mut seen = std::collections::HashSet::new();
+    for u in raw.users {
+        if u.username.trim().is_empty() {
+            return Err(CompileError::SipAuthUserEmptyName);
+        }
+        if u.password.is_empty() {
+            return Err(CompileError::SipAuthUserEmptySecret(u.username));
+        }
+        if !seen.insert(u.username.clone()) {
+            return Err(CompileError::SipAuthDuplicateUser(u.username));
+        }
+        users.push(SipAuthUser {
+            username: u.username,
+            password: u.password,
+        });
+    }
+
+    Ok(Some(SipAuthConfig {
+        realm,
+        algorithm,
+        qop,
+        users,
+    }))
 }
 
 fn compile_call_progress(
@@ -1782,6 +1919,7 @@ fn compile_trunks(raw: Vec<crate::raw::RawTrunk>) -> Result<Vec<TrunkConfig>, Co
             name: t.name,
             peer_addrs,
             from_hosts,
+            auth_required: t.auth_required.unwrap_or(false),
         });
     }
     Ok(compiled)

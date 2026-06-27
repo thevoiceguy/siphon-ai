@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Inbound INVITE admission control — `[sip.admission]`** (P1 "Security &
+  abuse hardening"; second chunk of v0.19.0). A DoS posture beyond the
+  `[[trunk]]` allowlist: shed abusive inbound INVITEs **before** any
+  trunk / auth / route work. A **per-source token bucket** keyed on the
+  source IP (`max_per_sec` + `burst`) answers an over-rate source `503` +
+  `Retry-After`, and after `drop_after` consecutive rejects **silently
+  drops** further INVITEs from it (an obvious flood doesn't earn a
+  response). An optional **global `max_concurrent`** cap (read from the
+  live call registry) answers `503` once the node is at capacity. Source
+  buckets live in a size-capped table (`max_sources`) with idle/oldest
+  eviction, so the limiter can't leak memory under a spoofed-source
+  flood. New metrics
+  `siphon_ai_invite_admission_total{result=accepted|rate_limited|dropped}`
+  + `siphon_ai_invite_admission_sources` gauge. Off by default;
+  restart-required on `SIGHUP` (part of `[sip]`). See `docs/CONFIG.md` →
+  `[sip.admission]`.
+
 - **Inbound digest authentication — `[sip.auth]`** (P1 "Security & abuse
   hardening"; first chunk of v0.19.0). Challenge inbound INVITEs with RFC 3261
   §22 / RFC 7616 digest auth, so trust no longer rests on a spoofable network

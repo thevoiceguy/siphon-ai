@@ -519,6 +519,25 @@ pub struct SipConfig {
     /// `Some` when `[sip.auth].enabled` — RFC 3261 §22 inbound digest
     /// authentication. `None` ⇒ off.
     pub auth: Option<SipAuthConfig>,
+    /// `Some` when `[sip.admission]` enables a per-source rate limit
+    /// and/or a global concurrency cap. `None` ⇒ off.
+    pub admission: Option<SipAdmissionConfig>,
+}
+
+/// Compiled `[sip.admission]` — inbound INVITE admission control.
+#[derive(Debug, Clone)]
+pub struct SipAdmissionConfig {
+    /// Per-source token-bucket rate (tokens/sec). `0` ⇒ no per-source
+    /// limit (only the global cap, if set, applies).
+    pub max_per_sec: u32,
+    /// Per-source bucket capacity (burst). Always ≥ `max_per_sec`.
+    pub burst: u32,
+    /// Consecutive per-source rejects → silent drop instead of `503`.
+    pub drop_after: u32,
+    /// Global concurrent-call cap. `0` ⇒ no cap.
+    pub max_concurrent: u32,
+    /// Cap on tracked source IPs.
+    pub max_sources: u32,
 }
 
 /// Compiled `[sip.auth]` — inbound digest authentication policy +
@@ -850,6 +869,9 @@ pub enum CompileError {
     #[error("[[sip.auth.user]] username {0:?} is used more than once")]
     SipAuthDuplicateUser(String),
 
+    #[error("[sip.admission].burst ({burst}) is smaller than max_per_sec ({max_per_sec}); burst must be ≥ the steady rate")]
+    SipAdmissionBurstTooSmall { burst: u32, max_per_sec: u32 },
+
     #[error("[webhooks].url is required when [webhooks].enabled = true")]
     WebhooksUrlRequired,
 
@@ -1113,6 +1135,7 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
         .map(|n| Duration::from_secs(n as u64));
 
     let auth = compile_sip_auth(raw.auth)?;
+    let admission = compile_sip_admission(raw.admission)?;
 
     Ok(SipConfig {
         listen_addr,
@@ -1126,7 +1149,48 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
         preferred_session_expires,
         allow_delayed_offer: raw.allow_delayed_offer,
         auth,
+        admission,
     })
+}
+
+/// Compile `[sip.admission]`. `None`, or every knob zero/unset, ⇒ off.
+/// `burst` defaults to (and is floored at) `max_per_sec`; `drop_after`
+/// defaults to 10; `max_sources` to 10000.
+fn compile_sip_admission(
+    raw: Option<crate::raw::RawSipAdmission>,
+) -> Result<Option<SipAdmissionConfig>, CompileError> {
+    let Some(raw) = raw else { return Ok(None) };
+    let max_per_sec = raw.max_per_sec.unwrap_or(0);
+    let max_concurrent = raw.max_concurrent.unwrap_or(0);
+    // Nothing to enforce → treat as off (an empty `[sip.admission]` is a
+    // no-op, not an error).
+    if max_per_sec == 0 && max_concurrent == 0 {
+        return Ok(None);
+    }
+    // burst defaults to the rate and can't be below it (a burst smaller
+    // than the steady rate would reject legitimate steady traffic).
+    let burst = match raw.burst {
+        None | Some(0) => max_per_sec,
+        Some(b) if b < max_per_sec => {
+            return Err(CompileError::SipAdmissionBurstTooSmall {
+                burst: b,
+                max_per_sec,
+            })
+        }
+        Some(b) => b,
+    };
+    let drop_after = raw.drop_after.unwrap_or(10);
+    let max_sources = match raw.max_sources {
+        None | Some(0) => 10_000,
+        Some(n) => n,
+    };
+    Ok(Some(SipAdmissionConfig {
+        max_per_sec,
+        burst,
+        drop_after,
+        max_concurrent,
+        max_sources,
+    }))
 }
 
 /// Compile `[sip.auth]`. `None`/`enabled = false` ⇒ off. When enabled,

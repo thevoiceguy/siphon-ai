@@ -20,6 +20,7 @@
 //! - refer: REFER (transfer) → controller event
 //! - register: UAC REGISTER lifecycle (Week 4)
 
+pub mod admission;
 pub mod dialog;
 pub mod digest;
 pub mod drain;
@@ -28,6 +29,7 @@ pub mod invite;
 pub mod register;
 pub mod route;
 
+pub use admission::{ActiveCallCountFn, AdmissionDecision, InviteAdmission};
 pub use dialog::{
     dispatch_bye, dispatch_cancel, DialogAction, DialogTerminator, DialogTerminatorHandle,
     NullDialogTerminator,

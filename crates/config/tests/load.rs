@@ -561,6 +561,79 @@ auth_required = true
 }
 
 #[test]
+fn sip_admission_absent_means_off() {
+    let cfg = load_from_str_with_env(&ADMIN_BASE.replace("__ADMIN__", ""), &MapEnv::new([]))
+        .expect("compiles");
+    assert!(cfg.sip.admission.is_none());
+}
+
+#[test]
+fn sip_admission_empty_block_is_off() {
+    // A `[sip.admission]` with no knobs set is a no-op, not an error.
+    let toml = ADMIN_BASE.replace("__ADMIN__", "[sip.admission]\n");
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    assert!(cfg.sip.admission.is_none());
+}
+
+#[test]
+fn sip_admission_compiles_with_defaults() {
+    let toml = ADMIN_BASE.replace("__ADMIN__", "[sip.admission]\nmax_per_sec = 10\n");
+    let adm = load_from_str_with_env(&toml, &MapEnv::new([]))
+        .expect("compiles")
+        .sip
+        .admission
+        .expect("admission on");
+    assert_eq!(adm.max_per_sec, 10);
+    assert_eq!(adm.burst, 10); // defaults to max_per_sec
+    assert_eq!(adm.drop_after, 10); // default
+    assert_eq!(adm.max_concurrent, 0); // unset
+    assert_eq!(adm.max_sources, 10_000); // default
+}
+
+#[test]
+fn sip_admission_explicit_values() {
+    let toml = ADMIN_BASE.replace(
+        "__ADMIN__",
+        "[sip.admission]\nmax_per_sec = 5\nburst = 20\ndrop_after = 3\nmax_concurrent = 200\nmax_sources = 50000\n",
+    );
+    let adm = load_from_str_with_env(&toml, &MapEnv::new([]))
+        .expect("compiles")
+        .sip
+        .admission
+        .expect("admission on");
+    assert_eq!(adm.max_per_sec, 5);
+    assert_eq!(adm.burst, 20);
+    assert_eq!(adm.drop_after, 3);
+    assert_eq!(adm.max_concurrent, 200);
+    assert_eq!(adm.max_sources, 50_000);
+}
+
+#[test]
+fn sip_admission_global_cap_only() {
+    // max_concurrent alone (no per-source rate) still enables admission.
+    let toml = ADMIN_BASE.replace("__ADMIN__", "[sip.admission]\nmax_concurrent = 100\n");
+    let adm = load_from_str_with_env(&toml, &MapEnv::new([]))
+        .expect("compiles")
+        .sip
+        .admission
+        .expect("admission on");
+    assert_eq!(adm.max_per_sec, 0);
+    assert_eq!(adm.max_concurrent, 100);
+}
+
+#[test]
+fn sip_admission_burst_below_rate_is_error() {
+    let toml = ADMIN_BASE.replace(
+        "__ADMIN__",
+        "[sip.admission]\nmax_per_sec = 10\nburst = 3\n",
+    );
+    assert!(matches!(
+        load_from_str_with_env(&toml, &MapEnv::new([])).unwrap_err(),
+        LoadError::Compile(_)
+    ));
+}
+
+#[test]
 fn unknown_codec_is_a_compile_error() {
     let env = MapEnv::new([]);
     let toml = r#"

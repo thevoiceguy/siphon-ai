@@ -227,6 +227,38 @@ pub struct RawSip {
     /// Unset/`enabled = false` ⇒ off (today's behaviour).
     #[serde(default)]
     pub auth: Option<RawSipAuth>,
+    /// `[sip.admission]` — per-source INVITE rate limiting + a global
+    /// concurrency cap. Unset / all-zero ⇒ off.
+    #[serde(default)]
+    pub admission: Option<RawSipAdmission>,
+}
+
+/// `[sip.admission]` — inbound INVITE admission control. A per-source
+/// token bucket sheds floods cheaply (before trunk/auth/route work), and
+/// an optional global cap bounds concurrent calls.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawSipAdmission {
+    /// Per-source new-INVITE rate (tokens/sec), keyed on the source IP.
+    /// `0`/unset ⇒ no per-source limit.
+    #[serde(default)]
+    pub max_per_sec: Option<u32>,
+    /// Per-source bucket capacity (burst). Default = `max_per_sec`.
+    #[serde(default)]
+    pub burst: Option<u32>,
+    /// Consecutive per-source rejections after which further INVITEs from
+    /// that source are **silently dropped** instead of answered `503`
+    /// (don't spend a response on an obvious flood). Default `10`.
+    #[serde(default)]
+    pub drop_after: Option<u32>,
+    /// Global cap on concurrent active calls. A new INVITE past this is
+    /// answered `503`. `0`/unset ⇒ no cap.
+    #[serde(default)]
+    pub max_concurrent: Option<u32>,
+    /// Cap on the number of distinct source IPs tracked (bounded memory;
+    /// idle/oldest entries are evicted past this). Default `10000`.
+    #[serde(default)]
+    pub max_sources: Option<u32>,
 }
 
 fn default_true() -> bool {

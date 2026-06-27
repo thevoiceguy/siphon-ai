@@ -317,6 +317,16 @@ backward compatible and still a single fail-loud pass:
 3. **Digest stores HA1** (`MD5(user:realm:pass)`) — never holds cleartext.
    Config accepts `password` (hashed to HA1 at load) **or** a pre-computed
    `ha1`.
+   - **DEVIATION (v0.19.0 build):** stored as **cleartext**, not HA1. The
+     upstream `sip-auth` verifier recomputes HA1 from the cleartext password
+     on every challenge (`compute_response(.., creds.password(), ..)`); there
+     is no HA1-direct path, and reimplementing digest to accept HA1 would
+     violate CLAUDE.md §4.8 (use upstream). Cleartext inbound credentials are
+     consistent with how `[[gateway]]`/`[[register]]` already hold outbound
+     passwords; the v0.18.0 secret resolver (`${file:…}`/`${cred:…}`) keeps
+     them out of the config file. `SipAuthUser`'s `Debug` prints a
+     non-reversible password fingerprint (not `[REDACTED]`) so a password
+     change still trips the SIGHUP restart-required check.
 4. **Digest is an AND gate with the trunk allowlist**, opt-in per trunk via
    `auth_required`. Static-IP carrier trunks stay allowlist-only; roaming /
    no-static-IP trunks set `auth_required` and must also pass digest. Both

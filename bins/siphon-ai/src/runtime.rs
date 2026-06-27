@@ -448,6 +448,42 @@ impl Runtime {
         // starts (0 = not draining). Feeds `GET /admin/v1/drain`'s
         // `remaining_secs` countdown; shared with `drain_calls`.
         let drain_deadline_ms = Arc::new(AtomicU64::new(0));
+        // Inbound digest auth (0.19.0). Built from `[sip.auth]` + the
+        // per-trunk `auth_required` flags BEFORE `trunks` is moved into
+        // the allowlist. With no `[[trunk]]` blocks (legacy mode) and
+        // `[sip.auth].enabled`, every source is challenged; otherwise
+        // only trunks that opted into `auth_required`.
+        let digest_auth = sip.auth.as_ref().map(|a| {
+            let require_all = trunks.is_empty();
+            let required_trunks: std::collections::HashSet<String> = trunks
+                .iter()
+                .filter(|t| t.auth_required)
+                .map(|t| t.name.clone())
+                .collect();
+            let users: Vec<(String, String)> = a
+                .users
+                .iter()
+                .map(|u| (u.username.clone(), u.password.clone()))
+                .collect();
+            info!(
+                realm = %a.realm,
+                algorithm = %a.algorithm,
+                qop = %a.qop,
+                users = users.len(),
+                require_all,
+                required_trunks = required_trunks.len(),
+                "inbound digest authentication enabled ([sip.auth])"
+            );
+            Arc::new(siphon_ai_sip_glue::InboundDigestAuth::new(
+                &a.realm,
+                &a.algorithm,
+                &a.qop,
+                users,
+                require_all,
+                required_trunks,
+            ))
+        });
+
         let mut routing_handler_builder =
             RoutingHandler::new(Arc::clone(&route_swap), Arc::clone(&acceptor))
                 .with_dialog_terminator(dialog_terminator)
@@ -457,6 +493,9 @@ impl Runtime {
             let gate: Arc<dyn siphon_ai_sip_glue::TrunkAllowlist> =
                 Arc::new(ConfigTrunkAllowlist::new(trunks));
             routing_handler_builder = routing_handler_builder.with_trunk_gate(gate);
+        }
+        if let Some(auth) = digest_auth {
+            routing_handler_builder = routing_handler_builder.with_digest_auth(auth);
         }
         let routing_handler = Arc::new(routing_handler_builder);
 
@@ -2284,6 +2323,7 @@ mod trunk_allowlist_tests {
             name: "fs".into(),
             peer_addrs: vec![TrunkCidr::parse("10.0.0.0/24").unwrap()],
             from_hosts: vec![],
+            auth_required: false,
         }];
         let gate = allowlist(trunks);
         let req = invite_with_from("<sip:caller@somewhere>;tag=t");
@@ -2303,6 +2343,7 @@ mod trunk_allowlist_tests {
             name: "carrier".into(),
             peer_addrs: vec![],
             from_hosts: vec!["sip.carrier.example".into()],
+            auth_required: false,
         }];
         let gate = allowlist(trunks);
         let req = invite_with_from("<sip:in@sip.carrier.example>;tag=t");
@@ -2329,6 +2370,7 @@ mod trunk_allowlist_tests {
             name: "strict".into(),
             peer_addrs: vec![TrunkCidr::parse("10.0.0.10").unwrap()],
             from_hosts: vec!["sip.carrier.example".into()],
+            auth_required: false,
         }];
         let gate = allowlist(trunks);
         let good_req = invite_with_from("<sip:in@sip.carrier.example>;tag=t");
@@ -2360,11 +2402,13 @@ mod trunk_allowlist_tests {
                 name: "first".into(),
                 peer_addrs: vec![TrunkCidr::parse("10.0.0.0/16").unwrap()],
                 from_hosts: vec![],
+                auth_required: false,
             },
             TrunkConfig {
                 name: "second".into(),
                 peer_addrs: vec![TrunkCidr::parse("10.0.0.0/8").unwrap()],
                 from_hosts: vec![],
+                auth_required: false,
             },
         ];
         let gate = allowlist(trunks);

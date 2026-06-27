@@ -457,6 +457,110 @@ fn admin_without_tls_has_none() {
 }
 
 #[test]
+fn sip_auth_absent_means_off() {
+    let cfg = load_from_str_with_env(&ADMIN_BASE.replace("__ADMIN__", ""), &MapEnv::new([]))
+        .expect("compiles");
+    assert!(cfg.sip.auth.is_none(), "no [sip.auth] → digest off");
+}
+
+#[test]
+fn sip_auth_disabled_flag_means_off() {
+    let toml = ADMIN_BASE.replace(
+        "__ADMIN__",
+        "[sip.auth]\nenabled = false\nrealm = \"x\"\n[[sip.auth.user]]\nusername=\"a\"\npassword=\"b\"\n",
+    );
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    assert!(cfg.sip.auth.is_none(), "enabled=false → digest off");
+}
+
+#[test]
+fn sip_auth_compiles_with_defaults() {
+    let toml = ADMIN_BASE.replace(
+        "__ADMIN__",
+        r#"
+[sip.auth]
+enabled = true
+realm = "siphon.example"
+[[sip.auth.user]]
+username = "alice"
+password = "${ALICE_PW}"
+"#,
+    );
+    let cfg =
+        load_from_str_with_env(&toml, &MapEnv::new([("ALICE_PW", "s3cret")])).expect("compiles");
+    let auth = cfg.sip.auth.expect("auth configured");
+    assert_eq!(auth.realm, "siphon.example");
+    assert_eq!(auth.algorithm, "SHA-256"); // default
+    assert_eq!(auth.qop, "auth"); // default
+    assert_eq!(auth.users.len(), 1);
+    assert_eq!(auth.users[0].username, "alice");
+    assert_eq!(auth.users[0].password, "s3cret"); // env-expanded
+}
+
+#[test]
+fn sip_auth_canonicalises_algorithm_and_qop() {
+    let toml = ADMIN_BASE.replace(
+        "__ADMIN__",
+        "[sip.auth]\nenabled=true\nrealm=\"x\"\nalgorithm=\"sha-512\"\nqop=\"auth-int\"\n[[sip.auth.user]]\nusername=\"a\"\npassword=\"b\"\n",
+    );
+    let auth = load_from_str_with_env(&toml, &MapEnv::new([]))
+        .expect("compiles")
+        .sip
+        .auth
+        .expect("auth");
+    assert_eq!(auth.algorithm, "SHA-512");
+    assert_eq!(auth.qop, "auth-int");
+}
+
+#[test]
+fn sip_auth_validation_errors() {
+    let cases = [
+        // enabled, no realm
+        "[sip.auth]\nenabled=true\n[[sip.auth.user]]\nusername=\"a\"\npassword=\"b\"\n",
+        // enabled, no users
+        "[sip.auth]\nenabled=true\nrealm=\"x\"\n",
+        // unknown algorithm
+        "[sip.auth]\nenabled=true\nrealm=\"x\"\nalgorithm=\"rot13\"\n[[sip.auth.user]]\nusername=\"a\"\npassword=\"b\"\n",
+        // unknown qop
+        "[sip.auth]\nenabled=true\nrealm=\"x\"\nqop=\"nope\"\n[[sip.auth.user]]\nusername=\"a\"\npassword=\"b\"\n",
+        // empty password
+        "[sip.auth]\nenabled=true\nrealm=\"x\"\n[[sip.auth.user]]\nusername=\"a\"\npassword=\"\"\n",
+        // duplicate username
+        "[sip.auth]\nenabled=true\nrealm=\"x\"\n[[sip.auth.user]]\nusername=\"a\"\npassword=\"b\"\n[[sip.auth.user]]\nusername=\"a\"\npassword=\"c\"\n",
+    ];
+    for (i, block) in cases.iter().enumerate() {
+        let toml = ADMIN_BASE.replace("__ADMIN__", block);
+        assert!(
+            matches!(
+                load_from_str_with_env(&toml, &MapEnv::new([])).unwrap_err(),
+                LoadError::Compile(_)
+            ),
+            "case {i} should be a compile error: {block}"
+        );
+    }
+}
+
+#[test]
+fn trunk_auth_required_defaults_false_and_parses_true() {
+    let toml = ADMIN_BASE.replace(
+        "__ADMIN__",
+        r#"
+[[trunk]]
+name = "static-carrier"
+peer_addrs = ["203.0.113.7"]
+[[trunk]]
+name = "roaming"
+from_hosts = ["sip.roam.example"]
+auth_required = true
+"#,
+    );
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    let by_name = |n: &str| cfg.trunks.iter().find(|t| t.name == n).unwrap();
+    assert!(!by_name("static-carrier").auth_required, "default false");
+    assert!(by_name("roaming").auth_required, "explicit true");
+}
+
+#[test]
 fn unknown_codec_is_a_compile_error() {
     let env = MapEnv::new([]);
     let toml = r#"

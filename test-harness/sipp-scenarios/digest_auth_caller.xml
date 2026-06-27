@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  digest_auth_caller — SIPp is the caller (UAC); SiphonAI is the UAS with
+  [sip.auth] enabled. Validates RFC 3261 §22 inbound digest:
+
+    INVITE (no creds)            → 401 Unauthorized + WWW-Authenticate
+    ACK (the 401)
+    INVITE (+ Authorization)     → 200 OK
+    ACK → BYE → 200
+
+  SIPp captures the challenge with `auth="true"` on the 401 recv and the
+  `[authentication]` keyword on the retry computes the digest response
+  from the username/password below (which must match a
+  [[sip.auth.user]]). 100 Trying is optional (SiphonAI may not send it).
+-->
+<scenario name="digest_auth_caller">
+  <!-- 1. First INVITE: no Authorization → expect a challenge. -->
+  <send>
+<![CDATA[
+INVITE sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:carrier-a@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:carrier-a@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="401" auth="true" rtd="true"/>
+
+  <!-- 2. ACK the 401 (same transaction; echo the response To-tag). -->
+  <send>
+<![CDATA[
+ACK sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:carrier-a@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- 3. Re-INVITE with credentials (new transaction, CSeq 2). The
+       [authentication] keyword turns the captured challenge into an
+       Authorization header for this username/password. -->
+  <send>
+<![CDATA[
+INVITE sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-auth
+Max-Forwards: 70
+From: <sip:carrier-a@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 2 INVITE
+Contact: <sip:carrier-a@[local_ip]:[local_port]>
+[authentication username=carrier-a password=s3cret-sipp]
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="200" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-auth-ack
+Max-Forwards: 70
+From: <sip:carrier-a@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="400"/>
+
+  <send>
+<![CDATA[
+BYE sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-bye
+Max-Forwards: 70
+From: <sip:carrier-a@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 3 BYE
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="200" rtd="true"/>
+</scenario>

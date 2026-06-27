@@ -223,10 +223,53 @@ pub struct RawSip {
     /// offerless INVITE is then rejected (488).
     #[serde(default = "default_true")]
     pub allow_delayed_offer: bool,
+    /// `[sip.auth]` — RFC 3261 §22 inbound digest authentication.
+    /// Unset/`enabled = false` ⇒ off (today's behaviour).
+    #[serde(default)]
+    pub auth: Option<RawSipAuth>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// `[sip.auth]` — challenge inbound INVITEs with RFC 3261 §22 digest
+/// authentication, verified against a configured credential set.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawSipAuth {
+    /// Master switch. `false` (default) ⇒ no challenge is ever issued.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The digest `realm` advertised in the challenge and folded into
+    /// HA1. Required when `enabled`. Typically the SIP domain.
+    #[serde(default)]
+    pub realm: Option<String>,
+    /// Digest algorithm: `MD5`, `SHA-256` (default), or `SHA-512`
+    /// (case-insensitive). MD5 is accepted for legacy peers but is
+    /// cryptographically weak (RFC 7616 §3).
+    #[serde(default)]
+    pub algorithm: Option<String>,
+    /// Quality of protection: `auth` (default) or `auth-int`.
+    #[serde(default)]
+    pub qop: Option<String>,
+    /// The credential set. At least one `[[sip.auth.user]]` is
+    /// required when `enabled`. The password is held in memory to
+    /// compute HA1 on verify (the upstream digest verifier needs the
+    /// cleartext, like `[[gateway]]`/`[[register]]`); use
+    /// `${file:…}`/`${cred:…}` to keep it out of the config file.
+    #[serde(default, rename = "user")]
+    pub users: Vec<RawSipAuthUser>,
+}
+
+/// One `[[sip.auth.user]]` credential.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawSipAuthUser {
+    /// SIP username presented in the `Authorization` header.
+    pub username: String,
+    /// Shared secret (env/secret-expanded). Non-empty.
+    pub password: String,
 }
 
 /// `[sip.call_progress]` — what — if any — provisional response
@@ -632,6 +675,13 @@ pub struct RawTrunk {
     /// possible. See `docs/CONFIG.md` for the threat model.
     #[serde(default)]
     pub from_hosts: Option<Vec<String>>,
+    /// Require RFC 3261 digest authentication (`[sip.auth]`) for
+    /// INVITEs from this trunk, in addition to the allowlist match.
+    /// Default `false`: a static-IP carrier stays allowlist-only.
+    /// Set `true` for trunks where the network identity is spoofable
+    /// (no static egress IP). Requires `[sip.auth].enabled`.
+    #[serde(default)]
+    pub auth_required: Option<bool>,
 }
 
 /// `[webhooks]` — out-of-band lifecycle events (call_start /

@@ -16,6 +16,8 @@ thiserror.workspace   = true
 tracing.workspace     = true
 chrono.workspace      = true
 parking_lot.workspace = true
+# Inbound digest-auth metric (siphon_ai_sip_auth_total).
+metrics.workspace     = true
 # Hot-swappable route table for SIGHUP config reload (0.12.0).
 arc-swap = "1"
 
@@ -35,3 +37,5 @@ sip-auth.workspace        = true
 [dev-dependencies]
 bytes = { workspace = true }
 parking_lot = { workspace = true }
+# Digest round-trip tests compute the client response hash.
+sha2 = { workspace = true }

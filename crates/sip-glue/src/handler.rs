@@ -276,6 +276,13 @@ pub struct RoutingHandler<A> {
     /// the node will be gone — the runtime sets it from
     /// `[shutdown].drain_timeout_secs`. Ignored unless `drain` fires.
     drain_retry_after_secs: u32,
+    /// Inbound digest authentication (0.19.0). `None` ⇒ off (no
+    /// `[sip.auth]`). When set, a *new* INVITE whose source
+    /// [`InboundDigestAuth::requires_auth`] is challenged with `401`
+    /// unless it carries a valid `Authorization` — AND'd with the trunk
+    /// allowlist, so it runs after the allowlist and before route
+    /// dispatch.
+    digest_auth: Option<Arc<crate::digest::InboundDigestAuth>>,
 }
 
 impl<A> RoutingHandler<A> {
@@ -295,6 +302,7 @@ impl<A> RoutingHandler<A> {
             uas_filler: std::sync::OnceLock::new(),
             drain: crate::drain::DrainFlag::new(),
             drain_retry_after_secs: 5,
+            digest_auth: None,
         }
     }
 
@@ -351,6 +359,15 @@ impl<A> RoutingHandler<A> {
     pub fn with_drain(mut self, drain: crate::drain::DrainFlag, retry_after_secs: u32) -> Self {
         self.drain = drain;
         self.drain_retry_after_secs = retry_after_secs;
+        self
+    }
+
+    /// Install inbound digest authentication (0.19.0). The daemon
+    /// constructs the [`InboundDigestAuth`](crate::digest::InboundDigestAuth)
+    /// from `[sip.auth]` + the per-trunk `auth_required` flags. Without
+    /// this call, no INVITE is ever challenged.
+    pub fn with_digest_auth(mut self, auth: Arc<crate::digest::InboundDigestAuth>) -> Self {
+        self.digest_auth = Some(auth);
         self
     }
 
@@ -439,6 +456,36 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
         } else {
             (self.resolver)(request, ctx)
         };
+
+        // Inbound digest auth gate (0.19.0). Runs AFTER the trunk
+        // allowlist (so the source is already known) and BEFORE route
+        // dispatch (so an unauthenticated INVITE does no per-call setup).
+        // Only sources whose policy requires it are challenged — a
+        // static-IP carrier trunk without `auth_required` stays
+        // allowlist-only and is never asked for credentials.
+        if let Some(digest) = self.digest_auth.as_ref() {
+            if digest.requires_auth(&register_source) {
+                let outcome = digest.evaluate(request);
+                metrics::counter!(
+                    "siphon_ai_sip_auth_total",
+                    "result" => outcome.metric_result(),
+                )
+                .increment(1);
+                if let crate::digest::DigestOutcome::Challenge { stale, .. } = &outcome {
+                    warn!(
+                        peer = %ctx.peer(),
+                        register_source = %register_source,
+                        stale = *stale,
+                        result = outcome.metric_result(),
+                        "INVITE challenged: digest authentication required (401)"
+                    );
+                    let mut response = digest.challenge(request, *stale);
+                    self.fill_response(&mut response, ctx).await;
+                    handle.send_final(response).await;
+                    return Ok(());
+                }
+            }
+        }
 
         let routes = self.routes.load();
         match dispatch_invite(&routes, &register_source, request) {

@@ -281,6 +281,16 @@ fn print_check_summary(path: &Path, config: &Config) {
     if config.webhooks.enabled {
         enabled.push("webhooks".into());
     }
+    if config.audit.enabled {
+        let mut sinks = Vec::new();
+        if config.audit.file.is_some() {
+            sinks.push("file");
+        }
+        if config.audit.webhook.is_some() {
+            sinks.push("webhook");
+        }
+        enabled.push(format!("audit({})", sinks.join("+")));
+    }
     if config.conference.enabled {
         enabled.push("conference".into());
     }

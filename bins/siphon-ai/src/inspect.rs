@@ -329,6 +329,26 @@ pub fn render_config(config: &Config, show_secrets: bool) -> String {
         );
     }
 
+    // [audit]
+    let _ = writeln!(
+        s,
+        "[audit] enabled={} events={:?}",
+        config.audit.enabled, config.audit.events
+    );
+    if let Some(f) = &config.audit.file {
+        let _ = writeln!(s, "  file    -> {}", f.path.display());
+    }
+    if let Some(w) = &config.audit.webhook {
+        let _ = writeln!(
+            s,
+            "  webhook -> {} auth_header={} secret={} spool_dir={}",
+            w.url,
+            secret(&w.auth_header, show_secrets),
+            secret(&w.secret, show_secrets),
+            opt(&w.spool_dir),
+        );
+    }
+
     // [observability]
     let _ = writeln!(
         s,

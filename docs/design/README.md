@@ -11,6 +11,8 @@ stays at the top level.
 
 One per feature theme — the locked decisions and the implementation sketch:
 
+- [DESIGN_OBSERVABILITY.md](DESIGN_OBSERVABILITY.md) — observability completeness: dashboards/alerts as code + OTLP traces (v0.21.0+, decisions locked)
+- [DESIGN_SECURITY_HARDENING.md](DESIGN_SECURITY_HARDENING.md) — security & abuse hardening: admin TLS + secret sources, inbound digest auth + admission, signed audit stream (v0.18–0.20)
 - [DESIGN_ADMIN_AUTH.md](DESIGN_ADMIN_AUTH.md) — native admin auth + RBAC (v0.10.0)
 - [DESIGN_WEBHOOK_DURABILITY.md](DESIGN_WEBHOOK_DURABILITY.md) — webhook/CDR signing, idempotency, durable spool (v0.11.0)
 - [DESIGN_CONFIG_CLI.md](DESIGN_CONFIG_CLI.md) — config CLI (`check`/`print-config`/`route-test`) + SIGHUP reload (v0.12.x)

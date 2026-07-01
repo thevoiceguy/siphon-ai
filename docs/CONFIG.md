@@ -71,6 +71,7 @@ credentials. Resolved secret values are never logged.
 [observability]   # /metrics, /health, /ready
 [admin]           # authenticated /admin/* listener (0.10.0); off → /admin not served
 [webhooks]        # lifecycle events (call_start, call_end, …)
+[audit]           # signed audit-event stream for SIEM (0.20.0); off by default
 [hep]             # HEP3 shipping to Homer
 [shutdown]        # graceful drain on SIGTERM/SIGINT (0.17.0)
 ```
@@ -775,6 +776,65 @@ Every delivery — webhook **and** CDR — also carries `X-SiphonAI-Event-Id`
 (+ an `Idempotency-Key` alias): a stable id, reused across retries and any
 spool replay, so a receiver can dedupe an at-least-once redelivery (0.11.0).
 
+## `[audit]` — signed audit-event stream (0.20.0)
+
+A tamper-evident trail of **admin and security decisions** for SIEM
+ingestion: who touched the `[admin]` API, and what the daemon *refused*
+on the SIP surface (failed auth, admission shedding, STIR/SHAKEN policy
+rejection), plus config/cert reloads. Distinct from `[webhooks]` (ops
+automation) and `[cdr]` (billing). **Off by default.**
+
+Ships to an append-only JSONL **file** (for a log shipper) and/or an
+HMAC-signed **webhook** (for a SIEM collector) — enable either or both.
+The webhook reuses the same delivery transport as `[webhooks]`/`[cdr]`,
+so `secret`, `spool_dir`, the `X-SiphonAI-Event-Id` idempotency header,
+and the `siphon_ai_webhook_*` metrics (label `sink="audit"`) all behave
+identically.
+
+```toml
+[audit]
+enabled = true
+# Optional allowlist; omit for all. Valid: "admin_request", "sip_auth",
+# "invite_rejected", "attestation_rejected", "config_reload", "cert_reload".
+events  = []
+
+[audit.file]                   # append-only JSONL, one event per line
+enabled = true
+path    = "/var/log/siphon-ai/audit.jsonl"
+
+[audit.webhook]                # HMAC-signed HTTP POST per event
+enabled     = true
+url         = "https://siem.example.com/ingest"
+auth_header = "Bearer ${AUDIT_TOKEN}"
+secret      = "${AUDIT_HMAC_SECRET}"           # STRONGLY recommended (tamper-evidence)
+spool_dir   = "/var/lib/siphon-ai/spool/audit" # optional durable retry
+retry_max   = 3
+timeout_ms  = 5000
+```
+
+| Field                | Type     | Default        | Notes |
+|----------------------|----------|----------------|-------|
+| `enabled`            | bool     | `false`        | Master switch. `true` with **no** sub-sink enabled is a fatal config error (you'd think you're auditing but nothing records). |
+| `events`             | string[] | all            | Event-type allowlist (see values above). Unknown names are accepted but never match. |
+| `file.enabled`       | bool     | `false`        | |
+| `file.path`          | path     | required if on | Append-only JSONL. Parent dir must exist (no `mkdir`); opened fail-loud at startup. |
+| `webhook.enabled`    | bool     | `false`        | |
+| `webhook.url`        | URL      | required if on | POST target. |
+| `webhook.auth_header`| string   | unset          | Sent verbatim. `${VAR}` / `${file:}` / `${cred:}` expansion works. |
+| `webhook.secret`     | string   | unset          | HMAC-SHA256 signing secret → `X-SiphonAI-Signature`. **Recommended** — the signature is what makes the stream tamper-evident. Unsigned logs a startup warning. |
+| `webhook.spool_dir`  | path     | unset          | Durable retry spool (survives restarts). Unset ⇒ best-effort. Created + write-probed at startup. |
+| `webhook.retry_max`  | integer  | `3`            | In-memory retries before spooling / dropping. |
+| `webhook.timeout_ms` | integer  | `5000`         | Per-attempt timeout. |
+
+**What is (and isn't) recorded, by design:** the stream captures the
+*anomalies* a security team acts on, not routine call traffic. So
+`invite_rejected` records admission `rate_limited` (503) and the `no_trunk`
+/ `draining` refusals but **not** the per-packet silent flood-drop (that's
+the DoS-shedding fast path — auditing it would amplify the attack).
+`sip_auth` records `failed` / `stale` credentials but **not** the normal
+first-leg `challenged` 401 or a successful `ok` (both track call volume,
+not security). See `docs/AUDIT.md` for the full event schema.
+
 ## `[hep]`
 
 ```toml
@@ -876,6 +936,10 @@ reload-safe sections without dropping calls:
 - **webhook + CDR sinks** (`[webhooks]`, `[cdr]`) — rebuilt and swapped,
   **unless** a durable spool (`spool_dir`) is active for that sink (its
   background drain worker can't be hot-swapped → restart required);
+- the **audit sink** (`[audit]`, 0.20.0) — rebuilt and swapped the same
+  way, but **only when `[audit]` was enabled at startup**; turning it on
+  from off is restart-required (the process-global facade is installed
+  once at boot). Disabling or retargeting an already-on stream is hot;
 - **outbound gateways** (`[[gateway]]`, 0.12.1) — the set is rebuilt and
   swapped (add / remove / modify trunks, **including rotating a gateway's
   `auth_password`**); in-flight outbound calls keep the trunk they're on.

@@ -34,11 +34,12 @@ use std::path::Path;
 use thiserror::Error;
 
 pub use compile::{
-    compile, AdminConfig, AdminTlsConfig, CdrConfig, CdrFileConfig, CdrWebhookConfig, CompileError,
-    ConferenceConfig, Config, Gateway, GatewayCredentials, HepConfig, MediaConfig, NodeConfig,
-    ObservabilityConfig, OutboundConfig, ParkConfig, ParkTimeoutAction, RegisterConfig,
-    SecurityConfig, ShutdownConfig, SipAdmissionConfig, SipAuthConfig, SipAuthUser, SipConfig,
-    SipTlsConfig, SipTransport, TrunkCidr, TrunkCidrParseError, TrunkConfig, WebhooksConfig,
+    compile, AdminConfig, AdminTlsConfig, AuditConfig, AuditFileConfig, AuditWebhookConfig,
+    CdrConfig, CdrFileConfig, CdrWebhookConfig, CompileError, ConferenceConfig, Config, Gateway,
+    GatewayCredentials, HepConfig, MediaConfig, NodeConfig, ObservabilityConfig, OutboundConfig,
+    ParkConfig, ParkTimeoutAction, RegisterConfig, SecurityConfig, ShutdownConfig,
+    SipAdmissionConfig, SipAuthConfig, SipAuthUser, SipConfig, SipTlsConfig, SipTransport,
+    TrunkCidr, TrunkCidrParseError, TrunkConfig, WebhooksConfig,
 };
 pub use env::{expand, expand_cow, EnvError, EnvSource, ProcessEnv};
 pub use raw::{

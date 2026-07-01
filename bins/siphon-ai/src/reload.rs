@@ -11,6 +11,10 @@
 //!   wrappers in this module, *unless* a durable spool is active for
 //!   that sink (its background drain worker can't be hot-swapped, so
 //!   delivery changes there need a restart);
+//! - the **audit sink** (`[audit]`, 0.20.0) — swapped the same way when
+//!   audit was *enabled at startup* (so the process-global facade
+//!   exists); *enabling* audit from off is restart-required, since the
+//!   facade is installed once at boot;
 //! - the **outbound gateway set** (`[[gateway]]`) — rebuilt (fresh
 //!   per-gateway UACs) and swapped when outbound is enabled and its
 //!   `[outbound]` limits are unchanged; in-flight outbound calls keep
@@ -37,6 +41,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use siphon_ai_audit::{AuditEvent, AuditSink, AuditSinkHandle};
 use siphon_ai_cdr::{CdrRecord, CdrSink, CdrSinkHandle};
 use siphon_ai_config::{AdminTlsConfig, Config, OutboundConfig, SipTlsConfig};
 use siphon_ai_core::OutboundService;
@@ -104,6 +109,32 @@ impl CdrSink for SwappableCdrSink {
     async fn emit(&self, record: CdrRecord) {
         let sink = self.inner.load_full();
         sink.emit(record).await;
+    }
+}
+
+/// Audit sink whose inner delegate can be swapped at runtime. The
+/// process-wide facade holds this wrapper (installed once), so a SIGHUP
+/// reload swaps the delegate without re-installing the global handle.
+pub struct SwappableAuditSink {
+    inner: ArcSwap<AuditSinkHandle>,
+}
+
+impl SwappableAuditSink {
+    pub fn new(inner: AuditSinkHandle) -> Self {
+        Self {
+            inner: ArcSwap::from_pointee(inner),
+        }
+    }
+    pub fn store(&self, inner: AuditSinkHandle) {
+        self.inner.store(Arc::new(inner));
+    }
+}
+
+#[async_trait]
+impl AuditSink for SwappableAuditSink {
+    async fn emit(&self, event: AuditEvent) {
+        let sink = self.inner.load_full();
+        sink.emit(event).await;
     }
 }
 
@@ -245,15 +276,22 @@ pub struct ReloadContext {
     pub route_swap: Arc<ArcSwap<RouteSet>>,
     pub webhook_swap: Arc<SwappableWebhookSink>,
     pub cdr_swap: Arc<SwappableCdrSink>,
+    /// Audit sink swap; `None` when `[audit]` was disabled at startup —
+    /// in which case *enabling* audit is restart-required (the process
+    /// global facade is installed once, at startup, only when enabled).
+    pub audit_swap: Option<Arc<SwappableAuditSink>>,
     pub hep_telemetry: Option<Arc<HepTelemetry>>,
     /// `[webhooks].spool_dir` set on the running config.
     pub webhook_spool_active: bool,
     /// `[cdr.webhook].spool_dir` set on the running config.
     pub cdr_spool_active: bool,
-    /// `[webhooks]` / `[cdr]` fingerprints at startup (so a reload only
-    /// touches a sink when its config actually changed).
+    /// `[audit.webhook].spool_dir` set on the running config.
+    pub audit_spool_active: bool,
+    /// `[webhooks]` / `[cdr]` / `[audit]` fingerprints at startup (so a
+    /// reload only touches a sink when its config actually changed).
     pub webhook_fingerprint: String,
     pub cdr_fingerprint: String,
+    pub audit_fingerprint: String,
     /// Outbound gateway hot-reload handle; `None` when outbound is off.
     pub outbound: Option<OutboundReload>,
     /// `Some` when TLS is configured — the cert is reloaded too (the
@@ -293,6 +331,8 @@ pub fn spawn_reload_handler(ctx: ReloadContext) {
             webhook_spool: ctx.webhook_spool_active,
             cdr_fp: ctx.cdr_fingerprint,
             cdr_spool: ctx.cdr_spool_active,
+            audit_fp: ctx.audit_fingerprint,
+            audit_spool: ctx.audit_spool_active,
             gateway_fp: ctx
                 .outbound
                 .as_ref()
@@ -317,12 +357,19 @@ pub fn spawn_reload_handler(ctx: ReloadContext) {
                 Err(e) => {
                     warn!(config = %ctx.config_path.display(), error = %e, "SIGHUP: could not read config; keeping running config");
                     metrics::counter!(CONFIG_RELOADS_TOTAL, "result" => "failed").increment(1);
+                    siphon_ai_audit::emit(AuditEvent::config_reload(
+                        "failed",
+                        vec![],
+                        Some(format!("read error: {e}")),
+                    ));
                     continue;
                 }
             };
             if text == last_text {
                 info!("SIGHUP: config file unchanged; nothing to reload");
                 metrics::counter!(CONFIG_RELOADS_TOTAL, "result" => "no_change").increment(1);
+                // `no_change` is deliberately not audited — a `systemctl
+                // reload` no-op every few minutes would swamp the trail.
                 continue;
             }
             let new = match siphon_ai_config::load_from_path(&ctx.config_path) {
@@ -330,6 +377,11 @@ pub fn spawn_reload_handler(ctx: ReloadContext) {
                 Err(e) => {
                     error!(config = %ctx.config_path.display(), error = %e, "SIGHUP: new config is INVALID; keeping running config");
                     metrics::counter!(CONFIG_RELOADS_TOTAL, "result" => "failed").increment(1);
+                    siphon_ai_audit::emit(AuditEvent::config_reload(
+                        "failed",
+                        vec![],
+                        Some(format!("invalid config: {e}")),
+                    ));
                     continue;
                 }
             };
@@ -343,6 +395,7 @@ pub fn spawn_reload_handler(ctx: ReloadContext) {
                 &ctx.route_swap,
                 &ctx.webhook_swap,
                 &ctx.cdr_swap,
+                ctx.audit_swap.as_deref(),
                 ctx.hep_telemetry.as_deref(),
                 ctx.outbound.as_ref(),
                 &mut state,
@@ -354,6 +407,11 @@ pub fn spawn_reload_handler(ctx: ReloadContext) {
             }
             info!("SIGHUP: config reload applied");
             metrics::counter!(CONFIG_RELOADS_TOTAL, "result" => "applied").increment(1);
+            siphon_ai_audit::emit(AuditEvent::config_reload(
+                "applied",
+                restart_required.iter().map(|s| s.to_string()).collect(),
+                None,
+            ));
 
             last_text = text;
         }
@@ -376,6 +434,8 @@ pub(crate) struct ReloadState {
     pub webhook_spool: bool,
     pub cdr_fp: String,
     pub cdr_spool: bool,
+    pub audit_fp: String,
+    pub audit_spool: bool,
     pub gateway_fp: String,
 }
 
@@ -387,18 +447,20 @@ pub(crate) struct ReloadState {
 /// a section it actually applied (see [`ReloadState`]) — and returns the
 /// restart-required sections that changed (for the warning). Split out
 /// from the SIGHUP loop so it's unit-testable without signals.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_reload(
     new: Config,
     route_swap: &ArcSwap<RouteSet>,
     webhook_swap: &SwappableWebhookSink,
     cdr_swap: &SwappableCdrSink,
+    audit_swap: Option<&SwappableAuditSink>,
     hep: Option<&HepTelemetry>,
     outbound_reload: Option<&OutboundReload>,
     state: &mut ReloadState,
 ) -> Vec<&'static str> {
     // Restart-required diff: new file vs the IMMUTABLE startup baseline.
     let new_fp = restart_fingerprints(&new);
-    let restart_required: Vec<&'static str> = state
+    let mut restart_required: Vec<&'static str> = state
         .restart_baseline
         .iter()
         .zip(&new_fp)
@@ -418,10 +480,19 @@ pub(crate) async fn apply_reload(
         .is_some();
     let new_webhook_fp = format!("{:?}", new.webhooks);
     let new_cdr_fp = format!("{:?}", new.cdr);
+    let new_audit_spool = new
+        .audit
+        .webhook
+        .as_ref()
+        .and_then(|w| w.spool_dir.as_ref())
+        .is_some();
+    let new_audit_fp = format!("{:?}", new.audit);
+    let new_audit_enabled = new.audit.enabled;
     let Config {
         routes,
         webhooks,
         cdr,
+        audit,
         outbound,
         ..
     } = new;
@@ -466,6 +537,55 @@ pub(crate) async fn apply_reload(
             }
             Err(e) => warn!(error = %e, "SIGHUP: rebuilding CDR sink failed; keeping previous"),
         },
+    }
+
+    // Audit sink: hot-reloadable only when `[audit]` was ENABLED at
+    // startup (the swap — and the process-global facade — exist). When
+    // it was disabled at startup, `audit_swap` is `None`: enabling or
+    // changing `[audit]` is restart-required (we don't install the
+    // global facade mid-flight). When enabled at startup, changes
+    // hot-swap the delegate — including swapping to a null sink if the
+    // new config disables it — unless a durable spool is active.
+    match audit_swap {
+        Some(swap) => {
+            match decide_sink_reload(
+                new_audit_fp != state.audit_fp,
+                state.audit_spool || new_audit_spool,
+            ) {
+                SinkReload::Unchanged => {}
+                SinkReload::RestartRequired => {
+                    warn!("SIGHUP: [audit] changed but its durable spool is active; audit delivery changes require a restart (not hot-applied)")
+                }
+                SinkReload::Swap => {
+                    // `build_audit_sink` requires `enabled = true`; when the
+                    // new config disables audit, swap in a null sink so
+                    // events stop being recorded without needing a restart.
+                    let built = if new_audit_enabled {
+                        crate::runtime::build_audit_sink(&audit).await
+                    } else {
+                        Ok(Arc::new(siphon_ai_audit::NullSink) as AuditSinkHandle)
+                    };
+                    match built {
+                        Ok(sink) => {
+                            swap.store(sink);
+                            state.audit_fp = new_audit_fp;
+                            state.audit_spool = new_audit_spool;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "SIGHUP: rebuilding audit sink failed; keeping previous")
+                        }
+                    }
+                }
+            }
+        }
+        None => {
+            // Audit was off at startup. If the new file turns it on (or
+            // otherwise changes `[audit]` while requesting it on), flag a
+            // restart — the facade can't be installed without one.
+            if new_audit_fp != state.audit_fp && new_audit_enabled {
+                restart_required.push("[audit]");
+            }
+        }
     }
 
     // Gateways: rebuild + swap the set when outbound is running, its
@@ -530,6 +650,13 @@ any = true
                 .as_ref()
                 .and_then(|w| w.spool_dir.as_ref())
                 .is_some(),
+            audit_fp: format!("{:?}", c.audit),
+            audit_spool: c
+                .audit
+                .webhook
+                .as_ref()
+                .and_then(|w| w.spool_dir.as_ref())
+                .is_some(),
             gateway_fp: gateway_fingerprint(&c.outbound),
         }
     }
@@ -549,13 +676,80 @@ any = true
         assert_eq!(route_swap.load().iter().next().unwrap().name, "default");
 
         let new = cfg(&BASE.replace("name = \"default\"", "name = \"renamed\""));
-        let restart_required = apply_reload(new, &route_swap, &wh, &cd, None, None, &mut st).await;
+        let restart_required =
+            apply_reload(new, &route_swap, &wh, &cd, None, None, None, &mut st).await;
 
         assert_eq!(route_swap.load().iter().next().unwrap().name, "renamed");
         assert!(
             restart_required.is_empty(),
             "only the route changed; nothing restart-required"
         );
+    }
+
+    // Audit block appended to BASE that turns the stream on with a
+    // single JSONL file sink (no network needed to build it).
+    fn base_with_audit(path: &str) -> String {
+        format!(
+            "{BASE}\n[audit]\nenabled = true\n[audit.file]\nenabled = true\npath = \"{path}\"\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn enabling_audit_when_off_at_startup_is_restart_required() {
+        // Startup: audit off → no swap installed.
+        let route_swap = ArcSwap::from_pointee(cfg(BASE).routes);
+        let (wh, cd) = null_sinks();
+        let mut st = state(&cfg(BASE));
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let new = cfg(&base_with_audit(tmp.path().to_str().unwrap()));
+        // audit_swap = None models "disabled at startup".
+        let rr = apply_reload(new, &route_swap, &wh, &cd, None, None, None, &mut st).await;
+        assert!(
+            rr.contains(&"[audit]"),
+            "turning [audit] on without a startup facade must be restart-required: {rr:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_hot_swaps_when_enabled_at_startup() {
+        // Startup: audit on with a file sink → swap present.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let start_cfg = cfg(&base_with_audit(tmp.path().to_str().unwrap()));
+        let route_swap = ArcSwap::from_pointee(cfg(BASE).routes);
+        let (wh, cd) = null_sinks();
+        let mut st = state(&start_cfg);
+        let audit_swap =
+            SwappableAuditSink::new(Arc::new(siphon_ai_audit::NullSink) as AuditSinkHandle);
+
+        // Reload that keeps audit on but adds an events allowlist — a
+        // hot-swappable change, must NOT be restart-required.
+        let mut edited = base_with_audit(tmp.path().to_str().unwrap());
+        edited = edited.replace(
+            "[audit]\nenabled = true",
+            "[audit]\nenabled = true\nevents = [\"sip_auth\"]",
+        );
+        let new = cfg(&edited);
+        let rr = apply_reload(
+            new,
+            &route_swap,
+            &wh,
+            &cd,
+            Some(&audit_swap),
+            None,
+            None,
+            &mut st,
+        )
+        .await;
+        assert!(
+            !rr.contains(&"[audit]"),
+            "an [audit] change with the facade present should hot-swap, not need a restart: {rr:?}"
+        );
+        // The swap now routes through a FilteredSink; a disallowed event
+        // is dropped silently (no panic) — exercises the swapped delegate.
+        audit_swap
+            .emit(AuditEvent::invite_rejected("1.2.3.4:5060", "rate_limited"))
+            .await;
     }
 
     #[tokio::test]
@@ -566,7 +760,8 @@ any = true
 
         // Change the SIP listen port — a restart-required section.
         let new = cfg(&BASE.replace("127.0.0.1:5060", "127.0.0.1:5999"));
-        let restart_required = apply_reload(new, &route_swap, &wh, &cd, None, None, &mut st).await;
+        let restart_required =
+            apply_reload(new, &route_swap, &wh, &cd, None, None, None, &mut st).await;
 
         assert!(
             restart_required.contains(&"[sip]"),
@@ -584,12 +779,12 @@ any = true
 
         // Edit a restart-required section — warned, not applied.
         let edited = cfg(&BASE.replace("127.0.0.1:5060", "127.0.0.1:5999"));
-        let rr1 = apply_reload(edited, &route_swap, &wh, &cd, None, None, &mut st).await;
+        let rr1 = apply_reload(edited, &route_swap, &wh, &cd, None, None, None, &mut st).await;
         assert!(rr1.contains(&"[sip]"));
 
         // Revert it — must NOT warn (baseline stayed at startup).
         let reverted = cfg(BASE);
-        let rr2 = apply_reload(reverted, &route_swap, &wh, &cd, None, None, &mut st).await;
+        let rr2 = apply_reload(reverted, &route_swap, &wh, &cd, None, None, None, &mut st).await;
         assert!(
             rr2.is_empty(),
             "reverting a restart-required edit must not warn: {rr2:?}"

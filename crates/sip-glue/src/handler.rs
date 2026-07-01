@@ -451,6 +451,12 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                         peer = %ctx.peer(),
                         "INVITE rejected: admission rate limit (503 Service Unavailable)"
                     );
+                    if siphon_ai_audit::is_enabled() {
+                        siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::invite_rejected(
+                            ctx.peer().to_string(),
+                            "rate_limited",
+                        ));
+                    }
                     let mut response =
                         UserAgentServer::create_response(request, 503, "Service Unavailable");
                     let _ = response.headers_mut().set_or_push(
@@ -464,6 +470,11 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                 crate::admission::AdmissionDecision::Drop => {
                     // Silently drop — no response. The retransmits a
                     // flooder sends will be dropped just as cheaply.
+                    // Deliberately NOT audited: this is the flood-shedding
+                    // fast path (fires per packet under attack), so emitting
+                    // here would amplify the very DoS it defends against.
+                    // The onset of shedding is captured by the Reject503
+                    // `rate_limited` events above.
                     debug!(
                         peer = %ctx.peer(),
                         "INVITE dropped: admission flood threshold (no response)"
@@ -488,6 +499,12 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                 peer = %ctx.peer(),
                 "INVITE rejected: draining for shutdown (503 Service Unavailable)"
             );
+            if siphon_ai_audit::is_enabled() {
+                siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::invite_rejected(
+                    ctx.peer().to_string(),
+                    "draining",
+                ));
+            }
             self.fill_response(&mut response, ctx).await;
             handle.send_final(response).await;
             return Ok(());
@@ -505,6 +522,12 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                         peer = %ctx.peer(),
                         "INVITE rejected: no trunk matched (403 Forbidden)"
                     );
+                    if siphon_ai_audit::is_enabled() {
+                        siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::invite_rejected(
+                            ctx.peer().to_string(),
+                            "no_trunk",
+                        ));
+                    }
                     let mut response = UserAgentServer::create_response(request, 403, "Forbidden");
                     self.fill_response(&mut response, ctx).await;
                     handle.send_final(response).await;
@@ -530,13 +553,26 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                 )
                 .increment(1);
                 if let crate::digest::DigestOutcome::Challenge { stale, .. } = &outcome {
+                    let result = outcome.metric_result();
                     warn!(
                         peer = %ctx.peer(),
                         register_source = %register_source,
                         stale = *stale,
-                        result = outcome.metric_result(),
+                        result,
                         "INVITE challenged: digest authentication required (401)"
                     );
+                    // Audit only the anomalous outcomes: `failed` (a bad
+                    // credential) and `stale` (a possibly-replayed nonce).
+                    // The bare `challenged` (normal first-leg 401, before
+                    // any credential) fires on every authenticated call, so
+                    // auditing it would track call volume, not security.
+                    if result == "failed" || result == "stale" {
+                        siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::sip_auth(
+                            ctx.peer().to_string(),
+                            Some(register_source.clone()),
+                            result,
+                        ));
+                    }
                     let mut response = digest.challenge(request, *stale);
                     self.fill_response(&mut response, ctx).await;
                     handle.send_final(response).await;

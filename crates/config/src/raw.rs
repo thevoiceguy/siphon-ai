@@ -80,6 +80,11 @@ pub struct RawConfig {
     #[serde(default)]
     pub webhooks: RawWebhooks,
 
+    /// `[audit]` — signed audit-event stream for SIEM ingestion
+    /// (0.20.0). Off by default.
+    #[serde(default)]
+    pub audit: RawAudit,
+
     #[serde(default)]
     pub hep: RawHep,
 
@@ -744,6 +749,70 @@ pub struct RawWebhooks {
     /// names are accepted but never match (no events from them).
     #[serde(default)]
     pub events: Option<Vec<String>>,
+    #[serde(default)]
+    pub retry_max: Option<u32>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// `[audit]` — signed audit-event stream (0.20.0). A tamper-evident
+/// trail of admin + security decisions for SIEM ingestion. Off by
+/// default. Ships to an append-only JSONL file (`[audit.file]`) and/or
+/// an HMAC-signed webhook (`[audit.webhook]`); enable either or both.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawAudit {
+    /// Master switch. When `false` the daemon installs no audit sink
+    /// and `audit::emit` is a no-op regardless of the sub-blocks.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Allowlist of event types to record. Empty / unset = all. Valid
+    /// values: `"admin_request"`, `"sip_auth"`, `"invite_rejected"`,
+    /// `"attestation_rejected"`, `"config_reload"`, `"cert_reload"`.
+    /// Unknown names are accepted but never match.
+    #[serde(default)]
+    pub events: Option<Vec<String>>,
+
+    #[serde(default)]
+    pub file: RawAuditFile,
+
+    #[serde(default)]
+    pub webhook: RawAuditWebhook,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawAuditFile {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Required when `enabled = true`. Append-only JSONL; the parent
+    /// directory must exist at startup (the daemon does NOT mkdir).
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawAuditWebhook {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Required when `enabled = true`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Optional `Authorization` header value, sent verbatim.
+    #[serde(default)]
+    pub auth_header: Option<String>,
+    /// HMAC-SHA256 signing secret. `${VAR}` / `${file:}` / `${cred:}`
+    /// resolved by the loader. Strongly recommended for an audit
+    /// stream — the signature is what makes it tamper-evident.
+    #[serde(default)]
+    pub secret: Option<String>,
+    /// Optional durable spool directory. When set, an event that
+    /// exhausts the in-memory retry budget is persisted here and
+    /// retried by a background worker that survives restarts.
+    #[serde(default)]
+    pub spool_dir: Option<String>,
     #[serde(default)]
     pub retry_max: Option<u32>,
     #[serde(default)]

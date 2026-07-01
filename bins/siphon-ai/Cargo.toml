@@ -28,6 +28,7 @@ chrono.workspace           = true
 metrics.workspace          = true
 
 # Internal — the daemon composes every layer.
+siphon-ai-audit.workspace      = true
 siphon-ai-bridge.workspace     = true
 siphon-ai-cdr.workspace        = true
 siphon-ai-config.workspace     = true

@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-07-01
+
+### Added
+
+- **Signed audit-event stream — `[audit]`** (P1 "Security & abuse
+  hardening"; the last sub-item of the theme). A tamper-evident trail of
+  admin and security decisions for SIEM ingestion — *who did what* on the
+  `[admin]` surface and *what the daemon refused* on the SIP surface —
+  distinct from `[webhooks]` (ops automation) and `[cdr]` (billing).
+  Ships to an append-only JSONL **file** (`[audit.file]`, for a log
+  shipper) and/or an HMAC-signed **webhook** (`[audit.webhook]`, for a
+  SIEM collector); enable either or both. The webhook reuses the 0.11.0
+  delivery transport, so the `X-SiphonAI-Signature` HMAC (the
+  tamper-evidence), `X-SiphonAI-Event-Id` idempotency, durable spool, and
+  the `siphon_ai_webhook_*` delivery metrics (label `sink="audit"`) all
+  behave identically. Six event types — `admin_request`, `sip_auth`,
+  `invite_rejected`, `attestation_rejected`, `config_reload`,
+  `cert_reload` — with an `events` allowlist. Emission is deliberately
+  signal-first: `invite_rejected` records admission `rate_limited` /
+  `no_trunk` / `draining` but **not** the per-packet silent flood-drop
+  (auditing that DoS-shedding fast path would amplify the attack), and
+  `sip_auth` records `failed` / `stale` but **not** the normal per-call
+  `challenged` / `ok`. Off by default; hot-reloadable on `SIGHUP` when
+  enabled at startup (enabling from off is restart-required). Best-effort
+  and off the call path — a slow SIEM never blocks an admin request or a
+  SIP transaction. New `docs/AUDIT.md`; see also `docs/CONFIG.md` →
+  `[audit]`. Completes the P1 security & abuse hardening theme.
+
 ## [0.19.0] - 2026-06-27
 
 ### Added

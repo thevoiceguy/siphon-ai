@@ -92,6 +92,7 @@ credentials. Resolved secret values are never logged.
 | `user_agent` | string           | unset      | Set to brand the `User-Agent` and `Server` headers. |
 | `contact`    | string           | derived    | Override the `Contact` URI; otherwise built from `[node].public_address` + the bound port. |
 | `allow_delayed_offer` | bool    | `true`     | Accept an inbound INVITE with **no SDP** (RFC 3264 delayed offer): SiphonAI offers in the 200 OK and reads the peer's answer from the ACK. Needed for CUCM trunks/phones without a forced MTP. `false` rejects an offerless INVITE with `488`. Early-offer INVITEs are unaffected either way. |
+| `tcp_idle_timeout_secs` | integer | `1800`  | Idle timeout for an **established** inbound SIP-over-**TCP/TLS** connection — one that has completed at least one SIP message. A SIP trunk (e.g. CUCM) holds this connection open for a call's whole life while sending **no SIP** (RTP is out-of-band), so this must exceed your longest SIP-quiet period, or the connection is reaped mid-call and in-dialog re-INVITEs/BYEs are lost (wedging the trunk → `503` on new calls). Default `1800` (matches common session timers). `0` disables the idle close. Does **not** shorten the short Slowloris window for connections that never complete a request. **UDP is connectionless and unaffected.** |
 
 ### `[sip.tls]`
 

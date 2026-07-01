@@ -555,6 +555,11 @@ pub struct SipConfig {
     /// `Some` when `[sip.admission]` enables a per-source rate limit
     /// and/or a global concurrency cap. `None` ⇒ off.
     pub admission: Option<SipAdmissionConfig>,
+    /// Idle timeout (seconds) for an established inbound SIP-over-TCP/TLS
+    /// connection (`[sip].tcp_idle_timeout_secs`). Default 1800; `0`
+    /// disables the idle close. Wired to `sip_transport::set_established_idle_timeout`
+    /// at startup. UDP is unaffected.
+    pub tcp_idle_timeout_secs: u64,
 }
 
 /// Compiled `[sip.admission]` — inbound INVITE admission control.
@@ -1194,6 +1199,7 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
         allow_delayed_offer: raw.allow_delayed_offer,
         auth,
         admission,
+        tcp_idle_timeout_secs: raw.tcp_idle_timeout_secs.unwrap_or(1800),
     })
 }
 

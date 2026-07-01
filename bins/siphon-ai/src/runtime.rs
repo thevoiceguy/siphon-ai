@@ -557,6 +557,22 @@ impl Runtime {
         let routing_handler = Arc::new(routing_handler_builder);
 
         // ─── SIP transports + transaction manager ──────────────────
+        // Established-connection idle timeout for inbound SIP-over-TCP/TLS.
+        // A SIP trunk (e.g. CUCM) keeps its signaling connection open for a
+        // call's whole life while sending no SIP — RTP is out-of-band — so
+        // the transport must not reap it as "idle" mid-call (that drops
+        // in-dialog re-INVITEs/BYEs and wedges the trunk). Set before any
+        // listener accepts. UDP is connectionless and unaffected.
+        sip_transport::set_established_idle_timeout(sip.tcp_idle_timeout_secs);
+        if sip.tcp_idle_timeout_secs == 0 {
+            info!("inbound SIP TCP/TLS established idle-close disabled ([sip].tcp_idle_timeout_secs = 0)");
+        } else {
+            info!(
+                secs = sip.tcp_idle_timeout_secs,
+                "inbound SIP TCP/TLS established idle timeout set"
+            );
+        }
+
         // Bind UDP eagerly so a port-busy error surfaces here, not
         // after we log "ready". TCP / TLS listeners spawn inside
         // spawn_listeners; their accept loops own the bind.

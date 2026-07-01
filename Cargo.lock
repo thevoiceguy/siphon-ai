@@ -2917,6 +2917,7 @@ dependencies = [
  "sip-transport",
  "sip-uac",
  "sip-uas",
+ "siphon-ai-audit",
  "siphon-ai-bridge",
  "siphon-ai-cdr",
  "siphon-ai-config",
@@ -2933,6 +2934,22 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webpki-roots 1.0.7",
+]
+
+[[package]]
+name = "siphon-ai-audit"
+version = "0.19.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "siphon-ai-http",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3016,6 +3033,7 @@ dependencies = [
  "sip-transaction",
  "sip-uac",
  "sip-uas",
+ "siphon-ai-audit",
  "siphon-ai-bridge",
  "siphon-ai-cdr",
  "siphon-ai-media-glue",
@@ -3127,6 +3145,7 @@ dependencies = [
  "sip-transport",
  "sip-uac",
  "sip-uas",
+ "siphon-ai-audit",
  "siphon-ai-routes",
  "thiserror 1.0.69",
  "tokio",
@@ -3167,6 +3186,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sip-hep",
+ "siphon-ai-audit",
  "subtle",
  "thiserror 1.0.69",
  "tokio",

@@ -342,6 +342,16 @@ async fn handle_admin_request(
         Err(AuthReject::Unauthenticated) => {
             warn!(peer = %peer, endpoint, "admin request rejected: 401 unauthenticated");
             metrics::counter!(ADMIN_REQUESTS_TOTAL, "endpoint" => endpoint, "role" => "none", "result" => "unauthenticated").increment(1);
+            siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::admin_request(
+                peer.to_string(),
+                None,
+                None,
+                method.as_str(),
+                endpoint,
+                401,
+                "unauthenticated",
+                None,
+            ));
             let mut resp = respond(
                 StatusCode::UNAUTHORIZED,
                 "application/json",
@@ -354,6 +364,19 @@ async fn handle_admin_request(
         Err(AuthReject::Forbidden { required, have }) => {
             warn!(peer = %peer, endpoint, required = required.as_str(), have = have.as_str(), "admin request rejected: 403 forbidden");
             metrics::counter!(ADMIN_REQUESTS_TOTAL, "endpoint" => endpoint, "role" => have.as_str(), "result" => "forbidden").increment(1);
+            // The caller authenticated (we know its role) but lacks the
+            // required role. Token *name* isn't surfaced by AuthReject, so
+            // `actor` is absent; `role` carries what it had.
+            siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::admin_request(
+                peer.to_string(),
+                None,
+                Some(have.as_str().to_string()),
+                method.as_str(),
+                endpoint,
+                403,
+                "forbidden",
+                Some(required.as_str().to_string()),
+            ));
             respond(
                 StatusCode::FORBIDDEN,
                 "application/json",
@@ -370,14 +393,35 @@ async fn handle_admin_request(
             };
             match admin::dispatch(&method, &path, body, &state.admin).await {
                 Some(resp) => {
-                    info!(peer = %peer, actor = %actor, role, endpoint, status = resp.status().as_u16(), "admin request");
+                    let status = resp.status().as_u16();
+                    info!(peer = %peer, actor = %actor, role, endpoint, status, "admin request");
                     metrics::counter!(ADMIN_REQUESTS_TOTAL, "endpoint" => endpoint, "role" => role, "result" => "ok").increment(1);
+                    siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::admin_request(
+                        peer.to_string(),
+                        Some(actor.clone()),
+                        Some(role.to_string()),
+                        method.as_str(),
+                        endpoint,
+                        status,
+                        "ok",
+                        None,
+                    ));
                     resp
                 }
                 None => {
                     // Authenticated, but an unknown /admin route.
                     info!(peer = %peer, actor = %actor, role, endpoint, status = 404, "admin request (unknown route)");
                     metrics::counter!(ADMIN_REQUESTS_TOTAL, "endpoint" => endpoint, "role" => role, "result" => "not_found").increment(1);
+                    siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::admin_request(
+                        peer.to_string(),
+                        Some(actor.clone()),
+                        Some(role.to_string()),
+                        method.as_str(),
+                        endpoint,
+                        404,
+                        "not_found",
+                        None,
+                    ));
                     respond(StatusCode::NOT_FOUND, "text/plain", b"not found\n")
                 }
             }

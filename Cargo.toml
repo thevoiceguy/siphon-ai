@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "bins/siphon-ai",
+    "crates/audit",
     "crates/bridge",
     "crates/cdr",
     "crates/config",
@@ -28,6 +29,7 @@ homepage = "https://github.com/thevoiceguy/siphon-ai"
 
 [workspace.dependencies]
 # Internal crates (used by bins/siphon-ai and cross-crate)
+siphon-ai-audit       = { path = "crates/audit" }
 siphon-ai-bridge      = { path = "crates/bridge" }
 siphon-ai-cdr         = { path = "crates/cdr" }
 siphon-ai-config      = { path = "crates/config" }

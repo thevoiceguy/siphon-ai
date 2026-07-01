@@ -70,14 +70,16 @@ const DEFAULT_SPOOL_MAX_FILES: usize = 10_000;
 const MAX_DRAIN_ATTEMPTS: u32 = 100;
 
 /// Which sink a [`RetryingPoster`] serves. Used purely as the bounded
-/// `sink` metric label (two values) so lifecycle-webhook and CDR
-/// delivery health are separable on a dashboard.
+/// `sink` metric label (three values) so lifecycle-webhook, CDR, and
+/// audit-stream delivery health are separable on a dashboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SinkKind {
     /// `siphon-ai-webhooks` lifecycle events.
     Lifecycle,
     /// `siphon-ai-cdr` call-detail records.
     Cdr,
+    /// `siphon-ai-audit` admin/security audit events.
+    Audit,
 }
 
 impl SinkKind {
@@ -86,6 +88,7 @@ impl SinkKind {
         match self {
             SinkKind::Lifecycle => "lifecycle",
             SinkKind::Cdr => "cdr",
+            SinkKind::Audit => "audit",
         }
     }
 }

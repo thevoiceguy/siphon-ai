@@ -71,13 +71,18 @@ use sip_transport::{
 };
 use sip_uac::integrated::IntegratedUAC;
 use sip_uas::integrated::{IntegratedUAS, UasRequestHandler};
+use siphon_ai_audit::{
+    AuditSinkHandle, FanoutSink as AuditFanoutSink, FileSink as AuditFileSink,
+    FilteredSink as AuditFilteredSink, HttpSink as AuditHttpSink,
+    HttpSinkConfig as AuditHttpSinkConfig,
+};
 use siphon_ai_cdr::{
     CdrSinkHandle, FileSink, HepCdrSink, MultiSink, NullSink, WebhookSink, WebhookSinkConfig,
 };
 use siphon_ai_config::{
-    AdminTlsConfig, CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, HepConfig, MediaConfig,
-    NodeConfig, ObservabilityConfig, ParkTimeoutAction as ConfigParkTimeoutAction, SipConfig,
-    SipTlsConfig, SipTransport, WebhooksConfig,
+    AdminTlsConfig, AuditConfig, CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, HepConfig,
+    MediaConfig, NodeConfig, ObservabilityConfig, ParkTimeoutAction as ConfigParkTimeoutAction,
+    SipConfig, SipTlsConfig, SipTransport, WebhooksConfig,
 };
 use siphon_ai_core::{
     default_call_id_factory, BridgingAcceptor, CallControlRegistry, CallRegistry, ConferenceAdmin,
@@ -194,6 +199,7 @@ impl Runtime {
             cdr,
             observability,
             webhooks,
+            audit,
             hep,
             park,
             admin,
@@ -249,6 +255,29 @@ impl Runtime {
         ));
         let webhook_sink: WebhookSinkHandle = webhook_swap.clone();
         let webhook_sink_for_registrations = Arc::clone(&webhook_sink);
+
+        // ─── Audit-event stream (0.20.0) ────────────────────────────
+        // Build the signed webhook + JSONL sinks, wrap in a swappable
+        // delegate for SIGHUP, and install the process-wide facade so
+        // the admin / SIP / reload call sites can `audit::emit(...)`
+        // without threading a handle through every constructor. When
+        // `[audit].enabled = false` this installs nothing and
+        // `audit::emit` stays a no-op.
+        let audit_spool_active = audit
+            .webhook
+            .as_ref()
+            .and_then(|w| w.spool_dir.as_ref())
+            .is_some();
+        let audit_fingerprint = format!("{:?}", audit);
+        let audit_swap = if audit.enabled {
+            let swap = Arc::new(crate::reload::SwappableAuditSink::new(
+                build_audit_sink(&audit).await?,
+            ));
+            siphon_ai_audit::install(swap.clone() as AuditSinkHandle);
+            Some(swap)
+        } else {
+            None
+        };
 
         // ─── Forge media stack ──────────────────────────────────────
         // One process-wide EventBus. Forge's session manager publishes
@@ -811,11 +840,14 @@ impl Runtime {
                     route_swap: Arc::clone(&route_swap),
                     webhook_swap: Arc::clone(&webhook_swap),
                     cdr_swap: Arc::clone(&cdr_swap),
+                    audit_swap: audit_swap.clone(),
                     hep_telemetry: hep_telemetry.clone(),
                     webhook_spool_active,
                     cdr_spool_active,
+                    audit_spool_active,
                     webhook_fingerprint,
                     cdr_fingerprint,
+                    audit_fingerprint,
                     outbound: outbound_reload,
                     tls: sip.tls.clone().zip(tls_for_reload),
                     admin_tls: admin_tls_for_reload,
@@ -1584,11 +1616,23 @@ pub(crate) fn reload_admin_tls_cert(tls: &AdminTlsConfig, swap: &TlsSwap) {
             metrics::counter!("siphon_ai_admin_tls_reload_attempts_total", "outcome" => "ok")
                 .increment(1);
             info!(cert = %tls.cert_path.display(), "admin TLS cert reloaded on SIGHUP");
+            siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::cert_reload(
+                "admin_tls",
+                tls.cert_path.display().to_string(),
+                "ok",
+                None,
+            ));
         }
         Err(e) => {
             metrics::counter!("siphon_ai_admin_tls_reload_attempts_total", "outcome" => "failed")
                 .increment(1);
             error!(cert = %tls.cert_path.display(), error = %e, "SIGHUP admin TLS reload failed; keeping previous cert");
+            siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::cert_reload(
+                "admin_tls",
+                tls.cert_path.display().to_string(),
+                "failed",
+                Some(e.to_string()),
+            ));
         }
     }
 }
@@ -1682,11 +1726,23 @@ pub(crate) fn reload_sip_tls_cert(tls: &SipTlsConfig, swap: &TlsSwap) {
             metrics::counter!("siphon_ai_sip_tls_reload_attempts_total", "outcome" => "ok")
                 .increment(1);
             info!(cert = %tls.cert_path.display(), "SIP/TLS cert reloaded on SIGHUP");
+            siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::cert_reload(
+                "sip_tls",
+                tls.cert_path.display().to_string(),
+                "ok",
+                None,
+            ));
         }
         Err(e) => {
             metrics::counter!("siphon_ai_sip_tls_reload_attempts_total", "outcome" => "failed")
                 .increment(1);
             error!(cert = %tls.cert_path.display(), error = %e, "SIGHUP cert reload failed; keeping previous cert");
+            siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::cert_reload(
+                "sip_tls",
+                tls.cert_path.display().to_string(),
+                "failed",
+                Some(e.to_string()),
+            ));
         }
     }
 }
@@ -1765,6 +1821,59 @@ pub(crate) async fn build_cdr_sink(
         }
         1 => sinks.pop().unwrap(),
         _ => Arc::new(MultiSink::new(sinks)) as CdrSinkHandle,
+    })
+}
+
+/// Build the audit sink from a validated (`enabled = true`) config.
+/// Tees the enabled sub-sinks (JSONL file + HMAC webhook) through a
+/// `FanoutSink`, then wraps the result in a `FilteredSink` when an
+/// `events` allowlist is set. `compile_audit` guarantees at least one
+/// sub-sink is enabled, so this never returns a no-op.
+pub(crate) async fn build_audit_sink(cfg: &AuditConfig) -> Result<AuditSinkHandle> {
+    let mut sinks: Vec<AuditSinkHandle> = Vec::new();
+
+    if let Some(file_cfg) = &cfg.file {
+        let sink = AuditFileSink::open(&file_cfg.path)
+            .await
+            .with_context(|| format!("open audit file {}", file_cfg.path.display()))?;
+        info!(path = %file_cfg.path.display(), "audit file sink active");
+        sinks.push(Arc::new(sink) as AuditSinkHandle);
+    }
+    if let Some(webhook_cfg) = &cfg.webhook {
+        let sink = AuditHttpSink::new(AuditHttpSinkConfig {
+            url: webhook_cfg.url.clone(),
+            auth_header: webhook_cfg.auth_header.clone(),
+            secret: webhook_cfg.secret.clone(),
+            spool_dir: webhook_cfg.spool_dir.clone(),
+            retry_max: webhook_cfg.retry_max,
+            timeout_ms: webhook_cfg.timeout.as_millis() as u64,
+        })
+        .map_err(|e| anyhow!("audit webhook client build failed: {e}"))?;
+        if webhook_cfg.secret.is_none() {
+            warn!("[audit.webhook] has no secret; the audit stream is UNSIGNED and not tamper-evident");
+        }
+        info!(
+            url = %webhook_cfg.url,
+            signed = webhook_cfg.secret.is_some(),
+            spooled = webhook_cfg.spool_dir.is_some(),
+            "audit webhook sink active"
+        );
+        sinks.push(Arc::new(sink) as AuditSinkHandle);
+    }
+
+    // Fan out to every enabled sub-sink; unwrap the single-sink case to
+    // skip the fan-out indirection.
+    let fanned: AuditSinkHandle = if sinks.len() == 1 {
+        sinks.pop().unwrap()
+    } else {
+        Arc::new(AuditFanoutSink::new(sinks)) as AuditSinkHandle
+    };
+
+    Ok(if cfg.events.is_empty() {
+        fanned
+    } else {
+        info!(allowlist = cfg.events.len(), "audit event allowlist active");
+        Arc::new(AuditFilteredSink::new(fanned, cfg.events.clone())) as AuditSinkHandle
     })
 }
 

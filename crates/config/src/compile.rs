@@ -70,6 +70,8 @@ pub struct Config {
     pub cdr: CdrConfig,
     pub observability: ObservabilityConfig,
     pub webhooks: WebhooksConfig,
+    /// `[audit]` — signed audit-event stream (0.20.0).
+    pub audit: AuditConfig,
     pub hep: HepConfig,
     /// `[admin]` — the authenticated admin API. `None` when no `[admin]`
     /// block is configured, in which case `/admin/*` is not served.
@@ -479,6 +481,37 @@ pub struct CdrWebhookConfig {
     pub timeout: Duration,
 }
 
+/// Resolved `[audit]` plan (0.20.0). The daemon translates this into
+/// real `siphon-ai-audit` sinks at runtime (config doesn't depend on
+/// the audit crate, to keep the dep graph minimal — same as CDR).
+#[derive(Debug, Clone, Default)]
+pub struct AuditConfig {
+    /// `[audit].enabled`. Even when true, file and webhook are
+    /// individually off until their `enabled = true` is set.
+    pub enabled: bool,
+    /// Event-type allowlist. Empty = record everything.
+    pub events: Vec<String>,
+    pub file: Option<AuditFileConfig>,
+    pub webhook: Option<AuditWebhookConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditFileConfig {
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditWebhookConfig {
+    pub url: String,
+    pub auth_header: Option<String>,
+    /// HMAC-SHA256 signing secret. `None` ⇒ unsigned deliveries.
+    pub secret: Option<String>,
+    /// Durable spool directory. `None` ⇒ best-effort delivery.
+    pub spool_dir: Option<String>,
+    pub retry_max: u32,
+    pub timeout: Duration,
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
     pub id: String,
@@ -812,6 +845,15 @@ pub enum CompileError {
     #[error("[cdr.webhook].url is required when [cdr.webhook].enabled = true")]
     CdrWebhookUrlRequired,
 
+    #[error("[audit.file].path is required when [audit.file].enabled = true")]
+    AuditFilePathRequired,
+
+    #[error("[audit.webhook].url is required when [audit.webhook].enabled = true")]
+    AuditWebhookUrlRequired,
+
+    #[error("[audit].enabled = true but neither [audit.file] nor [audit.webhook] is enabled; enable at least one sink or set [audit].enabled = false")]
+    AuditNoSink,
+
     #[error("[observability].http_listen {0:?} is not a valid socket address: {1}")]
     BadObservabilityListen(String, std::net::AddrParseError),
 
@@ -969,6 +1011,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let cdr = compile_cdr(raw.cdr)?;
     let observability = compile_observability(raw.observability)?;
     let webhooks = compile_webhooks(raw.webhooks)?;
+    let audit = compile_audit(raw.audit)?;
     let hep = compile_hep(raw.hep)?;
     let admin = compile_admin(raw.admin)?;
     let shutdown = compile_shutdown(raw.shutdown);
@@ -1063,6 +1106,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         cdr,
         observability,
         webhooks,
+        audit,
         hep,
         admin,
         shutdown,
@@ -2384,6 +2428,137 @@ fn compile_cdr(raw: RawCdr) -> Result<CdrConfig, CompileError> {
         file,
         webhook,
     })
+}
+
+fn compile_audit(raw: crate::raw::RawAudit) -> Result<AuditConfig, CompileError> {
+    if !raw.enabled {
+        // Master switch off; sub-block config parsed but ignored,
+        // matching the [cdr] pattern (flip `enabled = false` to
+        // silence a misconfig while investigating).
+        return Ok(AuditConfig::default());
+    }
+    let file = if raw.file.enabled {
+        let path = raw.file.path.ok_or(CompileError::AuditFilePathRequired)?;
+        if path.is_empty() {
+            return Err(CompileError::AuditFilePathRequired);
+        }
+        Some(AuditFileConfig {
+            path: PathBuf::from(path),
+        })
+    } else {
+        None
+    };
+    let webhook = if raw.webhook.enabled {
+        let url = raw
+            .webhook
+            .url
+            .ok_or(CompileError::AuditWebhookUrlRequired)?;
+        if url.is_empty() {
+            return Err(CompileError::AuditWebhookUrlRequired);
+        }
+        Some(AuditWebhookConfig {
+            url,
+            auth_header: raw.webhook.auth_header.filter(|s| !s.is_empty()),
+            secret: raw.webhook.secret.filter(|s| !s.is_empty()),
+            spool_dir: raw.webhook.spool_dir.filter(|s| !s.is_empty()),
+            retry_max: raw.webhook.retry_max.unwrap_or(3),
+            timeout: Duration::from_millis(raw.webhook.timeout_ms.unwrap_or(5000)),
+        })
+    } else {
+        None
+    };
+    // `[audit].enabled = true` with no sink enabled is almost certainly
+    // a mistake (the operator thinks they're auditing but nothing is
+    // recorded). Fail loud rather than silently install a null sink.
+    if file.is_none() && webhook.is_none() {
+        return Err(CompileError::AuditNoSink);
+    }
+    Ok(AuditConfig {
+        enabled: true,
+        events: raw.events.unwrap_or_default(),
+        file,
+        webhook,
+    })
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::{compile_audit, CompileError};
+    use crate::raw::{RawAudit, RawAuditFile, RawAuditWebhook};
+
+    fn base() -> RawAudit {
+        RawAudit {
+            enabled: true,
+            events: None,
+            file: RawAuditFile::default(),
+            webhook: RawAuditWebhook::default(),
+        }
+    }
+
+    #[test]
+    fn disabled_yields_default_no_sinks() {
+        let cfg = compile_audit(RawAudit::default()).unwrap();
+        assert!(!cfg.enabled);
+        assert!(cfg.file.is_none());
+        assert!(cfg.webhook.is_none());
+    }
+
+    #[test]
+    fn enabled_with_no_sink_is_rejected() {
+        let err = compile_audit(base()).unwrap_err();
+        assert!(matches!(err, CompileError::AuditNoSink));
+    }
+
+    #[test]
+    fn file_enabled_requires_path() {
+        let mut raw = base();
+        raw.file.enabled = true;
+        let err = compile_audit(raw).unwrap_err();
+        assert!(matches!(err, CompileError::AuditFilePathRequired));
+    }
+
+    #[test]
+    fn webhook_enabled_requires_url() {
+        let mut raw = base();
+        raw.webhook.enabled = true;
+        let err = compile_audit(raw).unwrap_err();
+        assert!(matches!(err, CompileError::AuditWebhookUrlRequired));
+    }
+
+    #[test]
+    fn file_and_webhook_compile_with_defaults() {
+        let mut raw = base();
+        raw.file.enabled = true;
+        raw.file.path = Some("/var/log/siphon-ai/audit.jsonl".into());
+        raw.webhook.enabled = true;
+        raw.webhook.url = Some("https://siem.example/events".into());
+        raw.webhook.secret = Some("s3cret".into());
+        raw.events = Some(vec!["admin_request".into(), "sip_auth".into()]);
+
+        let cfg = compile_audit(raw).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(
+            cfg.file.unwrap().path.to_str().unwrap(),
+            "/var/log/siphon-ai/audit.jsonl"
+        );
+        let wh = cfg.webhook.unwrap();
+        assert_eq!(wh.url, "https://siem.example/events");
+        assert_eq!(wh.secret.as_deref(), Some("s3cret"));
+        assert_eq!(wh.retry_max, 3);
+        assert_eq!(cfg.events, vec!["admin_request", "sip_auth"]);
+    }
+
+    #[test]
+    fn empty_secret_and_spool_normalise_to_none() {
+        let mut raw = base();
+        raw.webhook.enabled = true;
+        raw.webhook.url = Some("https://siem.example/events".into());
+        raw.webhook.secret = Some(String::new());
+        raw.webhook.spool_dir = Some(String::new());
+        let wh = compile_audit(raw).unwrap().webhook.unwrap();
+        assert!(wh.secret.is_none());
+        assert!(wh.spool_dir.is_none());
+    }
 }
 
 #[cfg(test)]

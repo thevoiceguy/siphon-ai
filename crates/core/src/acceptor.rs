@@ -2862,6 +2862,33 @@ impl CallAcceptor for BridgingAcceptor {
                 let (code, reason) = e.sip_status();
                 warn!(error = %e, code, reason, "rejecting INVITE");
                 metrics::counter!(INVITES_TOTAL, "result" => e.reject_metric_label()).increment(1);
+                // Audit the security-screening rejections (STIR/SHAKEN
+                // policy + missing Identity) for the SIEM trail. Other
+                // reject causes (bad SDP, setup failure) are call-quality
+                // signals, not security events, and stay out of the audit
+                // stream. from_tn / presented attestation aren't plumbed
+                // to this site, so they're recorded as absent.
+                match &e {
+                    AcceptError::AttestationRejected { required, .. } => {
+                        siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::attestation_rejected(
+                            None,
+                            format!("{required:?}"),
+                            None,
+                            code,
+                            reason.to_string(),
+                        ));
+                    }
+                    AcceptError::IdentityRequired => {
+                        siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::attestation_rejected(
+                            None,
+                            "identity_required",
+                            None,
+                            code,
+                            reason.to_string(),
+                        ));
+                    }
+                    _ => {}
+                }
                 let mut response = UserAgentServer::create_response(call.request, code, reason);
                 // Attestation rejections carry a Q.850 Reason so the caller /
                 // Homer sees why the call was screened (plan §9 decision 4).

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-07-01
+
+### Fixed
+
+- **SIP-over-TCP/TLS trunks no longer wedge after ~60s of a call**
+  (CUCM and any persistent-connection trunk). The SIP stack closed an
+  inbound TCP/TLS connection after 60s with no inbound SIP — but a trunk
+  keeps its signaling connection open for a call's whole life while
+  sending **no SIP at all** (RTP is out-of-band), so 60s idle was hit by
+  essentially every call. The reaped connection then dropped mid-call
+  re-INVITEs and BYEs (they got no response — the socket was gone before
+  the transaction layer saw them), leaving the peer's dialogs stuck and
+  its trunk health-check failing → `503` on new calls. The idle timeout
+  is now two-phase: a short Slowloris window until a connection completes
+  its first SIP message, then a long, configurable **established** timeout
+  (new `[sip].tcp_idle_timeout_secs`, default `1800`; `0` disables). UDP
+  is connectionless and was never affected. Requires the paired siphon-rs
+  transport fix (bumped here). See `docs/CONFIG.md` → `[sip]`.
+
 ## [0.21.0] - 2026-07-01
 
 ### Added

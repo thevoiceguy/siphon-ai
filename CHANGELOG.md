@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-01
+
+### Added
+
+- **Dashboards & alerts as code** (P1 "Observability completeness"; first
+  sub-item of the theme). A runnable Prometheus + Grafana stack under
+  [`examples/observability/`](examples/observability/) — the consumer
+  artifacts for the metrics the daemon already emits, no daemon code. Ships
+  a reference scrape config, **16 recording rules** (per-route call rates,
+  INVITE reject ratio, latency percentiles for WS-connect / SDP-negotiate /
+  call-duration / RTP-RTT / packet-loss / room-tick-lag, webhook delivery
+  success ratio, registration state), **12 alerting rules** (target/
+  registration down, high reject rate, dead air, slow WS connect, high RTP
+  RTT / packet loss, spool backlog, delivery failing, admission flooding,
+  sip-auth brute force, drain forced), and **two provisioned Grafana
+  dashboards** (Fleet Overview + Call Quality). `docker compose -f
+  examples/observability/compose.yaml up` stands the whole stack up.
+- **Observability anti-drift CI check.** `scripts/check-observability-metrics.py`
+  (new `observability artifacts` CI job) asserts every `siphon_ai_*` metric
+  referenced in the shipped rules/dashboards is actually emitted by the
+  daemon, and `promtool check config` validates the PromQL — so a metric
+  rename can't ship silently-broken artifacts (same spirit as the version
+  gate).
+
+### Changed
+
+- **`docs/OPERATIONS.md` made concrete.** The §11.8 "ten questions" now carry
+  the worked PromQL and the covering dashboard/alert for each metrics-
+  answerable one, plus a symptom → dashboard table. `docs/DEPLOY.md`'s metrics
+  section points to the shipped stack. (Prometheus/Grafana for the aggregate;
+  Homer for the individual call.)
+
 ## [0.20.0] - 2026-07-01
 
 ### Added

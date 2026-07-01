@@ -102,15 +102,20 @@ calls. Regulatory-driven for some operators; large.
 
 ## P1 — Observability completeness
 
-The metrics/logs/HEP primitives are rich, but there are no shipped consumer
-artifacts and no distributed tracing.
+The metrics/logs/HEP primitives are rich; the gap is shipped consumer
+artifacts and distributed tracing. Scoped in
+[`docs/design/DESIGN_OBSERVABILITY.md`](design/DESIGN_OBSERVABILITY.md).
 
-- **Dashboards & alerts as code** — shipped Grafana dashboard JSON +
-  Prometheus recording/alerting rules + the `docs/OPERATIONS.md` "ten
-  questions" runbook made concrete.
+- **Dashboards & alerts as code** — ✅ **delivered in v0.21.0.** Runnable
+  Prometheus + Grafana stack in [`examples/observability/`](../examples/observability/)
+  (recording + alerting rules + Fleet Overview / Call Quality dashboards),
+  `docs/OPERATIONS.md` "ten questions" made concrete, and an anti-drift CI
+  check keeping metric names honest.
 - **OpenTelemetry / OTLP traces** — today tracing is structured logs + HEP
   correlation only; OTLP spans would let operators trace a call across the
-  daemon + their WS server in one view.
+  daemon + their WS server in one view. Next up: v0.22.0 (daemon-side export)
+  then v0.23.0 (W3C trace-context propagation to the WS server). Deps + the
+  additive protocol change are approved (DESIGN_OBSERVABILITY §5).
 
 ---
 

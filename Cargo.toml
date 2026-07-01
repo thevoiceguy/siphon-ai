@@ -112,24 +112,24 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # main branch and replace the rev hashes here (see CLAUDE.md §7.5).
 
 # siphon-rs — RFC 3261 SIP stack
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "83523662848d" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "83523662848d" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "83523662848d", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "83523662848d" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "83523662848d" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "83523662848d" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "83523662848d" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "83523662848d" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "83523662848d" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
 # (distinct from forge-media's pinned sip-sdp). Used by the outbound
 # delayed-offer answer generator to hand the UAC a SessionDescription it
 # accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "83523662848d" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "83523662848d" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3023963ba83a" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "83523662848d" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #

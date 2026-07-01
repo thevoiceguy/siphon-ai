@@ -195,6 +195,37 @@ ws_url = "wss://${HOST:-fallback.example.com}/ws"
 }
 
 #[test]
+fn tcp_idle_timeout_defaults_to_1800() {
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
+    let cfg = load_from_str_with_env(toml, &MapEnv::new([])).expect("compiles");
+    assert_eq!(cfg.sip.tcp_idle_timeout_secs, 1800);
+}
+
+#[test]
+fn tcp_idle_timeout_custom_and_zero() {
+    for (val, want) in [("300", 300u64), ("0", 0)] {
+        let toml = format!(
+            r#"
+[sip]
+listen = "127.0.0.1:5060"
+tcp_idle_timeout_secs = {val}
+
+[bridge]
+ws_url = "wss://x/y"
+"#
+        );
+        let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+        assert_eq!(cfg.sip.tcp_idle_timeout_secs, want);
+    }
+}
+
+#[test]
 fn public_address_falls_back_to_listen_ip_when_unset() {
     let env = MapEnv::new([]);
     let toml = r#"

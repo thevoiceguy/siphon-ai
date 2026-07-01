@@ -236,6 +236,16 @@ pub struct RawSip {
     /// concurrency cap. Unset / all-zero ⇒ off.
     #[serde(default)]
     pub admission: Option<RawSipAdmission>,
+    /// Idle timeout (seconds) for an **established** inbound SIP-over-TCP/TLS
+    /// connection — one that has completed at least one SIP message. A SIP
+    /// trunk (e.g. CUCM) holds this connection open for a call's whole life
+    /// while sending no SIP (RTP is out-of-band), so this must exceed your
+    /// longest SIP-quiet period. Default 1800 (matches typical session
+    /// timers). `0` disables the idle close entirely. Does NOT shorten the
+    /// separate Slowloris window for connections that never complete a
+    /// request. UDP is connectionless and unaffected.
+    #[serde(default)]
+    pub tcp_idle_timeout_secs: Option<u64>,
 }
 
 /// `[sip.admission]` — inbound INVITE admission control. A per-source

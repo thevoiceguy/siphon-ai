@@ -79,12 +79,17 @@ internet-facing daemons (especially trunks without a static carrier IP):
 - **Per-source INVITE rate limits + admission control** — a DoS posture
   beyond the allowlist, complementing the existing fail2ban recipe.
 
-### Signed audit-event stream
-Admin requests are logged + metered, but there's no tamper-evident, shippable
-audit trail. (Explicitly deferred from the admin-auth theme.)
+### Signed audit-event stream — ✅ delivered in v0.20.0
+Admin requests were logged + metered, but there was no tamper-evident,
+shippable audit trail. (Explicitly deferred from the admin-auth theme.)
 
-- Emit admin/security events as a signed webhook / HEP stream for SIEM
-  ingestion (reuse the 0.11.0 HMAC signer).
+- **Delivered:** `[audit]` — admin/security events (`admin_request`,
+  `sip_auth`, `invite_rejected`, `attestation_rejected`, `config_reload`,
+  `cert_reload`) emitted to an append-only JSONL file and/or an HMAC-signed
+  webhook for SIEM ingestion, reusing the 0.11.0 signer. A HEP audit stream
+  remains a possible follow-up. **This completes the P1 security & abuse
+  hardening theme** — only STIR/SHAKEN outbound signing (below) remains, and
+  it's scoped as its own demand-gated effort.
 
 ### STIR/SHAKEN outbound signing
 SiphonAI *verifies* inbound attestation (0.4.0) but cannot *sign* outbound

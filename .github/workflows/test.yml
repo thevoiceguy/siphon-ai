@@ -56,6 +56,25 @@ jobs:
       - name: Check version consistency
         run: python3 scripts/check-version-consistency.py
 
+  observability-artifacts:
+    name: observability artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Anti-drift: every siphon_ai_* metric referenced in the shipped
+      # Prometheus rules / Grafana dashboards under examples/observability/
+      # must be a metric the daemon actually emits, so a metric rename can't
+      # ship silently-broken artifacts. Pure Python (stdlib).
+      - name: Check observability metric names
+        run: python3 scripts/check-observability-metrics.py
+      # Validate the reference Prometheus config + rules parse (real PromQL
+      # + rule-structure check) using promtool from the Prometheus image.
+      - name: promtool check rules + config
+        run: |
+          docker run --rm -v "$PWD/examples/observability":/work -w /work \
+            --entrypoint promtool prom/prometheus:latest \
+            check config prometheus.yml
+
   lint-and-test:
     name: fmt + clippy + cargo test
     runs-on: ubuntu-latest

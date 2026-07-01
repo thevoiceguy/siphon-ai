@@ -1,0 +1,12 @@
+# Provisions the Prometheus datasource the bundled dashboards reference by a
+# fixed uid (`siphonai-prom`), so they load without any manual wiring.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: siphonai-prom
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

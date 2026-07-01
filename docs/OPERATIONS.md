@@ -18,8 +18,31 @@ evidence and flags any gaps.
 | `tracing` spans                     | Per-call latency between `on_invite` → `on_matched` → `accept_inbound` → `start_session` |
 | Homer UI (`http://.../`)            | SIP call flow + RTCP + CDR + log chunks correlated by SIP `Call-ID`                    |
 | Prometheus `/metrics`               | Counters / histograms; `siphon_ai_*` for app-level, `forge_*` for media, `heplify_*` for collector  |
+| Grafana dashboards                  | Fleet Overview + Call Quality — shipped in [`examples/observability/`](../examples/observability/) (rates, ratios, latency percentiles) |
 | CDR (file / webhook)                | One JSON record per ended call with codec, route, termination cause, durations         |
 | `/admin/*`                          | Live state — active calls, registration status, log filter, HEP probe, drain status     |
+
+## Dashboards & alerts as code
+
+[`examples/observability/`](../examples/observability/) ships a runnable
+Prometheus + Grafana stack — recording rules, alerting rules, and two Grafana
+dashboards — so the metrics below come with visualizations and pages out of
+the box (`docker compose -f examples/observability/compose.yaml up`). Where a
+question below is answerable from metrics, the worked PromQL and the panel /
+alert that covers it are called out. **Prometheus/Grafana for the aggregate
+(rates, ratios, latency percentiles); Homer for the individual call** (SIP
+flow + per-stream RTP quality); the daemon log for the per-call *why*.
+
+Symptom → where to look first:
+
+| Symptom | Dashboard / alert | Then |
+|---|---|---|
+| Callers turned away | `SiphonAIHighInviteRejectRate`; Fleet → *INVITE rate by outcome* | break down `siphon_ai_invites_total` by `result`; Q1 |
+| Dead air at answer | `SiphonAISlowWsConnect`; Call Quality → *WS connect latency* | WS server health; Q5 |
+| Choppy / laggy audio | `SiphonAIHighRtpRtt` / `SiphonAIHighPacketLoss`; Call Quality → RTP panels | Homer RTP-QoS per leg; Q6 |
+| Not receiving calls | `SiphonAIRegistrationDown` / `SiphonAINoInboundCalls` | Q10; upstream trunk |
+| Events not reaching a SIEM/billing | `SiphonAIWebhookSpoolBacklog` / `SiphonAIWebhookDeliveryFailing`; Fleet → delivery panels | receiver health |
+| Rough deploy | `SiphonAIDrainForced` | lengthen `[shutdown].drain_timeout_secs` |
 
 ## The §11.8 ten questions
 
@@ -103,8 +126,18 @@ For systemic latency tracking the daemon exposes:
 - `siphon_ai_ws_connect_seconds` (histogram)
 - `siphon_ai_call_duration_seconds` (histogram of total call wall time)
 
-Pipe to Grafana; `histogram_quantile(0.99, ...)` per stage gives
-the headline numbers.
+The shipped rules pre-compute the percentiles — query the recorded series
+(no `histogram_quantile` in the panel):
+
+```promql
+siphon_ai:ws_connect_seconds:p99      # bridge to WS handshake + start
+siphon_ai:sdp_negotiate_seconds:p99   # SDP parse + port alloc + tap attach
+siphon_ai:call_duration_seconds:p95
+```
+
+The **Call Quality** dashboard (`examples/observability/`) plots all three.
+Raw form if you need an ad-hoc quantile:
+`histogram_quantile(0.99, sum by (le) (rate(siphon_ai_ws_connect_seconds_bucket[5m])))`.
 
 ### 5. Was the WS server slow to respond?
 
@@ -117,7 +150,9 @@ INFO connect_and_run{call_id=… ws_url=ws://echo-ws:8765/}:
 
 The histogram captures the time from `connect_and_run` start to
 "bridge connected." For per-call rather than aggregate, subtract
-log timestamps.
+log timestamps. The `SiphonAISlowWsConnect` alert fires on
+`siphon_ai:ws_connect_seconds:p99 > 1` for 10m — a slow WS server (or the
+network to it) means callers hear dead air at answer.
 
 **Gap:** The CDR doesn't carry `first_audio_out_ms` — the time
 from `bridge connected` to the first audio frame from the WS
@@ -145,6 +180,17 @@ look at the QoS panel."
 Prometheus also exposes `forge_rtcp_packet_loss_fraction`,
 `forge_rtcp_packets_lost_total` (gauges over the most recent
 RR), and `forge_rtcp_jitter_ms` for dashboards.
+
+For the aggregate view, SiphonAI's own histograms drive the **Call Quality**
+dashboard and two alerts:
+
+```promql
+siphon_ai:rtp_rtt_ms:p95              # SiphonAIHighRtpRtt        (> 300ms/10m)
+siphon_ai:rtp_packet_loss_ratio:p95   # SiphonAIHighPacketLoss    (> 5%/10m)
+```
+
+These tell you *a fleet-wide quality problem is happening*; drop to Homer's
+per-leg RTP-QoS panel to see *which stream*.
 
 ### 7. What did the SIP exchange actually look like?
 
@@ -218,8 +264,11 @@ WARN registration drive task ended with error error=…
 ```
 
 The Prometheus gauge `siphon_ai_register_state{name="…", state="…"}`
-tracks the current row of every `[[register]]` block; alert on
-`failed` or `disabled` to catch outages.
+tracks the current row of every `[[register]]` block; the shipped
+`SiphonAIRegistrationDown` alert fires when a name has not been in the
+`registered` state for 5m (`max by (name) (siphon_ai_register_state{state="registered"}) < 1`),
+and the **Fleet Overview** dashboard shows the registered count. Inbound
+calls to a non-registered AOR won't arrive, so this is a `critical`.
 
 The question's premise belongs to a B2BUA model where one
 mis-routed call could break a downstream registration. SiphonAI

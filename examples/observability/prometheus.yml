@@ -1,0 +1,36 @@
+# Reference Prometheus scrape config for SiphonAI.
+#
+# SiphonAI exposes Prometheus metrics on the [observability] listener
+# (`[observability].http_listen`, default 127.0.0.1:9091) at /metrics —
+# unauthenticated by design (metrics/health are safe to scrape; the
+# privileged surface is the separate authenticated [admin] listener).
+#
+# This is a starting point: set the target(s) to your daemon(s), tune the
+# scrape interval to your retention budget, and load the rule files. The
+# recording/alerting rules and the Grafana dashboards in this directory are
+# authored against the metric names this config scrapes.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - rules/recording.yml
+  - rules/alerting.yml
+
+scrape_configs:
+  - job_name: siphon-ai
+    metrics_path: /metrics
+    static_configs:
+      # One entry per daemon. In the bundled compose stack the daemon is
+      # reachable as `siphon-ai:9091`; for a host-run daemon use
+      # 127.0.0.1:9091 (or the [observability].http_listen you configured).
+      - targets: ["siphon-ai:9091"]
+        labels:
+          # `instance` is set from the target by default; add any fleet
+          # dimensions you slice on (region, pool, node) here.
+          service: siphon-ai
+
+# Alertmanager is intentionally omitted from this reference — wire your own
+# under `alerting:` / `alertmanagers:`. The alerting rules fire regardless;
+# without an Alertmanager they're visible in Prometheus' Alerts page.

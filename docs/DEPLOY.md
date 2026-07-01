@@ -970,6 +970,14 @@ should be incrementing across calls.
 All histograms have sensible default buckets defined explicitly — no reliance
 on the metrics crate's defaults (CLAUDE.md §7.4).
 
+> **Dashboards & alerts as code (0.21.0).** You don't have to author these
+> from scratch: [`examples/observability/`](../examples/observability/) ships
+> a runnable Prometheus + Grafana stack — recording rules, starting-point
+> alerting rules, and two Grafana dashboards (Fleet Overview + Call Quality)
+> built against the metrics below. `docker compose -f
+> examples/observability/compose.yaml up`. A CI check keeps the metric names
+> in those artifacts in sync with this table.
+
 | Metric                                  | Type      | Labels                                | What it measures |
 |-----------------------------------------|-----------|---------------------------------------|------------------|
 | `siphon_ai_invites_total`               | counter   | `result=accepted\|rejected\|rejected_attestation\|no_match` | INVITEs by acceptance outcome. `rejected_attestation` is a STIR/SHAKEN policy reject (`min_attestation` gate or `require_identity`) — separately alertable from ordinary routing/media `rejected`. |

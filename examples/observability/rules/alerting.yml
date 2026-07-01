@@ -1,0 +1,191 @@
+# SiphonAI alerting rules — reference.
+#
+# Starting-point alerts for the signals an operator actually gets paged on.
+# Thresholds and `for:` durations are deliberately conservative defaults —
+# tune them to your SLOs and traffic. Each alert links to the relevant
+# docs/OPERATIONS.md question so the responder knows where to look first.
+#
+# These reference recorded series from recording.yml where it keeps the
+# expression readable, and raw metrics otherwise. Metric names are checked
+# against crates/telemetry/src/metrics.rs by CI
+# (scripts/check-observability-metrics.py).
+
+groups:
+  - name: siphon_ai.availability
+    rules:
+      - alert: SiphonAITargetDown
+        expr: up{job="siphon-ai"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SiphonAI /metrics target {{ $labels.instance }} is down"
+          description: >
+            Prometheus cannot scrape {{ $labels.instance }}. The daemon may be
+            down, or its [observability] listener unreachable. Check /health
+            and /ready on the same listener, and the process/unit status.
+
+      - alert: SiphonAIRegistrationDown
+        # A [[register]] endpoint stuck out of the "registered" state. The
+        # gauge is 1 for a name's current state; alert when a known name has
+        # been non-registered for a while.
+        expr: max by (name) (siphon_ai_register_state{state="registered"}) < 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SiphonAI registration {{ $labels.name }} is not registered"
+          description: >
+            The [[register]] endpoint {{ $labels.name }} has not been in the
+            `registered` state for 5m — inbound calls to that AOR won't arrive.
+            See OPERATIONS.md Q10 (registration state) and the daemon's
+            register-state transition logs.
+
+  - name: siphon_ai.calls
+    rules:
+      - alert: SiphonAIHighInviteRejectRate
+        expr: siphon_ai:invite_reject_ratio:5m > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SiphonAI is rejecting {{ $value | humanizePercentage }} of INVITEs"
+          description: >
+            Over 20% of inbound INVITEs have been refused for 10m
+            (admission / trunk allowlist / attestation / no-route). Break down
+            by `result` on siphon_ai_invites_total. See OPERATIONS.md Q1
+            (routing) and the [sip.admission] / [[trunk]] / [security] config.
+
+      - alert: SiphonAINoInboundCalls
+        # Dead-air: the daemon is up but has taken no INVITEs. Only meaningful
+        # for always-on inbound deployments — disable or lengthen `for:` for
+        # bursty / outbound-only nodes.
+        expr: sum(rate(siphon_ai_invites_total[5m])) == 0 and on() up{job="siphon-ai"} == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SiphonAI has received no INVITEs for 15m"
+          description: >
+            The daemon is up but has seen no inbound INVITEs for 15m. Expected
+            for an outbound-only or off-hours node; on an always-on inbound
+            trunk it usually means upstream (carrier / SBC / DNS) is not
+            delivering calls.
+
+  - name: siphon_ai.latency
+    rules:
+      - alert: SiphonAISlowWsConnect
+        # The bridge is slow to reach the developer's WS server + send `start`.
+        expr: siphon_ai:ws_connect_seconds:p99 > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SiphonAI WS-connect p99 is {{ $value | humanizeDuration }}"
+          description: >
+            p99 time from bridge spawn to WS handshake + `start` exceeds 1s for
+            10m — callers hear dead air at answer. Check the WS server's health
+            and the network path. See OPERATIONS.md Q5 (WS server slow?).
+
+      - alert: SiphonAIHighRtpRtt
+        expr: siphon_ai:rtp_rtt_ms:p95 > 300
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SiphonAI RTP RTT p95 is {{ $value }}ms"
+          description: >
+            RTCP-derived round-trip time p95 exceeds 300ms for 10m — likely
+            audible latency / talk-over. For per-stream loss & jitter, see the
+            Homer RTP-QoS view (OPERATIONS.md Q6, audio quality).
+
+      - alert: SiphonAIHighPacketLoss
+        expr: siphon_ai:rtp_packet_loss_ratio:p95 > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SiphonAI RTP packet-loss p95 is {{ $value | humanizePercentage }}"
+          description: >
+            RTP packet-loss ratio p95 over 5% for 10m — degraded audio. Usually
+            a network-path problem toward the far end. Cross-check the Homer
+            RTP-QoS view for the affected legs (OPERATIONS.md Q6).
+
+  - name: siphon_ai.security
+    rules:
+      - alert: SiphonAISipAuthFailures
+        # Sustained bad digest credentials — brute-force or a misconfigured
+        # peer. Only emitted when [sip.auth] is enabled.
+        expr: sum(rate(siphon_ai_sip_auth_total{result="failed"}[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SiphonAI inbound digest-auth failures at {{ $value | humanize }}/s"
+          description: >
+            Sustained inbound digest-auth failures for 10m — a brute-force
+            attempt or a peer with stale credentials. Pair with the fail2ban
+            recipe and the audit stream (sip_auth events). See CONFIG.md
+            [sip.auth].
+
+      - alert: SiphonAIAdmissionFlooding
+        # A source pushed past drop_after and is being silently dropped —
+        # an active flood. Only emitted when [sip.admission] is on.
+        expr: sum(rate(siphon_ai_invite_admission_total{result="dropped"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SiphonAI is silently dropping flooding INVITEs"
+          description: >
+            Admission control has been hard-dropping INVITEs (past drop_after)
+            for 5m — a sustained flood from one or more sources. The node is
+            shedding load as designed; investigate the source(s) upstream.
+            See CONFIG.md [sip.admission].
+
+  - name: siphon_ai.delivery
+    rules:
+      - alert: SiphonAIWebhookSpoolBacklog
+        # Durable-spool depth rising = deliveries failing and backing up on disk.
+        expr: max by (sink) (siphon_ai_webhook_spool_depth) > 100
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SiphonAI {{ $labels.sink }} spool depth is {{ $value }}"
+          description: >
+            The {{ $labels.sink }} delivery spool has held >100 entries for
+            15m — the receiver is unreachable or erroring. Healthy is 0. Check
+            the receiver endpoint and the delivery-attempt outcomes.
+
+      - alert: SiphonAIWebhookDeliveryFailing
+        expr: >
+          sum by (sink) (rate(siphon_ai_webhook_deliveries_total{result=~"dropped|rejected"}[10m]))
+          /
+          clamp_min(sum by (sink) (rate(siphon_ai_webhook_deliveries_total[10m])), 1e-9)
+          > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SiphonAI {{ $labels.sink }} deliveries {{ $value | humanizePercentage }} failing"
+          description: >
+            Over 10% of {{ $labels.sink }} deliveries dropped/rejected for 10m.
+            `rejected` = non-retryable 4xx (bad URL/auth/signature mismatch);
+            `dropped` = retry/spool budget exhausted or payload unserializable.
+
+  - name: siphon_ai.shutdown
+    rules:
+      - alert: SiphonAIDrainForced
+        # Calls were force-terminated at the drain deadline on shutdown — the
+        # drain window is too short for the call volume, or a deploy is racing it.
+        expr: increase(siphon_ai_calls_drain_forced_total[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "SiphonAI force-terminated {{ $value }} call(s) at drain deadline"
+          description: >
+            One or more calls were cut at the [shutdown].drain_timeout deadline
+            rather than ending naturally. Lengthen the drain window (≤ the
+            orchestrator's terminationGracePeriodSeconds) or investigate stuck
+            calls.

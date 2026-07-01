@@ -1,0 +1,93 @@
+# SiphonAI recording rules — reference.
+#
+# These pre-aggregate the raw `siphon_ai_*` metrics into the rates, ratios,
+# and latency percentiles the dashboards and alerts consume, so a query runs
+# once here instead of on every dashboard refresh / alert eval.
+#
+# Naming follows the Prometheus convention `level:metric:operation`, loosely:
+# the recorded series carry a `siphon_ai:` prefix so they're easy to spot.
+# The `[5m]` windows are a starting point — widen for quieter fleets.
+#
+# Metric names are validated against crates/telemetry/src/metrics.rs by
+# scripts/check-observability-metrics.py (CI). If you add a rule referencing
+# a new metric, that check keeps this file honest.
+
+groups:
+  - name: siphon_ai.calls.recording
+    interval: 15s
+    rules:
+      # Inbound INVITE rate by outcome (accepted|rejected|rejected_attestation|no_match).
+      - record: siphon_ai:invites:rate5m
+        expr: sum by (result) (rate(siphon_ai_invites_total[5m]))
+
+      # Fraction of inbound INVITEs refused (any non-accepted outcome). The
+      # headline "are we turning callers away?" number.
+      - record: siphon_ai:invite_reject_ratio:5m
+        expr: >
+          sum(rate(siphon_ai_invites_total{result=~"rejected|rejected_attestation"}[5m]))
+          /
+          clamp_min(sum(rate(siphon_ai_invites_total[5m])), 1e-9)
+
+      # Completed calls by termination cause.
+      - record: siphon_ai:calls:rate5m
+        expr: sum by (cause) (rate(siphon_ai_calls_total[5m]))
+
+      # Per-route call rate (route is a bounded label — operator routes).
+      - record: siphon_ai:route_match:rate5m
+        expr: sum by (route) (rate(siphon_ai_route_match_total[5m]))
+
+      # Outbound call outcomes (answered|busy|declined|no_answer|rejected|unreachable|failed).
+      - record: siphon_ai:outbound_calls:rate5m
+        expr: sum by (result) (rate(siphon_ai_outbound_calls_total[5m]))
+
+  - name: siphon_ai.latency.recording
+    interval: 15s
+    rules:
+      # End-to-end call-setup / bridge latencies (seconds). p50/p95/p99.
+      - record: siphon_ai:ws_connect_seconds:p99
+        expr: histogram_quantile(0.99, sum by (le) (rate(siphon_ai_ws_connect_seconds_bucket[5m])))
+      - record: siphon_ai:ws_connect_seconds:p50
+        expr: histogram_quantile(0.50, sum by (le) (rate(siphon_ai_ws_connect_seconds_bucket[5m])))
+      - record: siphon_ai:sdp_negotiate_seconds:p99
+        expr: histogram_quantile(0.99, sum by (le) (rate(siphon_ai_sdp_negotiate_seconds_bucket[5m])))
+      - record: siphon_ai:call_duration_seconds:p50
+        expr: histogram_quantile(0.50, sum by (le) (rate(siphon_ai_call_duration_seconds_bucket[5m])))
+      - record: siphon_ai:call_duration_seconds:p95
+        expr: histogram_quantile(0.95, sum by (le) (rate(siphon_ai_call_duration_seconds_bucket[5m])))
+
+      # RTCP round-trip time (milliseconds — note the _ms suffix / bucket unit).
+      - record: siphon_ai:rtp_rtt_ms:p95
+        expr: histogram_quantile(0.95, sum by (le) (rate(siphon_ai_rtp_rtt_ms_bucket[5m])))
+
+      # RTP packet-loss ratio (0.0-1.0) p95, sampled per rtp_stats emission.
+      # Prometheus-side audio-quality signal; Homer/HEP has per-stream detail.
+      - record: siphon_ai:rtp_packet_loss_ratio:p95
+        expr: histogram_quantile(0.95, sum by (le) (rate(siphon_ai_rtp_packet_loss_ratio_bucket[5m])))
+
+      # Conference mixer tick jitter past the 20ms cadence (seconds).
+      - record: siphon_ai:room_tick_lag_seconds:p99
+        expr: histogram_quantile(0.99, sum by (le) (rate(siphon_ai_room_tick_lag_seconds_bucket[5m])))
+
+  - name: siphon_ai.delivery.recording
+    interval: 15s
+    rules:
+      # Webhook / CDR / audit delivery success ratio, per sink
+      # (sink=lifecycle|cdr|audit). "delivered" over all terminal outcomes.
+      - record: siphon_ai:webhook_delivery_success_ratio:5m
+        expr: >
+          sum by (sink) (rate(siphon_ai_webhook_deliveries_total{result="delivered"}[5m]))
+          /
+          clamp_min(sum by (sink) (rate(siphon_ai_webhook_deliveries_total[5m])), 1e-9)
+
+      # Delivery latency p99 (seconds), per sink.
+      - record: siphon_ai:webhook_delivery_seconds:p99
+        expr: histogram_quantile(0.99, sum by (le, sink) (rate(siphon_ai_webhook_delivery_seconds_bucket[5m])))
+
+  - name: siphon_ai.registration.recording
+    interval: 15s
+    rules:
+      # Number of [[register]] endpoints currently in each state. The gauge
+      # is 1 for a name's current state and 0 for the others, so summing the
+      # `state` label gives a per-state count across the fleet.
+      - record: siphon_ai:register_endpoints:by_state
+        expr: sum by (state) (siphon_ai_register_state)

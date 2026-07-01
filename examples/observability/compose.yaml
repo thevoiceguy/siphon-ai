@@ -1,0 +1,50 @@
+# Reference metrics stack for SiphonAI: Prometheus + Grafana, auto-provisioned
+# with the recording/alerting rules and dashboards in this directory.
+#
+#   docker compose -f examples/observability/compose.yaml up
+#
+# Then open Grafana at http://127.0.0.1:3000 (admin / admin — change it, or
+# it's fine for a throwaway lab). The two SiphonAI dashboards are pre-loaded.
+#
+# This stack scrapes a daemon at `siphon-ai:9091` by default (see
+# prometheus.yml). Point it at your daemon by editing prometheus.yml, or run
+# a daemon reachable on that name (e.g. add it to this compose, or use
+# `extra_hosts` / a shared network). It composes cleanly alongside
+# examples/homer-stack/ — Prometheus/Grafana for rates + latency, Homer for
+# per-call SIP flow + per-stream RTP quality.
+#
+# Reference-only: loopback-published ports, default creds, no persistence.
+
+name: siphon-ai-observability
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./rules:/etc/prometheus/rules:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    # Let the daemon on the host be scraped as `siphon-ai:9091` when it runs
+    # outside compose. Harmless if you instead add a siphon-ai service here.
+    extra_hosts:
+      - "siphon-ai:host-gateway"
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Reference lab only — do not expose this to a network.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus

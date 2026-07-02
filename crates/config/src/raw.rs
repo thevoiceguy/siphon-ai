@@ -846,6 +846,38 @@ pub struct RawObservability {
     /// Required when `enabled = true`.
     #[serde(default)]
     pub http_listen: Option<String>,
+    /// `[observability.otlp]` — OpenTelemetry OTLP trace export (0.22.0).
+    /// Independent of the metrics HTTP server above — you can export traces
+    /// without scraping metrics, and vice versa. Off by default.
+    #[serde(default)]
+    pub otlp: RawObservabilityOtlp,
+}
+
+/// `[observability.otlp]` — export per-call spans over OTLP/gRPC to a
+/// collector (Tempo / Jaeger / an OpenTelemetry Collector). Off by default;
+/// best-effort (a slow/unreachable collector never blocks a call).
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawObservabilityOtlp {
+    #[serde(default)]
+    pub enabled: bool,
+    /// OTLP/gRPC endpoint. Default `http://localhost:4317`.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Head sampling ratio in `[0.0, 1.0]`. Default `1.0` (sample all).
+    /// Parent-based: a sampled parent keeps its children.
+    #[serde(default)]
+    pub sample_ratio: Option<f64>,
+    /// Per-export gRPC timeout (ms). Default `5000`.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// `service.name` resource attribute. Default `siphon-ai`.
+    #[serde(default)]
+    pub service_name: Option<String>,
+    /// Extra resource attributes (e.g. `deployment.environment = "prod"`),
+    /// attached to every exported span.
+    #[serde(default)]
+    pub attributes: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// `[hep]` — HEP3 (Homer) shipping. Off by default; when

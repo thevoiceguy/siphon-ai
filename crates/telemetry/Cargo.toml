@@ -42,6 +42,9 @@ tokio-rustls.workspace                = true
 hep-rs       = { workspace = true }
 sip-hep      = { workspace = true }
 forge-hep    = { workspace = true }
+opentelemetry = "0.32.0"
+opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "trace"] }
 
 [dev-dependencies]
 hyper-util = { workspace = true, features = ["client", "client-legacy", "http1"] }

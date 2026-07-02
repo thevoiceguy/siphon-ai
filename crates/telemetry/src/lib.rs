@@ -25,6 +25,7 @@ pub mod hep;
 pub mod http;
 pub mod log_filter;
 pub mod metrics;
+pub mod otel;
 pub mod readiness;
 
 pub use admin::{
@@ -37,6 +38,7 @@ pub use auth::{AdminAuth, AdminToken, AuthReject, Role};
 pub use hep::{HepBuildError, HepTelemetry, HepTelemetryBuild, HepWorkerHandle};
 pub use http::{AdminServer, AdminTlsConfigFn, ObservabilityServer};
 pub use log_filter::{LogFilterError, LogFilterHandle};
+pub use otel::{OtelConfig, OtelError, OtelTelemetry, OTEL_SCOPE};
 
 // Re-exports for the daemon binary so it doesn't need a second
 // direct dep on `metrics-exporter-prometheus`.

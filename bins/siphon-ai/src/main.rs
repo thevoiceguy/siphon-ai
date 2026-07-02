@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
-use siphon_ai::Runtime;
+use siphon_ai::{OtelActivation, Runtime};
 use siphon_ai_config::Config;
-use siphon_ai_telemetry::LogFilterHandle;
+use siphon_ai_telemetry::{LogFilterHandle, OTEL_SCOPE};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -124,7 +124,7 @@ async fn main() -> Result<()> {
     // SRTP-key-in-cleartext footgun); without a subscriber those are
     // silently dropped and the preflight is less informative than a real
     // boot.
-    let log_filter = init_tracing(cli.log.as_deref());
+    let (log_filter, otel_activation) = init_tracing(cli.log.as_deref());
 
     // Read-only subcommands dispatch here and exit — no socket binding,
     // no runtime (but tracing is live, so config warnings show).
@@ -182,9 +182,10 @@ async fn main() -> Result<()> {
 
     // Pass the path so SIGHUP (`systemctl reload`) can re-read it for
     // hot reload of the reload-safe sections.
-    let runtime = Runtime::build_with_reload(config, Some(config_path), log_filter)
-        .await
-        .context("runtime build failed")?;
+    let runtime =
+        Runtime::build_with_reload(config, Some(config_path), log_filter, Some(otel_activation))
+            .await
+            .context("runtime build failed")?;
 
     runtime.run(shutdown_signal()).await
 }
@@ -361,7 +362,7 @@ fn print_check_summary(path: &Path, config: &Config) {
 /// shorthand `tracing_subscriber::fmt()` builder, because the
 /// shorthand doesn't expose a reload handle. The layered form is
 /// the canonical way to make `EnvFilter` mutable at runtime.
-fn init_tracing(cli_filter: Option<&str>) -> LogFilterHandle {
+fn init_tracing(cli_filter: Option<&str>) -> (LogFilterHandle, OtelActivation) {
     const DEFAULT: &str = "siphon_ai=info,siphon_ai_core=info,siphon_ai_media_glue=info,\
          siphon_ai_sip_glue=info,siphon_ai_bridge=info,siphon_ai_routes=info,\
          siphon_ai_config=info,sip_uas=warn,sip_transaction=warn,\
@@ -373,6 +374,19 @@ fn init_tracing(cli_filter: Option<&str>) -> LogFilterHandle {
     };
 
     let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(env_filter);
+
+    // OTLP trace layer, reloadable and installed **inactive** (`None`). The
+    // real OTLP tracer isn't known until config loads (it carries the
+    // endpoint), and `init_tracing` runs before that so config-load warnings
+    // still print. `None` is a genuine no-op layer — zero per-span cost while
+    // OTLP is disabled (the common case). The runtime installs the global
+    // OTLP provider and then calls `OtelActivation::activate`, which swaps in
+    // a live layer bound to `opentelemetry::global::tracer` (which must be
+    // obtained *after* the provider is set, hence the deferred build).
+    let otel_layer: Option<
+        tracing_opentelemetry::OpenTelemetryLayer<_, opentelemetry::global::BoxedTracer>,
+    > = None;
+    let (otel_reload_layer, otel_handle) = tracing_subscriber::reload::Layer::new(otel_layer);
     // `fmt::layer()` defaults to ANSI on regardless of stdout type
     // — unlike the higher-level `fmt::Subscriber::builder()` which
     // does tty auto-detection. Without the explicit `with_ansi`
@@ -391,10 +405,19 @@ fn init_tracing(cli_filter: Option<&str>) -> LogFilterHandle {
     // the subscriber, not a global cell.
     let _ = tracing_subscriber::registry()
         .with(filter_layer)
+        .with(otel_reload_layer)
         .with(fmt_layer)
         .try_init();
 
-    LogFilterHandle::new(reload_handle)
+    // Deferred activation: build the live layer *at activation time* so
+    // `global::tracer` binds to whatever provider is installed then (the real
+    // OTLP one). The runtime calls this after installing the OTLP provider.
+    let activation = OtelActivation::new(Box::new(move || {
+        let tracer = opentelemetry::global::tracer(OTEL_SCOPE);
+        otel_handle.reload(Some(tracing_opentelemetry::layer().with_tracer(tracer)))
+    }));
+
+    (LogFilterHandle::new(reload_handle), activation)
 }
 
 /// Resolve when SIGINT (Ctrl-C) or SIGTERM is received. On Windows

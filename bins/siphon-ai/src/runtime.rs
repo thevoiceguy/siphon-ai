@@ -142,6 +142,9 @@ pub struct Runtime {
     /// The HEP UDP worker JoinHandle. Held for the daemon's
     /// lifetime; aborted on shutdown.
     hep_worker: Option<HepWorkerHandle>,
+    /// OTLP trace exporter (0.22.0). `Some` when `[observability.otlp]` is
+    /// enabled; held so teardown can flush pending spans before exit.
+    otel: Option<siphon_ai_telemetry::OtelTelemetry>,
     /// Per-`[[register]]` background tasks. v1's tasks are no-ops
     /// (UAC drive lands in a follow-up); we still own the handles
     /// so shutdown awaits them cleanly.
@@ -167,7 +170,7 @@ impl Runtime {
     /// Binds the UDP socket eagerly so a "port already in use" error
     /// surfaces during startup, not after we've logged "ready".
     pub async fn build(config: Config, log_filter: LogFilterHandle) -> Result<Self> {
-        Self::build_with_reload(config, None, log_filter).await
+        Self::build_with_reload(config, None, log_filter, None).await
     }
 
     /// Like [`build`](Self::build) but with the `--config` path so a
@@ -179,6 +182,7 @@ impl Runtime {
         config: Config,
         config_path: Option<PathBuf>,
         log_filter: LogFilterHandle,
+        otel_activation: Option<crate::OtelActivation>,
     ) -> Result<Self> {
         // Fingerprint the restart-required sections before the config
         // is destructured, so a later SIGHUP reload can detect changes
@@ -223,6 +227,34 @@ impl Runtime {
         let (hep_telemetry, hep_worker) = match hep_built {
             Some((t, w)) => (Some(t), Some(w)),
             None => (None, None),
+        };
+
+        // ─── OpenTelemetry / OTLP trace export (0.22.0) ─────────────
+        // Build the OTLP provider (installs the process-global tracer
+        // provider), then activate the deferred tracing layer so per-call
+        // spans export. Off when `[observability.otlp]` is absent — the
+        // layer stays a no-op and OTLP has zero cost. Best-effort: a bad
+        // endpoint fails loud here (§4.6), but a collector that's merely
+        // down never blocks a call (spans batch + drop in the background).
+        let otel = match &observability.otlp {
+            Some(otlp) => {
+                let telemetry =
+                    siphon_ai_telemetry::OtelTelemetry::build(siphon_ai_telemetry::OtelConfig {
+                        endpoint: otlp.endpoint.clone(),
+                        timeout: otlp.timeout,
+                        sample_ratio: otlp.sample_ratio,
+                        service_name: otlp.service_name.clone(),
+                        node_id: node.id.clone(),
+                        extra_attributes: otlp.attributes.clone(),
+                    })
+                    .map_err(|e| anyhow!("OTLP trace export build failed: {e}"))?;
+                // Provider is now the process global; make the layer live.
+                if let Some(activation) = otel_activation {
+                    activation.activate();
+                }
+                Some(telemetry)
+            }
+            None => None,
         };
 
         // Whether a durable spool is active — captured before the
@@ -955,6 +987,7 @@ impl Runtime {
             admin: admin_server,
             hep_telemetry,
             hep_worker,
+            otel,
             registration_mgr,
             registration_listeners,
             drain,
@@ -1071,6 +1104,17 @@ impl Runtime {
         // scope at function end).
         if let Some(worker) = self.hep_worker {
             worker.shutdown().await;
+        }
+
+        // Flush + shut down the OTLP exporter so batched per-call spans reach
+        // the collector before exit (best-effort, bounded window). Runs on a
+        // blocking thread — the SDK's shutdown is synchronous and must not be
+        // called from within the async batch worker's runtime context.
+        if let Some(otel) = self.otel {
+            let _ = tokio::task::spawn_blocking(move || {
+                otel.shutdown(Duration::from_secs(5));
+            })
+            .await;
         }
 
         // Drop the UAS / TM Arcs so any per-call task that's still

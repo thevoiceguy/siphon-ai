@@ -226,6 +226,76 @@ ws_url = "wss://x/y"
 }
 
 #[test]
+fn otlp_disabled_by_default_and_independent_of_metrics_listener() {
+    // No [observability] block at all → otlp is None.
+    let toml = "[sip]\nlisten = \"127.0.0.1:5060\"\n[bridge]\nws_url = \"wss://x/y\"\n";
+    let cfg = load_from_str_with_env(toml, &MapEnv::new([])).expect("compiles");
+    assert!(cfg.observability.otlp.is_none());
+
+    // OTLP enabled WITHOUT the metrics HTTP server — a valid setup.
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+[bridge]
+ws_url = "wss://x/y"
+[observability.otlp]
+enabled = true
+"#;
+    let cfg = load_from_str_with_env(toml, &MapEnv::new([])).expect("compiles");
+    assert!(!cfg.observability.enabled, "metrics listener stays off");
+    let otlp = cfg.observability.otlp.expect("otlp compiled");
+    assert_eq!(otlp.endpoint, "http://localhost:4317");
+    assert_eq!(otlp.sample_ratio, 1.0);
+    assert_eq!(otlp.service_name, "siphon-ai");
+}
+
+#[test]
+fn otlp_custom_fields_and_attributes() {
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+[bridge]
+ws_url = "wss://x/y"
+[observability.otlp]
+enabled = true
+endpoint = "http://collector:4317"
+sample_ratio = 0.25
+timeout_ms = 2000
+service_name = "siphon-edge"
+[observability.otlp.attributes]
+"deployment.environment" = "prod"
+region = "us-east"
+"#;
+    let cfg = load_from_str_with_env(toml, &MapEnv::new([])).expect("compiles");
+    let otlp = cfg.observability.otlp.expect("otlp compiled");
+    assert_eq!(otlp.endpoint, "http://collector:4317");
+    assert_eq!(otlp.sample_ratio, 0.25);
+    assert_eq!(otlp.timeout.as_millis(), 2000);
+    assert_eq!(otlp.service_name, "siphon-edge");
+    assert!(otlp
+        .attributes
+        .contains(&("deployment.environment".to_string(), "prod".to_string())));
+}
+
+#[test]
+fn otlp_bad_sample_ratio_fails_load() {
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+[bridge]
+ws_url = "wss://x/y"
+[observability.otlp]
+enabled = true
+sample_ratio = 1.5
+"#;
+    let err = load_from_str_with_env(toml, &MapEnv::new([])).unwrap_err();
+    assert!(
+        format!("{err}").contains("sample_ratio"),
+        "expected sample_ratio range error, got: {err}"
+    );
+}
+
+#[test]
 fn public_address_falls_back_to_listen_ip_when_unset() {
     let env = MapEnv::new([]);
     let toml = r#"

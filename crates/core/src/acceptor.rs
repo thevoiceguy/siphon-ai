@@ -3064,72 +3064,81 @@ impl BridgingAcceptor {
         let dialog_handles = Arc::clone(&self.dialog_handles);
         let cleanup_session_timer_key = session_timer_key;
 
-        tokio::spawn(async move {
-            let run_result = controller.run().await;
-            let view = CallTerminationView::from_run_result(run_result);
-            info!(
-                call_id = %bridge_call_id,
-                cause = ?view.cause,
-                "call ended"
-            );
-            // Stop the RFC 4028 timer and drop the handle map entry
-            // first — otherwise a `SessionExpired` racing the
-            // controller exit would try to shutdown an already-gone
-            // controller. Cheap when no timer was negotiated.
-            if let Some(dialog_id) = cleanup_session_timer_key.as_ref() {
-                session_timer_manager.stop_timer(dialog_id);
-                dialog_handles.write().remove(dialog_id);
-            }
-            // Send outbound BYE if the peer didn't already drive it.
-            // Order: BYE first, registry remove second, forge stop
-            // third. That way a follow-up BYE retransmit from the
-            // peer (which would be racing our outbound BYE in the
-            // wild) still finds the entry and gets a 200 OK instead
-            // of "unknown dialog".
-            if !cleanup_handle.remote_bye_received() {
-                send_outbound_bye(teardown.as_ref(), &sip_call_id, bridge_call_id.as_str()).await;
-            }
-            registry.remove(&sip_call_id);
-            control_registry.remove(bridge_call_id.as_str());
-            if let Err(e) = media.session_manager().stop_session(&forge_call_id).await {
-                warn!(
+        // Link the controller task to the accept span so the whole call —
+        // INVITE handling, the controller, the WS bridge and media — is one
+        // OTLP trace instead of a separate root per task (0.22.0).
+        tokio::spawn(tracing::Instrument::instrument(
+            async move {
+                let run_result = controller.run().await;
+                let view = CallTerminationView::from_run_result(run_result);
+                info!(
                     call_id = %bridge_call_id,
-                    error = %e,
-                    "forge session teardown failed"
+                    cause = ?view.cause,
+                    "call ended"
                 );
-            }
+                // Stop the RFC 4028 timer and drop the handle map entry
+                // first — otherwise a `SessionExpired` racing the
+                // controller exit would try to shutdown an already-gone
+                // controller. Cheap when no timer was negotiated.
+                if let Some(dialog_id) = cleanup_session_timer_key.as_ref() {
+                    session_timer_manager.stop_timer(dialog_id);
+                    dialog_handles.write().remove(dialog_id);
+                }
+                // Send outbound BYE if the peer didn't already drive it.
+                // Order: BYE first, registry remove second, forge stop
+                // third. That way a follow-up BYE retransmit from the
+                // peer (which would be racing our outbound BYE in the
+                // wild) still finds the entry and gets a 200 OK instead
+                // of "unknown dialog".
+                if !cleanup_handle.remote_bye_received() {
+                    send_outbound_bye(teardown.as_ref(), &sip_call_id, bridge_call_id.as_str())
+                        .await;
+                }
+                registry.remove(&sip_call_id);
+                control_registry.remove(bridge_call_id.as_str());
+                if let Err(e) = media.session_manager().stop_session(&forge_call_id).await {
+                    warn!(
+                        call_id = %bridge_call_id,
+                        error = %e,
+                        "forge session teardown failed"
+                    );
+                }
 
-            let ended_at = Utc::now();
-            let duration_ms = (ended_at - call_start.started_at).num_milliseconds().max(0) as u64;
-            let duration_secs = duration_ms as f64 / 1000.0;
-            metrics::gauge!(CALLS_ACTIVE).decrement(1.0);
-            metrics::counter!(
-                CALLS_TOTAL,
-                "cause" => termination_label(view.cause),
-            )
-            .increment(1);
-            metrics::histogram!(CALL_DURATION_SECONDS).record(duration_secs);
-            if let Some(rec) = view.recording.as_ref() {
-                metrics::counter!(RECORDINGS_TOTAL, "result" => rec.result.as_str()).increment(1);
-            }
+                let ended_at = Utc::now();
+                let duration_ms =
+                    (ended_at - call_start.started_at).num_milliseconds().max(0) as u64;
+                let duration_secs = duration_ms as f64 / 1000.0;
+                metrics::gauge!(CALLS_ACTIVE).decrement(1.0);
+                metrics::counter!(
+                    CALLS_TOTAL,
+                    "cause" => termination_label(view.cause),
+                )
+                .increment(1);
+                metrics::histogram!(CALL_DURATION_SECONDS).record(duration_secs);
+                if let Some(rec) = view.recording.as_ref() {
+                    metrics::counter!(RECORDINGS_TOTAL, "result" => rec.result.as_str())
+                        .increment(1);
+                }
 
-            let end_event = WebhookEvent::CallEnd(CallEndEvent {
-                version: WEBHOOK_VERSION,
-                call_id: call_start.bridge_call_id.as_str().to_string(),
-                sip_call_id: call_start.sip_call_id.clone(),
-                timestamp: ended_at,
-                from: call_start.from.clone(),
-                to: call_start.to.clone(),
-                route: call_start.route.clone(),
-                ws_url: call_start.ws_url.clone(),
-                duration_ms,
-                termination_cause: termination_label(view.cause).to_string(),
-            });
+                let end_event = WebhookEvent::CallEnd(CallEndEvent {
+                    version: WEBHOOK_VERSION,
+                    call_id: call_start.bridge_call_id.as_str().to_string(),
+                    sip_call_id: call_start.sip_call_id.clone(),
+                    timestamp: ended_at,
+                    from: call_start.from.clone(),
+                    to: call_start.to.clone(),
+                    route: call_start.route.clone(),
+                    ws_url: call_start.ws_url.clone(),
+                    duration_ms,
+                    termination_cause: termination_label(view.cause).to_string(),
+                });
 
-            let record = call_start.into_record(ended_at, &view);
-            cdr_sink.emit(record).await;
-            webhook_sink.emit(end_event).await;
-        })
+                let record = call_start.into_record(ended_at, &view);
+                cdr_sink.emit(record).await;
+                webhook_sink.emit(end_event).await;
+            },
+            tracing::Span::current(),
+        ))
     }
 }
 

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-07-03
+
+### Added
+
+- **OpenTelemetry / OTLP distributed tracing — `[observability.otlp]`** (P1
+  "Observability completeness"; second sub-item of the theme). Export
+  per-call traces over OTLP/gRPC to a collector (Tempo / Jaeger / an
+  OpenTelemetry Collector). Each call is **one trace** — `on_invite →
+  on_matched → accept_inbound → run → { WS bridge, media }` — with the SIP
+  `Call-ID`, direction, and from/to on the root span, so an operator can see
+  where a call spent its time across the daemon. Config knobs: `endpoint`
+  (default `http://localhost:4317`), parent-based `sample_ratio`,
+  `timeout_ms`, `service_name`, and extra resource `attributes`; independent
+  of the metrics HTTP listener (traces without metrics scraping is a valid
+  setup). **Off by default** and **best-effort** (CLAUDE.md §4.7): spans batch
+  on a background worker and drop on overflow, so a slow or unreachable
+  collector never blocks a call; a bad endpoint fails loud at startup, a
+  collector that's merely down does not. When disabled the tracing layer is a
+  zero-cost no-op. Pending spans flush on shutdown. See `docs/CONFIG.md` →
+  `[observability.otlp]`. W3C trace-context propagation to the WS server is a
+  follow-up (v0.23.0).
+
 ## [0.21.1] - 2026-07-01
 
 ### Fixed

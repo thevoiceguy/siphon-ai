@@ -111,11 +111,12 @@ artifacts and distributed tracing. Scoped in
   (recording + alerting rules + Fleet Overview / Call Quality dashboards),
   `docs/OPERATIONS.md` "ten questions" made concrete, and an anti-drift CI
   check keeping metric names honest.
-- **OpenTelemetry / OTLP traces** — today tracing is structured logs + HEP
-  correlation only; OTLP spans would let operators trace a call across the
-  daemon + their WS server in one view. Next up: v0.22.0 (daemon-side export)
-  then v0.23.0 (W3C trace-context propagation to the WS server). Deps + the
-  additive protocol change are approved (DESIGN_OBSERVABILITY §5).
+- **OpenTelemetry / OTLP traces** — daemon-side export ✅ **delivered in
+  v0.22.0** (`[observability.otlp]`): one OTLP trace per call across the
+  daemon (INVITE handling → controller → WS bridge → media), off by default,
+  best-effort. Remaining: **v0.23.0** — W3C trace-context propagation to the
+  WS server so the developer's server joins the same trace (additive, protocol
+  stays v1; approved in DESIGN_OBSERVABILITY §5).
 
 ---
 

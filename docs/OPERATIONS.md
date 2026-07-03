@@ -15,7 +15,7 @@ evidence and flags any gaps.
 | Source                              | What's there                                                                           |
 |-------------------------------------|----------------------------------------------------------------------------------------|
 | Daemon log (stdout / journald)      | Lifecycle events, state transitions, errors, registration drive output                 |
-| `tracing` spans                     | Per-call latency between `on_invite` → `on_matched` → `accept_inbound` → `start_session` |
+| `tracing` spans                     | Per-call latency between `on_invite` → `on_matched` → `accept_inbound` → `start_session`. With `[observability.otlp]` (0.22.0) these export as one OTLP trace per call (root carries the SIP `Call-ID`, direction, from/to) to Tempo / Jaeger. |
 | Homer UI (`http://.../`)            | SIP call flow + RTCP + CDR + log chunks correlated by SIP `Call-ID`                    |
 | Prometheus `/metrics`               | Counters / histograms; `siphon_ai_*` for app-level, `forge_*` for media, `heplify_*` for collector  |
 | Grafana dashboards                  | Fleet Overview + Call Quality — shipped in [`examples/observability/`](../examples/observability/) (rates, ratios, latency percentiles) |

@@ -82,7 +82,7 @@ use siphon_ai_webhooks::{
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument, warn, Instrument};
 
 use crate::transfer::{plan_refer, ReferPlan, TransferContext, TransferOutcome};
 use siphon_ai_telemetry::{
@@ -622,7 +622,13 @@ impl CallController {
     ///
     /// Returns when all sub-tasks have terminated. The returned
     /// [`CallOutcome`] is the source of truth for what happened.
-    #[instrument(skip(self), fields(call_id = %self.cfg.call_id))]
+    #[instrument(skip(self), fields(
+        call_id = %self.cfg.call_id,
+        sip_call_id = %self.cfg.start.sip.call_id,
+        direction = ?self.cfg.start.direction,
+        from = %self.cfg.start.from,
+        to = %self.cfg.start.to,
+    ))]
     pub async fn run(self) -> Result<CallOutcome, CallError> {
         let CallController {
             cfg,
@@ -725,7 +731,11 @@ impl CallController {
             rec_path = Some(setup.path.clone());
             let writer =
                 RecordingWriter::new(setup.path, media_tap.sample_rate(), setup.auto_start);
-            recording_task = Some(tokio::spawn(writer.run(rec_rx, ctrl_rx, evt_tx)));
+            recording_task = Some(tokio::spawn(
+                writer
+                    .run(rec_rx, ctrl_rx, evt_tx)
+                    .instrument(tracing::Span::current()),
+            ));
             rec_ctrl_tx = Some(ctrl_tx);
             rec_evt_rx = Some(evt_rx);
             rec_drops = Some(Arc::clone(&drops));
@@ -734,20 +744,28 @@ impl CallController {
             media_tap
         };
 
-        let mut bridge_task: JoinHandle<Result<DisconnectReason, BridgeError>> =
-            tokio::spawn(connect_and_run(bridge, start, channels));
+        // Spawned tasks don't inherit the current span, so a call would
+        // otherwise fragment into sibling traces. Instrument each with the
+        // controller's `run` span so the WS-bridge, media-tap, and recording
+        // spans nest under it — one trace per call in OTLP (0.22.0).
+        let mut bridge_task: JoinHandle<Result<DisconnectReason, BridgeError>> = tokio::spawn(
+            connect_and_run(bridge, start, channels).instrument(tracing::Span::current()),
+        );
         // The tap forwards out-of-band events (currently DTMF) onto
         // the same control stream the bridge reads. Cloning the
         // sender means tap and controller are independent producers
         // — bridge teardown closes the receiver, both producers see
         // the same EOF.
-        let mut tap_task: JoinHandle<Result<TapDisconnect, MediaTapError>> =
-            tokio::spawn(media_tap.run(
-                caller_audio_tx,
-                playout_audio_rx,
-                control_out_tx.clone(),
-                tap_cmd_rx,
-            ));
+        let mut tap_task: JoinHandle<Result<TapDisconnect, MediaTapError>> = tokio::spawn(
+            media_tap
+                .run(
+                    caller_audio_tx,
+                    playout_audio_rx,
+                    control_out_tx.clone(),
+                    tap_cmd_rx,
+                )
+                .instrument(tracing::Span::current()),
+        );
 
         // We don't wait for the bridge handshake to declare
         // Active; the moment both tasks are spawned, audio plumbing

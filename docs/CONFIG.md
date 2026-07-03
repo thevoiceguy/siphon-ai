@@ -707,6 +707,47 @@ This listener is unauthenticated by design (metrics/health are safe to
 scrape). The privileged `/admin/*` surface lives on its own
 [`[admin]`](#admin) listener.
 
+### `[observability.otlp]` — OpenTelemetry trace export (0.22.0)
+
+Export per-call **distributed traces** over OTLP/gRPC to a collector (Tempo /
+Jaeger / an OpenTelemetry Collector). Each call is one trace — INVITE handling
+→ controller → WS bridge → media — with the SIP `Call-ID`, direction, and
+from/to on the root. **Off by default**, and **independent of the metrics
+listener above**: you can export traces without `enabled = true` (and vice
+versa), the same way HEP is independent of `[cdr]`.
+
+Best-effort, like HEP (CLAUDE.md §4.7): spans batch on a background worker and
+drop on overflow, so a slow or unreachable collector never blocks a call. A
+bad *endpoint* fails loud at startup; a collector that's merely *down* does
+not.
+
+```toml
+[observability.otlp]
+enabled      = true
+endpoint     = "http://localhost:4317"   # OTLP/gRPC collector
+sample_ratio = 1.0                        # parent-based head sampling, [0.0, 1.0]
+timeout_ms   = 5000                       # per-export gRPC timeout
+service_name = "siphon-ai"                # service.name resource attribute
+
+[observability.otlp.attributes]           # extra resource attributes
+"deployment.environment" = "prod"
+region                   = "us-east-1"
+```
+
+| Field          | Type       | Default                   | Notes |
+|----------------|------------|---------------------------|-------|
+| `enabled`      | bool       | `false`                   | Master switch. Off ⇒ the tracing layer is a zero-cost no-op. |
+| `endpoint`     | URL        | `http://localhost:4317`   | OTLP/**gRPC** collector endpoint. |
+| `sample_ratio` | float      | `1.0`                     | Head sampling ratio in `[0.0, 1.0]`; parent-based, so a sampled parent keeps its children. Out of range → fatal at load. |
+| `timeout_ms`   | integer    | `5000`                    | Per-export gRPC timeout. |
+| `service_name` | string     | `siphon-ai`               | `service.name` resource attribute. The node id is set as `service.instance.id`. |
+| `attributes`   | table      | none                      | Extra resource attributes attached to every span. |
+
+The daemon logs `OTLP trace export active` at startup when enabled, and
+flushes pending spans on shutdown. See `docs/OPERATIONS.md` and
+`examples/observability/` for the metrics/dashboards side; W3C trace-context
+propagation to your WS server is a follow-up (v0.23.0).
+
 ## `[admin]`
 
 Authenticated admin API listener (0.10.0). Serves `/admin/*` (hangup,

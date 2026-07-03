@@ -429,6 +429,26 @@ pub struct WebhooksConfig {
 pub struct ObservabilityConfig {
     pub enabled: bool,
     pub http_listen: Option<SocketAddr>,
+    /// `Some` when `[observability.otlp].enabled` — OTLP/gRPC trace export
+    /// (0.22.0). Independent of `enabled`/`http_listen` (traces without
+    /// metrics scraping is a valid setup). The daemon maps this to
+    /// `siphon_ai_telemetry::OtelConfig`.
+    pub otlp: Option<OtlpConfig>,
+}
+
+/// Resolved OTLP trace-export plan (`[observability.otlp]`, 0.22.0).
+#[derive(Debug, Clone)]
+pub struct OtlpConfig {
+    /// OTLP/gRPC endpoint (default `http://localhost:4317`).
+    pub endpoint: String,
+    /// Head sampling ratio in `[0.0, 1.0]`.
+    pub sample_ratio: f64,
+    /// Per-export gRPC timeout.
+    pub timeout: Duration,
+    /// `service.name` resource attribute.
+    pub service_name: String,
+    /// Extra resource attributes (`key`, `value`).
+    pub attributes: Vec<(String, String)>,
 }
 
 /// Resolved HEP3 (Homer) plan. The daemon binary builds a real
@@ -864,6 +884,9 @@ pub enum CompileError {
 
     #[error("[observability].http_listen is required when [observability].enabled = true")]
     ObservabilityListenRequired,
+
+    #[error("[observability.otlp].sample_ratio {0} is out of range; must be between 0.0 and 1.0")]
+    OtlpBadSampleRatio(f64),
 
     #[error("[admin].listen {0:?} is not a valid socket address: {1}")]
     BadAdminListen(String, std::net::AddrParseError),
@@ -2193,12 +2216,21 @@ fn parse_register_server(
 }
 
 fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, CompileError> {
+    // OTLP trace export is independent of the metrics HTTP listener — like
+    // HEP vs `[cdr]`, you can export traces without scraping metrics — so
+    // compile it regardless of the `enabled` master switch.
+    let otlp = compile_otlp(raw.otlp)?;
+
     if !raw.enabled {
         // Disabled means "don't spawn the HTTP server" — sub-block
         // misconfig is tolerated (same shape as [cdr] master switch
         // — operators can flip enabled = false to silence a flaky
         // listener without re-editing every field).
-        return Ok(ObservabilityConfig::default());
+        return Ok(ObservabilityConfig {
+            enabled: false,
+            http_listen: None,
+            otlp,
+        });
     }
     let listen_str = raw
         .http_listen
@@ -2212,7 +2244,33 @@ fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, C
     Ok(ObservabilityConfig {
         enabled: true,
         http_listen: Some(http_listen),
+        otlp,
     })
+}
+
+fn compile_otlp(raw: crate::raw::RawObservabilityOtlp) -> Result<Option<OtlpConfig>, CompileError> {
+    if !raw.enabled {
+        return Ok(None);
+    }
+    let endpoint = raw
+        .endpoint
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "http://localhost:4317".to_string());
+    let sample_ratio = raw.sample_ratio.unwrap_or(1.0);
+    if !(0.0..=1.0).contains(&sample_ratio) {
+        return Err(CompileError::OtlpBadSampleRatio(sample_ratio));
+    }
+    let service_name = raw
+        .service_name
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "siphon-ai".to_string());
+    Ok(Some(OtlpConfig {
+        endpoint,
+        sample_ratio,
+        timeout: Duration::from_millis(raw.timeout_ms.unwrap_or(5000)),
+        service_name,
+        attributes: raw.attributes.unwrap_or_default().into_iter().collect(),
+    }))
 }
 
 fn compile_admin(raw: Option<crate::raw::RawAdmin>) -> Result<Option<AdminConfig>, CompileError> {

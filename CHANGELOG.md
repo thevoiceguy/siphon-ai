@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-07-08
+
+### Added
+
+- **Object-storage upload — `[recording.storage]`** (P1 "Recording
+  compliance & storage", second release). Finalized recordings upload to
+  any S3-compatible bucket (AWS, MinIO, Cloudflare R2, Backblaze B2 —
+  path-style, hand-rolled SigV4, **no AWS SDK**). Durable by design: a
+  small job file lands in `spool_dir` at call teardown (atomic, survives
+  restarts) and a background worker uploads with retries; a job that keeps
+  failing is dropped with a metric rather than wedging the spool, and the
+  local file is deleted only after a durable upload (opt-in
+  `delete_local_after_upload`). `key_template` names objects with
+  `{call_id}` / `{date}` / `{route}` / `{direction}`. The CDR gains an
+  additive `recording_url` (`s3://bucket/key`, stamped at enqueue) and a
+  new **`recording_uploaded`** lifecycle webhook (after `call_end`)
+  confirms arrival with `size_bytes`. New metrics:
+  `siphon_ai_recording_uploads_total{result}`,
+  `siphon_ai_recording_upload_spool_depth`,
+  `siphon_ai_recording_upload_seconds`. Retention/TTL stays the bucket
+  lifecycle policy's job (worked recipe in `docs/RECORDING.md` §9). Pair
+  with `[recording.encryption]` so the bucket only ever holds ciphertext.
+  **Off by default.**
+- **AWS KMS as the recording KEK — `[recording.encryption.kms]`**. The KMS
+  hook the 0.24.0 envelope design reserved: each recording's data key is
+  wrapped by KMS `Encrypt` (the KEK never exists outside KMS; every unwrap
+  is IAM-auditable), on the same SigV4 client — still no AWS SDK. Exactly
+  one of `kek` / `kms`; `endpoint` override supports KMS-compatible
+  emulators. `siphon-ai decrypt-recording` gains `--kms-region` /
+  `--kms-endpoint` (credentials via `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY`); symmetric-KMS blobs name their own key, so no
+  key ARN is needed to decrypt. **Off by default.**
+- **Ogg-Opus recording format — `[recording].format = "opus"`**. ~10×
+  smaller than WAV for voice, encoded with the same libopus the media path
+  already uses and playable by ffmpeg/VLC/browsers. Streaming-native
+  (RFC 7845), so nothing needs a finalize back-patch — including inside an
+  encrypted envelope. Extensions: `.opus` plaintext, `.opusa` sealed.
+  Adds the `ogg` crate (the theme's one new small dependency). **Default
+  stays WAV.**
+
 ## [0.24.0] - 2026-07-08
 
 ### Added

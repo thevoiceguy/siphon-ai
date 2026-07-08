@@ -108,6 +108,13 @@ pub struct CdrRecord {
     /// recorded. Additive optional field → CDR schema version unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_encrypted: Option<bool>,
+    /// Object-storage destination (`s3://bucket/key`) when
+    /// `[recording.storage]` is enabled (0.25.0). Stamped at *enqueue*
+    /// time — the key is deterministic; the `recording_uploaded`
+    /// lifecycle webhook confirms arrival. Omitted when storage is off
+    /// or the call wasn't recorded. Additive → schema version unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_url: Option<String>,
 
     /// Park summary (0.7.0), present when the call was parked at least
     /// once. Omitted otherwise. Additive optional field → CDR schema
@@ -277,6 +284,7 @@ mod tests {
             recording_id: None,
             recording_path: None,
             recording_encrypted: None,
+            recording_url: None,
             park: None,
             hold: None,
             reconnect: None,

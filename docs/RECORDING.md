@@ -161,11 +161,13 @@ call. A recording is always best-effort; it never degrades call quality.
 ## 7. Limitations
 
 - One recording per call (`recording_id == call_id`).
-- Path is `<dir>/<call_id>.wav[a]` — no templating yet (planned for the
-  object-storage release, `docs/design/DESIGN_RECORDING_COMPLIANCE.md` §3).
+- Local path is `<dir>/<call_id>.wav[a]` — templating applies to the
+  object-storage key (`[recording.storage].key_template`, §9), not the
+  local dir.
 - WAV/PCM16 only; no compressed (Opus) format yet (planned, same design
   note §5).
-- Local-file sink only; no object-storage (S3) sink yet (planned, §3).
+- Object storage: upload-only (§9) — the daemon never serves or fetches
+  recordings back.
 - Inbound calls only; outbound-leg recording is planned (§5).
 - WAV `data`/`RIFF` sizes are 32-bit, so a single recording over ~4 GiB
   (many hours of 16 kHz stereo) saturates the header sizes — not a concern
@@ -241,3 +243,56 @@ chunk i: generation u32 | ct_len u32 | ciphertext (plaintext + 16-byte tag)
   has generation 1 on chunk 0 and 0 on every other chunk; anything else
   (including generation 0 on chunk 0 — an unfinalized capture) must be
   rejected by default.
+
+---
+
+## 9. Object storage (`[recording.storage]`, 0.25.0)
+
+```toml
+[recording.storage]
+enabled      = true
+endpoint     = "https://s3.us-east-1.amazonaws.com"   # MinIO/R2/B2 work too
+bucket       = "call-recordings"
+region       = "us-east-1"
+access_key   = "${cred:s3-access-key}"
+secret_key   = "${cred:s3-secret-key}"
+key_template = "{date}/{call_id}"
+delete_local_after_upload = false
+spool_dir    = "/var/spool/siphon-ai/uploads"
+```
+
+When a recording finalizes, the daemon writes a small **job file** to
+`spool_dir` and a background worker uploads the recording with retries
+(path-style `PUT`, SigV4 — S3-compatible stores are first-class). The
+design goals:
+
+- **Durable**: jobs survive restarts; an unreachable endpoint backs up in
+  the spool (`siphon_ai_recording_upload_spool_depth`) instead of losing
+  uploads. A job that keeps failing is dropped after a large retry budget
+  (`siphon_ai_recording_uploads_total{result="dropped"}`) — the recording
+  stays on local disk.
+- **Off every call path** (CLAUDE.md §4.7): enqueue is one file write at
+  teardown; uploads happen on a background worker.
+- **Deterministic destination**: the CDR's `recording_url`
+  (`s3://bucket/key`) is stamped at enqueue; the **`recording_uploaded`**
+  lifecycle webhook (after `call_end`) confirms arrival with `url` and
+  `size_bytes`.
+- **Local retention**: `delete_local_after_upload = true` removes the
+  local file only after a durable upload. TTL/retention in the bucket is
+  the bucket lifecycle policy's job — a worked AWS example:
+
+  ```json
+  { "Rules": [ { "ID": "expire-recordings", "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "Expiration": { "Days": 365 } } ] }
+  ```
+
+  (`aws s3api put-bucket-lifecycle-configuration --bucket call-recordings
+  --lifecycle-configuration file://policy.json`, or the MinIO/R2
+  equivalent.)
+- **Pair with encryption** (§8): with `[recording.encryption]` on, the
+  bucket only ever holds sealed `.wava` envelopes — a leaked bucket leaks
+  ciphertext.
+
+Uploads are `PUT`-only and capped at S3's 5 GiB single-request limit —
+far above any real recording (WAV sizes saturate at 4 GiB).

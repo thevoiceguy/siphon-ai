@@ -18,10 +18,20 @@ use sha2::{Digest, Sha256};
 type HmacSha256 = Hmac<Sha256>;
 
 /// Static credentials for SigV4 (S3/KMS access key pair).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SigV4Credentials {
     pub access_key: String,
     pub secret_key: String,
+}
+
+impl std::fmt::Debug for SigV4Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The secret never reaches logs/fingerprints in cleartext.
+        f.debug_struct("SigV4Credentials")
+            .field("access_key", &self.access_key)
+            .field("secret_key", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Everything SigV4 needs to know about the request being signed.
@@ -64,10 +74,7 @@ pub fn authorization_header(creds: &SigV4Credentials, req: &SignRequest<'_>) -> 
         .map(|(n, v)| (n.to_ascii_lowercase(), v.trim().to_string()))
         .collect();
     headers.sort();
-    let canonical_headers: String = headers
-        .iter()
-        .map(|(n, v)| format!("{n}:{v}\n"))
-        .collect();
+    let canonical_headers: String = headers.iter().map(|(n, v)| format!("{n}:{v}\n")).collect();
     let signed_headers: String = headers
         .iter()
         .map(|(n, _)| n.as_str())
@@ -93,7 +100,10 @@ pub fn authorization_header(creds: &SigV4Credentials, req: &SignRequest<'_>) -> 
     );
 
     // Signing key: HMAC chain date → region → service → "aws4_request".
-    let k_date = hmac(format!("AWS4{}", creds.secret_key).as_bytes(), date.as_bytes());
+    let k_date = hmac(
+        format!("AWS4{}", creds.secret_key).as_bytes(),
+        date.as_bytes(),
+    );
     let k_region = hmac(&k_date, req.region.as_bytes());
     let k_service = hmac(&k_region, req.service.as_bytes());
     let k_signing = hmac(&k_service, b"aws4_request");

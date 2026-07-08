@@ -180,6 +180,10 @@ pub fn restart_fingerprints(c: &Config) -> Vec<(&'static str, String)> {
         // `[security.stir_shaken]`, not just the enabled bool.
         ("[security]", fp_hash(&c.security)),
         ("[recording]", fp_hash(&c.recording)),
+        // Upload worker + spool are built once at startup (0.25.0). The
+        // secret key is Debug-redacted, so its rotation alone won't flag —
+        // rotate via restart anyway.
+        ("[recording.storage]", fp_hash(&c.recording_storage)),
         ("[conference]", fp_hash(&c.conference)),
         ("[park]", fp_hash(&c.park)),
         ("[observability]", fp_hash(&c.observability)),

@@ -106,7 +106,8 @@ use siphon_ai_telemetry::{
 };
 use siphon_ai_webhooks::{
     FilteredSink as WebhookFilteredSink, HttpSink as WebhookHttpSink,
-    HttpSinkConfig as WebhookHttpSinkConfig, NullSink as WebhookNullSink, WebhookSinkHandle,
+    HttpSinkConfig as WebhookHttpSinkConfig, NullSink as WebhookNullSink, RecordingUploadedEvent,
+    WebhookEvent, WebhookSinkHandle, WEBHOOK_VERSION,
 };
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -142,6 +143,11 @@ pub struct Runtime {
     /// The HEP UDP worker JoinHandle. Held for the daemon's
     /// lifetime; aborted on shutdown.
     hep_worker: Option<HepWorkerHandle>,
+    /// The recording upload worker (0.25.0). `Some` when
+    /// `[recording.storage]` is enabled; aborted on shutdown (jobs are
+    /// durable in the spool, so an in-flight upload just re-runs next
+    /// boot).
+    upload_worker: Option<JoinHandle<()>>,
     /// OTLP trace exporter (0.22.0). `Some` when `[observability.otlp]` is
     /// enabled; held so teardown can flush pending spans before exit.
     otel: Option<siphon_ai_telemetry::OtelTelemetry>,
@@ -198,6 +204,7 @@ impl Runtime {
             trunks,
             security,
             recording,
+            recording_storage,
             outbound,
             conference,
             cdr,
@@ -442,6 +449,39 @@ impl Runtime {
             None
         };
 
+        // ─── Recording upload worker (0.25.0) ──────────────────────
+        // Drains the [recording.storage] spool in the background and
+        // fires the `recording_uploaded` lifecycle webhook per completed
+        // upload. Both tasks are daemon-lifetime; they die with the
+        // process (jobs are durable on disk, so nothing is lost).
+        let recording_upload = recording_storage.map(std::sync::Arc::new);
+        let mut upload_worker_handle = None;
+        if let Some(settings) = recording_upload.as_deref() {
+            let (worker, mut outcomes) =
+                siphon_ai_http::upload::UploadWorker::spawn(settings.clone());
+            upload_worker_handle = Some(worker);
+            let webhook_for_uploads = Arc::clone(&webhook_sink);
+            tokio::spawn(async move {
+                while let Some(done) = outcomes.recv().await {
+                    webhook_for_uploads
+                        .emit(WebhookEvent::RecordingUploaded(RecordingUploadedEvent {
+                            version: WEBHOOK_VERSION,
+                            call_id: done.call_id.clone(),
+                            timestamp: chrono::Utc::now(),
+                            recording_id: done.call_id,
+                            url: done.location.uri,
+                            size_bytes: done.size_bytes,
+                        }))
+                        .await;
+                }
+            });
+            tracing::info!(
+                bucket = %settings.target.bucket,
+                endpoint = %settings.target.endpoint,
+                "recording upload worker active"
+            );
+        }
+
         let mut acceptor_builder = BridgingAcceptor::new(media_setup, bridge_defaults, registry.clone())
             .with_cdr_sink(cdr_sink)
             .with_webhook_sink(Arc::clone(&webhook_sink))
@@ -454,6 +494,7 @@ impl Runtime {
             // the verstat chunk lands on the same Homer call view.
             .with_hep_telemetry(hep_telemetry.clone())
             .with_recording(recording)
+            .with_recording_upload(recording_upload.clone())
             .with_hold_moh_file(media.moh_file.clone())
             .with_control_registry(control_registry.clone());
         if let Some(reg) = &conference_registry {
@@ -987,6 +1028,7 @@ impl Runtime {
             admin: admin_server,
             hep_telemetry,
             hep_worker,
+            upload_worker: upload_worker_handle,
             otel,
             registration_mgr,
             registration_listeners,
@@ -1104,6 +1146,14 @@ impl Runtime {
         // scope at function end).
         if let Some(worker) = self.hep_worker {
             worker.shutdown().await;
+        }
+
+        // Stop the recording upload worker. Abort is safe: job files are
+        // atomic and only removed after a durable upload, so whatever was
+        // mid-flight re-uploads on next boot (S3 PUT is idempotent).
+        if let Some(worker) = self.upload_worker {
+            worker.abort();
+            let _ = worker.await;
         }
 
         // Flush + shut down the OTLP exporter so batched per-call spans reach

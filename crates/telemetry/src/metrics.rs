@@ -72,6 +72,13 @@ pub const VERSTAT_TOTAL: &str = "siphon_ai_verstat_total";
 /// lives on the CDR (`recording_path`).
 pub const RECORDINGS_TOTAL: &str = "siphon_ai_recordings_total";
 
+/// Recording uploads to object storage (`[recording.storage]`, 0.25.0)
+/// by `result`: `ok` (durably uploaded), `failed` (attempt failed, will
+/// retry), `dropped` (retry budget exhausted / local file gone /
+/// unreadable job — the recording stays local-only). Emitted from the
+/// upload worker in `siphon-ai-http`.
+pub const RECORDING_UPLOADS_TOTAL: &str = "siphon_ai_recording_uploads_total";
+
 /// REGISTER attempts the daemon has driven. Labeled by `name`
 /// (the `[[register]].name`) and `outcome`:
 /// `registered` / `auth_failed` / `transport_error` / `timeout` /
@@ -243,11 +250,21 @@ pub const DRAINING: &str = "siphon_ai_draining";
 /// failing and backing up on disk. Emitted from `siphon-ai-http`.
 pub const WEBHOOK_SPOOL_DEPTH: &str = "siphon_ai_webhook_spool_depth";
 
+/// Recording uploads waiting in the durable spool
+/// (`[recording.storage].spool_dir`, 0.25.0). Sampled by the upload
+/// worker each pass. Healthy = 0; rising = the object store is
+/// unreachable and uploads are backing up on disk.
+pub const RECORDING_UPLOAD_SPOOL_DEPTH: &str = "siphon_ai_recording_upload_spool_depth";
+
 // ─── Histograms ─────────────────────────────────────────────────────
 
 /// Time from "spawned WS bridge task" to "WS handshake completed
 /// AND `start` sent." Labeled by `result`: `ok` / `error`.
 pub const WS_CONNECT_SECONDS: &str = "siphon_ai_ws_connect_seconds";
+
+/// Wall-time of one successful recording upload (0.25.0). No labels
+/// (failures don't record a duration).
+pub const RECORDING_UPLOAD_SECONDS: &str = "siphon_ai_recording_upload_seconds";
 
 /// Time spent inside `MediaSetup::accept_inbound` — SDP parse +
 /// forge port allocation + answer build + tap attach. Labeled by
@@ -328,6 +345,12 @@ pub fn prometheus_builder() -> Result<PrometheusBuilder, InitError> {
             )
         })
         .and_then(|b| {
+            b.set_buckets_for_metric(
+                Matcher::Full(RECORDING_UPLOAD_SECONDS.to_string()),
+                &RECORDING_UPLOAD_BUCKETS,
+            )
+        })
+        .and_then(|b| {
             b.set_buckets_for_metric(Matcher::Full(DRAIN_SECONDS.to_string()), &DRAIN_BUCKETS)
         })
         .map_err(|e| InitError::Install(e.to_string()))
@@ -387,6 +410,10 @@ pub fn register_descriptions() {
     describe_counter!(
         RECORDINGS_TOTAL,
         "Call recordings finished by result (ok, degraded, failed)."
+    );
+    describe_counter!(
+        RECORDING_UPLOADS_TOTAL,
+        "Recording uploads to object storage by result (ok, failed, dropped)."
     );
     describe_counter!(
         REGISTER_ATTEMPTS_TOTAL,
@@ -464,6 +491,16 @@ pub fn register_descriptions() {
         WEBHOOK_SPOOL_DEPTH,
         Unit::Count,
         "Webhook/CDR deliveries waiting in the durable spool, by sink (lifecycle, cdr)."
+    );
+    describe_gauge!(
+        RECORDING_UPLOAD_SPOOL_DEPTH,
+        Unit::Count,
+        "Recording uploads waiting in the durable spool."
+    );
+    describe_histogram!(
+        RECORDING_UPLOAD_SECONDS,
+        Unit::Seconds,
+        "Wall-time of one successful recording upload to object storage."
     );
     describe_histogram!(
         WS_CONNECT_SECONDS,
@@ -560,6 +597,11 @@ pub const WEBHOOK_DELIVERY_BUCKETS: [f64; 10] =
 /// common k8s grace periods (30/60/120 s) so a drain that ran to its
 /// deadline is visible rather than clipped into +Inf.
 pub const DRAIN_BUCKETS: [f64; 9] = [0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 90.0, 120.0];
+
+/// Recording-upload duration buckets: a small local MinIO PUT lands in
+/// tens of ms; a multi-hundred-MB WAV to a remote region can take tens
+/// of seconds.
+pub const RECORDING_UPLOAD_BUCKETS: [f64; 9] = [0.05, 0.1, 0.25, 0.5, 1.0, 5.0, 15.0, 60.0, 300.0];
 
 #[cfg(test)]
 mod tests {

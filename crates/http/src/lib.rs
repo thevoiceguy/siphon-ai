@@ -35,6 +35,7 @@
 
 pub mod s3;
 pub mod sigv4;
+pub mod upload;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

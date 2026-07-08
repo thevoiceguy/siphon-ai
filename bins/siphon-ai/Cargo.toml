@@ -33,6 +33,7 @@ siphon-ai-bridge.workspace     = true
 siphon-ai-cdr.workspace        = true
 siphon-ai-config.workspace     = true
 siphon-ai-core.workspace       = true
+siphon-ai-http.workspace       = true
 siphon-ai-media-glue.workspace = true
 siphon-ai-recording.workspace  = true
 siphon-ai-routes.workspace     = true

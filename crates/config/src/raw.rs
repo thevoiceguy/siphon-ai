@@ -494,6 +494,41 @@ pub struct RawRecording {
     /// `[recording.encryption]` (0.24.0) — envelope encryption at rest.
     #[serde(default)]
     pub encryption: Option<RawRecordingEncryption>,
+    /// `[recording.storage]` (0.25.0) — S3-compatible upload.
+    #[serde(default)]
+    pub storage: Option<RawRecordingStorage>,
+}
+
+/// `[recording.storage]` — upload finalized recordings to S3-compatible
+/// object storage (0.25.0). Off by default.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct RawRecordingStorage {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Scheme + host (+ port), e.g. `https://s3.us-east-1.amazonaws.com`
+    /// or a MinIO/R2/B2 URL.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub bucket: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Use `${cred:}` / `${file:}` references, never inline secrets.
+    #[serde(default)]
+    pub access_key: Option<String>,
+    #[serde(default)]
+    pub secret_key: Option<String>,
+    /// Object-key template; `{call_id}` / `{date}` / `{route}` /
+    /// `{direction}`. Default `"{date}/{call_id}"`. Must contain
+    /// `{call_id}` (key uniqueness).
+    #[serde(default)]
+    pub key_template: Option<String>,
+    /// Delete the local file after a durable upload. Default false.
+    #[serde(default)]
+    pub delete_local_after_upload: Option<bool>,
+    /// Durable job spool (survives restarts). Required when enabled.
+    #[serde(default)]
+    pub spool_dir: Option<String>,
 }
 
 /// `[recording.encryption]` — seal recordings into `.wava` envelopes

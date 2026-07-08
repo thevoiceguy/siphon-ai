@@ -21,7 +21,7 @@ API — see `CLAUDE.md` §4.2 before changing anything here.
 | Scheme | `ws://` and `wss://`. `wss://` is recommended for any non-loopback deployment. |
 | Subprotocol | SiphonAI sends `Sec-WebSocket-Protocol: siphon-ai.v1`. Servers SHOULD echo it; SiphonAI proceeds even if the server doesn't, so simple/dumb servers work. |
 | Auth | If `bridge.auth_bearer` is configured, SiphonAI sends `Authorization: Bearer <token>` on the upgrade request. |
-| Headers | Servers may inspect any HTTP header on the upgrade request. SiphonAI sets `User-Agent: siphon-ai/<version>` and forwards a `X-Siphon-Call-Id: <call_id>` header for log correlation. |
+| Headers | Servers may inspect any HTTP header on the upgrade request. SiphonAI sets `User-Agent: siphon-ai/<version>` and forwards a `X-Siphon-Call-Id: <call_id>` header for log correlation. When `[observability.otlp]` is enabled (0.23.0), SiphonAI also sends W3C [`traceparent`](https://www.w3.org/TR/trace-context/) (+ `tracestate` when non-empty) so the server can continue the call's distributed trace; the same values are mirrored on `start.trace_context` for servers whose WS library hides upgrade headers. Absent when OTLP is disabled (the default). |
 
 If the upgrade fails (4xx/5xx) or the TLS handshake fails, SiphonAI
 treats the call as failed and emits a CDR with `bridge_error`. There is
@@ -153,6 +153,9 @@ MAY use it to detect dropped frames in their own logs.
 | `verstat.signature_valid` | bool | ES256 signature over the PASSporT verified against that cert. |
 | `verstat.iat_passed` | bool | PASSporT `iat` was within the configured freshness window (replay protection). Added in 0.4.1; `false` for a stale/future/missing `iat`. Like the other booleans, it's part of the composite a server should treat as "trusted". |
 | `verstat.error` | string \| absent | Human-readable reason when verification did not fully pass; absent on success. |
+| `trace_context` | object \| absent | W3C trace context for this call's daemon-side OTLP trace (0.23.0). **Present only when `[observability.otlp]` is enabled**; absent otherwise (the default), so the protocol version stays `"1"` and a server that doesn't know the field ignores it. The same values are sent as `traceparent`/`tracestate` headers on the upgrade request — read whichever is easier for your stack. A server that adopts this as the parent of its own spans appears in the same trace waterfall as the daemon's SIP/media spans. |
+| `trace_context.traceparent` | string | W3C `traceparent`: `00-<32 hex trace-id>-<16 hex span-id>-<2 hex flags>`. The trace-id identifies the whole call's trace; the span-id is the daemon's call-root span. The flags byte reflects the daemon's sampling decision (`01` sampled, `00` not) — honouring it keeps sampling consistent across both services. |
+| `trace_context.tracestate` | string \| absent | W3C `tracestate` (vendor key/value list). Absent when there is nothing to forward — which is the common case. |
 
 The `srtp` field is omitted from the JSON when SRTP is off; a v1
 WS server that doesn't know about it sees exactly the v0.2.0 shape.

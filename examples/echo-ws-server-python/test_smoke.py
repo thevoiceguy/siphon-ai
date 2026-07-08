@@ -88,6 +88,8 @@ def _opts(**overrides) -> srv.Options:
         auto_conference_join=None,
         auto_park=False,
         auto_park_slot=None,
+        auto_hold=False,
+        drop_after_ms=None,
     )
     base.update(overrides)
     return srv.Options(**base)

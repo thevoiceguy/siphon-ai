@@ -3537,11 +3537,13 @@ impl BridgingAcceptor {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: true,
                 encryption: self.recording.encryption.clone(),
+                format: self.recording.format,
             }),
             RecordingMode::OnDemand => Some(RecordingSetup {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: false,
                 encryption: self.recording.encryption.clone(),
+                format: self.recording.format,
             }),
             RecordingMode::Off => None,
         };
@@ -3821,11 +3823,13 @@ impl BridgingAcceptor {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: true,
                 encryption: self.recording.encryption.clone(),
+                format: self.recording.format,
             }),
             RecordingMode::OnDemand => Some(RecordingSetup {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: false,
                 encryption: self.recording.encryption.clone(),
+                format: self.recording.format,
             }),
             RecordingMode::Off => None,
         };

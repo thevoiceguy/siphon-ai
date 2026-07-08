@@ -57,11 +57,11 @@ mode = "always"                       # …but always record the support line
 
 | Property | Value |
 |---|---|
-| Container | WAV (RIFF), uncompressed |
-| Sample format | PCM16, little-endian |
+| Container | WAV (RIFF) uncompressed, or **Ogg-Opus** with `format = "opus"` (0.25.0) |
+| Sample format | PCM16-LE (WAV) / Opus voice coding (`format = "opus"`, ~10× smaller) |
 | Channels | 2 (stereo) — **L = caller, R = bot/WS** |
 | Sample rate | The call's negotiated rate (8 kHz or 16 kHz) |
-| Path | `<dir>/<call_id>.wav` — `<dir>/<call_id>.wava` with encryption on (§8) |
+| Path | `<dir>/<call_id>.<ext>` — `wav`/`opus` plaintext, `wava`/`opusa` sealed (§8) |
 
 The `call_id` in the path is the same one on the WS `start` message and the
 CDR, so a recording correlates 1:1 with its call.
@@ -164,8 +164,9 @@ call. A recording is always best-effort; it never degrades call quality.
 - Local path is `<dir>/<call_id>.wav[a]` — templating applies to the
   object-storage key (`[recording.storage].key_template`, §9), not the
   local dir.
-- WAV/PCM16 only; no compressed (Opus) format yet (planned, same design
-  note §5).
+- Formats: WAV and Ogg-Opus. Opus recordings play in ffmpeg/VLC/browsers;
+  the encoder is the same libopus the media path uses. (No FLAC — lossless
+  buys little for telephony audio.)
 - Object storage: upload-only (§9) — the daemon never serves or fetches
   recordings back.
 - Inbound calls only; outbound-leg recording is planned (§5).

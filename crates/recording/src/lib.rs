@@ -18,9 +18,10 @@ mod control;
 mod envelope;
 mod frame;
 mod kek;
+mod opus;
 mod writer;
 
-pub use config::{RecordingConfig, RecordingMode, RecordingSetup};
+pub use config::{RecordingConfig, RecordingFormat, RecordingMode, RecordingSetup};
 pub use control::{RecControl, RecEvent};
 pub use envelope::{decrypt, peek_key_id, EnvelopeError};
 pub use frame::RecFrame;

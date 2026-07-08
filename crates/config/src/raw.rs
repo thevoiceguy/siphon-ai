@@ -491,6 +491,9 @@ pub struct RawRecording {
     /// Directory recordings are written to. Required when `mode != "off"`.
     #[serde(default)]
     pub dir: Option<String>,
+    /// `"wav"` (default) or `"opus"` (0.25.0).
+    #[serde(default)]
+    pub format: Option<String>,
     /// `[recording.encryption]` (0.24.0) — envelope encryption at rest.
     #[serde(default)]
     pub encryption: Option<RawRecordingEncryption>,

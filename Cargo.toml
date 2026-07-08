@@ -63,6 +63,12 @@ toml       = "0.8"
 bytes  = "1"
 base64 = "0.22"
 
+# Recording Opus/Ogg output (0.25.0, DESIGN_RECORDING_COMPLIANCE §5 D4):
+# `ogg` is the theme's one new small dep; audiopus is already in-tree
+# via forge-engine's opus feature (same version — no duplicate build).
+ogg      = "0.9"
+audiopus = "0.3.0-rc.0"
+
 # Crypto (HMAC for webhook signing; SHA-256 + constant-time eq for
 # admin token auth; AES-GCM + zeroize for recording encryption-at-rest —
 # both already in-tree transitively via rustls, promoted to direct for

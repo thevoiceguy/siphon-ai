@@ -793,6 +793,9 @@ pub enum CompileError {
     #[error("[recording].mode is {0:?}; expected \"off\" or \"always\"")]
     UnknownRecordingMode(String),
 
+    #[error("[recording].format is {0:?}; expected \"wav\" or \"opus\"")]
+    UnknownRecordingFormat(String),
+
     #[error("[recording].dir is required when mode is not \"off\"")]
     RecordingDirRequired,
 
@@ -1593,6 +1596,11 @@ fn compile_recording(
         Some("on_demand") => RecordingMode::OnDemand,
         Some(other) => return Err(CompileError::UnknownRecordingMode(other.to_string())),
     };
+    let format = match raw.format.as_deref() {
+        None | Some("") | Some("wav") => siphon_ai_recording::RecordingFormat::Wav,
+        Some("opus") => siphon_ai_recording::RecordingFormat::Opus,
+        Some(other) => return Err(CompileError::UnknownRecordingFormat(other.to_string())),
+    };
     let dir = raw.dir.map(PathBuf::from).unwrap_or_default();
     if mode != RecordingMode::Off && dir.as_os_str().is_empty() {
         return Err(CompileError::RecordingDirRequired);
@@ -1653,6 +1661,7 @@ fn compile_recording(
         mode,
         dir,
         encryption,
+        format,
     })
 }
 
@@ -2947,6 +2956,7 @@ mod recording_tests {
         RawRecording {
             mode: mode.map(str::to_string),
             dir: dir.map(str::to_string),
+            format: None,
             encryption: None,
             storage: None,
         }
@@ -2998,6 +3008,29 @@ mod recording_tests {
         assert!(matches!(
             compile_recording(raw(Some("always"), None)),
             Err(CompileError::RecordingDirRequired)
+        ));
+    }
+
+    #[test]
+    fn format_parses_and_flips_extension() {
+        let dir = std::env::temp_dir().join("siphon_rec_cfg_fmt_test");
+        let mut r = raw(Some("always"), dir.to_str());
+        r.format = Some("opus".into());
+        let c = compile_recording(r).unwrap();
+        assert!(c.path_for("c").to_string_lossy().ends_with("c.opus"));
+
+        // opus + encryption ⇒ .opusa
+        let mut r = raw(Some("always"), dir.to_str());
+        r.format = Some("opus".into());
+        r.encryption = Some(raw_enc(true, Some(&"ab".repeat(32)), Some("k")));
+        let c = compile_recording(r).unwrap();
+        assert!(c.path_for("c").to_string_lossy().ends_with("c.opusa"));
+
+        let mut r = raw(Some("always"), dir.to_str());
+        r.format = Some("mp3".into());
+        assert!(matches!(
+            compile_recording(r),
+            Err(CompileError::UnknownRecordingFormat(s)) if s == "mp3"
         ));
     }
 

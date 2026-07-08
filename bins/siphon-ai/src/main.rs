@@ -379,9 +379,15 @@ async fn decrypt_recording(
         }
     };
 
+    // Sealed extensions map to their payload format: .wava → .wav,
+    // .opusa → .opus.
+    let default_ext = match file.extension().and_then(|e| e.to_str()) {
+        Some("opusa") => "opus",
+        _ => "wav",
+    };
     let out_path = out
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| file.with_extension("wav"));
+        .unwrap_or_else(|| file.with_extension(default_ext));
     if out_path == file {
         return Err(anyhow!("output path equals input; pass --out"));
     }

@@ -491,9 +491,47 @@ pub struct RawRecording {
     /// Directory recordings are written to. Required when `mode != "off"`.
     #[serde(default)]
     pub dir: Option<String>,
+    /// `"wav"` (default) or `"opus"` (0.25.0).
+    #[serde(default)]
+    pub format: Option<String>,
     /// `[recording.encryption]` (0.24.0) — envelope encryption at rest.
     #[serde(default)]
     pub encryption: Option<RawRecordingEncryption>,
+    /// `[recording.storage]` (0.25.0) — S3-compatible upload.
+    #[serde(default)]
+    pub storage: Option<RawRecordingStorage>,
+}
+
+/// `[recording.storage]` — upload finalized recordings to S3-compatible
+/// object storage (0.25.0). Off by default.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct RawRecordingStorage {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Scheme + host (+ port), e.g. `https://s3.us-east-1.amazonaws.com`
+    /// or a MinIO/R2/B2 URL.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub bucket: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Use `${cred:}` / `${file:}` references, never inline secrets.
+    #[serde(default)]
+    pub access_key: Option<String>,
+    #[serde(default)]
+    pub secret_key: Option<String>,
+    /// Object-key template; `{call_id}` / `{date}` / `{route}` /
+    /// `{direction}`. Default `"{date}/{call_id}"`. Must contain
+    /// `{call_id}` (key uniqueness).
+    #[serde(default)]
+    pub key_template: Option<String>,
+    /// Delete the local file after a durable upload. Default false.
+    #[serde(default)]
+    pub delete_local_after_upload: Option<bool>,
+    /// Durable job spool (survives restarts). Required when enabled.
+    #[serde(default)]
+    pub spool_dir: Option<String>,
 }
 
 /// `[recording.encryption]` — seal recordings into `.wava` envelopes
@@ -511,6 +549,29 @@ pub struct RawRecordingEncryption {
     /// each recording so keys can rotate.
     #[serde(default)]
     pub key_id: Option<String>,
+    /// `[recording.encryption.kms]` (0.25.0) — wrap the per-recording
+    /// data key via AWS KMS instead of a local `kek`. Exactly one of
+    /// `kek` / `kms` when enabled.
+    #[serde(default)]
+    pub kms: Option<RawRecordingKms>,
+}
+
+/// `[recording.encryption.kms]` — AWS KMS as the KEK (0.25.0).
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct RawRecordingKms {
+    /// KMS key to wrap new recordings' data keys with.
+    #[serde(default)]
+    pub key_arn: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Use `${cred:}` / `${file:}` references, never inline secrets.
+    #[serde(default)]
+    pub access_key: Option<String>,
+    #[serde(default)]
+    pub secret_key: Option<String>,
+    /// Endpoint override for KMS-compatible emulators (LocalStack).
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 /// `[conference]` — conference rooms (0.7.0). Fail-closed like

@@ -21,6 +21,7 @@ tracing.workspace    = true
 # shared `ws_auth_header` normalizer that owns the wire-header behavior.
 siphon-ai-bridge.workspace     = true
 siphon-ai-core.workspace       = true
+siphon-ai-http.workspace       = true
 siphon-ai-media-glue.workspace = true
 siphon-ai-recording.workspace  = true
 siphon-ai-routes.workspace     = true

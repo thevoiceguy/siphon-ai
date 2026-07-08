@@ -26,7 +26,8 @@ pub mod sink;
 pub use event::{
     CallEndEvent, CallParkedEvent, CallRetrievedEvent, CallStartEvent, ConferenceCreatedEvent,
     ConferenceEndedEvent, OutboundAnsweredEvent, OutboundFailedEvent, OutboundInitiatedEvent,
-    ParkTimeoutEvent, RegistrationStateChangedEvent, WebhookEvent, WEBHOOK_VERSION,
+    ParkTimeoutEvent, RecordingUploadedEvent, RegistrationStateChangedEvent, WebhookEvent,
+    WEBHOOK_VERSION,
 };
 pub use http::{HttpSink, HttpSinkConfig};
 pub use sink::{FilteredSink, NullSink, WebhookSink, WebhookSinkHandle};

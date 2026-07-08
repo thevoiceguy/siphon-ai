@@ -91,6 +91,13 @@ pub enum WebhookEvent {
     /// Fired when a parked call hits `[park].timeout_secs`. `action` is
     /// what happened next (`hangup` / `keep`).
     ParkTimeout(ParkTimeoutEvent),
+
+    /// Fired when a call's recording finished uploading to object
+    /// storage (`[recording.storage]`, 0.25.0). Arrives *after* the
+    /// call's `CallEnd` — upload is asynchronous; the CDR's
+    /// `recording_url` names the same destination at enqueue time and
+    /// this event confirms it landed.
+    RecordingUploaded(RecordingUploadedEvent),
 }
 
 impl WebhookEvent {
@@ -110,6 +117,7 @@ impl WebhookEvent {
             WebhookEvent::CallParked(_) => "call_parked",
             WebhookEvent::CallRetrieved(_) => "call_retrieved",
             WebhookEvent::ParkTimeout(_) => "park_timeout",
+            WebhookEvent::RecordingUploaded(_) => "recording_uploaded",
         }
     }
 
@@ -130,6 +138,7 @@ impl WebhookEvent {
             WebhookEvent::CallParked(e) => Some(&e.call_id),
             WebhookEvent::CallRetrieved(e) => Some(&e.call_id),
             WebhookEvent::ParkTimeout(e) => Some(&e.call_id),
+            WebhookEvent::RecordingUploaded(e) => Some(&e.call_id),
         }
     }
 }
@@ -309,6 +318,23 @@ pub struct ParkTimeoutEvent {
     pub timestamp: DateTime<Utc>,
     /// What the daemon did: `"hangup"` or `"keep"`.
     pub action: String,
+}
+
+/// A recording landed in object storage (0.25.0).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingUploadedEvent {
+    pub version: u32,
+    pub call_id: String,
+    /// When the upload completed (UTC).
+    pub timestamp: DateTime<Utc>,
+    /// Recording identifier (equals `call_id` in this release —
+    /// mirrors the CDR's `recording_id`).
+    pub recording_id: String,
+    /// Storage-agnostic pointer, `s3://bucket/key` — matches the CDR's
+    /// `recording_url`.
+    pub url: String,
+    /// Uploaded object size in bytes.
+    pub size_bytes: u64,
 }
 
 #[cfg(test)]

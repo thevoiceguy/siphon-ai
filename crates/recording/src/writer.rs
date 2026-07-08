@@ -26,10 +26,12 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::config::RecordingFormat;
 use crate::control::{RecControl, RecEvent};
 use crate::envelope::EnvelopeWriter;
 use crate::frame::RecFrame;
 use crate::kek::Kek;
+use crate::opus::OggOpusStream;
 
 /// Recording cadence — one stereo frame per 20 ms, matching the bridge.
 const FRAME_MS: u64 = 20;
@@ -74,6 +76,7 @@ pub struct RecordingWriter {
     sample_rate: u32,
     auto_start: bool,
     encryption: Option<Kek>,
+    format: RecordingFormat,
 }
 
 impl RecordingWriter {
@@ -85,6 +88,7 @@ impl RecordingWriter {
             sample_rate,
             auto_start,
             encryption: None,
+            format: RecordingFormat::Wav,
         }
     }
 
@@ -93,6 +97,13 @@ impl RecordingWriter {
     /// `None` (the default) keeps plaintext WAV output.
     pub fn with_encryption(mut self, kek: Option<Kek>) -> Self {
         self.encryption = kek;
+        self
+    }
+
+    /// Output format (0.25.0): WAV (default) or Ogg-Opus. Opus is
+    /// streaming-native, so its finalize needs no header back-patch.
+    pub fn with_format(mut self, format: RecordingFormat) -> Self {
+        self.format = format;
         self
     }
 
@@ -136,7 +147,14 @@ impl RecordingWriter {
         }
 
         if self.auto_start {
-            match Open::create(&self.path, self.sample_rate, self.encryption.as_ref()).await {
+            match Open::create(
+                &self.path,
+                self.sample_rate,
+                self.encryption.as_ref(),
+                self.format,
+            )
+            .await
+            {
                 Ok(o) => {
                     open = Some(o);
                     status = Status::Recording;
@@ -159,7 +177,7 @@ impl RecordingWriter {
                 },
                 maybe = ctrl_rx.recv(), if ctrl_open => match maybe {
                     Some(RecControl::Start) if status == Status::Idle => {
-                        match Open::create(&self.path, self.sample_rate, self.encryption.as_ref()).await {
+                        match Open::create(&self.path, self.sample_rate, self.encryption.as_ref(), self.format).await {
                             Ok(o) => {
                                 open = Some(o);
                                 status = Status::Recording;
@@ -245,13 +263,20 @@ enum Output {
     Sealed(Box<EnvelopeWriter>),
 }
 
-/// An open recording mid-write (WAV, possibly enveloped).
+/// The format-specific half of an open recording: raw PCM headed for a
+/// WAV container, or an Ogg-Opus encoder.
+enum Payload {
+    Wav { buf: Vec<u8> },
+    Opus(Box<OggOpusStream>),
+}
+
+/// An open recording mid-write (WAV or Ogg-Opus, possibly enveloped).
 struct Open {
     path: PathBuf,
     part: PathBuf,
     sample_rate: u32,
     out: Output,
-    buf: Vec<u8>,
+    payload: Payload,
     frames: u64,
     data_bytes: u64,
 }
@@ -261,45 +286,39 @@ impl Open {
         path: &Path,
         sample_rate: u32,
         encryption: Option<&Kek>,
+        format: RecordingFormat,
     ) -> std::io::Result<Self> {
         let part = part_path(path);
         let file = File::create(&part).await?;
-        let out = match encryption {
-            None => {
-                let mut out = BufWriter::new(file);
-                out.write_all(&wav_header(sample_rate, 0)).await?; // placeholder
-                Output::Plain(out)
-            }
-            Some(kek) => {
-                let mut env = EnvelopeWriter::create(&part, file, kek)
+        let mut out = match encryption {
+            None => Output::Plain(BufWriter::new(file)),
+            Some(kek) => Output::Sealed(Box::new(
+                EnvelopeWriter::create(&part, file, kek)
                     .await
-                    .map_err(std::io::Error::other)?;
-                env.write(&wav_header(sample_rate, 0)) // placeholder, patched at finalize
-                    .await
-                    .map_err(std::io::Error::other)?;
-                Output::Sealed(Box::new(env))
+                    .map_err(std::io::Error::other)?,
+            )),
+        };
+        let payload = match format {
+            RecordingFormat::Wav => {
+                // Placeholder header; sizes patched at finalize.
+                out.write_bytes(&wav_header(sample_rate, 0)).await?;
+                Payload::Wav {
+                    buf: Vec::with_capacity(FLUSH_BYTES * 2),
+                }
             }
+            RecordingFormat::Opus => Payload::Opus(Box::new(
+                OggOpusStream::new(sample_rate).map_err(std::io::Error::other)?,
+            )),
         };
         Ok(Self {
             path: path.to_path_buf(),
             part,
             sample_rate,
             out,
-            buf: Vec::with_capacity(FLUSH_BYTES * 2),
+            payload,
             frames: 0,
             data_bytes: 0,
         })
-    }
-
-    async fn flush_buf(&mut self) -> std::io::Result<()> {
-        let buf = std::mem::take(&mut self.buf);
-        match &mut self.out {
-            Output::Plain(out) => out.write_all(&buf).await?,
-            Output::Sealed(env) => env.write(&buf).await.map_err(std::io::Error::other)?,
-        }
-        self.buf = buf;
-        self.buf.clear();
-        Ok(())
     }
 
     async fn write_frame(
@@ -308,47 +327,88 @@ impl Open {
         bot: Option<&[u8]>,
         mono_bytes: usize,
     ) -> std::io::Result<()> {
-        interleave_into(&mut self.buf, caller, bot, mono_bytes);
         self.frames += 1;
-        self.data_bytes += (mono_bytes * 2) as u64;
-        if self.buf.len() >= FLUSH_BYTES {
-            self.flush_buf().await?;
+        match &mut self.payload {
+            Payload::Wav { buf } => {
+                interleave_into(buf, caller, bot, mono_bytes);
+                self.data_bytes += (mono_bytes * 2) as u64;
+                if buf.len() >= FLUSH_BYTES {
+                    let mut full = std::mem::take(buf);
+                    self.out.write_bytes(&full).await?;
+                    full.clear();
+                    *buf = full; // reuse the allocation
+                }
+            }
+            Payload::Opus(opus) => {
+                opus.encode_frame(caller, bot)
+                    .map_err(std::io::Error::other)?;
+                let bytes = opus.take_bytes();
+                if !bytes.is_empty() {
+                    self.data_bytes += bytes.len() as u64;
+                    self.out.write_bytes(&bytes).await?;
+                }
+            }
         }
         Ok(())
     }
 
     async fn finalize(mut self) -> std::io::Result<RecordingStats> {
-        if !self.buf.is_empty() {
-            self.flush_buf().await?;
-        }
-        let data_u32 = u32::try_from(self.data_bytes).unwrap_or(u32::MAX);
-        let riff_u32 = 36u32.wrapping_add(data_u32);
-        match self.out {
-            Output::Plain(mut out) => {
-                out.flush().await?;
-                out.seek(SeekFrom::Start(4)).await?;
-                out.write_all(&riff_u32.to_le_bytes()).await?;
-                out.seek(SeekFrom::Start(40)).await?;
-                out.write_all(&data_u32.to_le_bytes()).await?;
-                out.flush().await?;
+        match self.payload {
+            Payload::Wav { buf } => {
+                if !buf.is_empty() {
+                    self.out.write_bytes(&buf).await?;
+                }
+                let data_u32 = u32::try_from(self.data_bytes).unwrap_or(u32::MAX);
+                let riff_u32 = 36u32.wrapping_add(data_u32);
+                match self.out {
+                    Output::Plain(mut out) => {
+                        out.flush().await?;
+                        out.seek(SeekFrom::Start(4)).await?;
+                        out.write_all(&riff_u32.to_le_bytes()).await?;
+                        out.seek(SeekFrom::Start(40)).await?;
+                        out.write_all(&data_u32.to_le_bytes()).await?;
+                        out.flush().await?;
+                    }
+                    Output::Sealed(env) => {
+                        env.finalize(&[(4, riff_u32), (40, data_u32)])
+                            .await
+                            .map_err(std::io::Error::other)?;
+                    }
+                }
+                if self.data_bytes > u32::MAX as u64 {
+                    warn!(path = %self.path.display(), "recording exceeded 4 GiB; WAV header sizes saturated");
+                }
             }
-            Output::Sealed(env) => {
-                env.finalize(&[(4, riff_u32), (40, data_u32)])
-                    .await
-                    .map_err(std::io::Error::other)?;
+            Payload::Opus(opus) => {
+                // Ogg is streaming-native: close the stream, no patches.
+                let tail = opus.finish().map_err(std::io::Error::other)?;
+                self.data_bytes += tail.len() as u64;
+                self.out.write_bytes(&tail).await?;
+                match self.out {
+                    Output::Plain(mut out) => out.flush().await?,
+                    Output::Sealed(env) => {
+                        env.finalize(&[]).await.map_err(std::io::Error::other)?
+                    }
+                }
             }
         }
         tokio::fs::rename(&self.part, &self.path).await?;
         debug!(path = %self.path.display(), frames = self.frames, data_bytes = self.data_bytes, "recording finalized");
-        if self.data_bytes > u32::MAX as u64 {
-            warn!(path = %self.path.display(), "recording exceeded 4 GiB; WAV header sizes saturated");
-        }
         let _ = self.sample_rate;
         Ok(RecordingStats {
             path: self.path,
             frames: self.frames,
             data_bytes: self.data_bytes,
         })
+    }
+}
+
+impl Output {
+    async fn write_bytes(&mut self, data: &[u8]) -> std::io::Result<()> {
+        match self {
+            Output::Plain(out) => out.write_all(data).await,
+            Output::Sealed(env) => env.write(data).await.map_err(std::io::Error::other),
+        }
     }
 }
 
@@ -537,12 +597,69 @@ mod tests {
 
         // Decrypting yields a well-formed WAV with patched sizes.
         let mut wav = Vec::new();
-        crate::envelope::decrypt(std::io::Cursor::new(raw), &mut wav, &kek, false).unwrap();
+        crate::envelope::decrypt(std::io::Cursor::new(raw), &mut wav, &kek, false)
+            .await
+            .unwrap();
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
         let data = u32::from_le_bytes(wav[40..44].try_into().unwrap()) as u64;
         assert_eq!(data, stats.data_bytes);
         assert_eq!(wav.len() as u64, WAV_HEADER_LEN as u64 + data);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn opus_format_writes_ogg_stream() {
+        let path = temp_path("opus").with_extension("opus");
+        let (atx, arx) = mpsc::channel(64);
+        let (_ctx, crx) = mpsc::channel(8);
+        let (etx, mut erx) = mpsc::channel(8);
+        let h = tokio::spawn(
+            RecordingWriter::new(path.clone(), 16000, true)
+                .with_format(crate::config::RecordingFormat::Opus)
+                .run(arx, crx, etx),
+        );
+        assert!(matches!(erx.recv().await, Some(RecEvent::Started)));
+        for _ in 0..5 {
+            atx.send(RecFrame::Caller(vec![0x33; 640])).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        drop(atx);
+        let stats = h.await.unwrap().unwrap().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..4], b"OggS", "plaintext opus is an Ogg stream");
+        assert!(bytes.windows(8).any(|w| w == b"OpusHead"));
+        assert_eq!(stats.data_bytes, bytes.len() as u64);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn encrypted_opus_decrypts_to_ogg() {
+        let path = temp_path("opusenc").with_extension("opusa");
+        let kek = crate::kek::Kek::new_static([6u8; 32], "opus-kek".into());
+        let (atx, arx) = mpsc::channel(64);
+        let (_ctx, crx) = mpsc::channel(8);
+        let (etx, _erx) = mpsc::channel(8);
+        let h = tokio::spawn(
+            RecordingWriter::new(path.clone(), 8000, true)
+                .with_format(crate::config::RecordingFormat::Opus)
+                .with_encryption(Some(kek.clone()))
+                .run(arx, crx, etx),
+        );
+        for _ in 0..5 {
+            atx.send(RecFrame::Bot(vec![0x11; 320])).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        drop(atx);
+        h.await.unwrap().unwrap().unwrap();
+
+        let raw = std::fs::read(&path).unwrap();
+        assert_eq!(&raw[..8], b"SAIWAVA1", "sealed container");
+        let mut ogg = Vec::new();
+        crate::envelope::decrypt(std::io::Cursor::new(raw), &mut ogg, &kek, false)
+            .await
+            .unwrap();
+        assert_eq!(&ogg[..4], b"OggS", "payload is an Ogg stream");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

@@ -175,6 +175,7 @@ mod tests {
             recording_id: None,
             recording_path: None,
             recording_encrypted: None,
+            recording_url: None,
             park: None,
             hold: None,
             reconnect: None,

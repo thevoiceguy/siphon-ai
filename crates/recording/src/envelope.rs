@@ -133,7 +133,7 @@ impl EnvelopeWriter {
     /// Wrap a fresh random DEK with `kek` and write the container header.
     pub async fn create(path: &Path, file: File, kek: &Kek) -> Result<Self, EnvelopeError> {
         let dek: Zeroizing<[u8; 32]> = crate::kek::fresh_dek();
-        let wrapped = kek.wrap_dek(&dek)?;
+        let wrapped = kek.wrap_dek(&dek).await?;
         let header = build_header(kek.key_id(), &wrapped);
         let dek_bytes: &[u8; 32] = &dek;
         let cipher = Aes256Gcm::new(dek_bytes.into());
@@ -251,8 +251,9 @@ impl EnvelopeWriter {
 }
 
 /// Decrypt a `.wava` container into `out`, returning the payload byte
-/// count. Synchronous — used by the `decrypt-recording` subcommand and
-/// tests, never on a call path.
+/// count. Async only for the KEK unwrap (a network hop on the KMS arm);
+/// the streaming I/O itself is synchronous — this is tooling, never a
+/// call path.
 ///
 /// `allow_unfinalized` accepts a chunk-0 `generation` of 0 (a crashed
 /// `.part` capture) — the recovered WAV then has placeholder (zero) size
@@ -292,7 +293,7 @@ pub fn peek_key_id<R: Read>(mut input: R) -> Result<String, EnvelopeError> {
     read_header(&mut input).map(|(key_id, _, _)| key_id)
 }
 
-pub fn decrypt<R: Read, W: Write>(
+pub async fn decrypt<R: Read, W: Write>(
     mut input: R,
     out: &mut W,
     kek: &Kek,
@@ -307,7 +308,7 @@ pub fn decrypt<R: Read, W: Write>(
     let (key_id, wrapped, chunk_size) = read_header(&mut input)?;
     let header = build_header(&key_id, &wrapped);
 
-    let dek = kek.unwrap_dek(&key_id, &wrapped)?;
+    let dek = kek.unwrap_dek(&key_id, &wrapped).await?;
     let dek_bytes: &[u8; 32] = &dek;
     let cipher = Aes256Gcm::new(dek_bytes.into());
 
@@ -399,14 +400,14 @@ mod tests {
         w.finalize(patches).await.unwrap();
     }
 
-    fn decrypt_file(
+    async fn decrypt_file(
         path: &Path,
         kek: &Kek,
         allow_unfinalized: bool,
     ) -> Result<Vec<u8>, EnvelopeError> {
         let f = std::fs::File::open(path).unwrap();
         let mut out = Vec::new();
-        decrypt(std::io::BufReader::new(f), &mut out, kek, allow_unfinalized)?;
+        decrypt(std::io::BufReader::new(f), &mut out, kek, allow_unfinalized).await?;
         Ok(out)
     }
 
@@ -418,7 +419,7 @@ mod tests {
         let payload: Vec<u8> = (0..CHUNK_SIZE * 5 / 2).map(|i| (i % 251) as u8).collect();
         write_envelope(&path, &kek, &payload, &[(4, 0xAABBCCDD), (40, 0x11223344)]).await;
 
-        let plain = decrypt_file(&path, &kek, false).unwrap();
+        let plain = decrypt_file(&path, &kek, false).await.unwrap();
         let mut expected = payload.clone();
         expected[4..8].copy_from_slice(&0xAABBCCDDu32.to_le_bytes());
         expected[40..44].copy_from_slice(&0x11223344u32.to_le_bytes());
@@ -432,7 +433,7 @@ mod tests {
         let kek = test_kek();
         let payload = vec![0x5A; 100]; // < one chunk, still gets patched + finalized
         write_envelope(&path, &kek, &payload, &[(4, 56)]).await;
-        let plain = decrypt_file(&path, &kek, false).unwrap();
+        let plain = decrypt_file(&path, &kek, false).await.unwrap();
         assert_eq!(plain.len(), 100);
         assert_eq!(&plain[4..8], &56u32.to_le_bytes());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -444,7 +445,7 @@ mod tests {
         let kek = test_kek();
         write_envelope(&path, &kek, &vec![1u8; 500], &[]).await;
         let other = Kek::new_static([9u8; 32], "test-key".into());
-        match decrypt_file(&path, &other, false) {
+        match decrypt_file(&path, &other, false).await {
             Err(EnvelopeError::Kek(_)) => {}
             other => panic!("expected KEK unwrap failure, got {other:?}"),
         }
@@ -461,7 +462,7 @@ mod tests {
         let n = bytes.len();
         bytes[n - 10] ^= 0xFF;
         std::fs::write(&path, &bytes).unwrap();
-        match decrypt_file(&path, &kek, false) {
+        match decrypt_file(&path, &kek, false).await {
             Err(EnvelopeError::Auth { index: 1 }) => {}
             other => panic!("expected auth failure on chunk 1, got {other:?}"),
         }
@@ -479,11 +480,11 @@ mod tests {
         w.out.flush().await.unwrap();
         drop(w);
 
-        match decrypt_file(&path, &kek, false) {
+        match decrypt_file(&path, &kek, false).await {
             Err(EnvelopeError::Unfinalized) => {}
             other => panic!("expected Unfinalized, got {other:?}"),
         }
-        let plain = decrypt_file(&path, &kek, true).unwrap();
+        let plain = decrypt_file(&path, &kek, true).await.unwrap();
         assert_eq!(plain, vec![8u8; CHUNK_SIZE]);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -514,7 +515,7 @@ mod tests {
             .copy_from_slice(&before[start..start + chunk0_frame_len]);
         std::fs::write(&path, &after).unwrap();
 
-        match decrypt_file(&path, &kek, false) {
+        match decrypt_file(&path, &kek, false).await {
             Err(EnvelopeError::Unfinalized) => {}
             other => panic!("expected Unfinalized on swapped chunk 0, got {other:?}"),
         }

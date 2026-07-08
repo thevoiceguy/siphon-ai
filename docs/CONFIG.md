@@ -630,8 +630,9 @@ writer can never stall live audio. **Full guide: `docs/RECORDING.md`.**
 
 ```toml
 [recording]
-mode = "always"            # "off" (default) | "always" | "on_demand"
-dir  = "/var/lib/siphon-ai/recordings"
+mode   = "always"          # "off" (default) | "always" | "on_demand"
+dir    = "/var/lib/siphon-ai/recordings"
+format = "wav"             # "wav" (default) | "opus" (0.25.0, ~10× smaller)
 
 [recording.encryption]                 # optional — encrypt at rest (0.24.0)
 enabled = true                         # default false
@@ -642,10 +643,45 @@ key_id  = "rec-2026-07"                # stamped into each recording
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `mode` | string | `"off"` | `"off"` = no recording (zero behaviour change). `"always"` = record every accepted call for its full duration. `"on_demand"` = the WS server drives recording with `start_recording` / `stop_recording` / `pause_recording` / `resume_recording` (see `docs/PROTOCOL.md` §4.7); SiphonAI emits `recording_started` / `recording_stopped` / `recording_failed` back. (Per-route overrides land in a later 0.5.0 chunk.) |
-| `dir` | string | — | Directory recordings are written to as `<dir>/<call_id>.wav` (`.wava` when encryption is on). **Required when `mode != "off"`**; created at startup (a bad path fails loud at load). A `pause` omits the paused span from the file (the audio is dropped, not silenced). In-progress recordings are `<name>.part` and are renamed on finalize (0.24.0) — a bare `.wav`/`.wava` is always a complete file. |
+| `format` | string | `"wav"` | `"opus"` writes Ogg-Opus instead of WAV — ~10× smaller for voice, encoded with the same libopus the media path uses. Extension becomes `.opus` (`.opusa` sealed). Playable by ffmpeg/VLC/browsers. |
+| `dir` | string | — | Directory recordings are written to as `<dir>/<call_id>.<ext>` — `wav`/`wava` or `opus`/`opusa` by format × encryption. **Required when `mode != "off"`**; created at startup (a bad path fails loud at load). A `pause` omits the paused span from the file (the audio is dropped, not silenced). In-progress recordings are `<name>.part` and are renamed on finalize (0.24.0) — a bare `.wav`/`.wava` is always a complete file. |
 | `encryption.enabled` | bool | `false` | Seal recordings into encrypted `.wava` envelopes (per-recording AES-256-GCM data key, wrapped by your `kek`). Decrypt offline with `siphon-ai decrypt-recording` — see `docs/RECORDING.md` §8 for the model, key rotation, and the container format. |
 | `encryption.kek` | string | — | The key-encryption key as **64 hex characters** (32 bytes). Reference a secret — `${file:…}` or `${cred:…}` — never inline it. Required when `enabled`; validated at load (fail-loud). Generate one with `openssl rand -hex 32`. |
 | `encryption.key_id` | string | — | Identifier (1–255 bytes) stamped into every recording's header, naming which KEK wrapped it — this is what makes rotation possible. Required when `enabled`. |
+| `encryption.kms` | table | — | **AWS KMS as the KEK** (0.25.0) — instead of a local `kek` (exactly one of the two). `{ key_arn, region, access_key, secret_key, endpoint? }`; creds via `${cred:}`, `endpoint` only for KMS-compatible emulators. Each recording start is one KMS `Encrypt` (on the writer task, never the audio path; 10 s timeout → the *recording* fails, the call continues). Decrypt with `siphon-ai decrypt-recording --kms-region <r>` (+ `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`); the blob names its own key. |
+
+**Object storage (`[recording.storage]`, 0.25.0).** Upload finalized
+recordings to an S3-compatible bucket (AWS, MinIO, Cloudflare R2, Backblaze
+B2 — path-style addressing, hand-rolled SigV4, no AWS SDK):
+
+```toml
+[recording.storage]
+enabled      = true                      # default false
+endpoint     = "https://s3.us-east-1.amazonaws.com"   # or a MinIO/R2 URL
+bucket       = "call-recordings"
+region       = "us-east-1"
+access_key   = "${cred:s3-access-key}"
+secret_key   = "${cred:s3-secret-key}"
+key_template = "{date}/{call_id}"        # default; {route}/{direction} too
+delete_local_after_upload = false        # default
+spool_dir    = "/var/spool/siphon-ai/uploads"
+```
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `false` | Spool each finalized recording for background upload. The CDR gains `recording_url` (`s3://bucket/key`) and a `recording_uploaded` lifecycle webhook fires per completed upload. |
+| `endpoint` | string | — | Scheme + host (+ port). Required; must be `http(s)://`. |
+| `bucket` / `region` | string | — | Required. For non-AWS targets `region` is whatever the endpoint expects (MinIO accepts any). |
+| `access_key` / `secret_key` | string | — | Required. Reference secrets (`${cred:}` / `${file:}`), never inline. |
+| `key_template` | string | `"{date}/{call_id}"` | Object-key template. Placeholders: `{call_id}`, `{date}` (UTC `YYYY-MM-DD`), `{route}`, `{direction}`. Must contain `{call_id}`; the file extension (`.wav`/`.wava`) is appended automatically. Validated at load. |
+| `delete_local_after_upload` | bool | `false` | Delete the local file only after a **durable** upload. Retention/TTL beyond that belongs to the bucket's lifecycle policy — the daemon never schedules deletion. |
+| `spool_dir` | string | — | Durable upload-job spool (survives restarts). Required; created at startup. |
+
+Upload is best-effort and off every call path (CLAUDE.md §4.7): teardown
+writes one small job file; a background worker uploads with retries (an
+unreachable endpoint backs up in the spool, visible as
+`siphon_ai_recording_upload_spool_depth`). Pair with
+`[recording.encryption]` so the bucket only ever holds ciphertext.
 
 **Per-route override.** A `[route.recording]` block overrides the global
 `mode` for calls that match that route (strict override — the route value
@@ -826,7 +862,7 @@ first request.
 | `auth_header` | string   | unset                  | Sent verbatim. `${VAR}` expansion works. |
 | `secret`      | string   | unset                  | HMAC-SHA256 signing secret (0.11.0). When set, every POST carries `X-SiphonAI-Signature` for authenticity + replay protection. `${VAR}` expansion works; never logged. See `docs/DEPLOY.md` → *Webhook delivery: signing, idempotency, durability*. |
 | `spool_dir`   | path     | unset                  | Durable retry spool directory (0.11.0). When set, a delivery that exhausts `retry_max` is persisted here and re-delivered by a background worker that survives restarts. Unset ⇒ best-effort (dropped after `retry_max`). Created + write-probed at startup (fail-loud). `${VAR}` expansion works. |
-| `events`      | string[] | all                    | Allowlist. Valid today: `"call_start"`, `"call_end"`, `"registration_state_changed"`, `"outbound_initiated"`, `"outbound_answered"`, `"outbound_failed"`, `"conference_created"`, `"conference_ended"`, `"call_parked"`, `"call_retrieved"`, `"park_timeout"`. |
+| `events`      | string[] | all                    | Allowlist. Valid today: `"call_start"`, `"call_end"`, `"registration_state_changed"`, `"outbound_initiated"`, `"outbound_answered"`, `"outbound_failed"`, `"conference_created"`, `"conference_ended"`, `"call_parked"`, `"call_retrieved"`, `"park_timeout"`, `"recording_uploaded"`. |
 | `retry_max`   | integer  | `3`                    | In-memory retries before spooling (or dropping). |
 | `timeout_ms`  | integer  | `5000`                 | |
 

@@ -571,6 +571,7 @@ fn build_outbound_record(
         recording_id: None,
         recording_path: None,
         recording_encrypted: None,
+        recording_url: None,
         // Outbound bots can park too (0.7.0); carry the accounting.
         park: view.park.map(|p| siphon_ai_cdr::ParkInfo {
             count: p.count,

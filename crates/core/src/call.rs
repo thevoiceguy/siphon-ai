@@ -751,7 +751,8 @@ impl CallController {
             rec_encrypted = setup.encryption.is_some();
             let writer =
                 RecordingWriter::new(setup.path, media_tap.sample_rate(), setup.auto_start)
-                    .with_encryption(setup.encryption);
+                    .with_encryption(setup.encryption)
+                    .with_format(setup.format);
             recording_task = Some(tokio::spawn(
                 writer
                     .run(rec_rx, ctrl_rx, evt_tx)

@@ -93,7 +93,8 @@ use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::call::{
-    CallController, CallControllerConfig, CallOutcome, CallTermination, RecordingSummary,
+    CallController, CallControllerConfig, CallOutcome, CallTermination, RecordingResult,
+    RecordingSummary,
 };
 use crate::conference::ConferenceRegistry;
 use crate::hold::HoldContext;
@@ -1612,6 +1613,10 @@ pub struct BridgingAcceptor {
     /// Recording policy. Default is `Off` (no recording). When `Always`,
     /// every accepted call gets a per-call WAV writer.
     recording: RecordingConfig,
+    /// `[recording.storage]` upload settings (0.25.0). `None` = local
+    /// disk only; `Some` = finalized recordings are spooled for the
+    /// upload worker and the CDR carries `recording_url`.
+    recording_upload: Option<std::sync::Arc<siphon_ai_http::upload::UploadSettings>>,
     /// Conference registry (0.7.0). `Some` when `[conference].enabled`;
     /// every accepted call's controller gets a clone so the WS server
     /// can `conference_join`. `None` → conferencing off, and joins are
@@ -1846,6 +1851,7 @@ impl BridgingAcceptor {
             security: AcceptSecurityPolicy::default(),
             hep: None,
             recording: RecordingConfig::default(),
+            recording_upload: None,
             conference: None,
             control_registry: CallControlRegistry::new(),
             park: None,
@@ -1966,6 +1972,17 @@ impl BridgingAcceptor {
     /// Install the recording policy (`[recording]`). Default is `Off`; the
     /// daemon passes the compiled config so `mode = "always"` records every
     /// accepted call.
+    /// Install `[recording.storage]` upload settings (0.25.0). Finalized
+    /// recordings are enqueued on the durable spool at teardown; the
+    /// upload worker (spawned by the runtime) drains it.
+    pub fn with_recording_upload(
+        mut self,
+        upload: Option<std::sync::Arc<siphon_ai_http::upload::UploadSettings>>,
+    ) -> Self {
+        self.recording_upload = upload;
+        self
+    }
+
     pub fn with_recording(mut self, recording: RecordingConfig) -> Self {
         self.recording = recording;
         self
@@ -2077,6 +2094,8 @@ impl CallStart {
                 .as_ref()
                 .map(|r| r.path.display().to_string()),
             recording_encrypted: outcome.recording.as_ref().map(|r| r.encrypted),
+            // Stamped after into_record by the upload-enqueue block (0.25.0).
+            recording_url: None,
             park: outcome.park.map(|p| siphon_ai_cdr::ParkInfo {
                 count: p.count,
                 total_ms: p.total_ms,
@@ -2219,6 +2238,7 @@ fn build_delayed_failure_cdr(
         recording_id: None,
         recording_path: None,
         recording_encrypted: None,
+        recording_url: None,
         park: None,
         hold: None,
         reconnect: None,
@@ -3055,6 +3075,7 @@ impl BridgingAcceptor {
         let control_registry = self.control_registry.clone();
         let cdr_sink = Arc::clone(&self.cdr_sink);
         let webhook_sink = Arc::clone(&self.webhook_sink);
+        let recording_upload = self.recording_upload.clone();
         // Daemon-wide UAC + DialogManager Arc clones so the cleanup
         // task can send an outbound BYE when teardown was driven
         // locally (WS `hangup`, admin force-hangup, bridge ended).
@@ -3141,7 +3162,34 @@ impl BridgingAcceptor {
                     termination_cause: termination_label(view.cause).to_string(),
                 });
 
-                let record = call_start.into_record(ended_at, &view);
+                let mut record = call_start.into_record(ended_at, &view);
+                // 0.25.0: spool the finalized recording for object-storage
+                // upload. One small file write at teardown, off any audio
+                // path; failure to enqueue degrades to local-only (warn),
+                // never a call error (§4.7). `recording_url` is the
+                // deterministic destination — the `recording_uploaded`
+                // webhook confirms arrival.
+                if let (Some(upload), Some(rec)) =
+                    (recording_upload.as_ref(), view.recording.as_ref())
+                {
+                    if rec.result != RecordingResult::Failed {
+                        let direction = match record.direction {
+                            siphon_ai_cdr::Direction::Inbound => "inbound",
+                            siphon_ai_cdr::Direction::Outbound => "outbound",
+                        };
+                        let key =
+                            upload.render_key(&record.call_id, &record.route, direction, &rec.path);
+                        let job = upload.job(&record.call_id, key.clone(), rec.path.clone());
+                        match upload.enqueue(&job) {
+                            Ok(()) => record.recording_url = Some(upload.planned_uri(&key)),
+                            Err(err) => warn!(
+                                call_id = %record.call_id,
+                                error = %err,
+                                "could not spool recording upload; kept local only"
+                            ),
+                        }
+                    }
+                }
                 cdr_sink.emit(record).await;
                 webhook_sink.emit(end_event).await;
             },
@@ -3489,11 +3537,13 @@ impl BridgingAcceptor {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: true,
                 encryption: self.recording.encryption.clone(),
+                format: self.recording.format,
             }),
             RecordingMode::OnDemand => Some(RecordingSetup {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: false,
                 encryption: self.recording.encryption.clone(),
+                format: self.recording.format,
             }),
             RecordingMode::Off => None,
         };
@@ -3773,11 +3823,13 @@ impl BridgingAcceptor {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: true,
                 encryption: self.recording.encryption.clone(),
+                format: self.recording.format,
             }),
             RecordingMode::OnDemand => Some(RecordingSetup {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: false,
                 encryption: self.recording.encryption.clone(),
+                format: self.recording.format,
             }),
             RecordingMode::Off => None,
         };

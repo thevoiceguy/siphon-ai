@@ -1857,6 +1857,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ogg"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdab8dcd8d4052eaacaf8fb07a3ccd9a6e26efadb42878a413c68fc4af1dee2b"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2422,6 +2431,7 @@ dependencies = [
  "base64",
  "bytes",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -2441,12 +2451,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots 1.0.7",
 ]
@@ -3059,6 +3071,7 @@ dependencies = [
  "siphon-ai-cdr",
  "siphon-ai-config",
  "siphon-ai-core",
+ "siphon-ai-http",
  "siphon-ai-media-glue",
  "siphon-ai-recording",
  "siphon-ai-routes",
@@ -3137,6 +3150,7 @@ dependencies = [
  "serde",
  "siphon-ai-bridge",
  "siphon-ai-core",
+ "siphon-ai-http",
  "siphon-ai-media-glue",
  "siphon-ai-recording",
  "siphon-ai-routes",
@@ -3175,6 +3189,7 @@ dependencies = [
  "siphon-ai-audit",
  "siphon-ai-bridge",
  "siphon-ai-cdr",
+ "siphon-ai-http",
  "siphon-ai-media-glue",
  "siphon-ai-recording",
  "siphon-ai-routes",
@@ -3194,6 +3209,7 @@ dependencies = [
 name = "siphon-ai-http"
 version = "0.24.0"
 dependencies = [
+ "base64",
  "hmac",
  "http-body-util",
  "hyper",
@@ -3206,8 +3222,10 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -3239,6 +3257,9 @@ name = "siphon-ai-recording"
 version = "0.24.0"
 dependencies = [
  "aes-gcm",
+ "audiopus",
+ "ogg",
+ "siphon-ai-http",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -4355,6 +4376,19 @@ dependencies = [
  "indexmap",
  "wasm-encoder",
  "wasmparser",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

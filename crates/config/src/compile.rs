@@ -64,6 +64,9 @@ pub struct Config {
     pub trunks: Vec<TrunkConfig>,
     pub security: SecurityConfig,
     pub recording: siphon_ai_recording::RecordingConfig,
+    /// `[recording.storage]` (0.25.0) — S3-compatible upload of finalized
+    /// recordings. `None` = local-disk only (the default).
+    pub recording_storage: Option<siphon_ai_http::upload::UploadSettings>,
     pub outbound: OutboundConfig,
     pub conference: ConferenceConfig,
     pub park: ParkConfig,
@@ -790,6 +793,9 @@ pub enum CompileError {
     #[error("[recording].mode is {0:?}; expected \"off\" or \"always\"")]
     UnknownRecordingMode(String),
 
+    #[error("[recording].format is {0:?}; expected \"wav\" or \"opus\"")]
+    UnknownRecordingFormat(String),
+
     #[error("[recording].dir is required when mode is not \"off\"")]
     RecordingDirRequired,
 
@@ -810,6 +816,28 @@ pub enum CompileError {
 
     #[error("[recording.encryption].key_id must be 1–255 bytes, got {0}")]
     RecordingKeyIdInvalid(usize),
+
+    #[error("[recording.storage].{0} is required when enabled")]
+    RecordingStorageField(&'static str),
+
+    #[error("[recording.encryption]: set exactly one of `kek` or `[recording.encryption.kms]`")]
+    RecordingKekXorKms,
+
+    #[error("[recording.encryption.kms].{0} is required")]
+    RecordingKmsField(&'static str),
+
+    #[error("[recording.storage].endpoint {0:?} must start with http:// or https://")]
+    RecordingStorageEndpointInvalid(String),
+
+    #[error(
+        "[recording.storage].key_template {0:?} is invalid: {1} \
+         (placeholders: {{call_id}} {{date}} {{route}} {{direction}}; \
+         {{call_id}} is required)"
+    )]
+    RecordingStorageKeyTemplateInvalid(String, &'static str),
+
+    #[error("[recording.storage].spool_dir {path:?} could not be created: {err}")]
+    RecordingStorageSpoolInvalid { path: String, err: String },
 
     #[error("[route.recording].mode on route {route:?} is {value:?}; expected \"off\", \"always\", or \"on_demand\"")]
     RouteRecordingModeInvalid { route: String, value: String },
@@ -1047,7 +1075,10 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let registrations = compile_registrations(raw.registrations)?;
     let trunks = compile_trunks(raw.trunks)?;
     let security = compile_security(raw.security)?;
-    let recording = compile_recording(raw.recording)?;
+    let mut raw_recording = raw.recording;
+    let raw_recording_storage = raw_recording.storage.take();
+    let recording = compile_recording(raw_recording)?;
+    let recording_storage = compile_recording_storage(raw_recording_storage, &recording)?;
     let outbound = compile_outbound(raw.outbound, raw.gateways, &registrations)?;
     let conference = compile_conference(raw.conference)?;
     let park = compile_park(raw.park)?;
@@ -1134,6 +1165,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         );
     }
     Ok(Config {
+        recording_storage,
         node,
         sip,
         media,
@@ -1564,6 +1596,11 @@ fn compile_recording(
         Some("on_demand") => RecordingMode::OnDemand,
         Some(other) => return Err(CompileError::UnknownRecordingMode(other.to_string())),
     };
+    let format = match raw.format.as_deref() {
+        None | Some("") | Some("wav") => siphon_ai_recording::RecordingFormat::Wav,
+        Some("opus") => siphon_ai_recording::RecordingFormat::Opus,
+        Some(other) => return Err(CompileError::UnknownRecordingFormat(other.to_string())),
+    };
     let dir = raw.dir.map(PathBuf::from).unwrap_or_default();
     if mode != RecordingMode::Off && dir.as_os_str().is_empty() {
         return Err(CompileError::RecordingDirRequired);
@@ -1590,9 +1627,31 @@ fn compile_recording(
             if key_id.is_empty() || key_id.len() > 255 {
                 return Err(CompileError::RecordingKeyIdInvalid(key_id.len()));
             }
-            let kek_hex = enc.kek.ok_or(CompileError::RecordingKekRequired)?;
-            let kek = siphon_ai_recording::Kek::from_hex(&kek_hex, key_id)
-                .map_err(|e| CompileError::RecordingKekInvalid(e.to_string()))?;
+            let kek = match (enc.kek, enc.kms) {
+                (Some(kek_hex), None) => siphon_ai_recording::Kek::from_hex(&kek_hex, key_id)
+                    .map_err(|e| CompileError::RecordingKekInvalid(e.to_string()))?,
+                (None, Some(kms)) => {
+                    let required = |field: &'static str, v: Option<String>| {
+                        v.filter(|s| !s.trim().is_empty())
+                            .ok_or(CompileError::RecordingKmsField(field))
+                    };
+                    let key_arn = required("key_arn", kms.key_arn)?;
+                    let region = required("region", kms.region)?;
+                    let credentials = siphon_ai_http::sigv4::SigV4Credentials {
+                        access_key: required("access_key", kms.access_key)?,
+                        secret_key: required("secret_key", kms.secret_key)?,
+                    };
+                    let client =
+                        siphon_ai_http::kms::KmsClient::new(region, credentials, kms.endpoint);
+                    siphon_ai_recording::Kek::AwsKms {
+                        client,
+                        key_arn,
+                        key_id,
+                    }
+                }
+                (None, None) => return Err(CompileError::RecordingKekRequired),
+                (Some(_), Some(_)) => return Err(CompileError::RecordingKekXorKms),
+            };
             Some(kek)
         }
         _ => None,
@@ -1602,7 +1661,99 @@ fn compile_recording(
         mode,
         dir,
         encryption,
+        format,
     })
+}
+
+/// Compile and validate `[recording.storage]` (0.25.0). Fail-loud at
+/// load (§4.6): every field checked here so upload failures at runtime
+/// can only be transport, never config. The spool dir is created at load.
+fn compile_recording_storage(
+    raw: Option<crate::raw::RawRecordingStorage>,
+    recording: &siphon_ai_recording::RecordingConfig,
+) -> Result<Option<siphon_ai_http::upload::UploadSettings>, CompileError> {
+    use siphon_ai_http::s3::S3Target;
+    use siphon_ai_http::sigv4::SigV4Credentials;
+    use siphon_ai_http::upload::UploadSettings;
+
+    let Some(raw) = raw else { return Ok(None) };
+    if !raw.enabled.unwrap_or(false) {
+        return Ok(None);
+    }
+
+    let required = |field: &'static str, v: Option<String>| {
+        v.filter(|s| !s.trim().is_empty())
+            .ok_or(CompileError::RecordingStorageField(field))
+    };
+    let endpoint = required("endpoint", raw.endpoint)?;
+    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        return Err(CompileError::RecordingStorageEndpointInvalid(endpoint));
+    }
+    let endpoint = endpoint.trim_end_matches('/').to_string();
+    let bucket = required("bucket", raw.bucket)?;
+    let region = required("region", raw.region)?;
+    let access_key = required("access_key", raw.access_key)?;
+    let secret_key = required("secret_key", raw.secret_key)?;
+
+    let key_template = raw
+        .key_template
+        .unwrap_or_else(|| "{date}/{call_id}".to_string());
+    if !key_template.contains("{call_id}") {
+        return Err(CompileError::RecordingStorageKeyTemplateInvalid(
+            key_template,
+            "missing {call_id}",
+        ));
+    }
+    // Reject unknown placeholders now, not as literal braces in keys later.
+    let mut rest = key_template.as_str();
+    while let Some(open) = rest.find('{') {
+        let Some(close) = rest[open..].find('}') else {
+            return Err(CompileError::RecordingStorageKeyTemplateInvalid(
+                key_template.clone(),
+                "unbalanced braces",
+            ));
+        };
+        let name = &rest[open + 1..open + close];
+        if !matches!(name, "call_id" | "date" | "route" | "direction") {
+            return Err(CompileError::RecordingStorageKeyTemplateInvalid(
+                key_template.clone(),
+                "unknown placeholder",
+            ));
+        }
+        rest = &rest[open + close + 1..];
+    }
+
+    let spool_dir = PathBuf::from(required("spool_dir", raw.spool_dir)?);
+    std::fs::create_dir_all(&spool_dir).map_err(|err| {
+        CompileError::RecordingStorageSpoolInvalid {
+            path: spool_dir.display().to_string(),
+            err: err.to_string(),
+        }
+    })?;
+
+    if recording.mode == siphon_ai_recording::RecordingMode::Off
+        && recording.dir.as_os_str().is_empty()
+    {
+        warn!(
+            "[recording.storage] is enabled but recording is fully off — \
+             nothing will ever be uploaded"
+        );
+    }
+
+    Ok(Some(UploadSettings {
+        target: S3Target {
+            endpoint,
+            bucket,
+            region,
+            credentials: SigV4Credentials {
+                access_key,
+                secret_key,
+            },
+        },
+        key_template,
+        delete_local_after_upload: raw.delete_local_after_upload.unwrap_or(false),
+        spool_dir,
+    }))
 }
 
 /// Compile `[outbound]` and `[[gateway]]`. Gateways resolve to a uniform
@@ -2805,7 +2956,9 @@ mod recording_tests {
         RawRecording {
             mode: mode.map(str::to_string),
             dir: dir.map(str::to_string),
+            format: None,
             encryption: None,
+            storage: None,
         }
     }
 
@@ -2818,6 +2971,7 @@ mod recording_tests {
             enabled: Some(enabled),
             kek: kek.map(str::to_string),
             key_id: key_id.map(str::to_string),
+            kms: None,
         }
     }
 
@@ -2854,6 +3008,29 @@ mod recording_tests {
         assert!(matches!(
             compile_recording(raw(Some("always"), None)),
             Err(CompileError::RecordingDirRequired)
+        ));
+    }
+
+    #[test]
+    fn format_parses_and_flips_extension() {
+        let dir = std::env::temp_dir().join("siphon_rec_cfg_fmt_test");
+        let mut r = raw(Some("always"), dir.to_str());
+        r.format = Some("opus".into());
+        let c = compile_recording(r).unwrap();
+        assert!(c.path_for("c").to_string_lossy().ends_with("c.opus"));
+
+        // opus + encryption ⇒ .opusa
+        let mut r = raw(Some("always"), dir.to_str());
+        r.format = Some("opus".into());
+        r.encryption = Some(raw_enc(true, Some(&"ab".repeat(32)), Some("k")));
+        let c = compile_recording(r).unwrap();
+        assert!(c.path_for("c").to_string_lossy().ends_with("c.opusa"));
+
+        let mut r = raw(Some("always"), dir.to_str());
+        r.format = Some("mp3".into());
+        assert!(matches!(
+            compile_recording(r),
+            Err(CompileError::UnknownRecordingFormat(s)) if s == "mp3"
         ));
     }
 
@@ -2924,6 +3101,150 @@ mod recording_tests {
         assert!(matches!(
             compile_recording(r),
             Err(CompileError::RecordingKeyIdInvalid(256))
+        ));
+    }
+
+    fn raw_storage(overrides: &[(&str, &str)]) -> crate::raw::RawRecordingStorage {
+        let mut r = crate::raw::RawRecordingStorage {
+            enabled: Some(true),
+            endpoint: Some("http://127.0.0.1:9000".into()),
+            bucket: Some("recs".into()),
+            region: Some("us-east-1".into()),
+            access_key: Some("ak".into()),
+            secret_key: Some("sk".into()),
+            key_template: None,
+            delete_local_after_upload: None,
+            spool_dir: Some(
+                std::env::temp_dir()
+                    .join("siphon_cfg_storage_spool")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        };
+        for (k, v) in overrides {
+            let v = Some(v.to_string());
+            match *k {
+                "endpoint" => r.endpoint = v,
+                "bucket" => r.bucket = v,
+                "key_template" => r.key_template = v,
+                other => panic!("unknown override {other}"),
+            }
+        }
+        r
+    }
+
+    #[test]
+    fn encryption_kms_compiles_and_is_xor_with_kek() {
+        let dir = std::env::temp_dir().join("siphon_rec_cfg_kms_test");
+        let kms = crate::raw::RawRecordingKms {
+            key_arn: Some("arn:aws:kms:us-east-1:000000000000:key/abc".into()),
+            region: Some("us-east-1".into()),
+            access_key: Some("ak".into()),
+            secret_key: Some("sk".into()),
+            endpoint: Some("http://127.0.0.1:4566".into()),
+        };
+
+        // KMS alone compiles.
+        let mut r = raw(Some("always"), dir.to_str());
+        let mut enc = raw_enc(true, None, Some("kms-1"));
+        enc.kms = Some(kms.clone());
+        r.encryption = Some(enc);
+        let c = compile_recording(r).unwrap();
+        assert_eq!(c.encryption.as_ref().unwrap().key_id(), "kms-1");
+
+        // kek + kms together fail loud.
+        let mut r = raw(Some("always"), dir.to_str());
+        let mut enc = raw_enc(true, Some(&"ab".repeat(32)), Some("kms-1"));
+        enc.kms = Some(kms.clone());
+        r.encryption = Some(enc);
+        assert!(matches!(
+            compile_recording(r),
+            Err(CompileError::RecordingKekXorKms)
+        ));
+
+        // Missing kms field fails loud.
+        let mut incomplete = kms;
+        incomplete.region = None;
+        let mut r = raw(Some("always"), dir.to_str());
+        let mut enc = raw_enc(true, None, Some("kms-1"));
+        enc.kms = Some(incomplete);
+        r.encryption = Some(enc);
+        assert!(matches!(
+            compile_recording(r),
+            Err(CompileError::RecordingKmsField("region"))
+        ));
+    }
+
+    #[test]
+    fn storage_compiles_with_defaults() {
+        let rec = compile_recording(raw(
+            Some("always"),
+            std::env::temp_dir().join("siphon_cfg_storage_rec").to_str(),
+        ))
+        .unwrap();
+        let up = super::compile_recording_storage(Some(raw_storage(&[])), &rec)
+            .unwrap()
+            .expect("enabled storage compiles");
+        assert_eq!(up.key_template, "{date}/{call_id}");
+        assert!(!up.delete_local_after_upload);
+        assert_eq!(up.target.bucket, "recs");
+    }
+
+    #[test]
+    fn storage_disabled_or_absent_is_none() {
+        let rec = compile_recording(RawRecording::default()).unwrap();
+        assert!(super::compile_recording_storage(None, &rec)
+            .unwrap()
+            .is_none());
+        let mut r = raw_storage(&[]);
+        r.enabled = Some(false);
+        assert!(super::compile_recording_storage(Some(r), &rec)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn storage_validation_fails_loud() {
+        let rec = compile_recording(RawRecording::default()).unwrap();
+
+        let mut r = raw_storage(&[]);
+        r.bucket = None;
+        assert!(matches!(
+            super::compile_recording_storage(Some(r), &rec),
+            Err(CompileError::RecordingStorageField("bucket"))
+        ));
+
+        let r = raw_storage(&[("endpoint", "s3.amazonaws.com")]);
+        assert!(matches!(
+            super::compile_recording_storage(Some(r), &rec),
+            Err(CompileError::RecordingStorageEndpointInvalid(_))
+        ));
+
+        let r = raw_storage(&[("key_template", "{date}/all-calls")]);
+        assert!(matches!(
+            super::compile_recording_storage(Some(r), &rec),
+            Err(CompileError::RecordingStorageKeyTemplateInvalid(
+                _,
+                "missing {call_id}"
+            ))
+        ));
+
+        let r = raw_storage(&[("key_template", "{tenant}/{call_id}")]);
+        assert!(matches!(
+            super::compile_recording_storage(Some(r), &rec),
+            Err(CompileError::RecordingStorageKeyTemplateInvalid(
+                _,
+                "unknown placeholder"
+            ))
+        ));
+
+        let r = raw_storage(&[("key_template", "{call_id}/{oops")]);
+        assert!(matches!(
+            super::compile_recording_storage(Some(r), &rec),
+            Err(CompileError::RecordingStorageKeyTemplateInvalid(
+                _,
+                "unbalanced braces"
+            ))
         ));
     }
 

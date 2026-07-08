@@ -34,6 +34,7 @@ siphon-ai-security.workspace   = true
 siphon-ai-stir-shaken.workspace = true
 siphon-ai-sip-glue.workspace   = true
 siphon-ai-telemetry.workspace  = true
+siphon-ai-http.workspace       = true
 siphon-ai-webhooks.workspace   = true
 
 # Upstream — siphon-rs (Request, Response) for the CallAcceptor impl.

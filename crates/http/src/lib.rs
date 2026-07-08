@@ -33,6 +33,11 @@
 //! signed are exactly the bytes that are sent. Delivery outcomes feed
 //! the `siphon_ai_webhook_*` metrics, labeled by [`SinkKind`].
 
+pub mod kms;
+pub mod s3;
+pub mod sigv4;
+pub mod upload;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 

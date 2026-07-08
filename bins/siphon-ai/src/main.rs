@@ -91,6 +91,28 @@ enum Command {
         #[arg(long = "header", short = 'H')]
         headers: Vec<String>,
     },
+
+    /// Decrypt an encrypted recording (`.wava`, 0.24.0) into a playable
+    /// WAV and exit. Offline tooling — needs the KEK file only, not the
+    /// daemon config.
+    DecryptRecording {
+        /// The `.wava` file to decrypt (a crashed capture's
+        /// `.wava.part` works with `--allow-unfinalized`).
+        file: PathBuf,
+        /// File holding the KEK as 64 hex chars — the same secret
+        /// `[recording.encryption].kek` references.
+        #[arg(long = "kek-file")]
+        kek_file: PathBuf,
+        /// Output path. Defaults to the input with a `.wav` extension.
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+        /// Recover an unfinalized capture: accept a generation-0 chunk 0.
+        /// The output WAV then has placeholder (zero) size fields in its
+        /// header; most tools still play it after `ffmpeg -i in.wav out.wav`
+        /// or similar re-muxing.
+        #[arg(long)]
+        allow_unfinalized: bool,
+    },
 }
 
 /// The config path, from `--config` or `$SIPHON_AI_CONFIG`. A clap
@@ -129,6 +151,17 @@ async fn main() -> Result<()> {
     // Read-only subcommands dispatch here and exit — no socket binding,
     // no runtime (but tracing is live, so config warnings show).
     if let Some(command) = &cli.command {
+        // decrypt-recording is pure offline tooling: it takes its key
+        // material directly and must work on a box with no daemon config.
+        if let Command::DecryptRecording {
+            file,
+            kek_file,
+            out,
+            allow_unfinalized,
+        } = command
+        {
+            run_decrypt_recording(file, kek_file, out.as_deref(), *allow_unfinalized);
+        }
         let path = config_path(&cli)?;
         match command {
             Command::Check => run_check(&path),
@@ -161,6 +194,8 @@ async fn main() -> Result<()> {
                     headers: parse_headers(headers)?,
                 },
             ),
+            // Dispatched above, before the config-path requirement.
+            Command::DecryptRecording { .. } => unreachable!("handled before config load"),
         }
     }
 
@@ -226,6 +261,77 @@ fn run_route_test(path: &Path, input: inspect::RouteTestInput) -> ! {
     let config = load_or_exit(path);
     print!("{}", inspect::route_test(&config, &input));
     std::process::exit(0);
+}
+
+/// `siphon-ai decrypt-recording` — unseal a `.wava` into a playable WAV
+/// and exit (0.24.0 tooling; format spec in `docs/RECORDING.md`).
+fn run_decrypt_recording(
+    file: &Path,
+    kek_file: &Path,
+    out: Option<&Path>,
+    allow_unfinalized: bool,
+) -> ! {
+    match decrypt_recording(file, kek_file, out, allow_unfinalized) {
+        Ok((out_path, bytes)) => {
+            println!(
+                "decrypted {} → {} ({bytes} WAV bytes)",
+                file.display(),
+                out_path.display()
+            );
+            std::process::exit(0);
+        }
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn decrypt_recording(
+    file: &Path,
+    kek_file: &Path,
+    out: Option<&Path>,
+    allow_unfinalized: bool,
+) -> Result<(PathBuf, u64)> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let kek_hex = std::fs::read_to_string(kek_file)
+        .with_context(|| format!("read KEK file {}", kek_file.display()))?;
+    let mut input = std::io::BufReader::new(
+        std::fs::File::open(file).with_context(|| format!("open {}", file.display()))?,
+    );
+    // The container names the KEK that wrapped it; surface that id in
+    // errors (so the operator knows *which* retired KEK to fetch) and use
+    // it for the supplied key.
+    let key_id = siphon_ai_recording::peek_key_id(&mut input)
+        .with_context(|| format!("{} is not a readable encrypted recording", file.display()))?;
+    input.seek(SeekFrom::Start(0)).context("rewind input")?;
+    let kek = siphon_ai_recording::Kek::from_hex(&kek_hex, key_id.clone()).with_context(|| {
+        format!(
+            "KEK file {} (recording needs key_id {key_id:?})",
+            kek_file.display()
+        )
+    })?;
+
+    let out_path = out
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| file.with_extension("wav"));
+    if out_path == file {
+        return Err(anyhow!("output path equals input; pass --out"));
+    }
+    let mut out_file = std::io::BufWriter::new(
+        std::fs::File::create(&out_path)
+            .with_context(|| format!("create {}", out_path.display()))?,
+    );
+    let bytes = siphon_ai_recording::decrypt(input, &mut out_file, &kek, allow_unfinalized)
+        .with_context(|| {
+            format!(
+                "decrypt {} (wrapped with key_id {key_id:?})",
+                file.display()
+            )
+        })?;
+    out_file.flush().context("flush output")?;
+    Ok((out_path, bytes))
 }
 
 /// Parse `--header 'Name: Value'` flags into `(name, value)` pairs.

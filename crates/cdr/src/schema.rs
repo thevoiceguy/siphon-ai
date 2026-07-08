@@ -102,6 +102,12 @@ pub struct CdrRecord {
     /// Filesystem path of the recording, when one was written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_path: Option<String>,
+    /// `true` when the recording is sealed at rest under
+    /// `[recording.encryption]` (0.24.0) — the file at `recording_path` is
+    /// a `.wava` envelope, not a playable WAV. Omitted when the call wasn't
+    /// recorded. Additive optional field → CDR schema version unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_encrypted: Option<bool>,
 
     /// Park summary (0.7.0), present when the call was parked at least
     /// once. Omitted otherwise. Additive optional field → CDR schema
@@ -270,6 +276,7 @@ mod tests {
             verstat_passed: None,
             recording_id: None,
             recording_path: None,
+            recording_encrypted: None,
             park: None,
             hold: None,
             reconnect: None,

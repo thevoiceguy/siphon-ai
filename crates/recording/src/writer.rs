@@ -17,7 +17,7 @@
 //! caller reads a card number"); `Resume` continues; `Stop` finalizes early.
 
 use std::io::SeekFrom;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use thiserror::Error;
@@ -27,7 +27,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::control::{RecControl, RecEvent};
+use crate::envelope::EnvelopeWriter;
 use crate::frame::RecFrame;
+use crate::kek::Kek;
 
 /// Recording cadence — one stereo frame per 20 ms, matching the bridge.
 const FRAME_MS: u64 = 20;
@@ -71,6 +73,7 @@ pub struct RecordingWriter {
     path: PathBuf,
     sample_rate: u32,
     auto_start: bool,
+    encryption: Option<Kek>,
 }
 
 impl RecordingWriter {
@@ -81,7 +84,16 @@ impl RecordingWriter {
             path,
             sample_rate,
             auto_start,
+            encryption: None,
         }
+    }
+
+    /// Encrypt the recording at rest: seal the WAV payload into a `.wava`
+    /// envelope under a per-recording DEK wrapped by `kek` (0.24.0).
+    /// `None` (the default) keeps plaintext WAV output.
+    pub fn with_encryption(mut self, kek: Option<Kek>) -> Self {
+        self.encryption = kek;
+        self
     }
 
     /// Run until `audio_rx` closes (call ended). `ctrl_rx` drives the
@@ -124,7 +136,7 @@ impl RecordingWriter {
         }
 
         if self.auto_start {
-            match Open::create(&self.path, self.sample_rate).await {
+            match Open::create(&self.path, self.sample_rate, self.encryption.as_ref()).await {
                 Ok(o) => {
                     open = Some(o);
                     status = Status::Recording;
@@ -147,7 +159,7 @@ impl RecordingWriter {
                 },
                 maybe = ctrl_rx.recv(), if ctrl_open => match maybe {
                     Some(RecControl::Start) if status == Status::Idle => {
-                        match Open::create(&self.path, self.sample_rate).await {
+                        match Open::create(&self.path, self.sample_rate, self.encryption.as_ref()).await {
                             Ok(o) => {
                                 open = Some(o);
                                 status = Status::Recording;
@@ -216,29 +228,78 @@ impl RecordingWriter {
     }
 }
 
-/// An open WAV file mid-recording.
+/// The in-progress path: `<final>.part`, renamed onto the final path only
+/// by a successful finalize — so a bare `.wav`/`.wava` on disk is always a
+/// complete recording, and a crash leaves only a `.part` (0.24.0, §6 D5).
+fn part_path(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(".part");
+    PathBuf::from(os)
+}
+
+/// Where the WAV bytes go: straight to disk, or sealed into an encrypted
+/// envelope first. Plaintext keeps the seek-back header patch; the envelope
+/// patches via its chunk-0 rewrite instead (no seeking into ciphertext).
+enum Output {
+    Plain(BufWriter<File>),
+    Sealed(Box<EnvelopeWriter>),
+}
+
+/// An open recording mid-write (WAV, possibly enveloped).
 struct Open {
     path: PathBuf,
+    part: PathBuf,
     sample_rate: u32,
-    out: BufWriter<File>,
+    out: Output,
     buf: Vec<u8>,
     frames: u64,
     data_bytes: u64,
 }
 
 impl Open {
-    async fn create(path: &PathBuf, sample_rate: u32) -> std::io::Result<Self> {
-        let file = File::create(path).await?;
-        let mut out = BufWriter::new(file);
-        out.write_all(&wav_header(sample_rate, 0)).await?; // placeholder
+    async fn create(
+        path: &Path,
+        sample_rate: u32,
+        encryption: Option<&Kek>,
+    ) -> std::io::Result<Self> {
+        let part = part_path(path);
+        let file = File::create(&part).await?;
+        let out = match encryption {
+            None => {
+                let mut out = BufWriter::new(file);
+                out.write_all(&wav_header(sample_rate, 0)).await?; // placeholder
+                Output::Plain(out)
+            }
+            Some(kek) => {
+                let mut env = EnvelopeWriter::create(&part, file, kek)
+                    .await
+                    .map_err(std::io::Error::other)?;
+                env.write(&wav_header(sample_rate, 0)) // placeholder, patched at finalize
+                    .await
+                    .map_err(std::io::Error::other)?;
+                Output::Sealed(Box::new(env))
+            }
+        };
         Ok(Self {
-            path: path.clone(),
+            path: path.to_path_buf(),
+            part,
             sample_rate,
             out,
             buf: Vec::with_capacity(FLUSH_BYTES * 2),
             frames: 0,
             data_bytes: 0,
         })
+    }
+
+    async fn flush_buf(&mut self) -> std::io::Result<()> {
+        let buf = std::mem::take(&mut self.buf);
+        match &mut self.out {
+            Output::Plain(out) => out.write_all(&buf).await?,
+            Output::Sealed(env) => env.write(&buf).await.map_err(std::io::Error::other)?,
+        }
+        self.buf = buf;
+        self.buf.clear();
+        Ok(())
     }
 
     async fn write_frame(
@@ -251,28 +312,33 @@ impl Open {
         self.frames += 1;
         self.data_bytes += (mono_bytes * 2) as u64;
         if self.buf.len() >= FLUSH_BYTES {
-            let buf = std::mem::take(&mut self.buf);
-            self.out.write_all(&buf).await?;
-            self.buf = buf;
-            self.buf.clear();
+            self.flush_buf().await?;
         }
         Ok(())
     }
 
     async fn finalize(mut self) -> std::io::Result<RecordingStats> {
         if !self.buf.is_empty() {
-            let buf = std::mem::take(&mut self.buf);
-            self.out.write_all(&buf).await?;
+            self.flush_buf().await?;
         }
-        self.out.flush().await?;
         let data_u32 = u32::try_from(self.data_bytes).unwrap_or(u32::MAX);
-        self.out.seek(SeekFrom::Start(4)).await?;
-        self.out
-            .write_all(&36u32.wrapping_add(data_u32).to_le_bytes())
-            .await?;
-        self.out.seek(SeekFrom::Start(40)).await?;
-        self.out.write_all(&data_u32.to_le_bytes()).await?;
-        self.out.flush().await?;
+        let riff_u32 = 36u32.wrapping_add(data_u32);
+        match self.out {
+            Output::Plain(mut out) => {
+                out.flush().await?;
+                out.seek(SeekFrom::Start(4)).await?;
+                out.write_all(&riff_u32.to_le_bytes()).await?;
+                out.seek(SeekFrom::Start(40)).await?;
+                out.write_all(&data_u32.to_le_bytes()).await?;
+                out.flush().await?;
+            }
+            Output::Sealed(env) => {
+                env.finalize(&[(4, riff_u32), (40, data_u32)])
+                    .await
+                    .map_err(std::io::Error::other)?;
+            }
+        }
+        tokio::fs::rename(&self.part, &self.path).await?;
         debug!(path = %self.path.display(), frames = self.frames, data_bytes = self.data_bytes, "recording finalized");
         if self.data_bytes > u32::MAX as u64 {
             warn!(path = %self.path.display(), "recording exceeded 4 GiB; WAV header sizes saturated");
@@ -421,6 +487,62 @@ mod tests {
         let stats = h.await.unwrap().unwrap().unwrap();
         assert!(stats.frames >= 2);
         assert_eq!(read_data_len(&path) as u64, stats.data_bytes);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn part_file_until_finalize_then_bare_path() {
+        let path = temp_path("part");
+        let (atx, arx) = mpsc::channel(64);
+        let (_ctx, crx) = mpsc::channel(8);
+        let (etx, mut erx) = mpsc::channel(8);
+        let h = tokio::spawn(RecordingWriter::new(path.clone(), 8000, true).run(arx, crx, etx));
+        assert!(matches!(erx.recv().await, Some(RecEvent::Started)));
+        // Mid-recording: only the .part exists (0.24.0 finalize atomicity).
+        atx.send(RecFrame::Caller(vec![1u8; 320])).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(part_path(&path).exists(), ".part must exist mid-recording");
+        assert!(!path.exists(), "final path must not exist mid-recording");
+        drop(atx);
+        h.await.unwrap().unwrap().unwrap();
+        assert!(path.exists(), "final path must exist after finalize");
+        assert!(!part_path(&path).exists(), ".part must be renamed away");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn encrypted_recording_decrypts_to_valid_wav() {
+        let path = temp_path("encrypted").with_extension("wava");
+        let kek = crate::kek::Kek::new_static([5u8; 32], "unit-kek".into());
+        let (atx, arx) = mpsc::channel(64);
+        let (_ctx, crx) = mpsc::channel(8);
+        let (etx, mut erx) = mpsc::channel(8);
+        let h = tokio::spawn(
+            RecordingWriter::new(path.clone(), 8000, true)
+                .with_encryption(Some(kek.clone()))
+                .run(arx, crx, etx),
+        );
+        assert!(matches!(erx.recv().await, Some(RecEvent::Started)));
+        for _ in 0..5 {
+            atx.send(RecFrame::Caller(vec![0x11; 320])).await.unwrap();
+            atx.send(RecFrame::Bot(vec![0x22; 320])).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        drop(atx);
+        let stats = h.await.unwrap().unwrap().unwrap();
+
+        // The file on disk is an envelope, not a WAV.
+        let raw = std::fs::read(&path).unwrap();
+        assert_eq!(&raw[..8], b"SAIWAVA1");
+
+        // Decrypting yields a well-formed WAV with patched sizes.
+        let mut wav = Vec::new();
+        crate::envelope::decrypt(std::io::Cursor::new(raw), &mut wav, &kek, false).unwrap();
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        let data = u32::from_le_bytes(wav[40..44].try_into().unwrap()) as u64;
+        assert_eq!(data, stats.data_bytes);
+        assert_eq!(wav.len() as u64, WAV_HEADER_LEN as u64 + data);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

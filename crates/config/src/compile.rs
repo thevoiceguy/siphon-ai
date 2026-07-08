@@ -796,6 +796,21 @@ pub enum CompileError {
     #[error("[recording].dir {path:?} could not be created: {err}")]
     RecordingDirInvalid { path: String, err: String },
 
+    #[error(
+        "[recording.encryption].kek is required when enabled — 64 hex chars, \
+         via ${{file:...}} or ${{cred:...}}"
+    )]
+    RecordingKekRequired,
+
+    #[error("[recording.encryption].kek is invalid: {0} (expected 64 hex chars = 32 bytes)")]
+    RecordingKekInvalid(String),
+
+    #[error("[recording.encryption].key_id is required when enabled (1–255 bytes)")]
+    RecordingKeyIdRequired,
+
+    #[error("[recording.encryption].key_id must be 1–255 bytes, got {0}")]
+    RecordingKeyIdInvalid(usize),
+
     #[error("[route.recording].mode on route {route:?} is {value:?}; expected \"off\", \"always\", or \"on_demand\"")]
     RouteRecordingModeInvalid { route: String, value: String },
 
@@ -1563,7 +1578,31 @@ fn compile_recording(
             err: err.to_string(),
         })?;
     }
-    Ok(RecordingConfig { mode, dir })
+
+    // `[recording.encryption]` (0.24.0). Fail-loud at load (§4.6): a bad
+    // or missing KEK/key_id must never surface as per-call recording
+    // failures. The `kek` value arrives already resolved (`${file:}` /
+    // `${cred:}` expand before parse), so it must be hex — raw key bytes
+    // wouldn't survive the TOML splice.
+    let encryption = match raw.encryption {
+        Some(enc) if enc.enabled.unwrap_or(false) => {
+            let key_id = enc.key_id.ok_or(CompileError::RecordingKeyIdRequired)?;
+            if key_id.is_empty() || key_id.len() > 255 {
+                return Err(CompileError::RecordingKeyIdInvalid(key_id.len()));
+            }
+            let kek_hex = enc.kek.ok_or(CompileError::RecordingKekRequired)?;
+            let kek = siphon_ai_recording::Kek::from_hex(&kek_hex, key_id)
+                .map_err(|e| CompileError::RecordingKekInvalid(e.to_string()))?;
+            Some(kek)
+        }
+        _ => None,
+    };
+
+    Ok(RecordingConfig {
+        mode,
+        dir,
+        encryption,
+    })
 }
 
 /// Compile `[outbound]` and `[[gateway]]`. Gateways resolve to a uniform
@@ -2766,6 +2805,19 @@ mod recording_tests {
         RawRecording {
             mode: mode.map(str::to_string),
             dir: dir.map(str::to_string),
+            encryption: None,
+        }
+    }
+
+    fn raw_enc(
+        enabled: bool,
+        kek: Option<&str>,
+        key_id: Option<&str>,
+    ) -> crate::raw::RawRecordingEncryption {
+        crate::raw::RawRecordingEncryption {
+            enabled: Some(enabled),
+            kek: kek.map(str::to_string),
+            key_id: key_id.map(str::to_string),
         }
     }
 
@@ -2802,6 +2854,76 @@ mod recording_tests {
         assert!(matches!(
             compile_recording(raw(Some("always"), None)),
             Err(CompileError::RecordingDirRequired)
+        ));
+    }
+
+    #[test]
+    fn encryption_compiles_and_flips_extension() {
+        let dir = std::env::temp_dir().join("siphon_rec_cfg_enc_test");
+        let mut r = raw(Some("always"), dir.to_str());
+        r.encryption = Some(raw_enc(true, Some(&"ab".repeat(32)), Some("k-2026")));
+        let c = compile_recording(r).unwrap();
+        let kek = c.encryption.as_ref().expect("encryption compiled");
+        assert_eq!(kek.key_id(), "k-2026");
+        assert!(c
+            .path_for("call1")
+            .to_string_lossy()
+            .ends_with("call1.wava"));
+    }
+
+    #[test]
+    fn encryption_disabled_section_is_inert() {
+        let dir = std::env::temp_dir().join("siphon_rec_cfg_enc_test");
+        let mut r = raw(Some("always"), dir.to_str());
+        // enabled = false → no KEK/key_id required, plaintext output.
+        r.encryption = Some(raw_enc(false, None, None));
+        let c = compile_recording(r).unwrap();
+        assert!(c.encryption.is_none());
+        assert!(c.path_for("call1").to_string_lossy().ends_with("call1.wav"));
+    }
+
+    #[test]
+    fn encryption_validation_fails_loud() {
+        let dir = std::env::temp_dir().join("siphon_rec_cfg_enc_test");
+        let d = dir.to_str();
+
+        let mut r = raw(Some("always"), d);
+        r.encryption = Some(raw_enc(true, Some(&"ab".repeat(32)), None));
+        assert!(matches!(
+            compile_recording(r),
+            Err(CompileError::RecordingKeyIdRequired)
+        ));
+
+        let mut r = raw(Some("always"), d);
+        r.encryption = Some(raw_enc(true, None, Some("k")));
+        assert!(matches!(
+            compile_recording(r),
+            Err(CompileError::RecordingKekRequired)
+        ));
+
+        let mut r = raw(Some("always"), d);
+        r.encryption = Some(raw_enc(true, Some("too-short"), Some("k")));
+        assert!(matches!(
+            compile_recording(r),
+            Err(CompileError::RecordingKekInvalid(_))
+        ));
+
+        let mut r = raw(Some("always"), d);
+        r.encryption = Some(raw_enc(true, Some(&"zz".repeat(32)), Some("k")));
+        assert!(matches!(
+            compile_recording(r),
+            Err(CompileError::RecordingKekInvalid(_))
+        ));
+
+        let mut r = raw(Some("always"), d);
+        r.encryption = Some(raw_enc(
+            true,
+            Some(&"ab".repeat(32)),
+            Some(&"x".repeat(256)),
+        ));
+        assert!(matches!(
+            compile_recording(r),
+            Err(CompileError::RecordingKeyIdInvalid(256))
         ));
     }
 

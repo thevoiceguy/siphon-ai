@@ -174,6 +174,7 @@ mod tests {
             verstat_passed: None,
             recording_id: None,
             recording_path: None,
+            recording_encrypted: None,
             park: None,
             hold: None,
             reconnect: None,

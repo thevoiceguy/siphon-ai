@@ -185,7 +185,7 @@ impl S3Target {
 }
 
 /// `YYYYMMDDTHHMMSSZ` UTC now, without a chrono dependency here.
-fn now_amz() -> String {
+pub(crate) fn now_amz() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before 1970")

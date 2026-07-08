@@ -43,6 +43,10 @@ pub enum KekError {
     WrapFailed,
     #[error("bad KEK encoding: {0}")]
     BadEncoding(&'static str),
+    #[error("KMS: {0}")]
+    Kms(#[from] siphon_ai_http::kms::KmsError),
+    #[error("KMS returned a {0}-byte DEK (expected 32)")]
+    WrongDekLength(usize),
 }
 
 /// A key-encryption key + its identifier.
@@ -58,6 +62,15 @@ pub enum Kek {
         key: Zeroizing<[u8; 32]>,
         key_id: String,
     },
+    /// Wrap/unwrap via AWS KMS (`[recording.encryption.kms]`, 0.25.0).
+    /// The KEK never leaves KMS; each recording start is one `Encrypt`
+    /// call (on the writer task, never the audio path) and tooling
+    /// decrypts via `Decrypt` (the blob names its own key).
+    AwsKms {
+        client: siphon_ai_http::kms::KmsClient,
+        key_arn: String,
+        key_id: String,
+    },
 }
 
 impl std::fmt::Debug for Kek {
@@ -68,6 +81,16 @@ impl std::fmt::Debug for Kek {
                 .debug_struct("Kek::Static")
                 .field("key_id", key_id)
                 .finish_non_exhaustive(),
+            Kek::AwsKms {
+                client,
+                key_arn,
+                key_id,
+            } => f
+                .debug_struct("Kek::AwsKms")
+                .field("client", client)
+                .field("key_arn", key_arn)
+                .field("key_id", key_id)
+                .finish(),
         }
     }
 }
@@ -102,12 +125,18 @@ impl Kek {
     pub fn key_id(&self) -> &str {
         match self {
             Kek::Static { key_id, .. } => key_id,
+            Kek::AwsKms { key_id, .. } => key_id,
         }
     }
 
-    /// Wrap a DEK for storage in a container header.
-    pub fn wrap_dek(&self, dek: &[u8; 32]) -> Result<Vec<u8>, KekError> {
+    /// Wrap a DEK for storage in a container header. Async because the
+    /// KMS arm is a network call — always on the per-call writer task,
+    /// never the audio path.
+    pub async fn wrap_dek(&self, dek: &[u8; 32]) -> Result<Vec<u8>, KekError> {
         match self {
+            Kek::AwsKms {
+                client, key_arn, ..
+            } => Ok(client.encrypt(key_arn, dek).await?),
             Kek::Static { key, key_id } => {
                 let key_bytes: &[u8; 32] = key;
                 let cipher = Aes256Gcm::new(key_bytes.into());
@@ -131,13 +160,30 @@ impl Kek {
     }
 
     /// Unwrap a DEK read from a container header. `recording_key_id` is the
-    /// id the container names; it must match this KEK's.
-    pub fn unwrap_dek(
+    /// id the container names; it must match this KEK's (the KMS arm
+    /// skips the check when its `key_id` is empty — tooling that only
+    /// knows the region, since the blob names its own key).
+    pub async fn unwrap_dek(
         &self,
         recording_key_id: &str,
         wrapped: &[u8],
     ) -> Result<Zeroizing<[u8; 32]>, KekError> {
         match self {
+            Kek::AwsKms { client, key_id, .. } => {
+                if !key_id.is_empty() && recording_key_id != key_id {
+                    return Err(KekError::KeyIdMismatch {
+                        recording: recording_key_id.to_string(),
+                        configured: key_id.clone(),
+                    });
+                }
+                let plain = client.decrypt(wrapped).await?;
+                if plain.len() != 32 {
+                    return Err(KekError::WrongDekLength(plain.len()));
+                }
+                let mut dek = Zeroizing::new([0u8; 32]);
+                dek.copy_from_slice(&plain);
+                Ok(dek)
+            }
             Kek::Static { key, key_id } => {
                 if recording_key_id != key_id {
                     return Err(KekError::KeyIdMismatch {
@@ -180,40 +226,43 @@ pub fn fresh_dek() -> Zeroizing<[u8; 32]> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn wrap_unwrap_roundtrip() {
+    #[tokio::test]
+    async fn wrap_unwrap_roundtrip() {
         let kek = Kek::new_static([1u8; 32], "k-1".into());
         let dek = fresh_dek();
-        let wrapped = kek.wrap_dek(&dek).unwrap();
+        let wrapped = kek.wrap_dek(&dek).await.unwrap();
         assert_eq!(wrapped.len(), WRAPPED_DEK_LEN);
-        let back = kek.unwrap_dek("k-1", &wrapped).unwrap();
+        let back = kek.unwrap_dek("k-1", &wrapped).await.unwrap();
         assert_eq!(*back, *dek);
     }
 
-    #[test]
-    fn wrong_kek_or_key_id_fails() {
+    #[tokio::test]
+    async fn wrong_kek_or_key_id_fails() {
         let kek = Kek::new_static([1u8; 32], "k-1".into());
-        let wrapped = kek.wrap_dek(&fresh_dek()).unwrap();
+        let wrapped = kek.wrap_dek(&fresh_dek()).await.unwrap();
 
         let other = Kek::new_static([2u8; 32], "k-1".into());
         assert!(matches!(
-            other.unwrap_dek("k-1", &wrapped),
+            other.unwrap_dek("k-1", &wrapped).await,
             Err(KekError::UnwrapAuth)
         ));
 
         let renamed = Kek::new_static([1u8; 32], "k-2".into());
         assert!(matches!(
-            renamed.unwrap_dek("k-1", &wrapped),
+            renamed.unwrap_dek("k-1", &wrapped).await,
             Err(KekError::KeyIdMismatch { .. })
         ));
     }
 
-    #[test]
-    fn distinct_deks_and_nonces_every_time() {
+    #[tokio::test]
+    async fn distinct_deks_and_nonces_every_time() {
         let kek = Kek::new_static([1u8; 32], "k".into());
         let (d1, d2) = (fresh_dek(), fresh_dek());
         assert_ne!(*d1, *d2, "fresh DEKs must differ");
-        let (w1, w2) = (kek.wrap_dek(&d1).unwrap(), kek.wrap_dek(&d1).unwrap());
+        let (w1, w2) = (
+            kek.wrap_dek(&d1).await.unwrap(),
+            kek.wrap_dek(&d1).await.unwrap(),
+        );
         assert_ne!(w1, w2, "wrap must use a fresh nonce every time");
     }
 }

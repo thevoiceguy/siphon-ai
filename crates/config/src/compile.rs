@@ -817,6 +817,12 @@ pub enum CompileError {
     #[error("[recording.storage].{0} is required when enabled")]
     RecordingStorageField(&'static str),
 
+    #[error("[recording.encryption]: set exactly one of `kek` or `[recording.encryption.kms]`")]
+    RecordingKekXorKms,
+
+    #[error("[recording.encryption.kms].{0} is required")]
+    RecordingKmsField(&'static str),
+
     #[error("[recording.storage].endpoint {0:?} must start with http:// or https://")]
     RecordingStorageEndpointInvalid(String),
 
@@ -1613,9 +1619,31 @@ fn compile_recording(
             if key_id.is_empty() || key_id.len() > 255 {
                 return Err(CompileError::RecordingKeyIdInvalid(key_id.len()));
             }
-            let kek_hex = enc.kek.ok_or(CompileError::RecordingKekRequired)?;
-            let kek = siphon_ai_recording::Kek::from_hex(&kek_hex, key_id)
-                .map_err(|e| CompileError::RecordingKekInvalid(e.to_string()))?;
+            let kek = match (enc.kek, enc.kms) {
+                (Some(kek_hex), None) => siphon_ai_recording::Kek::from_hex(&kek_hex, key_id)
+                    .map_err(|e| CompileError::RecordingKekInvalid(e.to_string()))?,
+                (None, Some(kms)) => {
+                    let required = |field: &'static str, v: Option<String>| {
+                        v.filter(|s| !s.trim().is_empty())
+                            .ok_or(CompileError::RecordingKmsField(field))
+                    };
+                    let key_arn = required("key_arn", kms.key_arn)?;
+                    let region = required("region", kms.region)?;
+                    let credentials = siphon_ai_http::sigv4::SigV4Credentials {
+                        access_key: required("access_key", kms.access_key)?,
+                        secret_key: required("secret_key", kms.secret_key)?,
+                    };
+                    let client =
+                        siphon_ai_http::kms::KmsClient::new(region, credentials, kms.endpoint);
+                    siphon_ai_recording::Kek::AwsKms {
+                        client,
+                        key_arn,
+                        key_id,
+                    }
+                }
+                (None, None) => return Err(CompileError::RecordingKekRequired),
+                (Some(_), Some(_)) => return Err(CompileError::RecordingKekXorKms),
+            };
             Some(kek)
         }
         _ => None,
@@ -2933,6 +2961,7 @@ mod recording_tests {
             enabled: Some(enabled),
             kek: kek.map(str::to_string),
             key_id: key_id.map(str::to_string),
+            kms: None,
         }
     }
 
@@ -3069,6 +3098,48 @@ mod recording_tests {
             }
         }
         r
+    }
+
+    #[test]
+    fn encryption_kms_compiles_and_is_xor_with_kek() {
+        let dir = std::env::temp_dir().join("siphon_rec_cfg_kms_test");
+        let kms = crate::raw::RawRecordingKms {
+            key_arn: Some("arn:aws:kms:us-east-1:000000000000:key/abc".into()),
+            region: Some("us-east-1".into()),
+            access_key: Some("ak".into()),
+            secret_key: Some("sk".into()),
+            endpoint: Some("http://127.0.0.1:4566".into()),
+        };
+
+        // KMS alone compiles.
+        let mut r = raw(Some("always"), dir.to_str());
+        let mut enc = raw_enc(true, None, Some("kms-1"));
+        enc.kms = Some(kms.clone());
+        r.encryption = Some(enc);
+        let c = compile_recording(r).unwrap();
+        assert_eq!(c.encryption.as_ref().unwrap().key_id(), "kms-1");
+
+        // kek + kms together fail loud.
+        let mut r = raw(Some("always"), dir.to_str());
+        let mut enc = raw_enc(true, Some(&"ab".repeat(32)), Some("kms-1"));
+        enc.kms = Some(kms.clone());
+        r.encryption = Some(enc);
+        assert!(matches!(
+            compile_recording(r),
+            Err(CompileError::RecordingKekXorKms)
+        ));
+
+        // Missing kms field fails loud.
+        let mut incomplete = kms;
+        incomplete.region = None;
+        let mut r = raw(Some("always"), dir.to_str());
+        let mut enc = raw_enc(true, None, Some("kms-1"));
+        enc.kms = Some(incomplete);
+        r.encryption = Some(enc);
+        assert!(matches!(
+            compile_recording(r),
+            Err(CompileError::RecordingKmsField("region"))
+        ));
     }
 
     #[test]

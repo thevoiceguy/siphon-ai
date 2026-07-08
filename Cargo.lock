@@ -3200,6 +3200,7 @@ dependencies = [
 name = "siphon-ai-http"
 version = "0.23.0"
 dependencies = [
+ "base64",
  "hmac",
  "http-body-util",
  "hyper",
@@ -3215,6 +3216,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -3246,6 +3248,7 @@ name = "siphon-ai-recording"
 version = "0.23.0"
 dependencies = [
  "aes-gcm",
+ "siphon-ai-http",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

@@ -646,6 +646,7 @@ key_id  = "rec-2026-07"                # stamped into each recording
 | `encryption.enabled` | bool | `false` | Seal recordings into encrypted `.wava` envelopes (per-recording AES-256-GCM data key, wrapped by your `kek`). Decrypt offline with `siphon-ai decrypt-recording` — see `docs/RECORDING.md` §8 for the model, key rotation, and the container format. |
 | `encryption.kek` | string | — | The key-encryption key as **64 hex characters** (32 bytes). Reference a secret — `${file:…}` or `${cred:…}` — never inline it. Required when `enabled`; validated at load (fail-loud). Generate one with `openssl rand -hex 32`. |
 | `encryption.key_id` | string | — | Identifier (1–255 bytes) stamped into every recording's header, naming which KEK wrapped it — this is what makes rotation possible. Required when `enabled`. |
+| `encryption.kms` | table | — | **AWS KMS as the KEK** (0.25.0) — instead of a local `kek` (exactly one of the two). `{ key_arn, region, access_key, secret_key, endpoint? }`; creds via `${cred:}`, `endpoint` only for KMS-compatible emulators. Each recording start is one KMS `Encrypt` (on the writer task, never the audio path; 10 s timeout → the *recording* fails, the call continues). Decrypt with `siphon-ai decrypt-recording --kms-region <r>` (+ `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`); the blob names its own key. |
 
 **Object storage (`[recording.storage]`, 0.25.0).** Upload finalized
 recordings to an S3-compatible bucket (AWS, MinIO, Cloudflare R2, Backblaze

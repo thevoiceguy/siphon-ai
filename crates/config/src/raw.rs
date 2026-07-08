@@ -546,6 +546,29 @@ pub struct RawRecordingEncryption {
     /// each recording so keys can rotate.
     #[serde(default)]
     pub key_id: Option<String>,
+    /// `[recording.encryption.kms]` (0.25.0) — wrap the per-recording
+    /// data key via AWS KMS instead of a local `kek`. Exactly one of
+    /// `kek` / `kms` when enabled.
+    #[serde(default)]
+    pub kms: Option<RawRecordingKms>,
+}
+
+/// `[recording.encryption.kms]` — AWS KMS as the KEK (0.25.0).
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct RawRecordingKms {
+    /// KMS key to wrap new recordings' data keys with.
+    #[serde(default)]
+    pub key_arn: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Use `${cred:}` / `${file:}` references, never inline secrets.
+    #[serde(default)]
+    pub access_key: Option<String>,
+    #[serde(default)]
+    pub secret_key: Option<String>,
+    /// Endpoint override for KMS-compatible emulators (LocalStack).
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 /// `[conference]` — conference rooms (0.7.0). Fail-closed like

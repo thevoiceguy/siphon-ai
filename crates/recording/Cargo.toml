@@ -14,6 +14,7 @@ tracing.workspace   = true
 thiserror.workspace = true
 aes-gcm.workspace   = true
 zeroize.workspace   = true
+siphon-ai-http.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

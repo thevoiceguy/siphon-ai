@@ -204,6 +204,25 @@ load — a missing/malformed KEK or `key_id` fails startup, never a call. If
 wrapping fails at runtime the *recording* fails (`recording_failed`,
 `siphon_ai_recordings_total{result="failed"}`); the call continues.
 
+**Or let AWS KMS hold the KEK** (0.25.0) — the key never exists outside
+KMS, and unwrapping is IAM-auditable:
+
+```toml
+[recording.encryption]
+enabled = true
+key_id  = "rec-kms-2026"
+kms = { key_arn = "arn:aws:kms:us-east-1:…:key/…", region = "us-east-1",
+        access_key = "${cred:kms-access-key}", secret_key = "${cred:kms-secret-key}" }
+```
+
+Exactly one of `kek` / `kms`. Each recording start makes one KMS `Encrypt`
+call on the writer task (never the audio path; 10 s timeout, failure fails
+the recording only). Decrypt with
+`siphon-ai decrypt-recording <file> --kms-region us-east-1` and
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` in the environment — the
+ciphertext blob names its own KMS key. `endpoint` (or `--kms-endpoint`)
+targets KMS-compatible emulators like LocalStack.
+
 ### Decrypting
 
 ```sh

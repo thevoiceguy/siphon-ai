@@ -537,7 +537,9 @@ mod tests {
 
         // Decrypting yields a well-formed WAV with patched sizes.
         let mut wav = Vec::new();
-        crate::envelope::decrypt(std::io::Cursor::new(raw), &mut wav, &kek, false).unwrap();
+        crate::envelope::decrypt(std::io::Cursor::new(raw), &mut wav, &kek, false)
+            .await
+            .unwrap();
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
         let data = u32::from_le_bytes(wav[40..44].try_into().unwrap()) as u64;

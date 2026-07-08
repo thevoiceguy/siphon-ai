@@ -100,9 +100,22 @@ enum Command {
         /// `.wava.part` works with `--allow-unfinalized`).
         file: PathBuf,
         /// File holding the KEK as 64 hex chars — the same secret
-        /// `[recording.encryption].kek` references.
-        #[arg(long = "kek-file")]
-        kek_file: PathBuf,
+        /// `[recording.encryption].kek` references. Mutually exclusive
+        /// with `--kms-region`.
+        #[arg(long = "kek-file", conflicts_with = "kms_region")]
+        kek_file: Option<PathBuf>,
+        /// Unwrap the recording's data key via AWS KMS instead of a
+        /// local KEK file (`[recording.encryption.kms]` recordings).
+        /// Credentials come from `AWS_ACCESS_KEY_ID` /
+        /// `AWS_SECRET_ACCESS_KEY`; the ciphertext blob names its own
+        /// KMS key, so no key ARN is needed.
+        #[arg(long = "kms-region")]
+        kms_region: Option<String>,
+        /// Override the KMS endpoint (LocalStack / KMS-compatible
+        /// emulators). Defaults to the public AWS endpoint for the
+        /// region.
+        #[arg(long = "kms-endpoint", requires = "kms_region")]
+        kms_endpoint: Option<String>,
         /// Output path. Defaults to the input with a `.wav` extension.
         #[arg(long, short)]
         out: Option<PathBuf>,
@@ -156,11 +169,21 @@ async fn main() -> Result<()> {
         if let Command::DecryptRecording {
             file,
             kek_file,
+            kms_region,
+            kms_endpoint,
             out,
             allow_unfinalized,
         } = command
         {
-            run_decrypt_recording(file, kek_file, out.as_deref(), *allow_unfinalized);
+            run_decrypt_recording(
+                file,
+                kek_file.as_deref(),
+                kms_region.as_deref(),
+                kms_endpoint.as_deref(),
+                out.as_deref(),
+                *allow_unfinalized,
+            )
+            .await;
         }
         let path = config_path(&cli)?;
         match command {
@@ -264,14 +287,26 @@ fn run_route_test(path: &Path, input: inspect::RouteTestInput) -> ! {
 }
 
 /// `siphon-ai decrypt-recording` — unseal a `.wava` into a playable WAV
-/// and exit (0.24.0 tooling; format spec in `docs/RECORDING.md`).
-fn run_decrypt_recording(
+/// and exit (0.24.0 tooling, KMS mode 0.25.0; format spec in
+/// `docs/RECORDING.md`).
+async fn run_decrypt_recording(
     file: &Path,
-    kek_file: &Path,
+    kek_file: Option<&Path>,
+    kms_region: Option<&str>,
+    kms_endpoint: Option<&str>,
     out: Option<&Path>,
     allow_unfinalized: bool,
 ) -> ! {
-    match decrypt_recording(file, kek_file, out, allow_unfinalized) {
+    match decrypt_recording(
+        file,
+        kek_file,
+        kms_region,
+        kms_endpoint,
+        out,
+        allow_unfinalized,
+    )
+    .await
+    {
         Ok((out_path, bytes)) => {
             println!(
                 "decrypted {} → {} ({bytes} WAV bytes)",
@@ -287,16 +322,16 @@ fn run_decrypt_recording(
     }
 }
 
-fn decrypt_recording(
+async fn decrypt_recording(
     file: &Path,
-    kek_file: &Path,
+    kek_file: Option<&Path>,
+    kms_region: Option<&str>,
+    kms_endpoint: Option<&str>,
     out: Option<&Path>,
     allow_unfinalized: bool,
 ) -> Result<(PathBuf, u64)> {
     use std::io::{Seek, SeekFrom, Write};
 
-    let kek_hex = std::fs::read_to_string(kek_file)
-        .with_context(|| format!("read KEK file {}", kek_file.display()))?;
     let mut input = std::io::BufReader::new(
         std::fs::File::open(file).with_context(|| format!("open {}", file.display()))?,
     );
@@ -306,12 +341,43 @@ fn decrypt_recording(
     let key_id = siphon_ai_recording::peek_key_id(&mut input)
         .with_context(|| format!("{} is not a readable encrypted recording", file.display()))?;
     input.seek(SeekFrom::Start(0)).context("rewind input")?;
-    let kek = siphon_ai_recording::Kek::from_hex(&kek_hex, key_id.clone()).with_context(|| {
-        format!(
-            "KEK file {} (recording needs key_id {key_id:?})",
-            kek_file.display()
-        )
-    })?;
+    let kek = match (kek_file, kms_region) {
+        (Some(kek_file), None) => {
+            let kek_hex = std::fs::read_to_string(kek_file)
+                .with_context(|| format!("read KEK file {}", kek_file.display()))?;
+            siphon_ai_recording::Kek::from_hex(&kek_hex, key_id.clone()).with_context(|| {
+                format!(
+                    "KEK file {} (recording needs key_id {key_id:?})",
+                    kek_file.display()
+                )
+            })?
+        }
+        (None, Some(region)) => {
+            let creds = siphon_ai_http::sigv4::SigV4Credentials {
+                access_key: std::env::var("AWS_ACCESS_KEY_ID")
+                    .context("AWS_ACCESS_KEY_ID is required with --kms-region")?,
+                secret_key: std::env::var("AWS_SECRET_ACCESS_KEY")
+                    .context("AWS_SECRET_ACCESS_KEY is required with --kms-region")?,
+            };
+            let client = siphon_ai_http::kms::KmsClient::new(
+                region.to_string(),
+                creds,
+                kms_endpoint.map(str::to_string),
+            );
+            // Empty key_id ⇒ skip the id check: KMS Decrypt resolves the
+            // key from the blob itself; the container id is informational.
+            siphon_ai_recording::Kek::AwsKms {
+                client,
+                key_arn: String::new(),
+                key_id: String::new(),
+            }
+        }
+        _ => {
+            return Err(anyhow!(
+                "pass exactly one of --kek-file or --kms-region                  (recording names key_id {key_id:?})"
+            ))
+        }
+    };
 
     let out_path = out
         .map(Path::to_path_buf)
@@ -324,6 +390,7 @@ fn decrypt_recording(
             .with_context(|| format!("create {}", out_path.display()))?,
     );
     let bytes = siphon_ai_recording::decrypt(input, &mut out_file, &kek, allow_unfinalized)
+        .await
         .with_context(|| {
             format!(
                 "decrypt {} (wrapped with key_id {key_id:?})",

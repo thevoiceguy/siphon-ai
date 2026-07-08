@@ -15,9 +15,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use siphon_ai::{OtelActivation, Runtime};
 use siphon_ai_config::Config;
-use siphon_ai_telemetry::{LogFilterHandle, OTEL_SCOPE};
+use siphon_ai_telemetry::LogFilterHandle;
 use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer as _};
 
 mod inspect;
 
@@ -375,18 +375,25 @@ fn init_tracing(cli_filter: Option<&str>) -> (LogFilterHandle, OtelActivation) {
 
     let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(env_filter);
 
-    // OTLP trace layer, reloadable and installed **inactive** (`None`). The
-    // real OTLP tracer isn't known until config loads (it carries the
-    // endpoint), and `init_tracing` runs before that so config-load warnings
-    // still print. `None` is a genuine no-op layer — zero per-span cost while
-    // OTLP is disabled (the common case). The runtime installs the global
-    // OTLP provider and then calls `OtelActivation::activate`, which swaps in
-    // a live layer bound to `opentelemetry::global::tracer` (which must be
-    // obtained *after* the provider is set, hence the deferred build).
-    let otel_layer: Option<
-        tracing_opentelemetry::OpenTelemetryLayer<_, opentelemetry::global::BoxedTracer>,
-    > = None;
-    let (otel_reload_layer, otel_handle) = tracing_subscriber::reload::Layer::new(otel_layer);
+    // OTLP trace layer, installed **concrete** with a reloadable per-layer
+    // filter that starts `OFF`. The real OTLP tracer isn't known until config
+    // loads (it carries the endpoint), and `init_tracing` runs before that so
+    // config-load warnings still print — `LazyGlobalTracer` defers the global
+    // tracer lookup to the first span build, and the `OFF` filter keeps the
+    // layer at zero per-span cost while OTLP is disabled (the common case).
+    // The runtime installs the global OTLP provider and then calls
+    // `OtelActivation::activate`, which opens the filter.
+    //
+    // The layer itself must NOT sit behind `reload::Layer`: W3C trace
+    // propagation (0.23.0) extracts span context via
+    // `OpenTelemetrySpanExt::context()`, whose `WithContext` downcast
+    // `reload` refuses to forward — spans would export but extraction would
+    // silently return no context. See `otel.rs` for the full story.
+    let (otel_filter, otel_filter_handle) =
+        tracing_subscriber::reload::Layer::new(tracing_subscriber::filter::LevelFilter::OFF);
+    let otel_layer = tracing_opentelemetry::layer()
+        .with_tracer(siphon_ai::otel::LazyGlobalTracer::default())
+        .with_filter(otel_filter);
     // `fmt::layer()` defaults to ANSI on regardless of stdout type
     // — unlike the higher-level `fmt::Subscriber::builder()` which
     // does tty auto-detection. Without the explicit `with_ansi`
@@ -405,16 +412,15 @@ fn init_tracing(cli_filter: Option<&str>) -> (LogFilterHandle, OtelActivation) {
     // the subscriber, not a global cell.
     let _ = tracing_subscriber::registry()
         .with(filter_layer)
-        .with(otel_reload_layer)
+        .with(otel_layer)
         .with(fmt_layer)
         .try_init();
 
-    // Deferred activation: build the live layer *at activation time* so
-    // `global::tracer` binds to whatever provider is installed then (the real
-    // OTLP one). The runtime calls this after installing the OTLP provider.
+    // Deferred activation: open the OTLP layer's filter. The runtime calls
+    // this after installing the OTLP provider, so `LazyGlobalTracer`'s first
+    // span build binds to the real provider, never the no-op default.
     let activation = OtelActivation::new(Box::new(move || {
-        let tracer = opentelemetry::global::tracer(OTEL_SCOPE);
-        otel_handle.reload(Some(tracing_opentelemetry::layer().with_tracer(tracer)))
+        otel_filter_handle.reload(tracing_subscriber::filter::LevelFilter::TRACE)
     }));
 
     (LogFilterHandle::new(reload_handle), activation)

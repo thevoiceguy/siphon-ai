@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-07-08
+
+### Added
+
+- **W3C trace-context propagation to the WS server** (P1 "Observability
+  completeness"; final sub-item — the theme is complete). When
+  `[observability.otlp]` is enabled, the WS upgrade request now carries
+  [`traceparent`](https://www.w3.org/TR/trace-context/) (+ `tracestate` when
+  non-empty), and the `start` message carries the same values in a new
+  additive `trace_context` field for servers whose WS library hides upgrade
+  headers. A WS server that continues the trace from either place appears in
+  the **same waterfall** as the daemon's SIP/media spans — one distributed
+  trace per call across both services. The span-id propagated is the daemon's
+  call-root span; park-retrieve and WS-reconnect sessions stay in the same
+  trace. **The protocol stays v1**: the field is absent whenever OTLP is
+  disabled (the default), so existing servers see an unchanged `start` shape.
+  No new knob — OTLP on ⇒ headers + field, off ⇒ neither. The reference echo
+  and OpenAI-Realtime example servers show the continuation pattern. See
+  `docs/PROTOCOL.md` §3.1 and `docs/CONFIG.md` → `[observability.otlp]`.
+
+### Fixed
+
+- **OTel span-context extraction now reaches the OTLP layer.** The 0.22.0
+  init installed the OTLP tracing layer behind `tracing_subscriber::reload`,
+  whose downcast barrier made the layer invisible to
+  `OpenTelemetrySpanExt::context()` — span *export* worked, but anything
+  asking a live span for its trace context got nothing (this would have
+  silently disabled 0.23.0's propagation). The layer is now installed
+  concrete with a reloadable per-layer filter (`OFF` until `[observability.otlp]`
+  activates it), preserving the zero-cost-when-disabled property.
+
 ## [0.22.0] - 2026-07-03
 
 ### Added

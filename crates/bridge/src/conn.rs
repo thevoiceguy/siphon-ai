@@ -347,7 +347,7 @@ pub async fn connect_and_run_with_ready(
     start.seq = 0;
     let call_id = start.call_id.clone();
 
-    let request = build_upgrade_request(&config, &call_id)?;
+    let request = build_upgrade_request(&config, &call_id, start.trace_context.as_ref())?;
 
     let ws_config = WebSocketConfig {
         max_message_size: Some(MAX_TEXT_BYTES),
@@ -400,6 +400,7 @@ pub async fn connect_and_run_with_ready(
 fn build_upgrade_request(
     config: &BridgeConfig,
     call_id: &CallId,
+    trace_context: Option<&crate::protocol::TraceContext>,
 ) -> Result<Request<()>, BridgeError> {
     let mut request = config.ws_url.as_str().into_client_request()?;
 
@@ -418,6 +419,30 @@ fn build_upgrade_request(
             BridgeError::InvalidConfig(format!("call_id is not a valid HTTP header value: {e}"))
         })?,
     );
+    // W3C trace propagation (0.23.0). Observability is best-effort
+    // (CLAUDE.md §4.7): a value that doesn't fit in a header — which a
+    // propagator-produced one always should — is skipped with a warning,
+    // never a connect failure.
+    if let Some(tc) = trace_context {
+        match HeaderValue::from_str(&tc.traceparent) {
+            Ok(value) => {
+                headers.insert("traceparent", value);
+                // `tracestate` is meaningful only alongside a `traceparent`
+                // (W3C trace-context §3.3), so it rides inside this arm.
+                if let Some(tracestate) = &tc.tracestate {
+                    match HeaderValue::from_str(tracestate) {
+                        Ok(value) => {
+                            headers.insert("tracestate", value);
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "invalid tracestate value; omitting tracestate header")
+                        }
+                    }
+                }
+            }
+            Err(e) => warn!(error = %e, "invalid traceparent value; not propagating trace context"),
+        }
+    }
     if let Some(value) = &config.auth_header {
         // Sent verbatim — `normalize_auth_header` already prepended
         // `Bearer ` for the bare-token case, and any pre-existing

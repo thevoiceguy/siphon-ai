@@ -438,6 +438,7 @@ mod tests {
                 verstat: None,
                 retrieved: false,
                 reconnected: false,
+                trace_context: None,
             },
             media_tap: tap,
             transfer: None,

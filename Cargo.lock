@@ -3333,6 +3333,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
 ]
 

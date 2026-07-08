@@ -22,7 +22,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use siphon_ai_bridge::protocol::{
     AudioEncoding, AudioFormat, BridgeIn, CallId, Direction, DtmfMethod, HangupCause, SipMeta,
-    StartMsg, StopReason, WS_SUBPROTOCOL,
+    StartMsg, StopReason, TraceContext, WS_SUBPROTOCOL,
 };
 use siphon_ai_bridge::{
     connect_and_run, BridgeChannels, BridgeConfig, BridgeError, DisconnectReason, OutgoingEvent,
@@ -36,6 +36,8 @@ struct CapturedRequest {
     authorization: Option<String>,
     user_agent: Option<String>,
     siphon_call_id: Option<String>,
+    traceparent: Option<String>,
+    tracestate: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -125,6 +127,16 @@ async fn spawn_server(opts: ServerOpts) -> ServerHandle {
                 c.siphon_call_id = req
                     .headers()
                     .get("x-siphon-call-id")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                c.traceparent = req
+                    .headers()
+                    .get("traceparent")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                c.tracestate = req
+                    .headers()
+                    .get("tracestate")
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string);
                 drop(c);
@@ -238,6 +250,7 @@ fn fixture_start(call_id: &str) -> StartMsg {
         verstat: None,
         retrieved: false,
         reconnected: false,
+        trace_context: None,
     }
 }
 
@@ -310,8 +323,63 @@ async fn upgrade_carries_subprotocol_user_agent_and_call_id() {
         captured.authorization.is_none(),
         "no token configured → no Authorization"
     );
+    assert!(
+        captured.traceparent.is_none() && captured.tracestate.is_none(),
+        "no trace_context on start → no W3C trace headers"
+    );
 
     // Tear down cleanly so the conn task returns.
+    control_out
+        .send(OutgoingEvent::Stop {
+            reason: StopReason::CallerHangup,
+        })
+        .await
+        .unwrap();
+    let result = conn.await.unwrap().unwrap();
+    assert_eq!(result, DisconnectReason::StopSent);
+}
+
+/// W3C trace propagation (0.23.0): a `trace_context` on `start` rides the
+/// upgrade request as `traceparent`/`tracestate` headers, and the `start`
+/// JSON carries the same values additively.
+#[tokio::test]
+async fn trace_context_propagates_as_upgrade_headers_and_start_field() {
+    let server = spawn_server(ServerOpts::echoing()).await;
+    let (chans, _audio_out, control_out, _audio_in, _control_in) = fixture_channels();
+
+    let mut start = fixture_start("siphon-traced");
+    start.trace_context = Some(TraceContext {
+        traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".into(),
+        tracestate: Some("vendor=value".into()),
+    });
+
+    let conn = tokio::spawn(connect_and_run(
+        fixture_config(server.ws_url()),
+        start,
+        chans,
+    ));
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let captured = server.captured.lock().clone();
+    assert_eq!(
+        captured.traceparent.as_deref(),
+        Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
+    );
+    assert_eq!(captured.tracestate.as_deref(), Some("vendor=value"));
+
+    // The same context is on the `start` JSON for servers whose WS
+    // library hides upgrade headers.
+    let mut server = server;
+    let start_json = server.client_text_rx.recv().await.expect("start frame");
+    let v: serde_json::Value = serde_json::from_str(&start_json).unwrap();
+    assert_eq!(v["type"], "start");
+    assert_eq!(
+        v["trace_context"]["traceparent"],
+        "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+    );
+    assert_eq!(v["trace_context"]["tracestate"], "vendor=value");
+
     control_out
         .send(OutgoingEvent::Stop {
             reason: StopReason::CallerHangup,

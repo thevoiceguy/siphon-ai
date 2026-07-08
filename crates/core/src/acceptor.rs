@@ -2076,6 +2076,7 @@ impl CallStart {
                 .recording
                 .as_ref()
                 .map(|r| r.path.display().to_string()),
+            recording_encrypted: outcome.recording.as_ref().map(|r| r.encrypted),
             park: outcome.park.map(|p| siphon_ai_cdr::ParkInfo {
                 count: p.count,
                 total_ms: p.total_ms,
@@ -2217,6 +2218,7 @@ fn build_delayed_failure_cdr(
         verstat_passed: None,
         recording_id: None,
         recording_path: None,
+        recording_encrypted: None,
         park: None,
         hold: None,
         reconnect: None,
@@ -3486,10 +3488,12 @@ impl BridgingAcceptor {
             RecordingMode::Always => Some(RecordingSetup {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: true,
+                encryption: self.recording.encryption.clone(),
             }),
             RecordingMode::OnDemand => Some(RecordingSetup {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: false,
+                encryption: self.recording.encryption.clone(),
             }),
             RecordingMode::Off => None,
         };
@@ -3768,10 +3772,12 @@ impl BridgingAcceptor {
             RecordingMode::Always => Some(RecordingSetup {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: true,
+                encryption: self.recording.encryption.clone(),
             }),
             RecordingMode::OnDemand => Some(RecordingSetup {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: false,
+                encryption: self.recording.encryption.clone(),
             }),
             RecordingMode::Off => None,
         };

@@ -61,10 +61,17 @@ mode = "always"                       # …but always record the support line
 | Sample format | PCM16, little-endian |
 | Channels | 2 (stereo) — **L = caller, R = bot/WS** |
 | Sample rate | The call's negotiated rate (8 kHz or 16 kHz) |
-| Path | `<dir>/<call_id>.wav` |
+| Path | `<dir>/<call_id>.wav` — `<dir>/<call_id>.wava` with encryption on (§8) |
 
 The `call_id` in the path is the same one on the WS `start` message and the
 CDR, so a recording correlates 1:1 with its call.
+
+**In-progress files are `<name>.part`** (0.24.0): the writer streams into
+the `.part` and renames it onto the final path only when finalize succeeds.
+A bare `.wav`/`.wava` on disk is therefore always a *complete* recording —
+safe for a watcher/uploader to pick up — and a crash leaves only a `.part`.
+(Before 0.24.0 the file appeared at its final name immediately, with
+placeholder header sizes until the call ended.)
 
 ---
 
@@ -103,8 +110,9 @@ needed there (a `start_recording` on an already-recording call is a no-op).
 ## 4. Observability
 
 - **CDR** (`docs/DEPLOY.md`): a recorded call's CDR carries `recording_id`
-  and `recording_path`. Both are omitted when the call wasn't recorded, so
-  the CDR schema stays at version 1.
+  and `recording_path`, plus `recording_encrypted: true` when the file is a
+  sealed `.wava` (§8). All are omitted when the call wasn't recorded —
+  additive fields, no CDR version bump.
 - **Metric:** `siphon_ai_recordings_total{result="ok"|"degraded"|"failed"}`
   ticks once per recorded call.
   - `ok` — written cleanly.
@@ -130,14 +138,13 @@ call. A recording is always best-effort; it never degrades call quality.
 
 ## 6. Operating
 
-- **Recordings are plaintext at rest — even for encrypted calls.** Recording
-  works on SRTP calls (the recorder taps the *decoded* audio — forge already
-  decrypts the media to bridge it to your WS server), so the WAV on disk is
-  always cleartext PCM regardless of `[media].srtp`. SRTP protects the media
-  *in transit*; it does nothing for the recording *at rest*. Treat the
-  recording directory as sensitive PII/PCI: protect it with volume
-  encryption, filesystem permissions, and access controls. SiphonAI does not
-  encrypt recordings.
+- **At-rest protection.** SRTP/WSS protect media *in transit*; the recorder
+  taps the *decoded* audio, so by default the WAV on disk is cleartext PCM
+  regardless of `[media].srtp`. For PCI/HIPAA-grade deployments turn on
+  **`[recording.encryption]`** (§8) so nothing plaintext ever touches disk.
+  Either way, treat the recording directory as sensitive PII/PCI:
+  filesystem permissions and access controls still apply (encryption
+  protects stolen disks and stale backups, not a compromised live box).
 - **Disk sizing:** recordings are uncompressed — ≈115 MB/hour at 16 kHz,
   ≈58 MB/hour at 8 kHz (stereo PCM16). With `mode = "always"`, size the disk
   for your peak concurrent-call-hours.
@@ -151,15 +158,86 @@ call. A recording is always best-effort; it never degrades call quality.
 
 ---
 
-## 7. Limitations (v0.5.0)
+## 7. Limitations
 
 - One recording per call (`recording_id == call_id`).
-- Path is `<dir>/<call_id>.wav` — no templating yet.
-- WAV/PCM16 only; no compressed (Opus) format yet.
-- Local-file sink only; no object-storage (S3) sink yet.
+- Path is `<dir>/<call_id>.wav[a]` — no templating yet (planned for the
+  object-storage release, `docs/design/DESIGN_RECORDING_COMPLIANCE.md` §3).
+- WAV/PCM16 only; no compressed (Opus) format yet (planned, same design
+  note §5).
+- Local-file sink only; no object-storage (S3) sink yet (planned, §3).
+- Inbound calls only; outbound-leg recording is planned (§5).
 - WAV `data`/`RIFF` sizes are 32-bit, so a single recording over ~4 GiB
   (many hours of 16 kHz stereo) saturates the header sizes — not a concern
   for normal call lengths.
 
-The compressed-format and object-storage sinks are tracked as 0.5.x
-stretch items (see `docs/design/DEV_PLAN_0.5.0.md` §4).
+---
+
+## 8. Encryption at rest (`[recording.encryption]`, 0.24.0)
+
+```toml
+[recording.encryption]
+enabled = true
+kek     = "${file:/etc/siphon-ai/recording-kek.hex}"   # 64 hex chars
+key_id  = "rec-2026-07"
+```
+
+With encryption on, recordings are written as **`.wava` envelopes** —
+nothing plaintext ever touches disk. The model is standard **envelope
+encryption**:
+
+- Every recording gets a **fresh random 256-bit data key (DEK)** that
+  encrypts the audio in independent 64 KiB AES-256-GCM chunks.
+- The DEK is stored in the file's header, **wrapped by your KEK** (the
+  32-byte key `kek` references). The KEK itself never appears in any
+  recording.
+- The header names your `key_id`, so **rotation is cheap**: deploy a new
+  KEK + `key_id` and new recordings use it; old recordings still name the
+  old id — keep retired KEKs in a secure archive to read them. No
+  re-encryption of existing audio, ever.
+
+Generate a KEK with `openssl rand -hex 32`, deliver it via `${file:}` (mode
+`0400`) or systemd `LoadCredential` + `${cred:}`. Validation is at config
+load — a missing/malformed KEK or `key_id` fails startup, never a call. If
+wrapping fails at runtime the *recording* fails (`recording_failed`,
+`siphon_ai_recordings_total{result="failed"}`); the call continues.
+
+### Decrypting
+
+```sh
+siphon-ai decrypt-recording /var/lib/siphon-ai/recordings/<call_id>.wava \
+    --kek-file /etc/siphon-ai/recording-kek.hex
+# → <call_id>.wav next to the input (or --out PATH)
+```
+
+The subcommand is offline tooling — it needs only the KEK file, not the
+daemon config. A wrong key fails loud and prints the `key_id` the recording
+was wrapped with, so you know which archived KEK to fetch. A crashed
+capture (`.wava.part`) can be recovered with `--allow-unfinalized`; its WAV
+header sizes are placeholders (re-mux with `ffmpeg -i out.wav fixed.wav` if
+a tool refuses it).
+
+### Container format (`SAIWAVA1`)
+
+For third-party decrypt implementations. All integers little-endian:
+
+```
+header:  magic "SAIWAVA1"
+         key_id_len u8 | key_id (utf-8)
+         wrapped_dek_len u16 | wrapped_dek
+         chunk_size u32                       # plaintext bytes per chunk
+chunk i: generation u32 | ct_len u32 | ciphertext (plaintext + 16-byte tag)
+```
+
+- `wrapped_dek` = `nonce (12) || AES-256-GCM(KEK, DEK)` with the `key_id`
+  bytes as AAD.
+- Chunk `i`'s cipher is AES-256-GCM under the DEK with nonce
+  `chunk_index u64 || generation u32` and the full serialized header as
+  AAD (a chunk can't be replayed into another recording).
+- The decrypted payload is a byte-exact standard WAV.
+- **Generation rule:** finalize rewrites chunk 0 with the patched WAV
+  header sizes under `generation = 1` (a fresh nonce — the plaintext
+  length is unchanged so it overwrites in place). A valid finalized file
+  has generation 1 on chunk 0 and 0 on every other chunk; anything else
+  (including generation 0 on chunk 0 — an unfinalized capture) must be
+  rejected by default.

@@ -491,6 +491,26 @@ pub struct RawRecording {
     /// Directory recordings are written to. Required when `mode != "off"`.
     #[serde(default)]
     pub dir: Option<String>,
+    /// `[recording.encryption]` (0.24.0) — envelope encryption at rest.
+    #[serde(default)]
+    pub encryption: Option<RawRecordingEncryption>,
+}
+
+/// `[recording.encryption]` — seal recordings into `.wava` envelopes
+/// (0.24.0). Off by default (`enabled = false`), mirroring
+/// `[observability.otlp]`.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct RawRecordingEncryption {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// The KEK as 64 hex chars — reference a secret with `${file:}` /
+    /// `${cred:}`, never inline it.
+    #[serde(default)]
+    pub kek: Option<String>,
+    /// Identifier stamped into recording headers; names which KEK wrapped
+    /// each recording so keys can rotate.
+    #[serde(default)]
+    pub key_id: Option<String>,
 }
 
 /// `[conference]` — conference rooms (0.7.0). Fail-closed like

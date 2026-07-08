@@ -22,7 +22,7 @@ mod writer;
 
 pub use config::{RecordingConfig, RecordingMode, RecordingSetup};
 pub use control::{RecControl, RecEvent};
-pub use envelope::{decrypt, EnvelopeError};
+pub use envelope::{decrypt, peek_key_id, EnvelopeError};
 pub use frame::RecFrame;
 pub use kek::{Kek, KekError};
 pub use writer::{RecordingError, RecordingStats, RecordingWriter};

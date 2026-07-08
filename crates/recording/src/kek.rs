@@ -41,10 +41,16 @@ pub enum KekError {
     UnwrapAuth,
     #[error("DEK wrap failed")]
     WrapFailed,
+    #[error("bad KEK encoding: {0}")]
+    BadEncoding(&'static str),
 }
 
 /// A key-encryption key + its identifier.
-#[derive(Clone)]
+///
+/// `PartialEq` exists for config-diffing on reload — it compares key bytes
+/// non-constant-time, which is fine there (both sides are our own config,
+/// never attacker-supplied guesses).
+#[derive(Clone, PartialEq, Eq)]
 pub enum Kek {
     /// A 32-byte KEK held in memory (resolved from `${file:}` / `${cred:}`
     /// at config load). Zeroized on drop.
@@ -72,6 +78,24 @@ impl Kek {
             key: Zeroizing::new(key),
             key_id,
         }
+    }
+
+    /// Parse a KEK from its 64-hex-char encoding — the `[recording.
+    /// encryption].kek` value and the `decrypt-recording` key file. Hex
+    /// (not raw bytes) because config secret references splice the value
+    /// into TOML text. Surrounding whitespace is tolerated.
+    pub fn from_hex(hex: &str, key_id: String) -> Result<Self, KekError> {
+        let hex = hex.trim();
+        if hex.len() != 64 {
+            return Err(KekError::BadEncoding("expected 64 hex characters"));
+        }
+        let mut key = Zeroizing::new([0u8; 32]);
+        for (i, byte) in key.iter_mut().enumerate() {
+            let pair = &hex[i * 2..i * 2 + 2];
+            *byte = u8::from_str_radix(pair, 16)
+                .map_err(|_| KekError::BadEncoding("non-hex character"))?;
+        }
+        Ok(Kek::Static { key, key_id })
     }
 
     /// The identifier stamped into container headers.

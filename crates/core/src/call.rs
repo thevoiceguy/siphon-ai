@@ -284,6 +284,8 @@ pub struct ReconnectSummary {
 pub struct RecordingSummary {
     pub path: std::path::PathBuf,
     pub result: RecordingResult,
+    /// Sealed at rest under `[recording.encryption]` (0.24.0).
+    pub encrypted: bool,
 }
 
 /// How a recording finished — the `result` label on `siphon_ai_recordings_total`.
@@ -735,6 +737,9 @@ impl CallController {
         // recording `degraded`. `None` when recording is off for the call.
         let mut rec_drops: Option<Arc<AtomicU64>> = None;
         let mut rec_path: Option<std::path::PathBuf> = None;
+        // Whether this call's recording is sealed at rest (0.24.0) — feeds
+        // the CDR `recording_encrypted` flag.
+        let mut rec_encrypted = false;
         // One recording per call in this revision → recording_id = call_id.
         let recording_id = call_id.as_str().to_string();
         let media_tap = if let Some(setup) = recording {
@@ -743,8 +748,10 @@ impl CallController {
             let (evt_tx, evt_rx) = mpsc::channel::<RecEvent>(CONTROL_CHANNEL_CAPACITY);
             let drops = Arc::new(AtomicU64::new(0));
             rec_path = Some(setup.path.clone());
+            rec_encrypted = setup.encryption.is_some();
             let writer =
-                RecordingWriter::new(setup.path, media_tap.sample_rate(), setup.auto_start);
+                RecordingWriter::new(setup.path, media_tap.sample_rate(), setup.auto_start)
+                    .with_encryption(setup.encryption);
             recording_task = Some(tokio::spawn(
                 writer
                     .run(rec_rx, ctrl_rx, evt_tx)
@@ -1881,6 +1888,7 @@ impl CallController {
                     Some(RecordingSummary {
                         path: stats.path,
                         result,
+                        encrypted: rec_encrypted,
                     })
                 }
                 // on-demand recording that was never started.
@@ -1893,6 +1901,7 @@ impl CallController {
                     Some(RecordingSummary {
                         path: failed_path(),
                         result: RecordingResult::Failed,
+                        encrypted: rec_encrypted,
                     })
                 }
                 Ok(Err(join_err)) => {
@@ -1900,6 +1909,7 @@ impl CallController {
                     Some(RecordingSummary {
                         path: failed_path(),
                         result: RecordingResult::Failed,
+                        encrypted: rec_encrypted,
                     })
                 }
                 Err(_) => {
@@ -1909,6 +1919,7 @@ impl CallController {
                     Some(RecordingSummary {
                         path: failed_path(),
                         result: RecordingResult::Failed,
+                        encrypted: rec_encrypted,
                     })
                 }
             }

@@ -3060,6 +3060,7 @@ dependencies = [
  "siphon-ai-config",
  "siphon-ai-core",
  "siphon-ai-media-glue",
+ "siphon-ai-recording",
  "siphon-ai-routes",
  "siphon-ai-sip-glue",
  "siphon-ai-stir-shaken",

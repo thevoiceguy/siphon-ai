@@ -632,12 +632,20 @@ writer can never stall live audio. **Full guide: `docs/RECORDING.md`.**
 [recording]
 mode = "always"            # "off" (default) | "always" | "on_demand"
 dir  = "/var/lib/siphon-ai/recordings"
+
+[recording.encryption]                 # optional — encrypt at rest (0.24.0)
+enabled = true                         # default false
+kek     = "${file:/etc/siphon-ai/recording-kek.hex}"   # 64 hex chars
+key_id  = "rec-2026-07"                # stamped into each recording
 ```
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `mode` | string | `"off"` | `"off"` = no recording (zero behaviour change). `"always"` = record every accepted call for its full duration. `"on_demand"` = the WS server drives recording with `start_recording` / `stop_recording` / `pause_recording` / `resume_recording` (see `docs/PROTOCOL.md` §4.7); SiphonAI emits `recording_started` / `recording_stopped` / `recording_failed` back. (Per-route overrides land in a later 0.5.0 chunk.) |
-| `dir` | string | — | Directory recordings are written to as `<dir>/<call_id>.wav`. **Required when `mode != "off"`**; created at startup (a bad path fails loud at load). A `pause` omits the paused span from the file (the audio is dropped, not silenced). |
+| `dir` | string | — | Directory recordings are written to as `<dir>/<call_id>.wav` (`.wava` when encryption is on). **Required when `mode != "off"`**; created at startup (a bad path fails loud at load). A `pause` omits the paused span from the file (the audio is dropped, not silenced). In-progress recordings are `<name>.part` and are renamed on finalize (0.24.0) — a bare `.wav`/`.wava` is always a complete file. |
+| `encryption.enabled` | bool | `false` | Seal recordings into encrypted `.wava` envelopes (per-recording AES-256-GCM data key, wrapped by your `kek`). Decrypt offline with `siphon-ai decrypt-recording` — see `docs/RECORDING.md` §8 for the model, key rotation, and the container format. |
+| `encryption.kek` | string | — | The key-encryption key as **64 hex characters** (32 bytes). Reference a secret — `${file:…}` or `${cred:…}` — never inline it. Required when `enabled`; validated at load (fail-loud). Generate one with `openssl rand -hex 32`. |
+| `encryption.key_id` | string | — | Identifier (1–255 bytes) stamped into every recording's header, naming which KEK wrapped it — this is what makes rotation possible. Required when `enabled`. |
 
 **Per-route override.** A `[route.recording]` block overrides the global
 `mode` for calls that match that route (strict override — the route value
@@ -660,9 +668,11 @@ mode = "always"                      # …but always record the support line
 
 Operational notes: recordings are uncompressed PCM16 stereo (≈115 MB/hour
 at 16 kHz; ≈58 MB/hour at 8 kHz) — size your disk and **manage retention
-yourself** (the daemon does not delete recordings). Recording consent and
-any "this call is recorded" announcement are the operator's responsibility
-(see `docs/SECURITY_STIR_SHAKEN.md` for the analogous trust-model framing).
+yourself** (the daemon does not delete recordings). Plaintext WAV at rest
+is fine for a lab; regulated deployments should turn on
+`[recording.encryption]` (0.24.0). Recording consent and any "this call is
+recorded" announcement are the operator's responsibility (see
+`docs/SECURITY_STIR_SHAKEN.md` for the analogous trust-model framing).
 
 ## `[cdr]`
 

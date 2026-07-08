@@ -257,18 +257,12 @@ impl EnvelopeWriter {
 /// `allow_unfinalized` accepts a chunk-0 `generation` of 0 (a crashed
 /// `.part` capture) — the recovered WAV then has placeholder (zero) size
 /// fields the caller must expect.
-pub fn decrypt<R: Read, W: Write>(
-    mut input: R,
-    out: &mut W,
-    kek: &Kek,
-    allow_unfinalized: bool,
-) -> Result<u64, EnvelopeError> {
+/// Parse a container header: `(key_id, wrapped_dek, chunk_size)`.
+fn read_header<R: Read>(input: &mut R) -> Result<(String, Vec<u8>, usize), EnvelopeError> {
     let err_io = |e: std::io::Error| EnvelopeError::Io {
         path: PathBuf::from("<input>"),
         source: e,
     };
-
-    // Header — reconstructed byte-for-byte, since it is every chunk's AAD.
     let mut magic = [0u8; 8];
     input.read_exact(&mut magic).map_err(err_io)?;
     if &magic != MAGIC {
@@ -289,6 +283,28 @@ pub fn decrypt<R: Read, W: Write>(
     if chunk_size == 0 || chunk_size > 16 * 1024 * 1024 {
         return Err(EnvelopeError::BadHeader("unreasonable chunk_size"));
     }
+    Ok((key_id, wrapped, chunk_size))
+}
+
+/// Read just the `key_id` a container names — lets tooling tell the
+/// operator *which* KEK a recording needs without attempting decryption.
+pub fn peek_key_id<R: Read>(mut input: R) -> Result<String, EnvelopeError> {
+    read_header(&mut input).map(|(key_id, _, _)| key_id)
+}
+
+pub fn decrypt<R: Read, W: Write>(
+    mut input: R,
+    out: &mut W,
+    kek: &Kek,
+    allow_unfinalized: bool,
+) -> Result<u64, EnvelopeError> {
+    let err_io = |e: std::io::Error| EnvelopeError::Io {
+        path: PathBuf::from("<input>"),
+        source: e,
+    };
+
+    // Header — reconstructed byte-for-byte, since it is every chunk's AAD.
+    let (key_id, wrapped, chunk_size) = read_header(&mut input)?;
     let header = build_header(&key_id, &wrapped);
 
     let dek = kek.unwrap_dek(&key_id, &wrapped)?;

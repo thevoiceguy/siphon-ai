@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-07-08
+
+### Added
+
+- **Recording encryption at rest — `[recording.encryption]`** (P1 "Recording
+  compliance & storage", first sub-item; design note
+  `docs/design/DESIGN_RECORDING_COMPLIANCE.md`). With `enabled = true`, a
+  `kek` (64 hex chars, referenced via `${file:}`/`${cred:}`) and a `key_id`,
+  recordings are written as encrypted **`.wava` envelopes** instead of
+  plaintext WAV — nothing plaintext ever touches disk. Envelope encryption:
+  a fresh random 256-bit data key per recording seals the audio in
+  independent AES-256-GCM chunks; the data key travels in the file header,
+  wrapped by your KEK. The header names the `key_id` that wrapped it, so
+  **rotating the KEK never re-encrypts audio**. Config is validated
+  fail-loud at startup; a runtime wrap failure fails the *recording*
+  (`recording_failed`), never the call. The CDR gains an additive
+  `recording_encrypted` flag (schema version unchanged). Decrypt offline
+  with the new **`siphon-ai decrypt-recording <file> --kek-file <hex>`**
+  subcommand — needs no daemon config; a wrong key names the `key_id` the
+  recording requires; `--allow-unfinalized` recovers a crashed capture. The
+  `SAIWAVA1` container format is documented in `docs/RECORDING.md` §8 for
+  third-party implementations. **Off by default.** Deps: `aes-gcm` +
+  `zeroize` promoted from transitive to direct (RustCrypto; no new vendor).
+
+### Changed
+
+- **Recordings now appear as `<name>.part` while in progress** and are
+  renamed to their final `.wav`/`.wava` name only when finalized — for
+  *plaintext* recordings too. A bare `.wav` on disk is now always a
+  complete file (safe for a watcher/uploader to pick up), and a daemon
+  crash leaves only a `.part` instead of a WAV with placeholder header
+  sizes. **If you watch the recording directory, match the final names and
+  ignore `*.part`.**
+
 ## [0.23.0] - 2026-07-08
 
 ### Added

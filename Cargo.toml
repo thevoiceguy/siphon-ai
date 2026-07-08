@@ -83,7 +83,7 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tokio-rustls = "0.26"
 
 # HTTP client (CDR webhook sink, lifecycle webhooks)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # Admin / health HTTP server
 hyper      = { version = "1", features = ["server", "http1"] }

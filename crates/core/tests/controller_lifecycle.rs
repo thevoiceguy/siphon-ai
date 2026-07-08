@@ -58,6 +58,7 @@ fn start_msg(call_id: &str) -> StartMsg {
         verstat: None,
         retrieved: false,
         reconnected: false,
+        trace_context: None,
     }
 }
 

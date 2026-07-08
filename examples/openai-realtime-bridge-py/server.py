@@ -318,6 +318,18 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
         start.get("to"),
     )
 
+    # W3C trace context (PROTOCOL.md §3.1, 0.23.0): present when the daemon
+    # runs with [observability.otlp] enabled (also sent as a `traceparent`
+    # upgrade header). A production bridge would extract it into its OTel
+    # SDK so its STT/LLM/TTS spans join the daemon's per-call trace:
+    #   ctx = TraceContextTextMapPropagator().extract(start["trace_context"])
+    #   with tracer.start_as_current_span("bridge-call", context=ctx): ...
+    # This example has no OTel dependency, so it just logs the value.
+    if start.get("trace_context"):
+        LOG.info(
+            "start call_id=%s trace_context=%s", call_id, start["trace_context"]
+        )
+
     url = f"{OPENAI_REALTIME_URL}?model={opts.openai_model}"
 
     try:

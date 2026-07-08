@@ -18,6 +18,6 @@ pub use conn::{
 };
 pub use protocol::{
     AudioEncoding, AudioFormat, BridgeIn, BridgeOut, CallId, ConferenceLeftReason, Direction,
-    DtmfMethod, ErrorCode, HangupCause, Seq, SipMeta, StartMsg, StopReason, PROTOCOL_VERSION,
-    WS_SUBPROTOCOL,
+    DtmfMethod, ErrorCode, HangupCause, Seq, SipMeta, StartMsg, StopReason, TraceContext,
+    PROTOCOL_VERSION, WS_SUBPROTOCOL,
 };

@@ -122,3 +122,111 @@ impl OtelTelemetry {
         }
     }
 }
+
+/// W3C Trace Context headers ([`https://www.w3.org/TR/trace-context/`])
+/// rendered from a live span, ready to be sent verbatim on an outgoing
+/// request — the WS-upgrade propagation surface of 0.23.0.
+///
+/// Plain strings (not `opentelemetry` types) so consumers — `siphon-ai-core`
+/// stamping the bridge `start` — don't need an OTel dep of their own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceContextHeaders {
+    /// `traceparent` value, e.g. `00-<32 hex trace-id>-<16 hex span-id>-01`.
+    pub traceparent: String,
+    /// `tracestate` value (vendor-specific key/value list); `None` when
+    /// there is none to forward, so callers can omit the header entirely.
+    pub tracestate: Option<String>,
+}
+
+/// Render the **current tracing span**'s OTel context as W3C trace-context
+/// headers, or `None` when there is no exportable context to propagate —
+/// i.e. the OTLP layer is inactive (`[observability.otlp]` disabled) or the
+/// caller isn't inside an instrumented span. An *unsampled* span still
+/// returns `Some` (with the `00` flags byte), per the W3C spec: downstream
+/// services should see the trace id even when this hop chose not to record.
+///
+/// Cheap and lock-free (a registry lookup + formatting); still, callers on
+/// per-call paths should invoke it once per session, not per frame.
+pub fn current_trace_context() -> Option<TraceContextHeaders> {
+    use opentelemetry::propagation::TextMapPropagator;
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let ctx = tracing::Span::current().context();
+    let mut carrier: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // The propagator injects nothing when the span context is invalid
+    // (no OTel layer / no span) — that absence is our `None`.
+    TraceContextPropagator::new().inject_context(&ctx, &mut carrier);
+    let traceparent = carrier.remove("traceparent")?;
+    let tracestate = carrier.remove("tracestate").filter(|s| !s.is_empty());
+    Some(TraceContextHeaders {
+        traceparent,
+        tracestate,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// `traceparent` is `00-<32 hex>-<16 hex>-<2 hex>` — assert shape
+    /// without pulling in a regex dep.
+    fn assert_traceparent_shape(value: &str) {
+        let parts: Vec<&str> = value.split('-').collect();
+        assert_eq!(parts.len(), 4, "traceparent must have 4 fields: {value}");
+        assert_eq!(parts[0], "00", "version field: {value}");
+        assert_eq!(parts[1].len(), 32, "trace-id length: {value}");
+        assert_eq!(parts[2].len(), 16, "span-id length: {value}");
+        assert_eq!(parts[3].len(), 2, "flags length: {value}");
+        for field in &parts[1..] {
+            assert!(
+                field.chars().all(|c| c.is_ascii_hexdigit()),
+                "non-hex field in {value}"
+            );
+        }
+        assert_ne!(
+            parts[1], "00000000000000000000000000000000",
+            "all-zero trace-id is invalid"
+        );
+    }
+
+    #[test]
+    fn no_otel_layer_yields_none() {
+        // A subscriber without the OTel layer: spans exist but carry no
+        // OTel context, so there is nothing to propagate.
+        let subscriber = tracing_subscriber::registry();
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("call");
+            let _e = span.enter();
+            assert_eq!(current_trace_context(), None);
+        });
+    }
+
+    #[test]
+    fn live_otel_span_yields_valid_traceparent() {
+        use opentelemetry::trace::TracerProvider as _;
+        // A provider with no exporter: spans are created (and dropped),
+        // which is all context extraction needs.
+        let provider = SdkTracerProvider::builder().build();
+        let layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("test"));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("call");
+            let _e = span.enter();
+            let headers = current_trace_context().expect("live span must yield a traceparent");
+            assert_traceparent_shape(&headers.traceparent);
+        });
+    }
+
+    #[test]
+    fn outside_any_span_yields_none() {
+        use opentelemetry::trace::TracerProvider as _;
+        let provider = SdkTracerProvider::builder().build();
+        let layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("test"));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(current_trace_context(), None);
+        });
+    }
+}

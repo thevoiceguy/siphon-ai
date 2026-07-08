@@ -328,12 +328,43 @@ pub struct StartMsg {
     /// it safely treats the call as brand-new.
     #[serde(default, skip_serializing_if = "is_false")]
     pub reconnected: bool,
+    /// W3C trace context for this call's daemon-side trace (0.23.0), when
+    /// `[observability.otlp]` is enabled. The same values are sent as
+    /// `traceparent` / `tracestate` headers on the WS upgrade request; this
+    /// field is the copy for servers whose WS library hides upgrade
+    /// headers. A server that continues the trace from either place sees
+    /// its own spans nested under the daemon's call trace in one waterfall.
+    ///
+    /// Like `srtp` / `verstat`, additive: `skip_serializing_if` keeps it
+    /// off the wire when OTLP is disabled (the default), so the `start`
+    /// shape — and the protocol `version` (`"1"`) — are unchanged for
+    /// servers that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<TraceContext>,
 }
 
 /// serde `skip_serializing_if` helper — keep `retrieved: false` off the
 /// wire so the `start` shape is byte-identical for non-retrieve calls.
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// W3C Trace Context (<https://www.w3.org/TR/trace-context/>) surfaced on
+/// [`StartMsg::trace_context`] and mirrored as upgrade-request headers.
+///
+/// Values are produced by the daemon's OTel propagator and passed through
+/// verbatim — this crate neither parses nor constructs them (no OTel dep
+/// here; `siphon-ai-core` stamps the field from `siphon-ai-telemetry`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceContext {
+    /// `traceparent` header value: `00-<32 hex trace-id>-<16 hex
+    /// span-id>-<2 hex flags>`. The trace-id is the whole call's trace;
+    /// the span-id is the daemon's call-root span.
+    pub traceparent: String,
+    /// `tracestate` header value (vendor key/value list). Omitted from the
+    /// wire when there is nothing to forward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracestate: Option<String>,
 }
 
 /// SRTP details surfaced on [`StartMsg::srtp`].
@@ -1286,6 +1317,7 @@ mod tests {
             verstat: None,
             retrieved: false,
             reconnected: false,
+            trace_context: None,
         };
         let v = serde_json::to_value(&start_false).unwrap();
         assert!(
@@ -1332,6 +1364,7 @@ mod tests {
             verstat: None,
             retrieved: false,
             reconnected: false,
+            trace_context: None,
         };
         let v = serde_json::to_value(&base).unwrap();
         assert!(
@@ -1510,6 +1543,7 @@ mod tests {
             verstat: None,
             retrieved: false,
             reconnected: false,
+            trace_context: None,
         });
         let v: Value = serde_json::to_value(&start).unwrap();
         let obj = v.as_object().unwrap();
@@ -1567,6 +1601,7 @@ mod tests {
                 verstat: None,
                 retrieved: false,
                 reconnected: false,
+                trace_context: None,
             })
         };
 
@@ -1601,6 +1636,81 @@ mod tests {
         assert_eq!(v["srtp"]["exchange"], json!("dtls"));
     }
 
+    /// `trace_context` (0.23.0) mirrors the `srtp` contract: absent when
+    /// `None` (the OTLP-disabled default — the v1 shape is unchanged),
+    /// and `{ "traceparent": …, "tracestate"?: … }` when present, with
+    /// `tracestate` itself skipped when there's nothing to forward.
+    #[test]
+    fn start_trace_context_field_serialization() {
+        let mk = |trace_context: Option<TraceContext>| {
+            BridgeOut::Start(StartMsg {
+                version: PROTOCOL_VERSION.to_string(),
+                call_id: CallId::new("c"),
+                seq: 0,
+                from: "+1".into(),
+                to: "5000".into(),
+                direction: Direction::Inbound,
+                audio: AudioFormat {
+                    encoding: AudioEncoding::Pcm16le,
+                    sample_rate: 8000,
+                    channels: 1,
+                    frame_ms: 20,
+                },
+                sip: SipMeta {
+                    call_id: "x@y".into(),
+                    headers: HashMap::new(),
+                },
+                srtp: None,
+                verstat: None,
+                retrieved: false,
+                reconnected: false,
+                trace_context,
+            })
+        };
+
+        // (1) None ⇒ field absent. The v1 contract.
+        let v: Value = serde_json::to_value(mk(None)).unwrap();
+        assert!(
+            !v.as_object().unwrap().contains_key("trace_context"),
+            "trace_context must be absent from JSON when None, got: {v}"
+        );
+
+        // (2) Some ⇒ present + round-trips; absent tracestate is omitted,
+        // not null.
+        let tc = TraceContext {
+            traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".into(),
+            tracestate: None,
+        };
+        let v: Value = serde_json::to_value(mk(Some(tc.clone()))).unwrap();
+        assert_eq!(
+            v["trace_context"]["traceparent"],
+            json!("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+        );
+        assert!(
+            !v["trace_context"]
+                .as_object()
+                .unwrap()
+                .contains_key("tracestate"),
+            "tracestate must be omitted when None, got: {v}"
+        );
+        let round: BridgeOut = serde_json::from_value(v).unwrap();
+        match round {
+            BridgeOut::Start(s) => assert_eq!(s.trace_context, Some(tc)),
+            other => panic!("expected Start, got {other:?}"),
+        }
+
+        // (3) tracestate rides along when present.
+        let tc = TraceContext {
+            traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".into(),
+            tracestate: Some("vendor=value,other=thing".into()),
+        };
+        let v: Value = serde_json::to_value(mk(Some(tc))).unwrap();
+        assert_eq!(
+            v["trace_context"]["tracestate"],
+            json!("vendor=value,other=thing")
+        );
+    }
+
     /// `verstat` mirrors the `srtp` contract: absent when `None`, and a
     /// stable wire shape (attest letter + the four booleans, optionals
     /// skipped when empty) when present.
@@ -1630,6 +1740,7 @@ mod tests {
                 verstat: verstat.map(Box::new),
                 retrieved: false,
                 reconnected: false,
+                trace_context: None,
             })
         };
 

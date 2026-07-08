@@ -45,6 +45,11 @@ forge-hep    = { workspace = true }
 opentelemetry = "0.32.0"
 opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "trace"] }
+# W3C trace propagation to the WS server (0.23.0): reads the OTel span
+# context off the *current tracing span* so core can stamp
+# `traceparent`/`tracestate` onto the WS upgrade. Same version pairing
+# as the daemon binary's OTLP layer.
+tracing-opentelemetry = "0.33.0"
 
 [dev-dependencies]
 hyper-util = { workspace = true, features = ["client", "client-legacy", "http1"] }

@@ -1397,6 +1397,9 @@ pub fn build_start_msg(
         // Reconnect resume sessions are built by the controller's
         // reconnect drive (0.7.3 chunk 2); a fresh accept is never one.
         reconnected: false,
+        // Stamped by `CallController::run` (the call's trace root) just
+        // before the bridge connects — the acceptor doesn't know it yet.
+        trace_context: None,
     }
 }
 
@@ -1438,6 +1441,9 @@ pub fn build_outbound_start_msg(
         // Reconnect resume sessions are built by the controller's
         // reconnect drive (0.7.3 chunk 2); a fresh accept is never one.
         reconnected: false,
+        // Stamped by `CallController::run` (the call's trace root) just
+        // before the bridge connects — not known at origination time.
+        trace_context: None,
     }
 }
 

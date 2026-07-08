@@ -640,7 +640,7 @@ impl CallController {
         let CallControllerConfig {
             call_id,
             bridge,
-            start,
+            mut start,
             media_tap,
             transfer,
             recording,
@@ -652,9 +652,23 @@ impl CallController {
             ws_reconnect_moh_file,
         } = cfg;
 
+        // W3C trace propagation (0.23.0): render this `run` span — the
+        // call's trace root — as `traceparent`/`tracestate` and stamp it
+        // onto `start`; the bridge sends it as upgrade headers and the
+        // additive `start.trace_context` field. `None` (field absent, no
+        // headers) when `[observability.otlp]` is disabled — the default.
+        start.trace_context = siphon_ai_telemetry::otel::current_trace_context().map(|h| {
+            siphon_ai_bridge::TraceContext {
+                traceparent: h.traceparent,
+                tracestate: h.tracestate,
+            }
+        });
+
         // Park needs to rebuild the WS bridge on retrieve from the
         // original call facts + bridge config; clone them before the
-        // first bridge consumes the originals.
+        // first bridge consumes the originals — `start_template` cloned
+        // *after* the trace-context stamp so retrieve/reconnect sessions
+        // stay in the same trace.
         let start_template = start.clone();
         let bridge_template = bridge.clone();
 

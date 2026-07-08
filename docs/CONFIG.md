@@ -745,8 +745,14 @@ region                   = "us-east-1"
 
 The daemon logs `OTLP trace export active` at startup when enabled, and
 flushes pending spans on shutdown. See `docs/OPERATIONS.md` and
-`examples/observability/` for the metrics/dashboards side; W3C trace-context
-propagation to your WS server is a follow-up (v0.23.0).
+`examples/observability/` for the metrics/dashboards side.
+
+Enabling OTLP also propagates the call's **W3C trace context to your WS
+server** (0.23.0): the upgrade request carries `traceparent` (+ `tracestate`
+when non-empty), and `start.trace_context` mirrors the same values (additive;
+protocol stays v1 — see `docs/PROTOCOL.md` §3.1). A server that continues the
+trace shows up in the same waterfall as the daemon's spans. There is no
+separate knob: disabled OTLP ⇒ no headers, no field.
 
 ## `[admin]`
 

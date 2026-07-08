@@ -140,6 +140,20 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
     if connection.subprotocol != SUBPROTOCOL:
         LOG.warning("client did not negotiate %r; proceeding optimistically", SUBPROTOCOL)
 
+    # W3C trace context (PROTOCOL.md §2, 0.23.0): present on the upgrade
+    # request when the daemon runs with [observability.otlp] enabled. A real
+    # server would hand this to its OpenTelemetry SDK — e.g.
+    #   ctx = TraceContextTextMapPropagator().extract(dict(request.headers))
+    #   with tracer.start_as_current_span("handle-call", context=ctx): ...
+    # — so its spans join the daemon's per-call trace in one waterfall. The
+    # reference server has no OTel dependency, so it just logs the value.
+    # (The same context is mirrored on `start.trace_context` below, for
+    # stacks whose WS library hides upgrade headers.)
+    if connection.request is not None:
+        traceparent = connection.request.headers.get("traceparent")
+        if traceparent:
+            LOG.info("trace context: traceparent=%s", traceparent)
+
     try:
         async for message in connection:
             if isinstance(message, bytes):
@@ -189,6 +203,16 @@ async def handle(connection: ServerConnection, opts: Options) -> None:
                     LOG.error("unsupported protocol version %r; closing", version)
                     await connection.close(code=1003, reason="unsupported version")
                     return
+                if msg.get("trace_context"):
+                    # Mirror of the `traceparent` upgrade header (PROTOCOL.md
+                    # §3.1, 0.23.0) — either place works for continuing the
+                    # daemon's per-call OTLP trace. Absent unless the daemon
+                    # runs with [observability.otlp] enabled.
+                    LOG.info(
+                        "start call_id=%s trace_context=%s",
+                        call_id,
+                        msg["trace_context"],
+                    )
                 if msg.get("retrieved"):
                     # This session is picking up a previously parked call
                     # (PROTOCOL.md §3.1 / §4.9), not a fresh inbound one.

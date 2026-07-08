@@ -572,6 +572,7 @@ fn build_outbound_record(
         recording_path: None,
         recording_encrypted: None,
         recording_url: None,
+        consent: None,
         // Outbound bots can park too (0.7.0); carry the accounting.
         park: view.park.map(|p| siphon_ai_cdr::ParkInfo {
             count: p.count,
@@ -626,6 +627,7 @@ mod tests {
             park: None,
             hold: None,
             reconnect: None,
+            consent: None,
         };
         let audio = CdrAudioInfo {
             codec: "PCMU".into(),

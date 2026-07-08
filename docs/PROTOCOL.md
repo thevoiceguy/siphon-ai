@@ -591,6 +591,21 @@ continues. All are no-ops if recording isn't enabled for the call or the
 control is invalid for the current state. (With `mode = "always"` recording
 covers the whole call; these controls aren't needed.)
 
+**`set_recording_consent`** (0.26.0) — record the fact that your server
+captured recording consent:
+
+```json
+{ "type": "set_recording_consent", "call_id": "...", "note": "dtmf-1" }
+```
+
+When your server obtains consent itself (a DTMF "press 1 to consent", a
+verbal yes your bot recognized), send this so the fact lands on the call's
+CDR as `consent.server` for the audit trail. `note` is a short free-form
+description (optional, truncated to 256 bytes; defaults to
+`"unspecified"`). This is a **stamp, not a gate** — to gate capture on
+consent, use `mode = "on_demand"` and send `start_recording` after consent.
+No reply message; additive, so the protocol stays v1.
+
 ### 4.8 `conference_join` / `conference_leave` — conference rooms (0.7.0)
 
 ```json

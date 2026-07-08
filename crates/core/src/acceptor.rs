@@ -2104,6 +2104,14 @@ impl CallStart {
                 count: h.count,
                 total_ms: h.total_ms,
             }),
+            consent: outcome
+                .consent
+                .as_ref()
+                .map(|c| siphon_ai_cdr::ConsentInfo {
+                    announced: c.announced,
+                    announcement_ms: c.announcement_ms,
+                    server: c.server.clone(),
+                }),
             reconnect: outcome.reconnect.map(|r| siphon_ai_cdr::ReconnectInfo {
                 count: r.count,
                 total_gap_ms: r.total_gap_ms,
@@ -2132,6 +2140,9 @@ pub(crate) struct CallTerminationView {
     /// WS-reconnect accounting, when the call reconnected at least once.
     /// Feeds the CDR `reconnect { count, total_gap_ms }`.
     pub(crate) reconnect: Option<crate::call::ReconnectSummary>,
+    /// Recording-consent audit trail (0.26.0). Feeds the CDR
+    /// `consent { announced, announcement_ms, server }`.
+    pub(crate) consent: Option<crate::call::ConsentSummary>,
 }
 
 impl CallTerminationView {
@@ -2145,6 +2156,7 @@ impl CallTerminationView {
                 park: o.park,
                 hold: o.hold,
                 reconnect: o.reconnect,
+                consent: o.consent,
             },
             Err(e) => Self {
                 // Treat a panic / join error as "bridge ended" —
@@ -2157,6 +2169,7 @@ impl CallTerminationView {
                 park: None,
                 hold: None,
                 reconnect: None,
+                consent: None,
             },
         }
     }
@@ -2239,6 +2252,7 @@ fn build_delayed_failure_cdr(
         recording_path: None,
         recording_encrypted: None,
         recording_url: None,
+        consent: None,
         park: None,
         hold: None,
         reconnect: None,

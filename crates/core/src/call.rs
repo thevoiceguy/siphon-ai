@@ -246,6 +246,21 @@ pub struct CallOutcome {
     /// `reconnect { count, total_gap_ms }`. `None` when the call never
     /// reconnected (the field is omitted then).
     pub reconnect: Option<ReconnectSummary>,
+    /// Recording-consent audit trail (0.26.0), `Some` when an
+    /// announcement played or the server reported consent. Feeds the CDR
+    /// `consent { announced, announcement_ms, server }`.
+    pub consent: Option<ConsentSummary>,
+}
+
+/// Recording-consent audit trail surfaced on [`CallOutcome`] → CDR
+/// (0.26.0). `announced`/`announcement_ms` come from the daemon-played
+/// announcement; `server` is whatever the WS server reported via
+/// `set_recording_consent`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConsentSummary {
+    pub announced: bool,
+    pub announcement_ms: u64,
+    pub server: Option<String>,
 }
 
 /// Per-call park outcome surfaced on [`CallOutcome`] → CDR.
@@ -837,6 +852,10 @@ impl CallController {
         // CDR `hold { count, total_ms }` accounting (mirrors park).
         let mut hold_count: u32 = 0;
         let mut hold_total = Duration::ZERO;
+        // Recording-consent audit trail (0.26.0): the server-reported
+        // note; the daemon-announcement half is stamped where the
+        // announcement completes.
+        let mut consent_server: Option<String> = None;
         let mut held_since: Option<Instant> = None;
         // Re-INVITE glare backoff (RFC 3261 §14.1): if the peer sends
         // its own re-INVITE at the same moment, our offer draws a 491 —
@@ -980,6 +999,14 @@ impl CallController {
                         }
                         Some(BridgeIn::ResumeRecording { call_id: cid }) => {
                             route_rec_control(&rec_ctrl_tx, RecControl::Resume, "ResumeRecording", &cid);
+                        }
+                        Some(BridgeIn::SetRecordingConsent { call_id: cid, note }) => {
+                            // Audit stamp only — never gates recording.
+                            let note = note
+                                .map(|n| n.chars().take(256).collect::<String>())
+                                .unwrap_or_else(|| "unspecified".to_string());
+                            debug!(call_id = %cid, note = %note, "recording consent reported by server");
+                            consent_server = Some(note);
                         }
                         Some(BridgeIn::ConferenceJoin { call_id: cid, room_id }) => {
                             debug!(ws_call_id = %cid, %room_id, "conference join requested by WS");
@@ -1930,6 +1957,14 @@ impl CallController {
 
         log_state(&call_id, CallState::Done);
 
+        // `announced`/`announcement_ms` stay zero until the daemon
+        // announcement lands in a later chunk.
+        let consent_summary = consent_server.map(|server| ConsentSummary {
+            announced: false,
+            announcement_ms: 0,
+            server: Some(server),
+        });
+
         Ok(CallOutcome {
             call_id,
             termination,
@@ -1939,6 +1974,7 @@ impl CallController {
             park: park_summary,
             hold: hold_summary,
             reconnect: reconnect_summary,
+            consent: consent_summary,
         })
     }
 }

@@ -1,6 +1,6 @@
 # Design: recording compliance & storage (P1 theme)
 
-> **Status: PROPOSED — decisions in §6 are open.** Same design-first cadence
+> **Status: DECISIONS LOCKED (2026-07-08) — §6.** Same design-first cadence
 > as observability (→ v0.21–0.23) and security hardening (→ v0.18–0.20):
 > design note → locked decisions → chunked PRs → tag-after-merge. The build
 > follows §7; deviations get noted back here.
@@ -232,32 +232,32 @@ Two complementary halves; both additive, protocol stays v1:
 
 ---
 
-## 6. Decisions (PROPOSED — to lock)
+## 6. Decisions (LOCKED 2026-07-08 — all seven as recommended)
 
-- **D1 — Encryption format**: custom chunked AES-256-GCM envelope with
+- **D1 — Encryption format — LOCKED: custom chunked GCM.** Custom chunked AES-256-GCM envelope with
   wrapped DEK + `decrypt-recording` subcommand (recommended), vs the `age`
   format. Custom wins on: chunk-0 rewrite (WAV finalize), KMS-wrap seam, no
   new vendor (`aes-gcm`/`zeroize` already in-lock). `age` wins on standard
-  tooling + public-key-only daemon. **Recommend custom chunked GCM.**
+  tooling + public-key-only daemon. **Locked: custom chunked GCM.**
 - **D2 — KEK sources**: file/`${cred:}` KEK in v0.24.0; `KekProvider` trait
   from day one; AWS-KMS provider in v0.25.0 sharing the SigV4 client. No
-  AWS SDK. **Recommend yes.**
+  AWS SDK. **Locked: yes.**
 - **D3 — S3 client**: reqwest + hand-rolled SigV4, S3-compatible targets
-  first-class, durable spool mirroring `crates/http`. **Recommend yes.**
+  first-class, durable spool mirroring `crates/http`. **Locked: yes.**
 - **D4 — Format**: Opus-in-Ogg opt-in output, `ogg` crate as the theme's one
-  new small dep; FLAC out of scope. **Recommend yes, landing in v0.25.0.**
+  new small dep; FLAC out of scope. **Locked: yes, landing in v0.25.0.**
 - **D5 — Plaintext finalize atomicity**: encrypted output gets
   `.part`+rename in v0.24.0. Also change *plaintext* WAV to `.part`+rename?
   It's a behavior change (consumers watching the dir see names change) but
-  fixes the crash ambiguity everywhere. **Recommend yes, with a
+  fixes the crash ambiguity everywhere. **Locked: yes, with a
   CHANGELOG-flagged behavior note.**
 - **D6 — Consent shape**: daemon announcement gating capture +
   additive CDR consent stamp + `SetRecordingConsent` control message
   (protocol stays v1; `PROTOCOL.md` documented same-PR per §4.2).
-  **Recommend yes.**
+  **Locked: yes.**
 - **D7 — Release slicing**: v0.24.0 encryption → v0.25.0 storage +
   templating + Opus + KMS provider → v0.26.0 consent + outbound.
-  **Recommend yes.**
+  **Locked: yes.**
 
 Everything in this theme is **off by default**; recording itself stays
 `mode = "off"` unless configured, WAV stays the default format, CDR changes

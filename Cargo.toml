@@ -64,10 +64,14 @@ bytes  = "1"
 base64 = "0.22"
 
 # Crypto (HMAC for webhook signing; SHA-256 + constant-time eq for
-# admin token auth)
+# admin token auth; AES-GCM + zeroize for recording encryption-at-rest —
+# both already in-tree transitively via rustls, promoted to direct for
+# DESIGN_RECORDING_COMPLIANCE §2)
 hmac = "0.12"
 sha2 = "0.10"
 subtle = "2"
+aes-gcm = "0.10"
+zeroize = "1"
 
 # WebSocket
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }

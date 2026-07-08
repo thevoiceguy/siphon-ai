@@ -3237,9 +3237,11 @@ dependencies = [
 name = "siphon-ai-recording"
 version = "0.23.0"
 dependencies = [
+ "aes-gcm",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

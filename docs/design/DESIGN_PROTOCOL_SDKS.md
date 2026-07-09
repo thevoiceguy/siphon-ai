@@ -1,6 +1,6 @@
 # Design: protocol SDKs & machine-readable schemas (P1 theme)
 
-> **Status: PROPOSED — decisions in §6 are open.** Same design-first cadence
+> **Status: DECISIONS LOCKED (2026-07-09) — §6.** Same design-first cadence
 > as recording compliance (→ v0.24–0.26) and observability (→ v0.21–0.23):
 > design note → locked decisions → chunked PRs → tag-after-merge. The build
 > follows §7; deviations get noted back here.
@@ -161,26 +161,26 @@ the *daemon's* side of the protocol against a candidate WS server:
 - **No package publishing** (PyPI/npm) — vendorable only, revisit later.
 - **No browser/WebRTC support** — server-side SDKs only.
 
-## 6. Decisions (PROPOSED — to lock)
+## 6. Decisions (LOCKED 2026-07-09 — all six as recommended)
 
 - **D1 — Schema pipeline**: `schemars` derive behind a `json-schema`
   feature (dev-path only; the one new Rust dep), generated
   `schemas/siphon-ai.v1.json` committed, drift-checked in CI, and
-  PROTOCOL.md's 26 examples validated against it. **Recommend yes.**
+  PROTOCOL.md's 26 examples validated against it. **Locked: yes.**
 - **D2 — SDK shape**: hand-written idiomatic types (TS discriminated
   unions / Python dataclasses) validated against the schema + corpus in
-  each SDK's tests; no codegen toolchain. **Recommend yes.**
+  each SDK's tests; no codegen toolchain. **Locked: yes.**
 - **D3 — Dogfooding**: rewrite `echo-ws-server-python` on the Python SDK
   (the SIPp job then exercises the SDK on every PR); add a new
-  SDK-based `echo-ws-server-node`. **Recommend yes.**
+  SDK-based `echo-ws-server-node`. **Locked: yes.**
 - **D4 — Packaging**: vendorable packages, publishing deferred.
-  **Recommend yes.**
+  **Locked: yes.**
 - **D5 — Testkit**: Rust `crates/protocol-testkit` bin, TOML scenarios,
   schema-validating assertions, doubles as the SDK-CI mock daemon; new CI
-  job wires Node in. **Recommend yes.**
+  job wires Node in. **Locked: yes.**
 - **D6 — Release slicing**: v0.27.0 schema + drift CI → v0.28.0 SDKs +
   example rewrites → v0.29.0 conformance testkit + CI job.
-  **Recommend yes.**
+  **Locked: yes.**
 
 ## 7. Build order
 

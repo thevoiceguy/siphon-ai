@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-07-09
+
+### Added
+
+- **Recording consent announcement — `[recording.announcement]`** (P1
+  "Recording compliance & storage", final release — the theme is
+  complete). Point `file` at a "this call may be recorded" WAV and the
+  daemon plays it to the caller right after answer; **capture starts only
+  when the prompt finishes**. The WS session connects in parallel
+  (announce-then-bridge); the bot can't talk over the prompt, and nothing
+  the caller says during it reaches the recording *or* the server. With
+  `mode = "on_demand"`, a `start_recording` arriving mid-prompt is
+  deferred to prompt completion. **Fail-closed**: if the prompt can't play
+  (missing file, wrong sample rate), the call is *not* recorded — and the
+  CDR shows `consent.announced = false`. Applies to inbound and outbound
+  legs. **Off by default.**
+- **Consent audit trail on the CDR** — additive
+  `consent { announced, announcement_ms, server }` object (schema version
+  unchanged). `announced`/`announcement_ms` come from the daemon-played
+  prompt; `server` from the new **`set_recording_consent`** WS control
+  message (`{ "type": "set_recording_consent", "call_id", "note"? }`) —
+  a stamp for consent your server captured itself (DTMF press-1, verbal
+  yes). A stamp, not a gate: capture gating stays `on_demand` +
+  `start_recording`. Protocol stays **v1**.
+- **Outbound-leg recording.** Originated calls (`POST /admin/v1/calls`)
+  can record exactly like inbound ones — same `[recording]`
+  dir/encryption/format, same on-demand WS controls, same object-storage
+  upload spool. Per-gateway default (`[[gateway]].recording = "off"
+  (default) | "always" | "on_demand"`, validated at load) plus a
+  per-originate `"recording"` override (`400` for bad values, rejected
+  before a toll-fraud concurrency permit is consumed). Recording an
+  outbound leg is config/API opt-in, never implied. **Off by default.**
+
 ## [0.25.0] - 2026-07-08
 
 ### Added

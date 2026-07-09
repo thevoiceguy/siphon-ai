@@ -23,6 +23,17 @@ API — see `CLAUDE.md` §4.2 before changing anything here.
 | Auth | If `bridge.auth_bearer` is configured, SiphonAI sends `Authorization: Bearer <token>` on the upgrade request. |
 | Headers | Servers may inspect any HTTP header on the upgrade request. SiphonAI sets `User-Agent: siphon-ai/<version>` and forwards a `X-Siphon-Call-Id: <call_id>` header for log correlation. When `[observability.otlp]` is enabled (0.23.0), SiphonAI also sends W3C [`traceparent`](https://www.w3.org/TR/trace-context/) (+ `tracestate` when non-empty) so the server can continue the call's distributed trace; the same values are mirrored on `start.trace_context` for servers whose WS library hides upgrade headers. Absent when OTLP is disabled (the default). |
 
+**Machine-readable schema (0.27.0).** Every JSON message in this document
+is described by [`schemas/siphon-ai.v1.json`](../schemas/siphon-ai.v1.json)
+— a JSON Schema (draft 2020-12) generated from the Rust wire types and
+drift-checked in CI (including every example in this file). Point your
+editor, validator, or code generator at it. Notes: messages are
+discriminated by `type`; validate against `$defs/BridgeOut`
+(SiphonAI→server) or `$defs/BridgeIn` (server→SiphonAI) when you know the
+direction — three discriminators (`hold`, `resume`, `mark`) exist in both.
+The binary audio framing is described by the schema's `x-binary-frames`
+annotation.
+
 If the upgrade fails (4xx/5xx) or the TLS handshake fails, SiphonAI
 treats the call as failed and emits a CDR with `bridge_error`. There is
 no automatic retry within a single call.

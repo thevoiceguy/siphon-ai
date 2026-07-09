@@ -69,6 +69,11 @@ base64 = "0.22"
 ogg      = "0.9"
 audiopus = "0.3.0-rc.0"
 
+# JSON Schema generation for the WS protocol (0.27.0, DESIGN_PROTOCOL_SDKS
+# §2 D1): dev-path only — pulled in solely by the `json-schema` feature on
+# siphon-ai-bridge/-security; the daemon binary never carries it.
+schemars = "1.2"
+
 # Crypto (HMAC for webhook signing; SHA-256 + constant-time eq for
 # admin token auth; AES-GCM + zeroize for recording encryption-at-rest —
 # both already in-tree transitively via rustls, promoted to direct for

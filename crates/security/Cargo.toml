@@ -11,6 +11,11 @@ repository.workspace   = true
 [dependencies]
 serde      = { workspace = true, features = ["derive"] }
 thiserror.workspace  = true
+# JSON Schema derive on the wire-shared types (0.27.0) — dev-path only.
+schemars = { workspace = true, optional = true }
+
+[features]
+json-schema = ["dep:schemars"]
 
 [dev-dependencies]
 serde_json.workspace = true

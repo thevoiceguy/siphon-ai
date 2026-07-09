@@ -322,8 +322,9 @@ info!(target: "siphon_ai::call", from = %invite.from, "received invite");
 4. Add unit test for serialization round-trip
 5. Add integration test in `test-harness/` if it touches SIP or audio
 6. **Document it in `docs/PROTOCOL.md`** (this is not optional)
-7. **Update example WS servers** in `examples/` to demonstrate or at least handle the new message
-8. If the message is a breaking addition (changes existing behavior), bump protocol version
+7. **Regenerate the protocol schema**: `cargo run -p siphon-ai-bridge --example gen_schema --features json-schema > schemas/siphon-ai.v1.json` (CI diffs it and validates the PROTOCOL.md examples against it)
+8. **Update example WS servers** in `examples/` to demonstrate or at least handle the new message
+9. If the message is a breaking addition (changes existing behavior), bump protocol version
 
 ### 7.2 Adding a New WS Event (SiphonAI → Server)
 

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 /// highest) run opposite to alphabetical intuition, so the rank is made
 /// explicit on purpose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub enum AttestationLevel {
     /// Full attestation — provider authenticated the customer and confirmed
     /// their right to use the calling number.

@@ -1,0 +1,1391 @@
+{
+  "$defs": {
+    "AttestationLevel": {
+      "description": "How strongly the originating provider vouches for the calling number.\n\nOrdered by trust strength: `A` (full) is the strongest, `C` (gateway)\nthe weakest. Use [`AttestationLevel::rank`] for policy comparisons\nrather than relying on a derived ordering — the wire characters (`A`\nhighest) run opposite to alphabetical intuition, so the rank is made\nexplicit on purpose.",
+      "oneOf": [
+        {
+          "const": "A",
+          "description": "Full attestation — provider authenticated the customer and confirmed\ntheir right to use the calling number.",
+          "type": "string"
+        },
+        {
+          "const": "B",
+          "description": "Partial attestation — origin authenticated, number authorization not\nconfirmed.",
+          "type": "string"
+        },
+        {
+          "const": "C",
+          "description": "Gateway attestation — only the ingress point is authenticated.",
+          "type": "string"
+        }
+      ]
+    },
+    "AudioEncoding": {
+      "enum": [
+        "pcm16le"
+      ],
+      "type": "string"
+    },
+    "AudioFormat": {
+      "description": "Audio format declaration. Fixed for the lifetime of the call.",
+      "properties": {
+        "channels": {
+          "description": "`1` only in v1 (mono).",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "encoding": {
+          "$ref": "#/$defs/AudioEncoding"
+        },
+        "frame_ms": {
+          "description": "`20` only in v1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sample_rate": {
+          "description": "`8000` or `16000` in v1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "encoding",
+        "sample_rate",
+        "channels",
+        "frame_ms"
+      ],
+      "type": "object"
+    },
+    "BridgeIn": {
+      "description": "Messages a WebSocket server sends to SiphonAI.\n\nServers MUST include `call_id` matching the value SiphonAI sent in\n`start`. Servers MUST NOT include `seq`.",
+      "oneOf": [
+        {
+          "description": "Discard any audio queued for playout but not yet sent into the\ncall. Used for barge-in.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "type": {
+              "const": "clear",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Insert a marker at the current tail of the outbound queue. When\nthe marker reaches the head, SiphonAI emits a [`BridgeOut::Mark`]\nwith the same `name`.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "name": {
+              "description": "Server-chosen, opaque to SiphonAI. ASCII, ≤64 chars.",
+              "type": "string"
+            },
+            "type": {
+              "const": "mark",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Terminate the call.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "cause": {
+              "$ref": "#/$defs/HangupCause",
+              "default": "normal"
+            },
+            "type": {
+              "const": "hangup",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Initiate a call transfer (REFER). Without `replaces_call_id`\nthis is a blind transfer to `target`. With it, an attended\ntransfer (0.6.1): the REFER carries a `Replaces` parameter\nreferencing the named consult call's dialog, so the transferee\nconnects to the party the server already consulted.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "replaces_call_id": {
+              "description": "Attended transfer: the bridge `call_id` of an ANSWERED\noutbound call (the consult leg, placed via\n`POST /admin/v1/calls`) that the transferee should replace.\nAdditive in 0.6.1 — protocol stays version \"1\".",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "target": {
+              "description": "Refer-To URI (MUST be SIP or SIPS). Required for blind\ntransfer. Optional with `replaces_call_id` — the default\nis the consult dialog's remote target (its Contact), which\nis normally what you want; sending it overrides.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "transfer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Generate an RFC 2833 DTMF event toward the caller.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "digit": {
+              "description": "One of `0-9 * # A B C D`.",
+              "maxLength": 1,
+              "minLength": 1,
+              "type": "string"
+            },
+            "duration_ms": {
+              "description": "Clamped to `[40, 2000]` ms by SiphonAI.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "send_dtmf",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "digit",
+            "duration_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Suspend AI-side playout to the caller until a matching\n[`BridgeIn::Unmute`] arrives. SiphonAI drops audio bytes the\nWS server keeps streaming during the mute, AND flushes audio\nalready queued into the media engine — so the caller hears\nsilence immediately, not after the queued tail plays out.\n\nDistinct from [`BridgeIn::Clear`], which is a one-shot\nbarge-in flush. `Mute` is sustained and `Unmute` is required\nto resume.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "type": {
+              "const": "mute",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Resume AI-side playout after a [`BridgeIn::Mute`]. A no-op\nif the call is not muted.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "type": {
+              "const": "unmute",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Begin recording this call (when `[recording].mode = \"on_demand\"`).\nNo-op if recording is off for the call or already in progress.\nSiphonAI replies with [`BridgeOut::RecordingStarted`] (or\n[`BridgeOut::RecordingFailed`]).",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "type": {
+              "const": "start_recording",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Finalize the recording now (close the file early). SiphonAI replies\nwith [`BridgeOut::RecordingStopped`].",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "type": {
+              "const": "stop_recording",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Suspend recording — the paused span is **omitted** from the file\n(e.g. while the caller reads a card number), not silenced. No-op if\nnot recording.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "type": {
+              "const": "pause_recording",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Resume recording after a [`BridgeIn::PauseRecording`].",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "type": {
+              "const": "resume_recording",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Record the fact that the server captured recording consent\n(0.26.0) — e.g. a DTMF \"press 1 to consent\" or a verbal yes your\nbot recognized. SiphonAI stores the note on the call's CDR\n(`consent.server`) for the audit trail; it does not gate\nrecording (use `on_demand` + `start_recording` for gating).\n`note` is a short free-form description (\"dtmf-1\",\n\"verbal-yes@12s\", …), truncated to 256 bytes.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "set_recording_consent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Park this call (0.7.0, §2.4): detach the WS session and shelve\nthe call playing hold music, keeping the SIP dialog + RTP alive.\nSelf-scoped. SiphonAI replies `stop { reason: \"park\" }` and\ncloses this WS; the call is later retrieved (operator action)\nonto a fresh WS session. `slot` is an optional human label for\nthe hold lot. Refused (`error { code: \"park_failed\" }`, call\ncontinues) when park is disabled or `[park].max_parked` is hit.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "slot": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "park",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Join this call into a conference room (0.7.0, §2.1). Creates\nthe room if it doesn't exist yet (subject to\n`[conference]` caps). Self-scoped: a session may only join its\nOWN call — cross-call composition (adding another participant)\nis the admin API's job (§9.2). SiphonAI replies with\n[`BridgeOut::ConferenceJoined`] or\n[`BridgeOut::Error`]`{ code: \"conference_failed\" }`. While\njoined, the bot hears the room mix minus its own playout and\nspeaks into the room.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "room_id": {
+              "description": "Operator-meaningful room name; calls naming the same\n`room_id` share a room. The room locks to the first\njoiner's sample rate.",
+              "type": "string"
+            },
+            "type": {
+              "const": "conference_join",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "room_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Leave the conference room this call is in (0.7.0). No-op if the\ncall isn't in a room. SiphonAI replies with\n[`BridgeOut::ConferenceLeft`]`{ reason: \"left\" }` and restores\nthe direct caller↔WS audio pair.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "type": {
+              "const": "conference_leave",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Put this call's caller on hold (0.7.2): SiphonAI re-INVITEs the\ncaller so their media goes on hold (`a=sendonly`/`recvonly`, RFC\n3264) — they hear hold music and stop sending — while the WS\nsession stays open. Self-scoped. SiphonAI replies\n[`BridgeOut::Held`] once the re-INVITE is acknowledged, or\n`error { code: \"hold_failed\" }` (the call stays as it was — a\nfailed hold never drops it). No-op if already held. Distinct from\n[`BridgeIn::Mute`], which only silences the bot's own audio.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "type": {
+              "const": "hold",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Resume a held call (0.7.2): re-INVITE back to two-way audio.\nSiphonAI replies [`BridgeOut::Resumed`]. No-op if not held.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "type": {
+              "const": "resume",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BridgeOut": {
+      "description": "Messages SiphonAI sends to the WebSocket server.\n\nWire format: each variant serializes to a single JSON object with a\n`\"type\"` discriminator. Audio frames travel separately as binary\nWebSocket frames (see `docs/PROTOCOL.md` §2.2).",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/StartMsg",
+          "description": "First message on the connection. Carries call metadata and the\naudio format both directions will use for the lifetime of the call.",
+          "properties": {
+            "type": {
+              "const": "start",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "VAD detected the caller starting to speak. Emitted only when\n`bridge.vad = true`.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ts_ms": {
+              "description": "Milliseconds since `start` was sent (monotonic, NOT wall-clock).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "speech_started",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "ts_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "VAD detected the caller stopping speaking.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "duration_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ts_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "speech_stopped",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "ts_ms",
+            "duration_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Mid-dialog re-INVITE flipped the audio direction to\nsomething other than `sendrecv` — typically a soft-phone\nhold (`sendonly`) or full pause (`inactive`). The server\nSHOULD stop sending audio for the duration; the peer isn't\nlistening. The matching `Resume` event arrives when the\ndirection returns to `sendrecv`.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "direction": {
+              "description": "One of `\"sendonly\"`, `\"recvonly\"`, `\"inactive\"` —\nmirrors the peer's offered direction per RFC 3264 §6.1.",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "hold",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "direction"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Direction returned to `sendrecv` after a [`BridgeOut::Hold`].\nThe server may resume sending audio.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "resume",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Caller has been silent (no VAD speech) for at least\n`duration_ms`. Configurable via `[bridge].silence_threshold_ms`;\n`0` disables emission. Fires once per silence stretch (the\nnext event only after a speech → silence cycle); a long\nsilence does not generate a stream of these.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "duration_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "silence_detected",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "duration_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "No audio observed in EITHER direction (no caller VAD speech\nAND no outbound playout from the WS server) for at least\n`duration_ms`. Suspect connectivity or a hung call.\nConfigurable via `[bridge].dead_air_threshold_ms`; `0`\ndisables emission. Fires every time the threshold elapses\nwithout either side producing audio.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "duration_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "dead_air_detected",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "duration_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Periodic snapshot of RTP / RTCP quality, emitted every\n`[bridge].rtp_stats_interval_ms` (default 5 s, configurable\nper-route; `0` disables). Fields are JSON `null` until forge\nhas reported its first quality assessment for the call.\nCodec / sample rate are constant for the call — consumers\nshould correlate to the `start` message.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "jitter_ms": {
+              "description": "Estimated inter-arrival jitter in milliseconds, or `null`.",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "packet_loss_ratio": {
+              "description": "Packet loss as a ratio in `[0.0, 1.0]`, or `null`.",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "rtcp_rtt_ms": {
+              "description": "Mean round-trip time over the reporting window in milliseconds,\nor `null` until forge-engine originates its own RTCP SRs\n(deferred to 0.3.1 per DEV_PLAN_0.3.0.md §9 decision 10).",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "rtp_stats",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The caller pressed a DTMF key.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "digit": {
+              "description": "One of `0-9 * # A B C D`.",
+              "maxLength": 1,
+              "minLength": 1,
+              "type": "string"
+            },
+            "duration_ms": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "method": {
+              "$ref": "#/$defs/DtmfMethod"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "dtmf",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "digit",
+            "duration_ms",
+            "method"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Acknowledgement of a server-initiated [`BridgeIn::Mark`]: the audio\nqueued before the marker has been fully played out into the call.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "name": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "mark",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A recording has begun (auto on `mode = \"always\"`, or in response to\n[`BridgeIn::StartRecording`]). `recording_id` identifies it for\ncorrelation. Added in 0.5.0.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "recording_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "recording_started",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "recording_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A recording finalized (call ended, or [`BridgeIn::StopRecording`]).",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "recording_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "recording_stopped",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "recording_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A recording could not start or write (e.g. disk error). The call is\nunaffected — recording is best-effort.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "reason": {
+              "description": "Human-readable reason.",
+              "type": "string"
+            },
+            "recording_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "recording_failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "recording_id",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "This call successfully joined a conference room, in response to\nthe server's [`BridgeIn::ConferenceJoin`] (0.7.0). The call's\naudio is now mixed into the room; the bot hears the room minus\nits own playout. `participants` is the member-call count at the\nmoment of joining (this call included) — a snapshot; subsequent\nchanges arrive as [`BridgeOut::ParticipantJoined`] /\n[`BridgeOut::ParticipantLeft`].",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "participants": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "room_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "conference_joined",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "room_id",
+            "participants"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "This call left a conference room — either because the server\nsent [`BridgeIn::ConferenceLeave`] (`reason = \"left\"`) or\nbecause the room ended underneath it (`reason = \"room_closed\"`,\ne.g. an operator force-ended the room). The direct caller↔WS\naudio pair is restored; the call continues. Added in 0.7.0.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "reason": {
+              "$ref": "#/$defs/ConferenceLeftReason"
+            },
+            "room_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "conference_left",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "room_id",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ANOTHER call joined the room this call is in (0.7.0; fan-out to\nevery other member). `participant_call_id` is the bridge\n`call_id` of the call that joined — distinct from the envelope\n`call_id`, which is always this receiving session's own call.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "participant_call_id": {
+              "type": "string"
+            },
+            "room_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "participant_joined",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "room_id",
+            "participant_call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ANOTHER call left the room this call is in (0.7.0). See\n[`BridgeOut::ParticipantJoined`] for the `participant_call_id`\nvs `call_id` distinction.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "participant_call_id": {
+              "type": "string"
+            },
+            "room_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "participant_left",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "room_id",
+            "participant_call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Confirmation that a server-requested [`BridgeIn::Hold`] took\neffect (0.7.2): the caller's hold re-INVITE was acknowledged and\nthey're now on hold music. **Distinct from the peer-initiated\n[`BridgeOut::Hold`] event**, which reports that the *far end* held\n*us*. A server that sent `hold` waits for this before relying on\nthe hold; on failure it gets `error { code: \"hold_failed\" }`.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "held",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Confirmation that a server-requested [`BridgeIn::Resume`] restored\ntwo-way audio (0.7.2). Mirror of [`BridgeOut::Held`].",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "resumed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Last message SiphonAI sends. Followed by a clean WS close (1000).",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "reason": {
+              "$ref": "#/$defs/StopReason"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "stop",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Fatal error. Always followed by `stop { reason: \"error\" }` and a\nclean close.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "code": {
+              "$ref": "#/$defs/ErrorCode"
+            },
+            "message": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "code",
+            "message"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CallId": {
+      "description": "SiphonAI's per-call identifier, distinct from the SIP `Call-ID`.\n\nSerialized transparently as a string. Servers MUST echo this on every\nmessage they send for the call.",
+      "type": "string"
+    },
+    "ConferenceLeftReason": {
+      "description": "Why a [`BridgeOut::ConferenceLeft`] fired.",
+      "oneOf": [
+        {
+          "const": "left",
+          "description": "The server asked to leave via [`BridgeIn::ConferenceLeave`].",
+          "type": "string"
+        },
+        {
+          "const": "room_closed",
+          "description": "The room ended underneath this call (e.g. operator force-end,\nor the room task stopped). The call reverts to its direct pair.",
+          "type": "string"
+        }
+      ]
+    },
+    "Direction": {
+      "oneOf": [
+        {
+          "const": "inbound",
+          "description": "SiphonAI answered an inbound call. The bot reacts to the caller.",
+          "type": "string"
+        },
+        {
+          "const": "outbound",
+          "description": "SiphonAI placed the call (outbound origination, 0.6.0). The bot\ndrives — it typically speaks first. Additive on the `start` message;\nthe protocol version stays `\"1\"`.",
+          "type": "string"
+        }
+      ]
+    },
+    "DtmfMethod": {
+      "enum": [
+        "rfc2833",
+        "inband"
+      ],
+      "type": "string"
+    },
+    "ErrorCode": {
+      "oneOf": [
+        {
+          "enum": [
+            "rtp_timeout",
+            "codec_unsupported",
+            "audio_format",
+            "protocol_error",
+            "server_too_slow",
+            "transfer_failed",
+            "internal"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "conference_failed",
+          "description": "A [`BridgeIn::ConferenceJoin`] was refused (conferencing\ndisabled, room/participant cap reached, sample-rate mismatch,\nor already joined). The call continues on its direct pair.\nAdded in 0.7.0.",
+          "type": "string"
+        },
+        {
+          "const": "park_failed",
+          "description": "A [`BridgeIn::Park`] was refused (park disabled or\n`[park].max_parked` reached). The call continues unparked.\nAdded in 0.7.0.",
+          "type": "string"
+        },
+        {
+          "const": "hold_failed",
+          "description": "A [`BridgeIn::Hold`] or [`BridgeIn::Resume`] re-INVITE was\nrejected by the peer, timed out, or lost glare resolution (0.7.2).\nThe call stays in its prior media state — a failed hold never\ndrops the call.",
+          "type": "string"
+        }
+      ]
+    },
+    "HangupCause": {
+      "oneOf": [
+        {
+          "const": "normal",
+          "description": "BYE on an established dialog, or 487 on an early dialog.",
+          "type": "string"
+        },
+        {
+          "const": "rejected",
+          "description": "603 Decline (the call hasn't been answered).",
+          "type": "string"
+        },
+        {
+          "const": "busy",
+          "description": "486 Busy Here.",
+          "type": "string"
+        },
+        {
+          "const": "not_acceptable",
+          "description": "488 Not Acceptable Here.",
+          "type": "string"
+        }
+      ]
+    },
+    "SipMeta": {
+      "description": "SIP-side metadata forwarded on the `start` message.",
+      "properties": {
+        "call_id": {
+          "description": "The SIP `Call-ID` from the inbound INVITE.",
+          "type": "string"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Selected SIP headers, configured via `bridge.forward_headers`.\nServers MUST NOT assume any specific header is present.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "call_id"
+      ],
+      "type": "object"
+    },
+    "SrtpExchange": {
+      "description": "Key-exchange family that produced [`SrtpInfo::profile`].",
+      "oneOf": [
+        {
+          "const": "sdes",
+          "description": "RFC 4568 SDES — master key exchanged via `a=crypto:` on the\nSIP signalling plane. Used by classic SIP carriers\n(Twilio Elastic SIP Trunk Secure Media etc).",
+          "type": "string"
+        },
+        {
+          "const": "dtls",
+          "description": "RFC 5764 DTLS-SRTP — master key derived from a DTLS handshake\nover the media path, with fingerprint authenticated via SIP\n`a=fingerprint:`. Used by WebRTC-side peers.",
+          "type": "string"
+        }
+      ]
+    },
+    "SrtpInfo": {
+      "description": "SRTP details surfaced on [`StartMsg::srtp`].\n\nW1 ships the type; the field stays `None` on real calls until\nthe Sprint 1 Week 2 / 3 wiring lands. Defined now so the WS\nprotocol shape is pinned before any code path produces a\nnon-`None` value.",
+      "properties": {
+        "exchange": {
+          "$ref": "#/$defs/SrtpExchange",
+          "description": "How the SRTP master key was negotiated."
+        },
+        "profile": {
+          "description": "The negotiated SRTP crypto suite identifier, exactly as it\nappears on the wire (`a=crypto:` `crypto-suite` token for\nSDES; the DTLS-SRTP profile name for DTLS-SRTP). Examples:\n`\"AES_CM_128_HMAC_SHA1_80\"`, `\"AES_256_CM_HMAC_SHA1_80\"`,\n`\"AEAD_AES_256_GCM\"`.\n\nString rather than enum because new suites land at the IANA\nregistry independent of our release cadence — we'd rather\npass through an unrecognised suite name than block negotiation\non a missing variant.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "exchange",
+        "profile"
+      ],
+      "type": "object"
+    },
+    "StartMsg": {
+      "description": "Body of the [`BridgeOut::Start`] message.",
+      "properties": {
+        "audio": {
+          "$ref": "#/$defs/AudioFormat"
+        },
+        "call_id": {
+          "$ref": "#/$defs/CallId"
+        },
+        "direction": {
+          "$ref": "#/$defs/Direction"
+        },
+        "from": {
+          "description": "E.164 number or SIP user from the inbound INVITE; may be empty\nif the PBX strips it.",
+          "type": "string"
+        },
+        "reconnected": {
+          "description": "`true` when this `start` *resumes* a call after an unexpected WS\ndrop (0.7.3, `[bridge].ws_reconnect_enabled`) — SiphonAI re-dialed\nthe same `ws_url` for the same `call_id`; the server should tear\ndown whatever handler it still has for this call and treat this\nsocket as the live one. `seq` restarts at 0 (a fresh session, no\nreplay of pre-drop audio/events). Distinct from [`retrieved`] (an\noperator picking up a *parked* call). Additive — omitted (and\n`false`) on every non-reconnect `start`, so a server that ignores\nit safely treats the call as brand-new.",
+          "type": "boolean"
+        },
+        "retrieved": {
+          "description": "`true` when this `start` opens a *retrieve* session on a\npreviously-parked call (0.7.0, §2.4) — the WS server is picking\nthe call back up, not handling a fresh inbound one. `seq` still\nrestarts at 0 (a fresh session, no replay). Additive — omitted\n(and `false`) on every non-retrieve `start`, so a pre-0.7.0\nserver sees the exact shape it always did.",
+          "type": "boolean"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sip": {
+          "$ref": "#/$defs/SipMeta"
+        },
+        "srtp": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SrtpInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "SRTP profile / key-exchange in use for this call's media leg,\nwhen SRTP was negotiated. `None` means the media is plaintext\n`RTP/AVP` (the v0.1.0 / v0.2.0 behaviour, and the default\nwhen `[media].srtp = \"off\"`).\n\nThe protocol stays at `version = \"1\"` — `srtp` is `#[serde]`\n`skip_serializing_if = \"Option::is_none\"`, so a 0.1.x / 0.2.x\nWS server's parser sees the same `start` shape it always\nsaw. Servers that *want* to know whether the leg is encrypted\njust check whether the field is present."
+        },
+        "to": {
+          "description": "Dialed digits / extension / SIP user.",
+          "type": "string"
+        },
+        "trace_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TraceContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "W3C trace context for this call's daemon-side trace (0.23.0), when\n`[observability.otlp]` is enabled. The same values are sent as\n`traceparent` / `tracestate` headers on the WS upgrade request; this\nfield is the copy for servers whose WS library hides upgrade\nheaders. A server that continues the trace from either place sees\nits own spans nested under the daemon's call trace in one waterfall.\n\nLike `srtp` / `verstat`, additive: `skip_serializing_if` keeps it\noff the wire when OTLP is disabled (the default), so the `start`\nshape — and the protocol `version` (`\"1\"`) — are unchanged for\nservers that predate it."
+        },
+        "version": {
+          "description": "Currently `\"1\"`.",
+          "type": "string"
+        },
+        "verstat": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VerificationResult"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "STIR/SHAKEN verification verdict (RFC 8224/8225) for this inbound\ncall, when `[security.stir_shaken].enabled`. `None` — and omitted\nfrom the wire — when call authentication is off (the default) or no\n`Identity` header was processed.\n\nThe shape is [`siphon_ai_security::VerificationResult`], reused\nverbatim so the wire format and the internal verdict can't drift.\n`attest` is trustworthy only when the booleans all hold; servers\napplying their own policy should treat a present-but-failed verdict\n(e.g. `signature_valid: false`) as untrusted. Like `srtp`, this is\n`skip_serializing_if = \"Option::is_none\"`, so a v1 server built\nbefore 0.4.0 sees the exact `start` shape it always saw.\n\nBoxed so the (already large) `Start` variant of [`BridgeOut`] doesn't\ngrow by another ~64 bytes for a field that's `None` on most calls.\n`Box<T>` is serde-transparent — the wire JSON is identical."
+        }
+      },
+      "required": [
+        "version",
+        "call_id",
+        "seq",
+        "from",
+        "to",
+        "direction",
+        "audio",
+        "sip"
+      ],
+      "type": "object"
+    },
+    "StopReason": {
+      "oneOf": [
+        {
+          "enum": [
+            "caller_hangup",
+            "server_hangup",
+            "transfer",
+            "ws_disconnect",
+            "error"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "park",
+          "description": "The call was parked (0.7.0): the WS session is being detached but\nthe call stays alive (caller hears hold music). A later retrieve\nopens a *fresh* WS session — this `stop` is the last message on\n*this* session, not the end of the call.",
+          "type": "string"
+        }
+      ]
+    },
+    "TraceContext": {
+      "description": "W3C Trace Context (<https://www.w3.org/TR/trace-context/>) surfaced on\n[`StartMsg::trace_context`] and mirrored as upgrade-request headers.\n\nValues are produced by the daemon's OTel propagator and passed through\nverbatim — this crate neither parses nor constructs them (no OTel dep\nhere; `siphon-ai-core` stamps the field from `siphon-ai-telemetry`).",
+      "properties": {
+        "traceparent": {
+          "description": "`traceparent` header value: `00-<32 hex trace-id>-<16 hex\nspan-id>-<2 hex flags>`. The trace-id is the whole call's trace;\nthe span-id is the daemon's call-root span.",
+          "type": "string"
+        },
+        "tracestate": {
+          "description": "`tracestate` header value (vendor key/value list). Omitted from the\nwire when there is nothing to forward.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "traceparent"
+      ],
+      "type": "object"
+    },
+    "VerificationResult": {
+      "description": "Outcome of STIR/SHAKEN verification for one inbound INVITE.\n\nThe booleans plus the optional error let a downstream consumer\nreconstruct the precise failure mode without re-parsing the Identity\nheader. This is the shape surfaced on `BridgeOut::Start.verstat`, the\nCDR, and the HEP verstat chunk.\n\n**Trust:** `attest` is the level *claimed* in the PASSporT. It is only\ntrustworthy when the verification passed — use\n[`VerificationResult::trusted_attestation`] for any policy decision, not\n`attest` directly.",
+      "properties": {
+        "attest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AttestationLevel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Attestation level claimed in the PASSporT, if a valid one was present."
+        },
+        "cert_chain_valid": {
+          "description": "The signing certificate chained to a configured STI-PA trust anchor.",
+          "type": "boolean"
+        },
+        "dest_passed": {
+          "description": "A `dest.tn` matched the SIP `To`/R-URI user.",
+          "type": "boolean"
+        },
+        "error": {
+          "description": "Human-readable failure reason when verification did not fully pass.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "iat_passed": {
+          "default": false,
+          "description": "The PASSporT `iat` is within the configured freshness window (replay\nprotection, ATIS-1000074). `#[serde(default)]` so an older verstat\nJSON without the field deserializes to `false` rather than erroring —\nthe field is additive (added in 0.4.1).",
+          "type": "boolean"
+        },
+        "orig_passed": {
+          "description": "`orig.tn` matched the SIP `From` user.",
+          "type": "boolean"
+        },
+        "orig_tn": {
+          "description": "Originating TN from the PASSporT `orig.tn` claim.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signature_valid": {
+          "description": "The ES256 signature over the PASSporT verified against that cert.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "orig_passed",
+        "dest_passed",
+        "cert_chain_valid",
+        "signature_valid"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/thevoiceguy/siphon-ai/main/schemas/siphon-ai.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/BridgeOut"
+    },
+    {
+      "$ref": "#/$defs/BridgeIn"
+    }
+  ],
+  "description": "Every JSON text frame on a SiphonAI bridge WebSocket is exactly one of these messages, discriminated by `type`. `BridgeOut` = daemon→server, `BridgeIn` = server→daemon. The canonical prose spec is docs/PROTOCOL.md; this schema is generated from the Rust types in crates/bridge (do not edit by hand).",
+  "title": "SiphonAI WebSocket protocol v1",
+  "x-binary-frames": {
+    "bytes_per_frame": {
+      "16000": 640,
+      "8000": 320
+    },
+    "channels": 1,
+    "description": "Audio travels as WS binary frames: raw PCM16 little-endian mono, no header bytes. One frame = exactly 20 ms at the call's negotiated rate.",
+    "encoding": "pcm16le",
+    "frame_ms": 20
+  },
+  "x-protocol-version": "1",
+  "x-ws-subprotocol": "siphon-ai.v1"
+}

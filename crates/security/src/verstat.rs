@@ -16,6 +16,7 @@ use crate::attestation::AttestationLevel;
 /// [`VerificationResult::trusted_attestation`] for any policy decision, not
 /// `attest` directly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct VerificationResult {
     /// Attestation level claimed in the PASSporT, if a valid one was present.
     #[serde(skip_serializing_if = "Option::is_none")]

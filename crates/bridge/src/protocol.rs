@@ -23,6 +23,7 @@ pub const WS_SUBPROTOCOL: &str = "siphon-ai.v1";
 /// Serialized transparently as a string. Servers MUST echo this on every
 /// message they send for the call.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct CallId(pub String);
 
@@ -58,6 +59,7 @@ pub type Seq = u64;
 /// `"type"` discriminator. Audio frames travel separately as binary
 /// WebSocket frames (see `docs/PROTOCOL.md` §2.2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BridgeOut {
     /// First message on the connection. Carries call metadata and the
@@ -266,6 +268,7 @@ pub enum BridgeOut {
 
 /// Body of the [`BridgeOut::Start`] message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct StartMsg {
     /// Currently `"1"`.
     pub version: String,
@@ -356,6 +359,7 @@ fn is_false(b: &bool) -> bool {
 /// verbatim — this crate neither parses nor constructs them (no OTel dep
 /// here; `siphon-ai-core` stamps the field from `siphon-ai-telemetry`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct TraceContext {
     /// `traceparent` header value: `00-<32 hex trace-id>-<16 hex
     /// span-id>-<2 hex flags>`. The trace-id is the whole call's trace;
@@ -374,6 +378,7 @@ pub struct TraceContext {
 /// protocol shape is pinned before any code path produces a
 /// non-`None` value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct SrtpInfo {
     /// How the SRTP master key was negotiated.
     pub exchange: SrtpExchange,
@@ -392,6 +397,7 @@ pub struct SrtpInfo {
 
 /// Key-exchange family that produced [`SrtpInfo::profile`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SrtpExchange {
     /// RFC 4568 SDES — master key exchanged via `a=crypto:` on the
@@ -406,6 +412,7 @@ pub enum SrtpExchange {
 
 /// Audio format declaration. Fixed for the lifetime of the call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct AudioFormat {
     pub encoding: AudioEncoding,
     /// `8000` or `16000` in v1.
@@ -418,6 +425,7 @@ pub struct AudioFormat {
 
 /// SIP-side metadata forwarded on the `start` message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct SipMeta {
     /// The SIP `Call-ID` from the inbound INVITE.
     pub call_id: String,
@@ -428,6 +436,7 @@ pub struct SipMeta {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
     /// SiphonAI answered an inbound call. The bot reacts to the caller.
@@ -439,12 +448,14 @@ pub enum Direction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AudioEncoding {
     Pcm16le,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DtmfMethod {
     Rfc2833,
@@ -452,6 +463,7 @@ pub enum DtmfMethod {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
     CallerHangup,
@@ -468,6 +480,7 @@ pub enum StopReason {
 
 /// Why a [`BridgeOut::ConferenceLeft`] fired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ConferenceLeftReason {
     /// The server asked to leave via [`BridgeIn::ConferenceLeave`].
@@ -478,6 +491,7 @@ pub enum ConferenceLeftReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     RtpTimeout,
@@ -512,6 +526,7 @@ pub enum ErrorCode {
 /// Servers MUST include `call_id` matching the value SiphonAI sent in
 /// `start`. Servers MUST NOT include `seq`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BridgeIn {
     /// Discard any audio queued for playout but not yet sent into the
@@ -662,6 +677,7 @@ pub enum BridgeIn {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum HangupCause {
     /// BYE on an established dialog, or 487 on an early dialog.

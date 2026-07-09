@@ -25,6 +25,11 @@ tracing.workspace           = true
 # is a pure-types leaf (serde + thiserror only), so this stays acyclic.
 siphon-ai-security.workspace = true
 
+# JSON Schema generation (0.27.0) — dev-path only, behind the
+# `json-schema` feature (used by the gen-schema example + the CI drift
+# guard; never compiled into the daemon).
+schemars = { workspace = true, optional = true }
+
 # mTLS for the WS bridge leg (W4 Part A). `rustls` is the
 # `ClientConfig` we hand to `Connector::Rustls`; `rustls-pemfile`
 # parses the operator-supplied PEM cert + key; `webpki-roots` is
@@ -36,6 +41,18 @@ webpki-roots    = "0.26"
 # Subject Public Key Info — matches the `rustls::CertificateDer`
 # parsing surface so we don't pull in an extra X.509 crate.
 sha2            = "0.10"
+
+[[example]]
+name = "gen_schema"
+# Only meaningful (and only compilable) with the schema feature; a plain
+# `cargo test --workspace` skips it.
+required-features = ["json-schema"]
+
+[features]
+# Derive schemars::JsonSchema on the protocol types and enable the
+# `gen-schema` example (`cargo run -p siphon-ai-bridge --example
+# gen-schema --features json-schema`).
+json-schema = ["dep:schemars", "siphon-ai-security/json-schema"]
 
 [dev-dependencies]
 parking_lot.workspace = true

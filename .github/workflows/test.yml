@@ -98,6 +98,16 @@ jobs:
       - name: cargo test --workspace --locked
         run: cargo test --workspace --locked
 
+      # Protocol-schema anti-drift (0.27.0): regenerate the JSON Schema
+      # from the Rust types and diff against the committed
+      # schemas/siphon-ai.v1.json, then validate every PROTOCOL.md JSON
+      # example against it. Lives in this job to reuse the cargo cache
+      # (the regen builds siphon-ai-bridge with --features json-schema).
+      - name: Check protocol schema (drift + docs corpus)
+        run: |
+          pip install --quiet jsonschema
+          python3 scripts/check-protocol-schema.py
+
   sipp:
     name: SIPp signaling regression
     runs-on: ubuntu-latest

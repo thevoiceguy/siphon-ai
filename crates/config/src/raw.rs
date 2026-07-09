@@ -500,6 +500,19 @@ pub struct RawRecording {
     /// `[recording.storage]` (0.25.0) — S3-compatible upload.
     #[serde(default)]
     pub storage: Option<RawRecordingStorage>,
+    /// `[recording.announcement]` (0.26.0) — consent prompt before
+    /// capture.
+    #[serde(default)]
+    pub announcement: Option<RawRecordingAnnouncement>,
+}
+
+/// `[recording.announcement]` — a "this call may be recorded" WAV played
+/// to the caller before any audio reaches the recording (0.26.0).
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct RawRecordingAnnouncement {
+    /// WAV file at the bridge rate (8/16 kHz mono). Validated at load.
+    #[serde(default)]
+    pub file: Option<String>,
 }
 
 /// `[recording.storage]` — upload finalized recordings to S3-compatible
@@ -664,6 +677,13 @@ pub struct RawGateway {
     /// signalling plane, so plaintext SIP leaks them (warned at load).
     #[serde(default)]
     pub srtp: Option<String>,
+
+    /// Default recording mode for calls placed through this gateway
+    /// (0.26.0): `"off"` (default) | `"always"` | `"on_demand"`. A
+    /// per-originate `recording` field overrides it. Requires
+    /// `[recording].dir` when not `"off"`.
+    #[serde(default)]
+    pub recording: Option<String>,
 }
 
 /// `[outbound]` — global outbound-origination controls (0.6.0). The native

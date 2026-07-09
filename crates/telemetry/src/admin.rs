@@ -148,6 +148,10 @@ pub struct OriginateRequest {
     /// (early offer — SiphonAI offers in the INVITE).
     #[serde(default)]
     pub delayed_offer: bool,
+    /// Recording override for this leg (0.26.0): `"off"` / `"always"` /
+    /// `"on_demand"`. Falls back to the gateway's `recording` default.
+    #[serde(default)]
+    pub recording: Option<String>,
 }
 
 /// Why an originate request was refused synchronously (before the call is
@@ -164,6 +168,9 @@ pub enum OriginateRejection {
     AtCapacity,
     /// The per-second outbound rate limit was exceeded → 429.
     RateLimited,
+    /// Bad `recording` value, or recording requested with no
+    /// `[recording].dir` configured → 400 (0.26.0).
+    BadRecording(String),
 }
 
 /// The outbound-origination entry point the admin endpoint calls. Defined
@@ -592,6 +599,9 @@ fn originate_call(state: &AdminState, body: &Bytes) -> Response<Full<Bytes>> {
                     StatusCode::TOO_MANY_REQUESTS,
                     "outbound rate limit exceeded".to_string(),
                 ),
+                OriginateRejection::BadRecording(r) => {
+                    (StatusCode::BAD_REQUEST, format!("bad recording: {r}"))
+                }
             };
             json_response(status, &json!({ "error": msg }))
         }

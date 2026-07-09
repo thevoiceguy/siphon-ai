@@ -493,7 +493,7 @@ impl Runtime {
             // Share the same HEP worker the SIP/RTCP/CDR emitters use so
             // the verstat chunk lands on the same Homer call view.
             .with_hep_telemetry(hep_telemetry.clone())
-            .with_recording(recording)
+            .with_recording(recording.clone())
             .with_recording_upload(recording_upload.clone())
             .with_hold_moh_file(media.moh_file.clone())
             .with_control_registry(control_registry.clone());
@@ -889,6 +889,11 @@ impl Runtime {
             // Hold music for the WS-reconnect gap on outbound legs (0.7.3) —
             // the same [media].moh_file the inbound acceptor uses.
             service = service.with_moh_file(media.moh_file.clone());
+            // Outbound recording (0.26.0): same [recording] dir/encryption/
+            // format and the same upload spool as inbound.
+            service = service
+                .with_recording(recording.clone())
+                .with_recording_upload(recording_upload.clone());
             if let Some(reg) = &conference_registry {
                 service = service.with_conference(reg.clone());
             }
@@ -2123,6 +2128,8 @@ pub(crate) fn build_gateways(
                         siphon_ai_media_glue::OutboundSrtp::Required
                     }
                 },
+
+                recording: gw.recording,
             },
         );
     }

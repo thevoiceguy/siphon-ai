@@ -597,6 +597,19 @@ pub enum BridgeIn {
     /// Resume recording after a [`BridgeIn::PauseRecording`].
     ResumeRecording { call_id: CallId },
 
+    /// Record the fact that the server captured recording consent
+    /// (0.26.0) — e.g. a DTMF "press 1 to consent" or a verbal yes your
+    /// bot recognized. SiphonAI stores the note on the call's CDR
+    /// (`consent.server`) for the audit trail; it does not gate
+    /// recording (use `on_demand` + `start_recording` for gating).
+    /// `note` is a short free-form description ("dtmf-1",
+    /// "verbal-yes@12s", …), truncated to 256 bytes.
+    SetRecordingConsent {
+        call_id: CallId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+
     /// Park this call (0.7.0, §2.4): detach the WS session and shelve
     /// the call playing hold music, keeping the SIP dialog + RTP alive.
     /// Self-scoped. SiphonAI replies `stop { reason: "park" }` and
@@ -1026,6 +1039,24 @@ mod tests {
             panic!("expected Hangup");
         };
         assert_eq!(cause, HangupCause::Normal);
+    }
+
+    #[test]
+    fn bridge_in_set_recording_consent() {
+        let raw = r#"{ "type": "set_recording_consent", "call_id": "c", "note": "dtmf-1" }"#;
+        let msg: BridgeIn = assert_round_trip(raw);
+        let BridgeIn::SetRecordingConsent { note, .. } = msg else {
+            panic!("expected SetRecordingConsent");
+        };
+        assert_eq!(note.as_deref(), Some("dtmf-1"));
+
+        // `note` is optional — the bare form parses too.
+        let raw = r#"{ "type": "set_recording_consent", "call_id": "c" }"#;
+        let msg: BridgeIn = serde_json::from_str(raw).unwrap();
+        assert!(matches!(
+            msg,
+            BridgeIn::SetRecordingConsent { note: None, .. }
+        ));
     }
 
     #[test]

@@ -37,6 +37,9 @@ pub struct RecordingConfig {
     pub encryption: Option<Kek>,
     /// `[recording].format` (0.25.0): `wav` (default) or `opus`.
     pub format: RecordingFormat,
+    /// `[recording.announcement].file` (0.26.0): a WAV played to the
+    /// caller before capture starts. `None` = no announcement.
+    pub announcement: Option<PathBuf>,
 }
 
 impl Default for RecordingConfig {
@@ -46,6 +49,7 @@ impl Default for RecordingConfig {
             dir: PathBuf::new(),
             encryption: None,
             format: RecordingFormat::default(),
+            announcement: None,
         }
     }
 }
@@ -79,4 +83,6 @@ pub struct RecordingSetup {
     pub encryption: Option<Kek>,
     /// Output format (0.25.0).
     pub format: RecordingFormat,
+    /// Announcement to play before capture starts (0.26.0).
+    pub announcement: Option<PathBuf>,
 }

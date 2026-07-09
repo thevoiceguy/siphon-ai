@@ -32,8 +32,8 @@ pub mod webhook;
 pub use file::{FileSink, FileSinkError};
 pub use hep::HepCdrSink;
 pub use schema::{
-    AudioInfo, CdrRecord, Direction, HoldInfo, ParkInfo, ReconnectInfo, TerminationCause,
-    TerminationInfo, CDR_VERSION,
+    AudioInfo, CdrRecord, ConsentInfo, Direction, HoldInfo, ParkInfo, ReconnectInfo,
+    TerminationCause, TerminationInfo, CDR_VERSION,
 };
 pub use sink::{CdrSink, CdrSinkHandle, MultiSink, NullSink};
 pub use webhook::{WebhookSink, WebhookSinkConfig};

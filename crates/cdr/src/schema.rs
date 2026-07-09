@@ -116,6 +116,13 @@ pub struct CdrRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_url: Option<String>,
 
+    /// Recording-consent audit trail (0.26.0), present when a "this call
+    /// is recorded" announcement played and/or the WS server reported
+    /// captured consent (`set_recording_consent`). Omitted otherwise.
+    /// Additive optional field → CDR schema version unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent: Option<ConsentInfo>,
+
     /// Park summary (0.7.0), present when the call was parked at least
     /// once. Omitted otherwise. Additive optional field → CDR schema
     /// stays at version 1.
@@ -133,6 +140,21 @@ pub struct CdrRecord {
     /// field → CDR schema stays at version 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconnect: Option<ReconnectInfo>,
+}
+
+/// Recording-consent audit trail on the CDR (0.26.0).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsentInfo {
+    /// The daemon played the `[recording.announcement]` file to the
+    /// caller before capture started.
+    pub announced: bool,
+    /// Announcement duration in milliseconds (0 when `announced` is
+    /// false).
+    pub announcement_ms: u64,
+    /// The WS server's consent note (`set_recording_consent`), e.g.
+    /// "dtmf-1". Absent when the server never reported consent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
 }
 
 /// Per-call park accounting on the CDR (0.7.0).
@@ -285,6 +307,7 @@ mod tests {
             recording_path: None,
             recording_encrypted: None,
             recording_url: None,
+            consent: None,
             park: None,
             hold: None,
             reconnect: None,

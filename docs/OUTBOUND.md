@@ -68,6 +68,8 @@ curl -X POST http://localhost:9091/admin/v1/calls -d '{
 | `gateway` | yes | A `[[gateway]]` name. `404` if unknown. |
 | `ws_url` | no | WS server for this call. Falls back to `[bridge].ws_url`; `400` if neither is set. |
 | `from` | no | Caller-ID override (full `sip:` URI). Falls back to the gateway's `from`. |
+| `delayed_offer` | no | Place the call as a delayed offer (RFC 3264, 0.9.0): INVITE without SDP, answer the peer's offer in the ACK. Default `false`. |
+| `recording` | no | Recording override for this leg (0.26.0): `"off"` / `"always"` / `"on_demand"`. Falls back to the gateway's `recording` default (itself `"off"`). `400` for other values or when recording is requested with no `[recording].dir` configured. Recorded outbound legs behave exactly like inbound: same dir/encryption/format/upload, `recording_*` on the CDR, on-demand WS controls. |
 
 `202` means *admitted and dialing*, not answered — the HTTP exchange ends
 there, and everything after arrives out-of-band (see [§4](#4-call-lifecycle)).
@@ -115,6 +117,8 @@ proxy     = "siptrunk.example.com"
 from      = "sip:+13125551234@siptrunk.example.com"
 transport = "tls"          # secures the signalling that carries the SDES key
 srtp      = "required"      # "off" (default) | "preferred" | "required"
+recording = "off"           # per-gateway recording default (0.26.0):
+                            # "off" | "always" | "on_demand"
 ```
 
 SiphonAI offers SDES (RFC 4568): it mints an `AES_CM_128_HMAC_SHA1_80` master

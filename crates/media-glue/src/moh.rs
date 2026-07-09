@@ -126,6 +126,56 @@ impl std::fmt::Debug for MohSource {
     }
 }
 
+/// Play-once announcement source (0.26.0) — the "this call may be
+/// recorded" prompt played to the caller before capture starts. Unlike
+/// [`MohSource`] it does **not** loop: EOF means the announcement
+/// finished. And unlike MOH it is **fail-loud**: a compliance prompt
+/// that can't play must surface as an error (the caller of `new`
+/// fail-closes recording), never degrade to comfort noise.
+pub struct AnnounceSource {
+    file: FileSource,
+    frame_samples: usize,
+}
+
+impl std::fmt::Debug for AnnounceSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnnounceSource")
+            .field("frame_samples", &self.frame_samples)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AnnounceSource {
+    /// Open `path` at the call's `sample_rate`. Errors on any load or
+    /// rate problem (forge has no resampler — provide the file at the
+    /// bridge rate, 8 or 16 kHz).
+    pub fn new(path: &Path, sample_rate: u32) -> Result<Self, String> {
+        let frame_samples = (sample_rate / 1000) as usize * 20;
+        let file = FileSource::open_trusted(path)
+            .and_then(|f| f.with_sample_rate(sample_rate))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Self {
+            file,
+            frame_samples,
+        })
+    }
+
+    /// One 20 ms PCM16 frame, or `None` when the announcement has
+    /// finished. A short tail read is zero-padded so the last frame
+    /// plays whole; a decode error ends the announcement (fail-closed
+    /// is the caller's job).
+    pub fn next_frame(&mut self) -> Option<Vec<i16>> {
+        match self.file.read_frame(self.frame_samples) {
+            Ok(frame) if frame.is_empty() => None,
+            Ok(mut frame) => {
+                frame.resize(self.frame_samples, 0);
+                Some(frame)
+            }
+            Err(_) => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +193,61 @@ mod tests {
     fn frame_size_tracks_rate() {
         let mut moh16 = MohSource::new(None, 16000);
         assert_eq!(moh16.next_frame().len(), 320);
+    }
+
+    /// Minimal mono PCM16 WAV: `n_samples` at `rate`.
+    fn write_wav(path: &Path, rate: u32, n_samples: usize) {
+        let data_len = (n_samples * 2) as u32;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data_len).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        b.extend_from_slice(&1u16.to_le_bytes()); // mono
+        b.extend_from_slice(&rate.to_le_bytes());
+        b.extend_from_slice(&(rate * 2).to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&data_len.to_le_bytes());
+        for i in 0..n_samples {
+            b.extend_from_slice(&(((i % 100) as i16) * 50).to_le_bytes());
+        }
+        std::fs::write(path, b).unwrap();
+    }
+
+    #[test]
+    fn announce_plays_once_then_eof() {
+        let dir = std::env::temp_dir().join(format!("siphon_ann_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("prompt.wav");
+        // 2.5 frames at 8 kHz: 400 samples → 2 full frames + 1 padded tail.
+        write_wav(&wav, 8000, 400);
+
+        let mut src = AnnounceSource::new(&wav, 8000).expect("opens at matching rate");
+        let mut frames = 0;
+        while let Some(frame) = src.next_frame() {
+            assert_eq!(frame.len(), 160, "frames are whole (tail zero-padded)");
+            frames += 1;
+            assert!(frames < 10, "must not loop like MOH");
+        }
+        assert_eq!(frames, 3, "2 full + 1 padded tail, then EOF");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn announce_fails_loud_on_missing_or_mismatched_file() {
+        assert!(AnnounceSource::new(Path::new("/nonexistent/x.wav"), 8000).is_err());
+        let dir = std::env::temp_dir().join(format!("siphon_ann_mm_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("wrong-rate.wav");
+        write_wav(&wav, 44_100, 1000);
+        // 44.1 kHz file at an 8 kHz call: forge has no resampler → error,
+        // never comfort-noise (this is a compliance prompt).
+        assert!(AnnounceSource::new(&wav, 8000).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

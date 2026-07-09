@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-07-09
+
+### Added
+
+- **Machine-readable protocol schema — `schemas/siphon-ai.v1.json`** (P1
+  "Protocol SDKs & machine-readable schemas", first release; design note
+  `docs/design/DESIGN_PROTOCOL_SDKS.md`). The complete WS protocol
+  contract as JSON Schema draft 2020-12, **generated from the Rust wire
+  types** in `crates/bridge`: `$defs/BridgeOut` (21 daemon→server
+  messages) + `$defs/BridgeIn` (17 server→daemon), doc comments as
+  descriptions, and an `x-binary-frames` annotation describing the audio
+  half (raw PCM16-LE, 320 B @ 8 kHz / 640 B @ 16 kHz, 20 ms). Point your
+  editor, validator, or code generator at it. The top level is `anyOf`
+  (not `oneOf`): `hold`/`resume`/`mark` exist in both directions, so
+  validate against the direction-specific union when you know who sent
+  the frame. A new CI gate regenerates the schema and diffs it on every
+  PR, **and validates every JSON example in `docs/PROTOCOL.md` against
+  it** (39 today) — the protocol docs, Rust types, and schema can no
+  longer drift apart silently. Generation is behind a dev-only
+  `json-schema` cargo feature (`schemars`); the daemon binary is
+  unchanged. Protocol stays **v1**.
+
 ## [0.26.0] - 2026-07-09
 
 ### Added

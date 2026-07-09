@@ -169,7 +169,8 @@ call. A recording is always best-effort; it never degrades call quality.
   buys little for telephony audio.)
 - Object storage: upload-only (§9) — the daemon never serves or fetches
   recordings back.
-- Inbound calls only; outbound-leg recording is planned (§5).
+- Outbound legs record too (0.26.0): per-gateway `recording` default +
+  per-originate override — see `docs/OUTBOUND.md` §2.
 - WAV `data`/`RIFF` sizes are 32-bit, so a single recording over ~4 GiB
   (many hours of 16 kHz stereo) saturates the header sizes — not a concern
   for normal call lengths.

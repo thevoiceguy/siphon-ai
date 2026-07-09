@@ -33,7 +33,7 @@ use siphon_ai_media_glue::{
 };
 use siphon_ai_telemetry::{
     OriginateRejection, OriginateRequest, OutboundOriginateHandle, OUTBOUND_CALLS_ACTIVE,
-    OUTBOUND_CALLS_TOTAL, OUTBOUND_SRTP_TOTAL,
+    OUTBOUND_CALLS_TOTAL, OUTBOUND_SRTP_TOTAL, RECORDINGS_TOTAL,
 };
 use siphon_ai_webhooks::{
     CallEndEvent, OutboundAnsweredEvent, OutboundFailedEvent, OutboundInitiatedEvent, WebhookEvent,
@@ -55,6 +55,7 @@ use crate::outbound::{
 use crate::park::ParkContext;
 use crate::registry::{CallControlRegistry, ConsultRegistry};
 use crate::transfer::{DialogControl, DialogSource, TransferContext};
+use siphon_ai_recording::{RecordingConfig, RecordingMode, RecordingSetup};
 
 /// One configured outbound gateway, ready to dial. Built by the daemon from a
 /// compiled `[[gateway]]` (the `siphon-ai-config::Gateway`) plus a per-gateway
@@ -73,6 +74,9 @@ pub struct OutboundGateway {
     /// SRTP policy for media on this trunk (0.7.x). The daemon maps the
     /// config gateway's `SrtpMode` onto this when building the service.
     pub srtp: OutboundSrtp,
+    /// Default recording mode for calls through this gateway (0.26.0).
+    /// A per-originate `recording` override wins.
+    pub recording: RecordingMode,
 }
 
 /// Daemon-wide outbound-origination service.
@@ -104,6 +108,12 @@ pub struct OutboundService {
     /// Shared with the inbound side (the acceptor's `hold_moh_file`).
     /// `None` → comfort silence.
     moh_file: Option<std::path::PathBuf>,
+    /// `[recording]` config (0.26.0) — outbound legs record with the
+    /// same dir/encryption/format as inbound.
+    recording: RecordingConfig,
+    /// `[recording.storage]` upload settings, shared with the acceptor's
+    /// teardown enqueue.
+    recording_upload: Option<std::sync::Arc<siphon_ai_http::upload::UploadSettings>>,
 }
 
 impl OutboundService {
@@ -129,7 +139,26 @@ impl OutboundService {
             control_registry: CallControlRegistry::new(),
             park: None,
             moh_file: None,
+            recording: RecordingConfig::default(),
+            recording_upload: None,
         }
+    }
+
+    /// Install the `[recording]` config so outbound legs can record
+    /// (0.26.0). Without this every originated call runs unrecorded.
+    pub fn with_recording(mut self, recording: RecordingConfig) -> Self {
+        self.recording = recording;
+        self
+    }
+
+    /// Install `[recording.storage]` upload settings (0.25.0/0.26.0) so
+    /// finalized outbound recordings are spooled for upload too.
+    pub fn with_recording_upload(
+        mut self,
+        upload: Option<std::sync::Arc<siphon_ai_http::upload::UploadSettings>>,
+    ) -> Self {
+        self.recording_upload = upload;
+        self
     }
 
     /// Share the daemon's conference registry so outbound calls can
@@ -198,6 +227,27 @@ impl OutboundOriginateHandle for OutboundService {
         let target = SipUri::parse(&target_str)
             .map_err(|e| OriginateRejection::BadTarget(format!("{target_str}: {e}")))?;
 
+        // Recording for this leg (0.26.0): per-request override beats the
+        // gateway default. Same vocabulary as [recording].mode; anything
+        // else — or recording without a configured [recording].dir — is a
+        // 400, before a concurrency permit is consumed.
+        let recording_mode = match req.recording.as_deref() {
+            None => gw.recording,
+            Some("off") => RecordingMode::Off,
+            Some("always") => RecordingMode::Always,
+            Some("on_demand") => RecordingMode::OnDemand,
+            Some(other) => {
+                return Err(OriginateRejection::BadRecording(format!(
+                    "{other:?} (expected \"off\", \"always\", or \"on_demand\")"
+                )))
+            }
+        };
+        if recording_mode != RecordingMode::Off && self.recording.dir.as_os_str().is_empty() {
+            return Err(OriginateRejection::BadRecording(
+                "recording requested but [recording].dir is not configured".into(),
+            ));
+        }
+
         // Admit — the permit lives for the spawned call's whole lifetime.
         let permit = self.guard.try_admit().map_err(|r| match r {
             OutboundRejection::AtCapacity => OriginateRejection::AtCapacity,
@@ -260,6 +310,19 @@ impl OutboundOriginateHandle for OutboundService {
         let ws_reconnect_enabled = self.defaults.ws_reconnect_enabled;
         let ws_reconnect_max = self.defaults.ws_reconnect_max;
         let ws_reconnect_moh_file = self.moh_file.clone();
+        // Recording setup mirrors the inbound acceptor's resolution: the
+        // path keys on the bridge id, `always` auto-starts, `on_demand`
+        // wires the writer idle for a WS `start_recording`.
+        let recording_setup = match recording_mode {
+            RecordingMode::Off => None,
+            mode => Some(RecordingSetup {
+                path: self.recording.path_for(bridge_id.as_str()),
+                auto_start: mode == RecordingMode::Always,
+                encryption: self.recording.encryption.clone(),
+                format: self.recording.format,
+            }),
+        };
+        let recording_upload = self.recording_upload.clone();
 
         info!(call_id = %bridge_id_str, gateway = %gateway, "originating outbound call");
         let log_id = bridge_id_str.clone();
@@ -301,6 +364,8 @@ impl OutboundOriginateHandle for OutboundService {
                         ws_reconnect_enabled,
                         ws_reconnect_max,
                         ws_reconnect_moh_file,
+                        recording_setup,
+                        recording_upload,
                     };
                     run_call(originator, call, bridge, ctx).await;
                 }
@@ -376,6 +441,11 @@ struct OutboundCallContext {
     ws_reconnect_enabled: bool,
     ws_reconnect_max: std::time::Duration,
     ws_reconnect_moh_file: Option<std::path::PathBuf>,
+    /// Recording for this leg (0.26.0), resolved at originate time
+    /// (request override > gateway default). `None` = unrecorded.
+    recording_setup: Option<RecordingSetup>,
+    /// `[recording.storage]` upload settings for the teardown enqueue.
+    recording_upload: Option<std::sync::Arc<siphon_ai_http::upload::UploadSettings>>,
 }
 
 /// Run an answered outbound call's audio bridge to completion, tear it
@@ -485,7 +555,7 @@ async fn run_call(
         // (0.7.3) — same as the acceptor does for inbound.
         media_tap: accepted.tap.with_ws_reconnect(ctx.ws_reconnect_enabled),
         transfer: Some(transfer),
-        recording: None,
+        recording: ctx.recording_setup.clone(),
         conference: ctx.conference.clone(),
         park: ctx.park.clone(),
         hold,
@@ -514,8 +584,27 @@ async fn run_call(
     drop(call_handle); // stop keepalives / session-timer tasks
 
     let view = CallTerminationView::from_run_result(run_result);
+    if let Some(rec) = view.recording.as_ref() {
+        metrics::counter!(RECORDINGS_TOTAL, "result" => rec.result.as_str()).increment(1);
+    }
     let ended_at = Utc::now();
-    let record = build_outbound_record(&ctx, &sip_call_id, audio, &ws_url, ended_at, &view);
+    let mut record = build_outbound_record(&ctx, &sip_call_id, audio, &ws_url, ended_at, &view);
+    // Spool the finalized recording for object-storage upload (0.25.0
+    // machinery, outbound wiring 0.26.0) — mirrors the inbound acceptor.
+    if let (Some(upload), Some(rec)) = (ctx.recording_upload.as_ref(), view.recording.as_ref()) {
+        if rec.result != crate::call::RecordingResult::Failed {
+            let key = upload.render_key(&record.call_id, &record.route, "outbound", &rec.path);
+            let job = upload.job(&record.call_id, key.clone(), rec.path.clone());
+            match upload.enqueue(&job) {
+                Ok(()) => record.recording_url = Some(upload.planned_uri(&key)),
+                Err(err) => warn!(
+                    call_id = %record.call_id,
+                    error = %err,
+                    "could not spool recording upload; kept local only"
+                ),
+            }
+        }
+    }
     let end_event = WebhookEvent::CallEnd(CallEndEvent {
         version: WEBHOOK_VERSION,
         call_id: ctx.bridge_id.as_str().to_string(),
@@ -563,16 +652,27 @@ fn build_outbound_record(
             bridge_disconnect: view.bridge_detail.clone(),
             tap_disconnect: view.tap_detail.clone(),
         },
-        // STIR/SHAKEN verstat is an inbound-verification concern; recording
-        // isn't wired for outbound calls in this release (controller runs
-        // with `recording: None`).
+        // STIR/SHAKEN verstat is an inbound-verification concern.
         verstat_attest: None,
         verstat_passed: None,
-        recording_id: None,
-        recording_path: None,
-        recording_encrypted: None,
+        // Recording works on outbound legs since 0.26.0; recording_id ==
+        // call_id, same as inbound. `recording_url` is stamped post-hoc
+        // by the upload-enqueue block.
+        recording_id: view
+            .recording
+            .as_ref()
+            .map(|_| ctx.bridge_id.as_str().to_string()),
+        recording_path: view
+            .recording
+            .as_ref()
+            .map(|r| r.path.display().to_string()),
+        recording_encrypted: view.recording.as_ref().map(|r| r.encrypted),
         recording_url: None,
-        consent: None,
+        consent: view.consent.as_ref().map(|c| siphon_ai_cdr::ConsentInfo {
+            announced: c.announced,
+            announcement_ms: c.announcement_ms,
+            server: c.server.clone(),
+        }),
         // Outbound bots can park too (0.7.0); carry the accounting.
         park: view.park.map(|p| siphon_ai_cdr::ParkInfo {
             count: p.count,
@@ -618,6 +718,8 @@ mod tests {
             ws_reconnect_enabled: false,
             ws_reconnect_max: std::time::Duration::from_secs(30),
             ws_reconnect_moh_file: None,
+            recording_setup: None,
+            recording_upload: None,
         };
         let view = CallTerminationView {
             cause: CdrTerminationCause::ServerHangup,

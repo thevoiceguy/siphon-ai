@@ -231,6 +231,9 @@ pub struct Gateway {
     /// SRTP. Maps onto `siphon-ai-media-glue::OutboundSrtp` at the
     /// originate path.
     pub srtp: siphon_ai_core::SrtpMode,
+    /// Default recording mode for calls placed through this gateway
+    /// (0.26.0). A per-originate override wins; `Off` is the default.
+    pub recording: siphon_ai_recording::RecordingMode,
 }
 
 impl Gateway {
@@ -820,6 +823,14 @@ pub enum CompileError {
     #[error("[recording.storage].{0} is required when enabled")]
     RecordingStorageField(&'static str),
 
+    #[error(
+        "[[gateway]] {gateway:?}: recording is {value:?}; expected \"off\", \"always\", or \"on_demand\""
+    )]
+    GatewayRecordingModeInvalid { gateway: String, value: String },
+
+    #[error("[[gateway]] {gateway:?} enables recording but [recording].dir is unset")]
+    GatewayRecordingWithoutDir { gateway: String },
+
     #[error("[recording.encryption]: set exactly one of `kek` or `[recording.encryption.kms]`")]
     RecordingKekXorKms,
 
@@ -1079,7 +1090,18 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let raw_recording_storage = raw_recording.storage.take();
     let recording = compile_recording(raw_recording)?;
     let recording_storage = compile_recording_storage(raw_recording_storage, &recording)?;
+    // (0.26.0) A gateway that defaults recording on needs the global
+    // recording dir — same invariant as per-route recording.
     let outbound = compile_outbound(raw.outbound, raw.gateways, &registrations)?;
+    for gw in &outbound.gateways {
+        if gw.recording != siphon_ai_recording::RecordingMode::Off
+            && recording.dir.as_os_str().is_empty()
+        {
+            return Err(CompileError::GatewayRecordingWithoutDir {
+                gateway: gw.name.clone(),
+            });
+        }
+    }
     let conference = compile_conference(raw.conference)?;
     let park = compile_park(raw.park)?;
     let cdr = compile_cdr(raw.cdr)?;
@@ -1783,6 +1805,19 @@ fn compile_outbound(
         // resolve it once and stamp it into whichever branch builds the
         // Gateway. Unknown value fails loud (same as [media].srtp).
         let srtp = compile_srtp_mode(g.srtp.as_deref())?;
+        // Per-gateway recording default (0.26.0) — same vocabulary as
+        // [recording].mode / [route.recording].mode.
+        let recording = match g.recording.as_deref() {
+            None | Some("") | Some("off") => siphon_ai_recording::RecordingMode::Off,
+            Some("always") => siphon_ai_recording::RecordingMode::Always,
+            Some("on_demand") => siphon_ai_recording::RecordingMode::OnDemand,
+            Some(other) => {
+                return Err(CompileError::GatewayRecordingModeInvalid {
+                    gateway: g.name.clone(),
+                    value: other.to_string(),
+                })
+            }
+        };
 
         let gw = if let Some(reg_name) = g.register.as_deref().filter(|s| !s.is_empty()) {
             // Register reuse — inherit server + credentials + AOR +
@@ -1818,6 +1853,7 @@ fn compile_outbound(
                     realm: reg.realm.clone(),
                 }),
                 srtp,
+                recording,
             }
         } else {
             // Standalone trunk.
@@ -1884,6 +1920,7 @@ fn compile_outbound(
                 from,
                 credentials,
                 srtp,
+                recording,
             }
         };
 
@@ -3298,6 +3335,30 @@ mod outbound_tests {
             expires: Duration::from_secs(3600),
             register_on_startup: true,
         }
+    }
+
+    #[test]
+    fn gateway_recording_mode_parses_and_fails_loud() {
+        use siphon_ai_recording::RecordingMode;
+        let raw = RawGateway {
+            proxy: Some("sip.example.com:5060".into()),
+            from: Some("sip:bot@example.com".into()),
+            recording: Some("always".into()),
+            ..gw("t")
+        };
+        let out = compile_outbound(RawOutbound::default(), vec![raw], &[]).unwrap();
+        assert_eq!(out.gateway("t").unwrap().recording, RecordingMode::Always);
+
+        let raw = RawGateway {
+            proxy: Some("sip.example.com:5060".into()),
+            from: Some("sip:bot@example.com".into()),
+            recording: Some("sometimes".into()),
+            ..gw("t")
+        };
+        assert!(matches!(
+            compile_outbound(RawOutbound::default(), vec![raw], &[]),
+            Err(CompileError::GatewayRecordingModeInvalid { value, .. }) if value == "sometimes"
+        ));
     }
 
     #[test]

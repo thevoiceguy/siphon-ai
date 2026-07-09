@@ -664,6 +664,13 @@ pub struct RawGateway {
     /// signalling plane, so plaintext SIP leaks them (warned at load).
     #[serde(default)]
     pub srtp: Option<String>,
+
+    /// Default recording mode for calls placed through this gateway
+    /// (0.26.0): `"off"` (default) | `"always"` | `"on_demand"`. A
+    /// per-originate `recording` field overrides it. Requires
+    /// `[recording].dir` when not `"off"`.
+    #[serde(default)]
+    pub recording: Option<String>,
 }
 
 /// `[outbound]` — global outbound-origination controls (0.6.0). The native

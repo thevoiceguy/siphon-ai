@@ -233,6 +233,19 @@ pub enum TapCommand {
     /// direct caller↔WS pair on the **existing** channels (no swap, the
     /// WS never went away). A no-op if not held.
     Unhold,
+
+    /// Play a one-shot announcement to the caller (0.26.0 — the "this
+    /// call may be recorded" compliance prompt). While it plays: caller
+    /// frames are dropped (not forwarded to the WS, **not** forked to
+    /// the recording — capture starts after the prompt) and WS playout
+    /// is drained-and-dropped (the bot can't talk over it). At EOF the
+    /// elapsed milliseconds are reported on `done` and the direct
+    /// caller↔WS pair resumes. A `Park`/`Hold` during the announcement
+    /// ends it early (reported as done).
+    Announce {
+        source: Box<crate::moh::AnnounceSource>,
+        done: tokio::sync::oneshot::Sender<u64>,
+    },
 }
 
 /// How the tap reacts to forge-vad `SpeechStarted` events. Mirrors
@@ -537,6 +550,14 @@ impl MediaTap {
         // practice (a parked call has no WS to drive a hold), but the
         // arms below treat them independently for clarity.
         let mut held: Option<crate::moh::MohSource> = None;
+        // One-shot announcement (0.26.0): the playing source, its
+        // completion channel, and frames played so far. Cleared (and
+        // `done` fired) at EOF or when park/hold preempts it.
+        let mut announcing: Option<(
+            Box<crate::moh::AnnounceSource>,
+            tokio::sync::oneshot::Sender<u64>,
+            u64,
+        )> = None;
         // WS-reconnect survival (0.7.3). When `survive_ws_drop` is set and
         // the WS-facing channels close (bridge task ended on an unexpected
         // drop), we set `ws_dropped` to suppress the close-driven teardown
@@ -688,7 +709,7 @@ impl MediaTap {
                     // leaving it un-recv'd would back-pressure the open
                     // bridge. A genuine WS disconnect still tears down via
                     // the `None` branch above.
-                    if held.is_some() {
+                    if held.is_some() || announcing.is_some() {
                         continue;
                     }
                     // `TapCommand::Mute` gates AI-side playout. We
@@ -777,6 +798,12 @@ impl MediaTap {
                     }
                     reframer.push(&frame.samples);
                     while let Some(samples) = reframer.pop_frame() {
+                        // Announcing (0.26.0): drop the frame entirely —
+                        // no WS forward AND no recording fork; capture
+                        // starts only after the compliance prompt.
+                        if announcing.is_some() {
+                            continue;
+                        }
                         // Parked or held: don't forward the caller to
                         // the WS (parked = no WS; held = caller is on
                         // hold). Keep recording the caller's own voice
@@ -1299,6 +1326,11 @@ impl MediaTap {
                                 call_id = %self.call_id,
                                 "tap parked; playing hold music, WS detached"
                             );
+                            if let Some((_, done, frames)) = announcing.take() {
+                                debug!(call_id = %self.call_id,
+                                       "announcement cut short by park");
+                                let _ = done.send(frames * 20);
+                            }
                             parked = Some(*moh);
                             // Align the MOH cadence to now so the first
                             // frame plays ~20 ms from here, not whenever
@@ -1342,9 +1374,27 @@ impl MediaTap {
                                 call_id = %self.call_id,
                                 "tap held; playing hold music, WS attached but paused"
                             );
+                            if let Some((_, done, frames)) = announcing.take() {
+                                debug!(call_id = %self.call_id,
+                                       "announcement cut short by hold");
+                                let _ = done.send(frames * 20);
+                            }
                             held = Some(*moh);
                             // Align the MOH cadence to now (same as Park).
                             moh_tick.reset();
+                        }
+                        TapCommand::Announce { source, done } => {
+                            if parked.is_some() || held.is_some() {
+                                // Park/hold owns the caller's ear; skip
+                                // the prompt rather than queue it.
+                                debug!(call_id = %self.call_id,
+                                       "announce skipped: call is parked/held");
+                                let _ = done.send(0);
+                            } else {
+                                info!(call_id = %self.call_id, "announcement started");
+                                announcing = Some((source, done, 0));
+                                moh_tick.reset();
+                            }
                         }
                         TapCommand::Unhold => {
                             if held.take().is_some() {
@@ -1433,7 +1483,37 @@ impl MediaTap {
                 // MOH playout while parked or held: one hold-music frame
                 // per 20 ms into the caller leg. Active in either state;
                 // both share the same MohSource-driven tick.
-                _ = moh_tick.tick(), if parked.is_some() || held.is_some() => {
+                _ = moh_tick.tick(), if parked.is_some() || held.is_some() || announcing.is_some() => {
+                    // Announcement plays only when neither park nor hold
+                    // owns the tick (they preempt it at the command site).
+                    if parked.is_none() && held.is_none() {
+                        if let Some((source, _, frames)) = announcing.as_mut() {
+                            match source.next_frame() {
+                                Some(samples) => {
+                                    *frames += 1;
+                                    let frame = OutboundMediaFrame {
+                                        target: MediaTarget::A,
+                                        sample_rate: self.sample_rate,
+                                        samples,
+                                        playback_id: None,
+                                        mode: PlayoutMode::Append,
+                                    };
+                                    self.handle
+                                        .send_audio(frame)
+                                        .await
+                                        .map_err(|e| MediaTapError::PlayoutFailed(e.to_string()))?;
+                                }
+                                None => {
+                                    if let Some((_, done, frames)) = announcing.take() {
+                                        debug!(call_id = %self.call_id, ms = frames * 20,
+                                               "announcement finished");
+                                        let _ = done.send(frames * 20);
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     if let Some(moh) = parked.as_mut().or(held.as_mut()) {
                         let samples = moh.next_frame();
                         // Recording right channel = what the caller

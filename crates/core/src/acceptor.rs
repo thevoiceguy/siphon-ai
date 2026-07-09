@@ -3552,12 +3552,14 @@ impl BridgingAcceptor {
                 auto_start: true,
                 encryption: self.recording.encryption.clone(),
                 format: self.recording.format,
+                announcement: self.recording.announcement.clone(),
             }),
             RecordingMode::OnDemand => Some(RecordingSetup {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: false,
                 encryption: self.recording.encryption.clone(),
                 format: self.recording.format,
+                announcement: self.recording.announcement.clone(),
             }),
             RecordingMode::Off => None,
         };
@@ -3838,12 +3840,14 @@ impl BridgingAcceptor {
                 auto_start: true,
                 encryption: self.recording.encryption.clone(),
                 format: self.recording.format,
+                announcement: self.recording.announcement.clone(),
             }),
             RecordingMode::OnDemand => Some(RecordingSetup {
                 path: self.recording.path_for(bridge_call_id.as_str()),
                 auto_start: false,
                 encryption: self.recording.encryption.clone(),
                 format: self.recording.format,
+                announcement: self.recording.announcement.clone(),
             }),
             RecordingMode::Off => None,
         };

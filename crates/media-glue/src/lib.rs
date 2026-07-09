@@ -15,7 +15,7 @@ pub mod sdp;
 pub mod setup;
 pub mod tap;
 
-pub use moh::MohSource;
+pub use moh::{AnnounceSource, MohSource};
 pub use room::{
     spawn_room, RoomConfig, RoomEvent, RoomHandle, RoomJoinError, RoomLifecycle, RoomMembership,
     RoomObserver,

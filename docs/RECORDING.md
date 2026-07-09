@@ -152,9 +152,16 @@ call. A recording is always best-effort; it never degrades call quality.
   yourself (lifecycle policy on the storage, or a cron job) per your
   compliance window.
 - **Consent / announcement:** recording has jurisdiction-specific consent
-  law (e.g. two-party-consent regions). Playing any "this call is recorded"
-  announcement and obtaining consent are the **operator's responsibility** —
-  SiphonAI does not insert prompts. (Your WS server can play the prompt.)
+  law (e.g. two-party-consent regions). SiphonAI gives you both halves of
+  the machinery (0.26.0), but the *policy* is still yours:
+  - **`[recording.announcement].file`** — the daemon plays the prompt to
+    the caller right after answer and starts capture only when it
+    finishes. Fail-closed: if the prompt can't play, the call is not
+    recorded. The CDR records `consent { announced, announcement_ms }`.
+  - **`set_recording_consent`** (WS control, `docs/PROTOCOL.md` §4.7) —
+    when your server captures consent itself (DTMF press-1, verbal yes),
+    stamp the fact onto the CDR as `consent.server`. Pair with
+    `mode = "on_demand"` + `start_recording` to gate capture on it.
 
 ---
 

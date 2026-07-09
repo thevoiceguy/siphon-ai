@@ -64,7 +64,7 @@ use siphon_ai_bridge::{
     BridgeIn, CallId, DisconnectReason, ErrorCode, OutgoingEvent, StartMsg, StopReason,
 };
 use siphon_ai_media_glue::{
-    MediaTap, MediaTapError, MohSource, RoomMembership, TapCommand, TapDisconnect,
+    AnnounceSource, MediaTap, MediaTapError, MohSource, RoomMembership, TapCommand, TapDisconnect,
 };
 
 use crate::conference::{ConferenceError, ConferenceRegistry};
@@ -752,6 +752,17 @@ impl CallController {
         // recording `degraded`. `None` when recording is off for the call.
         let mut rec_drops: Option<Arc<AtomicU64>> = None;
         let mut rec_path: Option<std::path::PathBuf> = None;
+        // Announcement gating (0.26.0): the prompt source (sent to the
+        // tap once it's spawned), its completion channel, whether
+        // capture should start when it finishes (mode=always, or a
+        // server start_recording that arrived mid-prompt), and the
+        // played duration for the CDR consent stamp. `rec_blocked`
+        // fail-closes recording when the prompt can't play.
+        let mut announce_source: Option<Box<AnnounceSource>> = None;
+        let mut announce_done_rx: Option<tokio::sync::oneshot::Receiver<u64>> = None;
+        let mut announce_start_after = false;
+        let mut rec_blocked = false;
+        let mut announced_ms: Option<u64> = None;
         // Whether this call's recording is sealed at rest (0.24.0) — feeds
         // the CDR `recording_encrypted` flag.
         let mut rec_encrypted = false;
@@ -764,10 +775,35 @@ impl CallController {
             let drops = Arc::new(AtomicU64::new(0));
             rec_path = Some(setup.path.clone());
             rec_encrypted = setup.encryption.is_some();
-            let writer =
-                RecordingWriter::new(setup.path, media_tap.sample_rate(), setup.auto_start)
-                    .with_encryption(setup.encryption)
-                    .with_format(setup.format);
+            // Announcement gating (0.26.0): with a prompt configured the
+            // writer starts idle regardless of mode — capture begins only
+            // when the tap reports the prompt finished. An unusable
+            // prompt file FAIL-CLOSES recording for this call (capturing
+            // without the compliance announcement is worse than not
+            // capturing; the CDR consent stamp shows announced=false).
+            let mut auto_start = setup.auto_start;
+            if let Some(file) = &setup.announcement {
+                match AnnounceSource::new(file, media_tap.sample_rate()) {
+                    Ok(src) => {
+                        announce_source = Some(Box::new(src));
+                        announce_start_after = auto_start;
+                        auto_start = false;
+                    }
+                    Err(err) => {
+                        warn!(
+                            call_id = %call_id,
+                            file = %file.display(),
+                            error = %err,
+                            "recording announcement unusable; recording fail-closed for this call"
+                        );
+                        auto_start = false;
+                        rec_blocked = true;
+                    }
+                }
+            }
+            let writer = RecordingWriter::new(setup.path, media_tap.sample_rate(), auto_start)
+                .with_encryption(setup.encryption)
+                .with_format(setup.format);
             recording_task = Some(tokio::spawn(
                 writer
                     .run(rec_rx, ctrl_rx, evt_tx)
@@ -809,6 +845,25 @@ impl CallController {
         // is in place. A late handshake error surfaces as the
         // bridge task ending early, which the select! picks up.
         log_state(&call_id, CallState::Active);
+
+        // Kick off the recording announcement (0.26.0). The prompt plays
+        // to the caller while the WS session comes up in parallel
+        // (announce-then-bridge); the tap reports completion on the
+        // oneshot, which gates the recording Start below.
+        if let Some(source) = announce_source.take() {
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            match tap_cmd_tx.try_send(TapCommand::Announce {
+                source,
+                done: done_tx,
+            }) {
+                Ok(()) => announce_done_rx = Some(done_rx),
+                Err(e) => {
+                    warn!(call_id = %call_id, error = %e,
+                          "could not start announcement; recording fail-closed");
+                    rec_blocked = true;
+                }
+            }
+        }
 
         // ─── Main loop ───────────────────────────────────────────
         let termination: CallTermination;
@@ -989,7 +1044,19 @@ impl CallController {
                             }
                         }
                         Some(BridgeIn::StartRecording { call_id: cid }) => {
-                            route_rec_control(&rec_ctrl_tx, RecControl::Start, "StartRecording", &cid);
+                            if rec_blocked {
+                                warn!(call_id = %cid,
+                                      "start_recording ignored: announcement failed (recording fail-closed)");
+                            } else if announce_done_rx.is_some() {
+                                // Capture starts only after the prompt —
+                                // remember the request and act on
+                                // announcement completion.
+                                debug!(call_id = %cid,
+                                       "start_recording deferred until the announcement completes");
+                                announce_start_after = true;
+                            } else {
+                                route_rec_control(&rec_ctrl_tx, RecControl::Start, "StartRecording", &cid);
+                            }
                         }
                         Some(BridgeIn::StopRecording { call_id: cid }) => {
                             route_rec_control(&rec_ctrl_tx, RecControl::Stop, "StopRecording", &cid);
@@ -1772,6 +1839,31 @@ impl CallController {
                 }
 
                 // Recording writer lifecycle event → relay to the WS server.
+                done = recv_announce_done(&mut announce_done_rx), if announce_done_rx.is_some() => {
+                    announce_done_rx = None;
+                    match done {
+                        Ok(ms) => {
+                            info!(call_id = %call_id, announcement_ms = ms, "announcement complete");
+                            announced_ms = Some(ms);
+                            if announce_start_after {
+                                route_rec_control(
+                                    &rec_ctrl_tx,
+                                    RecControl::Start,
+                                    "announcement-complete",
+                                    &call_id,
+                                );
+                            }
+                        }
+                        Err(_) => {
+                            // Tap dropped the channel (teardown race) —
+                            // fail-closed: no capture starts.
+                            warn!(call_id = %call_id,
+                                  "announcement completion channel dropped; recording stays off");
+                            rec_blocked = true;
+                        }
+                    }
+                }
+
                 maybe_evt = recv_rec_evt(&mut rec_evt_rx) => {
                     match maybe_evt {
                         Some(evt) => {
@@ -1957,13 +2049,12 @@ impl CallController {
 
         log_state(&call_id, CallState::Done);
 
-        // `announced`/`announcement_ms` stay zero until the daemon
-        // announcement lands in a later chunk.
-        let consent_summary = consent_server.map(|server| ConsentSummary {
-            announced: false,
-            announcement_ms: 0,
-            server: Some(server),
-        });
+        let consent_summary =
+            (announced_ms.is_some() || consent_server.is_some()).then(|| ConsentSummary {
+                announced: announced_ms.is_some(),
+                announcement_ms: announced_ms.unwrap_or(0),
+                server: consent_server,
+            });
 
         Ok(CallOutcome {
             call_id,
@@ -2089,6 +2180,15 @@ fn route_rec_control(
 /// `select!`-friendly receive over the optional recording-event channel.
 /// Pends forever when there's no channel (recording off, or the writer
 /// already ended), so the arm never busy-loops.
+async fn recv_announce_done(
+    rx: &mut Option<tokio::sync::oneshot::Receiver<u64>>,
+) -> Result<u64, tokio::sync::oneshot::error::RecvError> {
+    match rx {
+        Some(r) => r.await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn recv_rec_evt(rx: &mut Option<mpsc::Receiver<RecEvent>>) -> Option<RecEvent> {
     match rx {
         Some(r) => r.recv().await,

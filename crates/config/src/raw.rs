@@ -500,6 +500,19 @@ pub struct RawRecording {
     /// `[recording.storage]` (0.25.0) — S3-compatible upload.
     #[serde(default)]
     pub storage: Option<RawRecordingStorage>,
+    /// `[recording.announcement]` (0.26.0) — consent prompt before
+    /// capture.
+    #[serde(default)]
+    pub announcement: Option<RawRecordingAnnouncement>,
+}
+
+/// `[recording.announcement]` — a "this call may be recorded" WAV played
+/// to the caller before any audio reaches the recording (0.26.0).
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct RawRecordingAnnouncement {
+    /// WAV file at the bridge rate (8/16 kHz mono). Validated at load.
+    #[serde(default)]
+    pub file: Option<String>,
 }
 
 /// `[recording.storage]` — upload finalized recordings to S3-compatible

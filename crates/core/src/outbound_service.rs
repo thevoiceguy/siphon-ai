@@ -320,6 +320,7 @@ impl OutboundOriginateHandle for OutboundService {
                 auto_start: mode == RecordingMode::Always,
                 encryption: self.recording.encryption.clone(),
                 format: self.recording.format,
+                announcement: self.recording.announcement.clone(),
             }),
         };
         let recording_upload = self.recording_upload.clone();

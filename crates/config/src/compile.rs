@@ -823,6 +823,9 @@ pub enum CompileError {
     #[error("[recording.storage].{0} is required when enabled")]
     RecordingStorageField(&'static str),
 
+    #[error("[recording.announcement].file {path:?} is unreadable: {err}")]
+    RecordingAnnouncementInvalid { path: String, err: String },
+
     #[error(
         "[[gateway]] {gateway:?}: recording is {value:?}; expected \"off\", \"always\", or \"on_demand\""
     )]
@@ -1679,11 +1682,34 @@ fn compile_recording(
         _ => None,
     };
 
+    // `[recording.announcement]` (0.26.0): the file must exist and be
+    // readable at load (fail-loud §4.6); rate compatibility is checked
+    // per-call (the bridge rate isn't known here), where a mismatch
+    // fail-closes that call's recording.
+    let announcement = match raw
+        .announcement
+        .and_then(|a| a.file)
+        .filter(|f| !f.is_empty())
+    {
+        None => None,
+        Some(file) => {
+            let path = PathBuf::from(file);
+            std::fs::File::open(&path).map_err(|err| {
+                CompileError::RecordingAnnouncementInvalid {
+                    path: path.display().to_string(),
+                    err: err.to_string(),
+                }
+            })?;
+            Some(path)
+        }
+    };
+
     Ok(RecordingConfig {
         mode,
         dir,
         encryption,
         format,
+        announcement,
     })
 }
 
@@ -2996,6 +3022,7 @@ mod recording_tests {
             format: None,
             encryption: None,
             storage: None,
+            announcement: None,
         }
     }
 

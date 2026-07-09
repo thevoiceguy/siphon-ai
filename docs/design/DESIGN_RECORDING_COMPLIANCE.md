@@ -1,6 +1,15 @@
 # Design: recording compliance & storage (P1 theme)
 
-> **Status: DECISIONS LOCKED (2026-07-08) — §6.** Same design-first cadence
+> **Status: SHIPPED — theme complete.** v0.24.0 (encryption at rest) +
+> v0.25.0 (object storage, KMS KEK, Opus) + v0.26.0 (consent + outbound)
+> released 2026-07-08/09. Deviations from the plan: the KEK seam is an
+> enum, not a trait (async-KMS-friendly, closed set); S3 multipart was
+> dropped (single-PUT + fail-loud 5 GiB cap — unreachable, WAV saturates
+> at 4 GiB); an unusable announcement FAIL-CLOSES recording (stronger
+> than the note's sketch); local-path templating stayed out (the
+> object-storage `key_template` covers naming).
+>
+> Original status line: DECISIONS LOCKED (2026-07-08) — §6. Same design-first cadence
 > as observability (→ v0.21–0.23) and security hardening (→ v0.18–0.20):
 > design note → locked decisions → chunked PRs → tag-after-merge. The build
 > follows §7; deviations get noted back here.

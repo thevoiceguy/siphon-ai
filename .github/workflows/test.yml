@@ -132,6 +132,78 @@ jobs:
           pip install --quiet jsonschema
           python3 scripts/check-protocol-schema.py
 
+  conformance:
+    name: protocol conformance (testkit vs SDK echo servers)
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the testkit
+        run: cargo build -p siphon-ai-protocol-testkit
+
+      # ── Python SDK echo server ──────────────────────────────
+      - name: Prep + start echo-ws-server-python
+        run: |
+          python3 -m venv examples/echo-ws-server-python/.venv
+          examples/echo-ws-server-python/.venv/bin/pip install --no-input \
+              -r examples/echo-ws-server-python/requirements.txt
+          examples/echo-ws-server-python/.venv/bin/python \
+              examples/echo-ws-server-python/server.py \
+              --bind 127.0.0.1:8861 > /tmp/echo-py.log 2>&1 &
+          for _ in 1 2 3 4 5; do
+            ss -ltn 'sport = :8861' | grep -q LISTEN && exit 0
+            sleep 1
+          done
+          echo "python echo server failed to bind"; cat /tmp/echo-py.log; exit 1
+
+      - name: Testkit vs Python SDK echo server
+        run: |
+          ./target/debug/siphon-ai-testkit run ws://127.0.0.1:8861/ \
+              --report /tmp/conformance-python.json
+
+      # ── TypeScript SDK echo server (Node's first CI outing) ─
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Prep + start echo-ws-server-node
+        run: |
+          cd examples/echo-ws-server-node
+          npm install --no-audit --no-fund
+          node server.mjs --bind 127.0.0.1:8862 > /tmp/echo-node.log 2>&1 &
+          for _ in 1 2 3 4 5; do
+            ss -ltn 'sport = :8862' | grep -q LISTEN && exit 0
+            sleep 1
+          done
+          echo "node echo server failed to bind"; cat /tmp/echo-node.log; exit 1
+
+      - name: Testkit vs TypeScript SDK echo server
+        run: |
+          ./target/debug/siphon-ai-testkit run ws://127.0.0.1:8862/ \
+              --report /tmp/conformance-node.json
+
+      - name: Dump server logs on failure
+        if: failure()
+        run: |
+          echo "── echo-py.log ──";   cat /tmp/echo-py.log   || true
+          echo "── echo-node.log ──"; cat /tmp/echo-node.log || true
+
+      - name: Upload conformance reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-reports
+          path: /tmp/conformance-*.json
+          if-no-files-found: ignore
+
   sipp:
     name: SIPp signaling regression
     runs-on: ubuntu-latest

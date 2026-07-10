@@ -1,0 +1,37 @@
+# The bread-and-butter path: audio in, audio out, plus unknown-message
+# tolerance. A conformant server keeps the session alive and keeps its
+# messages schema-valid throughout.
+
+name = "basic-echo"
+description = "Stream audio, expect it back correctly framed; survive an unknown event."
+
+[[steps]]                 # 1 s of caller audio at the daemon's 20 ms cadence
+action = "send_audio"
+frames = 50
+
+[[steps]]                 # expect the server to have sent audio back
+action = "expect_audio"
+min_frames = 40
+within_ms = 3000
+
+# Tolerance probe (PROTOCOL.md §5.1): the daemon may add NEW event types
+# within protocol v1 — servers must ignore what they don't know, not die.
+[[steps]]
+action = "send_raw"
+json = '{ "type": "testkit_future_event", "novel_field": true }'
+
+[[steps]]                 # prove the server survived: echo still flows
+action = "send_audio"
+frames = 25
+
+[[steps]]                 # cumulative session total: 75 sent, allow loss
+action = "expect_audio"
+min_frames = 65
+within_ms = 2000
+
+[[steps]]                 # the daemon's last message on a session…
+action = "send_stop"
+reason = "caller_hangup"
+
+[[steps]]                 # …followed by a clean close (PROTOCOL.md §5.7)
+action = "close"

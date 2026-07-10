@@ -53,6 +53,7 @@ siphon-ai/
 │   ├── cdr/                      # CDR generation (JSON), file sink, webhook sink
 │   ├── webhooks/                 # Out-of-band lifecycle webhooks (HTTP POST)
 │   ├── config/                   # TOML config + validation + reload
+│   ├── protocol-testkit/         # siphon-ai-testkit: WS protocol conformance harness
 │   └── telemetry/                # tracing + metrics + HEP wiring + admin/health endpoints
 ├── bins/
 │   └── siphon-ai/                # The daemon binary
@@ -94,6 +95,7 @@ siphon-ai/
 | New CDR field | `crates/cdr/src/schema.rs` + bump CDR `version` + update `docs/` |
 | New webhook event type | `crates/webhooks/src/events.rs` + update `docs/` |
 | Server SDK change (typed events, `Call` commands, framing) | `sdks/python` + `sdks/typescript` — keep both in lockstep; their tests validate against `schemas/siphon-ai.v1.json` + `docs/PROTOCOL.md` |
+| Conformance scenario or testkit assertion | `crates/protocol-testkit/` (bundled scenarios in its `scenarios/`) + update `docs/CONFORMANCE.md` |
 | New HEP chunk emission | `crates/telemetry/src/hep.rs` (uses `hep-rs` crate) |
 | New metric | `crates/telemetry/src/metrics.rs` + document in `docs/DEPLOY.md` |
 | New admin endpoint | `crates/telemetry/src/admin.rs` + document in `docs/DEPLOY.md` |

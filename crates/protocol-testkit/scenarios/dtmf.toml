@@ -1,0 +1,39 @@
+# DTMF events mid-stream. The digits are delivered exactly as the daemon
+# sends them (typed round-trip through BridgeOut); a conformant server
+# processes or ignores them without disturbing the audio path, and any
+# commands it sends back stay schema-valid.
+
+name = "dtmf"
+description = "Inject DTMF events mid-audio; the session must sail on."
+
+[[steps]]
+action = "send_audio"
+frames = 25
+
+[[steps]]
+action = "send_event"
+json = '{ "type": "dtmf", "digit": "1", "duration_ms": 160, "method": "rfc2833" }'
+
+[[steps]]
+action = "send_event"
+json = '{ "type": "dtmf", "digit": "*", "duration_ms": 160, "method": "rfc2833" }'
+
+[[steps]]
+action = "send_event"
+json = '{ "type": "dtmf", "digit": "#", "duration_ms": 240, "method": "inband" }'
+
+[[steps]]                 # audio keeps flowing around the events
+action = "send_audio"
+frames = 25
+
+[[steps]]
+action = "expect_audio"
+min_frames = 35
+within_ms = 3000
+
+[[steps]]
+action = "send_stop"
+reason = "caller_hangup"
+
+[[steps]]
+action = "close"

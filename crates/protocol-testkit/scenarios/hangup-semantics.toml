@@ -1,0 +1,43 @@
+# PROTOCOL.md §5.7 close semantics, both directions:
+#   * an unexpected WS drop is NOT a hangup — after an abrupt drop the
+#     daemon may redial with `start { reconnected: true }`, and the server
+#     must accept that fresh session;
+#   * a server that wants the call over sends `hangup` (the testkit honors
+#     it daemon-style: `stop { server_hangup }` + clean close — that path
+#     passing shows up as a note, not a failure).
+
+name = "hangup-semantics"
+description = "Abrupt drop + reconnected session must be accepted; hangup (if sent) is honored."
+
+[[steps]]
+action = "send_audio"
+frames = 25
+
+[[steps]]
+action = "expect_audio"
+min_frames = 15
+within_ms = 3000
+
+# Abrupt drop (no close handshake), fresh socket, `start` with
+# reconnected: true and seq restarting at 0 — a daemon-side WS reconnect.
+[[steps]]
+action = "reconnect"
+
+[[steps]]                 # the resumed session must carry audio again
+action = "send_audio"
+frames = 25
+
+# Some servers (e.g. the echo reference) choose to hang up a reconnected
+# call once they've seen it work; that's a legal reaction, not required.
+[[steps]]
+action = "expect_command"
+type = "hangup"
+within_ms = 1000
+optional = true
+
+[[steps]]
+action = "send_stop"
+reason = "caller_hangup"
+
+[[steps]]
+action = "close"

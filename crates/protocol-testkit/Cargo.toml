@@ -1,0 +1,34 @@
+[package]
+name        = "siphon-ai-protocol-testkit"
+description = "Conformance testkit for the SiphonAI WS bridge protocol: plays the daemon side against a candidate server and validates its behavior."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[[bin]]
+name = "siphon-ai-testkit"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace             = true
+tokio-tungstenite.workspace = true
+futures.workspace           = true
+serde.workspace             = true
+serde_json.workspace        = true
+toml.workspace              = true
+anyhow.workspace            = true
+clap.workspace              = true
+tracing.workspace           = true
+tracing-subscriber.workspace = true
+
+# The wire types ARE the contract — construct/parse with the real serde
+# impls so the testkit can't drift from the daemon.
+siphon-ai-bridge.workspace = true
+
+# Schema-validating assertions (DESIGN_PROTOCOL_SDKS §4, locked D5):
+# every server message is validated against schemas/siphon-ai.v1.json.
+# Test-tooling only — never a daemon dependency.
+jsonschema = { version = "0.47", default-features = false }

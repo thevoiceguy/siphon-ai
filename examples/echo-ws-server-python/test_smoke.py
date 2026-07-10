@@ -55,18 +55,15 @@ def _start_msg(call_id: str = "smoke-1", sample_rate: int = 8000) -> dict:
 async def running_server(opts: srv.Options):
     """Start the echo server on a background task; cancel it on exit."""
 
-    async def handler(connection):
-        await srv.handle(connection, opts)
-
-    async with websockets.asyncio.server.serve(
-        handler,
+    sdk_server = srv.SiphonServer(
+        lambda call: srv.handle(call, opts),
         host=opts.bind_host,
         port=opts.bind_port,
-        subprotocols=[srv.SUBPROTOCOL],
-        process_request=srv.make_request_handler(opts),
-        max_size=256 * 1024,
+        auth_token=opts.auth_token,
         ping_interval=None,  # disable pings in tests; we want deterministic IO
-    ) as server:
+        ping_timeout=None,
+    )
+    async with sdk_server.listen() as server:
         yield server
 
 

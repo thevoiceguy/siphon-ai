@@ -103,6 +103,12 @@ The reference bot in `examples/deepgram-llm-bot-node/` is a working demo
 of the protocol, not the product. Tune it for your deployment or replace
 it entirely with your own WS server in any language.
 
+Writing that server in Python or TypeScript? The **server SDKs** in
+[`sdks/`](sdks/) handle the wire protocol for you — typed events, paced
+20 ms audio framing, and connection lifecycle — so you write handlers,
+not wire code. The protocol itself is also machine-readable:
+[`schemas/siphon-ai.v1.json`](schemas/siphon-ai.v1.json).
+
 ## Quickstart (Docker)
 
 The fastest way to see SiphonAI work end-to-end is the local demo
@@ -200,6 +206,7 @@ journal — grep `turn_summary` for SLO numbers. See
 | `crates/config/`      | TOML config + validation + SIGHUP reload |
 | `crates/telemetry/`   | tracing + metrics + HEP wiring + admin API (auth + RBAC) |
 | `bins/siphon-ai/`     | The daemon binary |
+| `sdks/`               | Server SDKs (Python + TypeScript) for the WS protocol |
 | `examples/`           | Reference WS servers and the local Homer stack |
 | `scripts/`            | Idempotent Debian 13 install scripts (daemon + bot) |
 | `test-harness/`       | SIPp scenarios, load tooling, HEP collector stub |

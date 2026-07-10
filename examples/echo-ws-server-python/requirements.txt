@@ -1,1 +1,5 @@
 websockets>=13
+# The SiphonAI server SDK (sdks/python). Path is relative to the pip
+# invocation CWD — install from the repo root (as CI does); a bare
+# `python3 server.py` also works with no install (repo-path fallback).
+./sdks/python

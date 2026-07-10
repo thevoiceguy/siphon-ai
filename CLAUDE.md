@@ -56,9 +56,12 @@ siphon-ai/
 │   └── telemetry/                # tracing + metrics + HEP wiring + admin/health endpoints
 ├── bins/
 │   └── siphon-ai/                # The daemon binary
+├── sdks/
+│   ├── python/                   # Server SDK (siphon-ai-server on PyPI-style layout)
+│   └── typescript/               # Server SDK (siphon-ai-server npm-style layout)
 ├── examples/
-│   ├── echo-ws-server-python/    # Reference WS server (echo)
-│   ├── echo-ws-server-node/      # Same in Node
+│   ├── echo-ws-server-python/    # Reference WS server (echo) — built on sdks/python
+│   ├── echo-ws-server-node/      # Same in Node — built on sdks/typescript
 │   ├── openai-realtime-bridge-py/  # Reference: OpenAI Realtime bridge
 │   └── homer-stack/              # Local Homer + dashboards via docker-compose
 ├── docker/
@@ -90,6 +93,7 @@ siphon-ai/
 | New config field | `crates/config/src/` + update `docs/CONFIG.md` + example TOML in `docs/` |
 | New CDR field | `crates/cdr/src/schema.rs` + bump CDR `version` + update `docs/` |
 | New webhook event type | `crates/webhooks/src/events.rs` + update `docs/` |
+| Server SDK change (typed events, `Call` commands, framing) | `sdks/python` + `sdks/typescript` — keep both in lockstep; their tests validate against `schemas/siphon-ai.v1.json` + `docs/PROTOCOL.md` |
 | New HEP chunk emission | `crates/telemetry/src/hep.rs` (uses `hep-rs` crate) |
 | New metric | `crates/telemetry/src/metrics.rs` + document in `docs/DEPLOY.md` |
 | New admin endpoint | `crates/telemetry/src/admin.rs` + document in `docs/DEPLOY.md` |
@@ -323,8 +327,9 @@ info!(target: "siphon_ai::call", from = %invite.from, "received invite");
 5. Add integration test in `test-harness/` if it touches SIP or audio
 6. **Document it in `docs/PROTOCOL.md`** (this is not optional)
 7. **Regenerate the protocol schema**: `cargo run -p siphon-ai-bridge --example gen_schema --features json-schema > schemas/siphon-ai.v1.json` (CI diffs it and validates the PROTOCOL.md examples against it)
-8. **Update example WS servers** in `examples/` to demonstrate or at least handle the new message
-9. If the message is a breaking addition (changes existing behavior), bump protocol version
+8. **Update the server SDKs** in `sdks/python` + `sdks/typescript` (typed message classes + `Call` method for BridgeIn commands; their test suites assert full coverage of the schema's unions, so CI fails if you skip this)
+9. **Update example WS servers** in `examples/` to demonstrate or at least handle the new message
+10. If the message is a breaking addition (changes existing behavior), bump protocol version
 
 ### 7.2 Adding a New WS Event (SiphonAI → Server)
 

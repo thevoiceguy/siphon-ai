@@ -37,6 +37,12 @@ The SDKs in [`sdks/`](../sdks/) implement this protocol — typed events,
 paced 20 ms audio framing, close semantics — so you write handlers, not
 wire code. Their test suites validate against the schema and every
 example in this document, so they track the spec release-for-release.
+
+**Conformance testkit (0.29.0).** `siphon-ai-testkit` plays the daemon's
+side of this protocol against your server — scripted calls, every message
+schema-validated, framing/pacing/close semantics asserted — and exits
+non-zero on any violation, so "conformant with protocol v1" is a claim
+your CI can check. See [`CONFORMANCE.md`](CONFORMANCE.md).
 The binary audio framing is described by the schema's `x-binary-frames`
 annotation.
 

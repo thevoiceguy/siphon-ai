@@ -1,0 +1,35 @@
+# PROTOCOL.md §5.6: the daemon pings every [bridge].ws_ping_interval_secs
+# and declares the connection half-open if the pong never comes. A server
+# (or a middlebox in front of it) that doesn't answer pings gets its calls
+# torn down in production — catch it here instead.
+
+name = "keepalive"
+description = "Pong our pings; survive idle gaps with the session intact."
+
+[[steps]]                 # ping on a fresh, quiet connection
+action = "ping"
+within_ms = 2000
+
+[[steps]]                 # idle: no audio for 2 s (daemon-side comfort noise
+action = "wait"           # gaps look like this); anything the server sends
+ms = 2000                 # meanwhile is still validated
+
+[[steps]]                 # ping again after the idle gap
+action = "ping"
+within_ms = 2000
+
+[[steps]]                 # the session must still carry audio
+action = "send_audio"
+frames = 25
+
+[[steps]]
+action = "expect_audio"
+min_frames = 15
+within_ms = 3000
+
+[[steps]]
+action = "send_stop"
+reason = "caller_hangup"
+
+[[steps]]
+action = "close"

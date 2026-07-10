@@ -12,7 +12,11 @@ This is the Node twin of
 ## Run
 
 ```bash
-npm install     # builds the in-repo SDK via its prepare script
+# One-time: build the in-repo SDK (npm links `file:` deps rather than
+# packing them, so the SDK needs its own install + tsc build first).
+(cd ../../sdks/typescript && npm install)
+
+npm install
 node server.mjs --bind 0.0.0.0:8080
 ```
 

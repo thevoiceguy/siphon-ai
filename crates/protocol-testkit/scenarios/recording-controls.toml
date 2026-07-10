@@ -1,0 +1,42 @@
+# Recording lifecycle events (0.5.0+). Servers that never touch recording
+# must still tolerate the daemon announcing recordings (mode = "always",
+# operator-initiated, or failures) without wobbling the audio path.
+
+name = "recording-controls"
+description = "Announce recording lifecycle events; the audio path must be unaffected."
+
+[[steps]]
+action = "send_audio"
+frames = 25
+
+[[steps]]                 # a recording began (e.g. route has mode = "always")
+action = "send_event"
+json = '{ "type": "recording_started", "recording_id": "rec-testkit-1" }'
+
+[[steps]]
+action = "send_audio"
+frames = 15
+
+[[steps]]                 # recording is best-effort: failures are events, not call teardown
+action = "send_event"
+json = '{ "type": "recording_failed", "recording_id": "rec-testkit-1", "reason": "disk full (testkit probe)" }'
+
+[[steps]]
+action = "send_event"
+json = '{ "type": "recording_stopped", "recording_id": "rec-testkit-1" }'
+
+[[steps]]                 # audio must have kept flowing throughout
+action = "send_audio"
+frames = 15
+
+[[steps]]
+action = "expect_audio"
+min_frames = 40
+within_ms = 3000
+
+[[steps]]
+action = "send_stop"
+reason = "caller_hangup"
+
+[[steps]]
+action = "close"

@@ -9,6 +9,7 @@ members = [
     "crates/core",
     "crates/http",
     "crates/media-glue",
+    "crates/protocol-testkit",
     "crates/recording",
     "crates/routes",
     "crates/security",

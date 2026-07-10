@@ -10,7 +10,8 @@
  * the SIPp test-harness knobs; this one stays minimal.
  *
  * Run:
- *   npm install          # builds the in-repo SDK via its prepare script
+ *   (cd ../../sdks/typescript && npm install)   # one-time: build the SDK
+ *   npm install
  *   node server.mjs --bind 0.0.0.0:8080
  */
 

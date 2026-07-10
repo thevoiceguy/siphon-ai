@@ -98,9 +98,11 @@ DTMF, and the WebSocket protocol:
   **graceful shutdown** for zero-drop deploys (`SIGTERM` flips `/ready`,
   503s new INVITEs, drains active calls before exit).
 - **Developer surface** — the WS protocol as a machine-readable **JSON
-  Schema** (`schemas/siphon-ai.v1.json`, drift-checked in CI) and **server
+  Schema** (`schemas/siphon-ai.v1.json`, drift-checked in CI), **server
   SDKs** for Python + TypeScript (`sdks/`) — typed events, paced 20 ms audio
-  framing, connection lifecycle.
+  framing, connection lifecycle — and a **conformance testkit**
+  (`siphon-ai-testkit`) that plays the daemon side against any WS server
+  and validates its behavior (`docs/CONFORMANCE.md`).
 
 See [`docs/DEV_PLAN.md`](docs/DEV_PLAN.md) for design rationale. Still
 deliberately out of scope: multi-tenancy, video, and WebRTC client support.
@@ -238,6 +240,7 @@ journal — grep `turn_summary` for SLO numbers. See
 | `crates/http/`        | Shared retrying HTTP delivery (signing, idempotency, spool) |
 | `crates/config/`      | TOML config + validation + SIGHUP reload |
 | `crates/telemetry/`   | tracing + metrics + HEP wiring + admin API (auth + RBAC) |
+| `crates/protocol-testkit/` | `siphon-ai-testkit` — WS protocol conformance harness |
 | `bins/siphon-ai/`     | The daemon binary |
 | `sdks/`               | Server SDKs (Python + TypeScript) for the WS protocol |
 | `examples/`           | Reference WS servers and the local Homer stack |
@@ -294,7 +297,8 @@ secure default). See [`docs/DEPLOY.md`](docs/DEPLOY.md) → *Admin auth & RBAC*.
 7. Feature guides — `docs/OUTBOUND.md`, `docs/CONFERENCE.md`,
    `docs/PARK.md`, `docs/RECORDING.md`, `docs/SECURITY_STIR_SHAKEN.md`,
    `docs/AUDIT.md`, `docs/OPERATIONS.md` (dashboards, OTLP, fleet ops),
-   `docs/INTEGRATIONS_TWILIO.md`.
+   `docs/INTEGRATIONS_TWILIO.md`, `docs/CONFORMANCE.md` (testkit for WS
+   server authors).
 
 ## Upstream dependencies
 

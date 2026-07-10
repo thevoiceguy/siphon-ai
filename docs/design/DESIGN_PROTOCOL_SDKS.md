@@ -195,3 +195,37 @@ the *daemon's* side of the protocol against a candidate WS server:
    running both SDK echo servers. Verify: testkit passes against both
    SDKs; deliberately-broken server fails with a readable report; theme
    retrospective back into this note.
+
+## 8. Retrospective (theme complete, 2026-07-10)
+
+Shipped as planned in three releases — v0.27.0 (#271/#272), v0.28.0
+(#273/#274), v0.29.0 (#276/release PR) — protocol stayed v1 throughout,
+zero daemon-binary changes across the whole theme. All six locked
+decisions held; nothing was reopened. What deviated or surprised:
+
+- **`oneOf` → `anyOf` at the schema top level** (v0.27): `hold`/`resume`/
+  `mark` exist in both directions, so exactly-one fails on
+  direction-ambiguous names. The corpus check caught it before release —
+  the §4.2 anti-drift loop paid for itself on day one. Direction-specific
+  validation (`$defs/BridgeOut` / `$defs/BridgeIn`) is the documented
+  answer.
+- **The SDKs found no protocol bugs** — expected, since 0.13/0.14 closed
+  the doc↔impl drift — but the corpus tests immediately constrain every
+  future protocol PR three ways (Rust types, schema, two SDKs), which was
+  the point.
+- **npm `file:` deps are symlinks, not packs** (v0.29 CI): the TS SDK
+  must be `npm install`ed in its own directory (building `dist/` via
+  `prepare`) before anything that depends on it — a fresh-checkout-only
+  failure that local verification with a warm tree can't see. Fixed in
+  the conformance job + vendoring docs.
+- **Testkit `expect_audio` had to be cumulative-per-session**: echo
+  arrives concurrently with `send_audio`, so per-step frame counts race.
+  Found live against the real echo server, not in unit tests — scenario
+  semantics need end-to-end verification like everything else.
+- **One new Rust dep per sub-item** held: `schemars` (v0.27, dev-path
+  feature) and `jsonschema` (v0.29, testkit-only). The daemon's dep tree
+  is unchanged.
+
+Deferred, still open: registry publishing (PyPI/npm — D4), SDK migration
+of the remaining examples (deepgram-node's hand-rolled re-framer would
+shrink ~100 lines), Go/Java SDKs (the schema is the extension point).

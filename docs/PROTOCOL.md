@@ -31,6 +31,12 @@ editor, validator, or code generator at it. Notes: messages are
 discriminated by `type`; validate against `$defs/BridgeOut`
 (SiphonAI→server) or `$defs/BridgeIn` (server→SiphonAI) when you know the
 direction — three discriminators (`hold`, `resume`, `mark`) exist in both.
+
+**Server SDKs (0.28.0).** Writing your server in Python or TypeScript?
+The SDKs in [`sdks/`](../sdks/) implement this protocol — typed events,
+paced 20 ms audio framing, close semantics — so you write handlers, not
+wire code. Their test suites validate against the schema and every
+example in this document, so they track the spec release-for-release.
 The binary audio framing is described by the schema's `x-binary-frames`
 annotation.
 

@@ -75,6 +75,30 @@ jobs:
             --entrypoint promtool prom/prometheus:latest \
             check config prometheus.yml
 
+  sdk-tests:
+    name: server SDK unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Both SDK suites (sdks/python, sdks/typescript) parse every
+      # PROTOCOL.md example into typed events and validate every command
+      # the SDK can emit against schemas/siphon-ai.v1.json — the SDKs
+      # can't drift from the protocol silently. No cargo needed: the
+      # committed schema is the contract (lint-and-test regenerates and
+      # diffs it separately).
+      - name: Python SDK tests
+        run: |
+          pip install --quiet jsonschema websockets pytest
+          python3 -m pytest sdks/python/tests -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: TypeScript SDK tests
+        run: |
+          cd sdks/typescript
+          npm install --no-audit --no-fund
+          npm test
+
   lint-and-test:
     name: fmt + clippy + cargo test
     runs-on: ubuntu-latest

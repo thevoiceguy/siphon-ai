@@ -1,0 +1,14 @@
+{
+  "name": "echo-ws-server-node",
+  "private": true,
+  "version": "0.28.0",
+  "description": "Reference echo WS server for the SiphonAI bridge protocol v1, built on the TypeScript server SDK.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "siphon-ai-server": "file:../../sdks/typescript"
+  }
+}

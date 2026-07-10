@@ -1,0 +1,31 @@
+{
+  "name": "siphon-ai-server",
+  "version": "0.28.0",
+  "description": "Server SDK for the SiphonAI WebSocket bridge protocol v1: typed events, 20 ms audio framing, and connection lifecycle — write handlers, not wire code.",
+  "license": "(MIT OR Apache-2.0)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thevoiceguy/siphon-ai.git",
+    "directory": "sdks/typescript"
+  },
+  "keywords": ["siphon-ai", "sip", "voice", "websocket", "telephony"],
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "engines": { "node": ">=20" },
+  "files": ["dist/src", "src"],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "test": "tsc && node --test dist/test/"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/ws": "^8",
+    "ajv": "^8",
+    "typescript": "^5.5"
+  }
+}

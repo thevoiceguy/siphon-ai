@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-07-10
+
+### Added
+
+- **Protocol conformance testkit — `siphon-ai-testkit`** (P1 "Protocol
+  SDKs & machine-readable schemas", final release — the theme is
+  complete). A new `crates/protocol-testkit` binary that plays the
+  *daemon's* side of WS protocol v1 against any candidate server — no
+  SIP, no RTP, no daemon needed. Scripted calls from TOML scenarios
+  (five bundled: `basic-echo`, `dtmf`, `recording-controls`,
+  `hangup-semantics`, `keepalive`; `--scenario-dir` adds your own) with
+  every server message validated against `schemas/siphon-ai.v1.json`
+  **and** the daemon's real wire types, exact 20 ms frame sizing and
+  real-time pacing asserted, §5.7 close semantics enforced (bare close
+  mid-call is a violation; server `hangup` is honored daemon-style),
+  unknown-event tolerance probed, and WS keepalive checked. Exit code 0
+  iff conformant plus a JSON report (`--report`) — *"conformant with
+  protocol v1"* is now a claim any third-party server's CI can gate on.
+  See `docs/CONFORMANCE.md`.
+- **`conformance` CI job** — every PR now runs the full scenario set
+  against **both** SDK echo servers (`echo-ws-server-python`,
+  `echo-ws-server-node`) — the first CI coverage for the Node echo
+  server, closing the theme's last verification gap.
+
+The WS protocol stays **v1**; the daemon binary is unchanged (the
+testkit's one new dependency, the `jsonschema` validator, is
+test-tooling only).
+
 ## [0.28.0] - 2026-07-10
 
 ### Added

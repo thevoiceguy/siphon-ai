@@ -151,9 +151,11 @@ barrier and make the contract testable:
 - **Server SDKs** — ✅ **delivered in v0.28.0** (`sdks/python` +
   `sdks/typescript`: typed events, paced 20 ms framing, close semantics;
   schema/corpus-validated in CI; echo examples rewritten on them).
-- **Conformance suite + protocol testkit** — a harness that replays a
-  scripted call against a candidate WS server and validates its responses,
-  plus a local mock daemon for SDK CI.
+- **Conformance suite + protocol testkit** — ✅ **delivered in v0.29.0**
+  (`siphon-ai-testkit`: TOML-scripted calls against a candidate WS server,
+  schema-validating assertions, JSON report; the `conformance` CI job runs
+  it against both SDK echo servers). **Theme complete** — see the
+  retrospective in `docs/design/DESIGN_PROTOCOL_SDKS.md` §8.
 
 ---
 

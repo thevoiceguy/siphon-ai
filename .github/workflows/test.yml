@@ -176,6 +176,10 @@ jobs:
 
       - name: Prep + start echo-ws-server-node
         run: |
+          # npm `file:` deps are symlinks — the SDK must be installed
+          # (and thereby tsc-built via its prepare script) in its own
+          # directory first, or the example's install finds no dist/.
+          (cd sdks/typescript && npm install --no-audit --no-fund)
           cd examples/echo-ws-server-node
           npm install --no-audit --no-fund
           node server.mjs --bind 127.0.0.1:8862 > /tmp/echo-node.log 2>&1 &

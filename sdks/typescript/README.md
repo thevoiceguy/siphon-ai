@@ -13,9 +13,11 @@ and plays back whatever you send; STT/LLM/TTS are your handler's business.
 Not yet on npm — install from the repo (vendorable):
 
 ```bash
+# One-time in the checkout: install + build the SDK in place (npm links
+# local folder deps rather than packing them, so `dist/` must exist).
+(cd sdks/typescript && npm install)
+
 npm install ./sdks/typescript
-# or from a checkout URL:
-npm install "github:thevoiceguy/siphon-ai#main" --workspace sdks/typescript
 ```
 
 Requires Node ≥ 20. Sole runtime dependency: `ws`.

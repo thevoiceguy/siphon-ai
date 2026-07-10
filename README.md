@@ -48,9 +48,10 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 (Twilio Elastic SIP Trunking, FreeSWITCH, CUCM). The WS protocol is still
 `version: "1"` — every release has been additive, so a WS server built
 against 0.1.0 keeps working unchanged, and upgrading the daemon is a
-zero-behaviour-change drop-in (every feature below is **off by default**
-until you turn it on). The full per-release history is in
-[`CHANGELOG.md`](CHANGELOG.md).
+behaviour-preserving drop-in (features below are **off by default** until
+you turn them on; the one operator-facing move was v0.10.0 relocating
+`/admin/*` onto its own authenticated listener). The full per-release
+history is in [`CHANGELOG.md`](CHANGELOG.md).
 
 ### What's shipped
 
@@ -67,20 +68,39 @@ DTMF, and the WebSocket protocol:
   **call park** (retrieve onto a fresh session).
 - **Outbound origination** — `POST /admin/v1/calls` with `[[gateway]]`
   trunks, toll-fraud guardrails (cap + rate limit), and outbound SRTP.
-- **Recording** — per-call stereo WAV (`off` / `always` / `on_demand`,
-  PCI-aware pause), written off the audio hot path.
+- **Recording** — per-call stereo WAV or **Opus** (`off` / `always` /
+  `on_demand`, PCI-aware pause), written off the audio hot path; inbound
+  **and outbound** legs; **encryption at rest** (envelope format + offline
+  decrypt CLI, local KEK or **AWS KMS**), **S3 storage**, and a **consent
+  announcement** ("this call may be recorded" prompt gates capture, consent
+  stamped into the CDR). See [`docs/RECORDING.md`](docs/RECORDING.md).
 - **Reliability** — mid-call **WS reconnect**: an unexpected WS drop parks the
   caller on hold music, re-dials, and resumes on a fresh session.
-- **Security** — **STIR/SHAKEN** verification + policy gate, and **native
-  admin auth + RBAC** (bearer tokens, nested `readonly` ⊂ `operator` ⊂
-  `admin` roles) on a dedicated authenticated listener.
+- **Security** — **STIR/SHAKEN** verification + policy gate; **native admin
+  auth + RBAC** (bearer tokens, nested `readonly` ⊂ `operator` ⊂ `admin`
+  roles) on a dedicated authenticated listener, with TLS and `SIGHUP` cert
+  reload; SIP **digest auth** and **admission control** (allowlists, rate
+  limits) on the inbound leg; per-route **bridge mTLS** on the WS leg;
+  `${file:}` / `${cred:}` **secret resolution** so tokens stay out of the
+  TOML; and a **signed audit-event stream** (`docs/AUDIT.md`).
 - **Delivery durability** — webhook + CDR **HMAC signing**
   (`X-SiphonAI-Signature`), per-event idempotency ids, and a **durable retry
   spool** that survives daemon restarts.
+- **Observability** — Prometheus metrics + **Grafana dashboards and alert
+  rules as code** (`examples/observability/`), daemon-side **OTLP trace
+  export** (one trace per call), and **W3C trace-context propagation** to
+  your WS server so its spans join the call's trace; HEP3 → Homer for
+  SIP/RTCP/CDR correlation.
 - **Operations** — a config CLI (`siphon-ai check` / `print-config` /
   `route-test`) and **`SIGHUP` hot-reload** of routes, webhook/CDR sinks, and
   outbound gateways (fail-safe — a bad config is rejected and the running one
-  kept; socket-binding / concurrency changes warn restart-required).
+  kept; socket-binding / concurrency changes warn restart-required);
+  **graceful shutdown** for zero-drop deploys (`SIGTERM` flips `/ready`,
+  503s new INVITEs, drains active calls before exit).
+- **Developer surface** — the WS protocol as a machine-readable **JSON
+  Schema** (`schemas/siphon-ai.v1.json`, drift-checked in CI) and **server
+  SDKs** for Python + TypeScript (`sdks/`) — typed events, paced 20 ms audio
+  framing, connection lifecycle.
 
 See [`docs/DEV_PLAN.md`](docs/DEV_PLAN.md) for design rationale. Still
 deliberately out of scope: multi-tenancy, video, and WebRTC client support.
@@ -143,9 +163,22 @@ For the full HEP/Homer end-to-end demo (SIP + RTCP + CDRs
 correlated in one call view), see
 [`examples/homer-stack/`](examples/homer-stack/).
 
-## Production install (Debian 13)
+## Production install
 
-Two scripts walk through `docs/INSTALL_DEBIAN13.md` and
+**From a release (recommended):** every tag ships static musl binary
+tarballs (amd64 + arm64), Debian packages, and a multi-arch container on
+GHCR — all cosign-signed with checksums and a CycloneDX SBOM. See
+[`docs/DEPLOY.md`](docs/DEPLOY.md) → *Install from a release* for the
+verify-and-install steps.
+
+```sh
+# Debian/Ubuntu: grab the .deb for your arch from
+# https://github.com/thevoiceguy/siphon-ai/releases/latest — then:
+sudo apt install ./siphon-ai_<version>_<arch>.deb
+```
+
+**From source (Debian 13):**
+two scripts walk through `docs/INSTALL_DEBIAN13.md` and
 `docs/BOT_LOCALHOST_SETUP.md` end-to-end. Both are idempotent —
 re-running is safe.
 
@@ -232,8 +265,11 @@ cargo test --workspace
 | Conference / park control | `/admin/v1/conferences`, `/admin/v1/parked` | `[admin]` (auth) |
 | Runtime log filter | `PUT /admin/log` | `[admin]` (auth) |
 | HEP test packet | `POST /admin/hep/test` | `[admin]` (auth) |
+| Drain status (during shutdown) | `GET /admin/v1/drain` | `[admin]` (auth) |
 | CDR (JSONL file) | `/var/log/siphon-ai/cdr.jsonl` | — |
 | Lifecycle webhooks | `[webhooks]` block in the TOML | — |
+| OTLP trace export (one trace per call) | `[observability.otlp]` in the TOML | — |
+| Grafana dashboards + Prometheus alerts | `examples/observability/` | — |
 | Full SIP + RTCP + CDR correlation | HEP → Homer (see `docs/HEP.md`) | — |
 
 Since **v0.10.0** the admin API is **authenticated**: `/admin/*` is served
@@ -256,7 +292,9 @@ secure default). See [`docs/DEPLOY.md`](docs/DEPLOY.md) → *Admin auth & RBAC*.
 6. `docs/DEPLOY.md` — operator surface: admin auth & RBAC, webhook/CDR
    delivery (signing, durability), metrics, and the systemd / reload flow.
 7. Feature guides — `docs/OUTBOUND.md`, `docs/CONFERENCE.md`,
-   `docs/PARK.md`, `docs/RECORDING.md`, `docs/SECURITY_STIR_SHAKEN.md`.
+   `docs/PARK.md`, `docs/RECORDING.md`, `docs/SECURITY_STIR_SHAKEN.md`,
+   `docs/AUDIT.md`, `docs/OPERATIONS.md` (dashboards, OTLP, fleet ops),
+   `docs/INTEGRATIONS_TWILIO.md`.
 
 ## Upstream dependencies
 

@@ -145,11 +145,12 @@ The WS protocol (`docs/PROTOCOL.md`) is the product contract, but every
 integrator hand-rolls JSON + 20 ms audio framing from prose. Lower the
 barrier and make the contract testable:
 
-- **JSON Schema** for every WS message (generated from / checked against the
-  Rust types in `crates/bridge`).
-- **Server SDKs** — TypeScript and Python, handling framing, audio
-  endianness/rate, and the message envelope, so a bot author writes handlers
-  not wire code.
+- **JSON Schema** for every WS message — ✅ **delivered in v0.27.0**
+  (`schemas/siphon-ai.v1.json`, generated from the Rust types in
+  `crates/bridge`, drift-checked + docs-corpus-validated in CI).
+- **Server SDKs** — ✅ **delivered in v0.28.0** (`sdks/python` +
+  `sdks/typescript`: typed events, paced 20 ms framing, close semantics;
+  schema/corpus-validated in CI; echo examples rewritten on them).
 - **Conformance suite + protocol testkit** — a harness that replays a
   scripted call against a candidate WS server and validates its responses,
   plus a local mock daemon for SDK CI.

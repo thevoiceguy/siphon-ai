@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-07-10
+
+### Added
+
+- **Server SDKs — `sdks/python` + `sdks/typescript`** (P1 "Protocol SDKs
+  & machine-readable schemas", second release). Two dependency-light
+  packages (`siphon-ai-server`; `websockets` / `ws` respectively) that
+  implement the WS bridge protocol so a bot author writes handlers, not
+  wire code: WS accept with `siphon-ai.v1` subprotocol echo, typed events
+  for all 21 daemon→server messages, one `Call` method per server→daemon
+  command (all 17), a **paced 20 ms audio re-framer** (arbitrary byte
+  pushes → exact 320/640 B frames at real time — the code every example
+  hand-rolled), §5.7 close semantics (`hangup` vs bare-close drop), and
+  `start.reconnected` surfaced. Zero AI dependencies. Types are
+  hand-written and **validated against `schemas/siphon-ai.v1.json` plus
+  every `docs/PROTOCOL.md` example** in each SDK's test suite, with full
+  union coverage asserted — a new `sdk-tests` CI job runs both suites on
+  every PR. Vendorable (`pip install ./sdks/python`,
+  `npm install ./sdks/typescript`); registry publishing deferred.
+- **`examples/echo-ws-server-node`** — new minimal echo server on the
+  TypeScript SDK.
+
+### Changed
+
+- **`examples/echo-ws-server-python` is rewritten on the Python SDK**
+  (566 → 408 lines, same CLI and behavior, every `--auto-*` test-harness
+  knob kept). It remains the SIPp CI fixture, so every daemon PR now
+  exercises the Python SDK end-to-end against real calls.
+
+The WS protocol stays **v1**; the daemon binary is unchanged.
+
 ## [0.27.0] - 2026-07-09
 
 ### Added

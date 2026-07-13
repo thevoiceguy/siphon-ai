@@ -64,7 +64,8 @@ use siphon_ai_bridge::{
     BridgeIn, CallId, DisconnectReason, ErrorCode, OutgoingEvent, StartMsg, StopReason,
 };
 use siphon_ai_media_glue::{
-    AnnounceSource, MediaTap, MediaTapError, MohSource, RoomMembership, TapCommand, TapDisconnect,
+    AnnounceSource, MediaTap, MediaTapError, MohSource, QualityReport, QualitySummary,
+    RoomMembership, TapCommand, TapDisconnect,
 };
 
 use crate::conference::{ConferenceError, ConferenceRegistry};
@@ -250,6 +251,23 @@ pub struct CallOutcome {
     /// announcement played or the server reported consent. Feeds the CDR
     /// `consent { announced, announcement_ms, server }`.
     pub consent: Option<ConsentSummary>,
+    /// Per-call quality summary (0.30.0), `Some` when the call produced
+    /// any quality signal. Feeds the CDR `quality` block. `None` for
+    /// calls that never went active (the field is omitted then).
+    pub quality: Option<QualityOutcome>,
+}
+
+/// Per-call quality outcome surfaced on [`CallOutcome`] → CDR (0.30.0).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QualityOutcome {
+    /// Milliseconds from "WS `start` on the wire" to the first server
+    /// audio frame reaching playout. `None` when the server never sent
+    /// audio (or the bridge never connected).
+    pub first_audio_out_ms: Option<u64>,
+    /// Playout clears (`auto_clear` + server `clear`).
+    pub barge_in_count: u32,
+    /// Jitter / loss / RTT / RX / MOS aggregates from the tap's tracker.
+    pub stats: QualitySummary,
 }
 
 /// Recording-consent audit trail surfaced on [`CallOutcome`] → CDR
@@ -768,6 +786,12 @@ impl CallController {
         let mut rec_encrypted = false;
         // One recording per call in this revision → recording_id = call_id.
         let recording_id = call_id.as_str().to_string();
+        // Quality feed for the CDR `quality` block (0.30.0): the tap
+        // publishes the latest whole-call state; we read it once at
+        // outcome build. Watch semantics — no backpressure, no loss
+        // that matters.
+        let (quality_tx, quality_rx) = tokio::sync::watch::channel(QualityReport::default());
+        let media_tap = media_tap.with_quality_watch(quality_tx);
         let media_tap = if let Some(setup) = recording {
             let (rec_tx, rec_rx) = mpsc::channel::<RecFrame>(RECORDING_CHANNEL_CAPACITY);
             let (ctrl_tx, ctrl_rx) = mpsc::channel::<RecControl>(CONTROL_CHANNEL_CAPACITY);
@@ -821,8 +845,13 @@ impl CallController {
         // otherwise fragment into sibling traces. Instrument each with the
         // controller's `run` span so the WS-bridge, media-tap, and recording
         // spans nest under it — one trace per call in OTLP (0.22.0).
+        // Readiness carries the "start on the wire" Instant — the epoch
+        // for the CDR `first_audio_out_ms` (0.30.0). Polled lazily at
+        // outcome build (`try_recv`), never awaited in the loop.
+        let (bridge_ready_tx, mut bridge_connected_rx) = oneshot::channel();
         let mut bridge_task: JoinHandle<Result<DisconnectReason, BridgeError>> = tokio::spawn(
-            connect_and_run(bridge, start, channels).instrument(tracing::Span::current()),
+            connect_and_run_with_ready(bridge, start, channels, Some(bridge_ready_tx))
+                .instrument(tracing::Span::current()),
         );
         // The tap forwards out-of-band events (currently DTMF) onto
         // the same control stream the bridge reads. Cloning the
@@ -937,7 +966,7 @@ impl CallController {
         // on `ready` (not at dial) so a redial that fails fast doesn't
         // flap the caller's audio.
         let mut pending_unpark: Option<PendingUnpark> = None;
-        let mut reconnect_ready_rx: Option<oneshot::Receiver<()>> = None;
+        let mut reconnect_ready_rx: Option<oneshot::Receiver<std::time::Instant>> = None;
         let reconnect_backoff_sleep = tokio::time::sleep(Duration::from_secs(86_400));
         tokio::pin!(reconnect_backoff_sleep);
         let mut reconnect_backoff_armed = false;
@@ -2056,6 +2085,26 @@ impl CallController {
                 server: consent_server,
             });
 
+        // Latest quality state from the tap + the first session's
+        // connect stamp. Omit the whole block when nothing measured —
+        // a call that never went active has no quality story.
+        let quality_summary = {
+            let report = *quality_rx.borrow();
+            let measured = !report.stats.is_empty()
+                || report.barge_in_count > 0
+                || report.first_audio_at.is_some();
+            measured.then(|| QualityOutcome {
+                first_audio_out_ms: match (report.first_audio_at, bridge_connected_rx.try_recv()) {
+                    (Some(first), Ok(connected)) => {
+                        Some(first.saturating_duration_since(connected).as_millis() as u64)
+                    }
+                    _ => None,
+                },
+                barge_in_count: report.barge_in_count,
+                stats: report.stats,
+            })
+        };
+
         Ok(CallOutcome {
             call_id,
             termination,
@@ -2066,6 +2115,7 @@ impl CallController {
             hold: hold_summary,
             reconnect: reconnect_summary,
             consent: consent_summary,
+            quality: quality_summary,
         })
     }
 }
@@ -2109,8 +2159,8 @@ fn reconnect_backoff(attempt: u32) -> Duration {
 /// [`recv_rec_evt`]. `&mut Receiver` is itself a `Future` (oneshot's
 /// receiver is `Unpin`), so this doesn't consume the option.
 async fn recv_ready(
-    rx: &mut Option<oneshot::Receiver<()>>,
-) -> Result<(), oneshot::error::RecvError> {
+    rx: &mut Option<oneshot::Receiver<std::time::Instant>>,
+) -> Result<std::time::Instant, oneshot::error::RecvError> {
     match rx.as_mut() {
         Some(r) => r.await,
         None => std::future::pending().await,

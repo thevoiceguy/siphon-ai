@@ -692,6 +692,8 @@ fn build_outbound_record(
             count: r.count,
             total_gap_ms: r.total_gap_ms,
         }),
+        // Per-call quality summary (0.30.0) — same mapping as inbound.
+        quality: view.quality.map(crate::acceptor::quality_info),
     }
 }
 
@@ -731,6 +733,7 @@ mod tests {
             hold: None,
             reconnect: None,
             consent: None,
+            quality: None,
         };
         let audio = CdrAudioInfo {
             codec: "PCMU".into(),

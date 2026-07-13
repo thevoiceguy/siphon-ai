@@ -105,6 +105,67 @@ pub struct RtpStatsSnapshot {
     pub mos_estimate: Option<f32>,
 }
 
+/// Whole-call quality aggregates for the CDR `quality` block (0.30.0).
+/// Produced by [`RtpStatsTracker::quality_summary`]; every field is
+/// `None` until its signal produced at least one sample.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct QualitySummary {
+    /// Mean / max RR-reported jitter across the call's RTCP reports.
+    pub avg_jitter_ms: Option<f32>,
+    pub max_jitter_ms: Option<f32>,
+    /// Mean / max RR-reported cumulative-loss ratio.
+    pub avg_packet_loss_ratio: Option<f32>,
+    pub max_packet_loss_ratio: Option<f32>,
+    /// Mean RTCP RTT across reports that carried one.
+    pub avg_rtcp_rtt_ms: Option<f32>,
+    /// Latest (cumulative) local receive-side counters.
+    pub rx: Option<RxStats>,
+    /// Worst / mean transport-only MOS estimate, sampled once per
+    /// local media-stats snapshot.
+    pub mos_min: Option<f32>,
+    pub mos_avg: Option<f32>,
+}
+
+impl QualitySummary {
+    /// True when no signal ever produced a sample — the CDR omits the
+    /// whole block then.
+    pub fn is_empty(&self) -> bool {
+        self.avg_jitter_ms.is_none() && self.rx.is_none() && self.avg_rtcp_rtt_ms.is_none()
+    }
+}
+
+/// What the tap publishes on its quality watch channel (0.30.0) — the
+/// live whole-call quality state, refreshed on every quality-relevant
+/// event. The controller reads the latest value at teardown to build
+/// the CDR `quality` block.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct QualityReport {
+    pub stats: QualitySummary,
+    /// Playout clears: `auto_clear` firings + server `clear` commands.
+    pub barge_in_count: u32,
+    /// When the first WS-server audio frame reached playout toward the
+    /// caller. Sticky — set once, never reset (unlike the tap's
+    /// Mark-estimation clock). The controller subtracts its
+    /// bridge-connected instant to get `first_audio_out_ms`.
+    pub first_audio_at: Option<std::time::Instant>,
+}
+
+/// Running sums/extremes behind [`QualitySummary`]. Sums in f64 so a
+/// multi-hour call doesn't lose precision accumulating f32 samples.
+#[derive(Debug, Clone, Copy, Default)]
+struct QualityAggregates {
+    jitter_sum: f64,
+    jitter_max: f32,
+    loss_sum: f64,
+    loss_max: f32,
+    rr_n: u32,
+    rtt_sum: f64,
+    rtt_n: u32,
+    mos_sum: f64,
+    mos_min: f32,
+    mos_n: u32,
+}
+
 /// Per-call RTP-stats state. Owned by the tap; updated from forge
 /// event arms; polled by the periodic-emit arm.
 #[derive(Debug, Clone, Copy)]
@@ -114,6 +175,7 @@ pub struct RtpStatsTracker {
     last_packet_loss_ratio: Option<f32>,
     last_rtt_ms: Option<f32>,
     last_rx: Option<RxStats>,
+    agg: QualityAggregates,
 }
 
 impl RtpStatsTracker {
@@ -125,6 +187,7 @@ impl RtpStatsTracker {
             last_packet_loss_ratio: None,
             last_rtt_ms: None,
             last_rx: None,
+            agg: QualityAggregates::default(),
         }
     }
 
@@ -153,6 +216,16 @@ impl RtpStatsTracker {
         if rtt_ms.is_some() {
             self.last_rtt_ms = rtt_ms;
         }
+        // Whole-call aggregates for the CDR quality block.
+        self.agg.jitter_sum += jitter_ms as f64;
+        self.agg.jitter_max = self.agg.jitter_max.max(jitter_ms);
+        self.agg.loss_sum += packet_loss_ratio as f64;
+        self.agg.loss_max = self.agg.loss_max.max(packet_loss_ratio);
+        self.agg.rr_n += 1;
+        if let Some(rtt) = rtt_ms {
+            self.agg.rtt_sum += rtt as f64;
+            self.agg.rtt_n += 1;
+        }
     }
 
     /// forge reported a `QualityDegraded` — cache the values.
@@ -179,9 +252,39 @@ impl RtpStatsTracker {
 
     /// forge published a `MediaStatsSnapshot` — cache the locally-
     /// measured RX counters verbatim (they're cumulative; the newest
-    /// snapshot supersedes the previous one).
+    /// snapshot supersedes the previous one), and take one MOS sample
+    /// for the whole-call aggregates.
     pub fn note_media_stats(&mut self, rx: RxStats) {
         self.last_rx = Some(rx);
+        let mos = mos_estimate(
+            rx.jitter_ms,
+            rx.loss_percent(),
+            self.last_rtt_ms.unwrap_or(0.0),
+        );
+        self.agg.mos_sum += mos as f64;
+        self.agg.mos_min = if self.agg.mos_n == 0 {
+            mos
+        } else {
+            self.agg.mos_min.min(mos)
+        };
+        self.agg.mos_n += 1;
+    }
+
+    /// Whole-call aggregates for the CDR `quality` block.
+    pub fn quality_summary(&self) -> QualitySummary {
+        let rr = self.agg.rr_n;
+        QualitySummary {
+            avg_jitter_ms: (rr > 0).then(|| (self.agg.jitter_sum / rr as f64) as f32),
+            max_jitter_ms: (rr > 0).then_some(self.agg.jitter_max),
+            avg_packet_loss_ratio: (rr > 0).then(|| (self.agg.loss_sum / rr as f64) as f32),
+            max_packet_loss_ratio: (rr > 0).then_some(self.agg.loss_max),
+            avg_rtcp_rtt_ms: (self.agg.rtt_n > 0)
+                .then(|| (self.agg.rtt_sum / self.agg.rtt_n as f64) as f32),
+            rx: self.last_rx,
+            mos_min: (self.agg.mos_n > 0).then_some(self.agg.mos_min),
+            mos_avg: (self.agg.mos_n > 0)
+                .then(|| (self.agg.mos_sum / self.agg.mos_n as f64) as f32),
+        }
     }
 
     /// Current snapshot for the periodic-emit arm. `mos_estimate`

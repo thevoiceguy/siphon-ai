@@ -2116,7 +2116,29 @@ impl CallStart {
                 count: r.count,
                 total_gap_ms: r.total_gap_ms,
             }),
+            quality: outcome.quality.map(quality_info),
         }
+    }
+}
+
+/// Map the controller's quality outcome onto the CDR block (0.30.0).
+/// Shared by inbound (`into_record`) and the pre-active/outbound CDR
+/// assemblers so all record shapes agree.
+pub(crate) fn quality_info(q: crate::call::QualityOutcome) -> siphon_ai_cdr::QualityInfo {
+    siphon_ai_cdr::QualityInfo {
+        first_audio_out_ms: q.first_audio_out_ms,
+        barge_in_count: q.barge_in_count,
+        avg_jitter_ms: q.stats.avg_jitter_ms,
+        max_jitter_ms: q.stats.max_jitter_ms,
+        avg_packet_loss_ratio: q.stats.avg_packet_loss_ratio,
+        max_packet_loss_ratio: q.stats.max_packet_loss_ratio,
+        avg_rtcp_rtt_ms: q.stats.avg_rtcp_rtt_ms,
+        rx_packets_received: q.stats.rx.map(|rx| rx.packets_received),
+        rx_packets_lost: q.stats.rx.map(|rx| rx.packets_lost),
+        rx_packets_out_of_order: q.stats.rx.map(|rx| rx.packets_out_of_order),
+        rx_packets_duplicate: q.stats.rx.map(|rx| rx.packets_duplicate),
+        mos_estimate_min: q.stats.mos_min,
+        mos_estimate_avg: q.stats.mos_avg,
     }
 }
 
@@ -2143,6 +2165,8 @@ pub(crate) struct CallTerminationView {
     /// Recording-consent audit trail (0.26.0). Feeds the CDR
     /// `consent { announced, announcement_ms, server }`.
     pub(crate) consent: Option<crate::call::ConsentSummary>,
+    /// Per-call quality summary (0.30.0). Feeds the CDR `quality` block.
+    pub(crate) quality: Option<crate::call::QualityOutcome>,
 }
 
 impl CallTerminationView {
@@ -2157,6 +2181,7 @@ impl CallTerminationView {
                 hold: o.hold,
                 reconnect: o.reconnect,
                 consent: o.consent,
+                quality: o.quality,
             },
             Err(e) => Self {
                 // Treat a panic / join error as "bridge ended" —
@@ -2170,6 +2195,7 @@ impl CallTerminationView {
                 hold: None,
                 reconnect: None,
                 consent: None,
+                quality: None,
             },
         }
     }
@@ -2256,6 +2282,8 @@ fn build_delayed_failure_cdr(
         park: None,
         hold: None,
         reconnect: None,
+        // Pre-active failure: no media ever flowed.
+        quality: None,
     }
 }
 

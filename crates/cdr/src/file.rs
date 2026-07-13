@@ -180,6 +180,7 @@ mod tests {
             park: None,
             hold: None,
             reconnect: None,
+            quality: None,
         }
     }
 

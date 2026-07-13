@@ -1,6 +1,6 @@
 # Design: Per-call quality telemetry (live + history)
 
-**Status: PROPOSED — decisions in §6 await lock.**
+**Status: LOCKED (2026-07-13) — decisions in §6 confirmed; implementing per §7.**
 Theme: ROADMAP P1 "Per-call quality telemetry (live + history)", bundled
 with the P2 "CDR call-quality fields" item (the ROADMAP itself notes they
 complement each other).
@@ -93,7 +93,7 @@ quality summary at all. Two documented gaps (`docs/OPERATIONS.md` Q5/Q8:
   etc.) — MOS here is transport-math only.
 - **No protocol version bump** — every wire change is additive optional.
 
-## 6. Decisions (PROPOSED)
+## 6. Decisions (LOCKED 2026-07-13)
 
 - **D1 — Local RX stats source**: new periodic
   `ForgeEvent::MediaStatsSnapshot` in forge-media (small upstream PR;

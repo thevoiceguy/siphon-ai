@@ -329,7 +329,11 @@ hung call or connectivity issue; typical reaction is to hang up.
 ### 3.8 `rtp_stats` — periodic RTP/RTCP snapshot
 
 ```json
-{ "type": "rtp_stats", "call_id": "...", "seq": 50, "jitter_ms": 12.5, "packet_loss_ratio": 0.004 }
+{ "type": "rtp_stats", "call_id": "...", "seq": 50,
+  "jitter_ms": 12.5, "packet_loss_ratio": 0.004, "rtcp_rtt_ms": 42.0,
+  "rx_jitter_ms": 3.75, "rx_packets_received": 1500, "rx_packets_lost": 6,
+  "rx_packets_out_of_order": 2, "rx_packets_duplicate": 1,
+  "mos_estimate": 4.2 }
 ```
 
 Fired every `[bridge].rtp_stats_interval_ms` (default 5 s; configurable,
@@ -337,18 +341,36 @@ per-route override; `0` disables). The cadence mirrors RTCP's compound-
 report interval (RFC 3550 §6.2) so values track the underlying RTCP
 arrivals.
 
-Fields are JSON `null` (omitted) until forge has reported its first
-quality assessment for the call:
+Two viewpoints ride together (the `rx_*` fields and `mos_estimate` are
+additive in 0.30.0; protocol stays v1):
+
+- `jitter_ms` / `packet_loss_ratio` / `rtcp_rtt_ms` are
+  **remote-reported** — derived from the far end's RTCP Receiver
+  Reports, i.e. how the peer receives the stream SiphonAI *sends*.
+- `rx_*` fields are **locally measured** by SiphonAI on the stream it
+  *receives* from the caller. A congested path is often asymmetric;
+  compare the two sides to tell "they hear us badly" from "we hear
+  them badly."
+
+Fields are JSON `null` (omitted) until the corresponding source has
+produced its first data for the call:
 
 | Field                | Type            | Notes |
 |----------------------|-----------------|-------|
-| `jitter_ms`          | float \| null   | Estimated inter-arrival jitter. `null` if no RTCP RR has arrived yet. After a `QualityRestored` event in forge, this resets to `0.0` — distinct from `null`. |
-| `packet_loss_ratio`  | float \| null   | Loss as a ratio in `[0.0, 1.0]` (NOT a percent). Same `null` / `0.0` distinction. |
+| `jitter_ms`          | float \| null   | Estimated inter-arrival jitter (remote-reported). `null` if no RTCP RR has arrived yet. After a `QualityRestored` event in forge, this resets to `0.0` — distinct from `null`. |
+| `packet_loss_ratio`  | float \| null   | Loss as a ratio in `[0.0, 1.0]` (NOT a percent), remote-reported. Same `null` / `0.0` distinction. |
 | `rtcp_rtt_ms`        | float \| null   | Mean round-trip time over the reporting window. `null` until forge originates its own RTCP SRs (deferred to 0.3.1). Distinct from `0.0`, which is degenerate; once populated, the field is sticky — a window with no fresh RTT sample preserves the last measurement rather than reverting to `null`. |
+| `rx_jitter_ms`       | float \| null   | Locally-computed interarrival jitter (RFC 3550 §6.4.1) on the caller→SiphonAI stream. `null` until the first local media-stats snapshot (~5 s in). |
+| `rx_packets_received`| int \| null     | Unique RTP packets received from the caller, **cumulative since call start** (duplicates excluded). |
+| `rx_packets_lost`    | int \| null     | Sequence-gap loss on the receive side, cumulative. Late arrivals repair the count retroactively, so it may decrease between snapshots. |
+| `rx_packets_out_of_order` | int \| null | Packets that arrived after a newer sequence number had been seen, cumulative. |
+| `rx_packets_duplicate` | int \| null   | Re-receives of a recently seen sequence number, cumulative. |
+| `mos_estimate`       | float \| null   | Transport-only MOS-CQE estimate in `[1.0, 5.0]`: simplified E-model over local RX jitter/loss plus RTCP RTT — the same math heplify-server applies to SiphonAI's HEP QoS chunks, so Homer-side and WS-side scores agree. Transport impairment only (no codec/content scoring). `null` until RX data exists; slightly optimistic while `rtcp_rtt_ms` is still `null`. |
 
-Codec and sample-rate are constant for a call — consumers should
-correlate to the `start` message (§3.1) rather than expecting them
-on every snapshot.
+The `rx_packets_*` counters are cumulative — diff successive snapshots
+for rates. Codec and sample-rate are constant for a call — consumers
+should correlate to the `start` message (§3.1) rather than expecting
+them on every snapshot.
 
 ### 3.9 `stop` — call ended
 

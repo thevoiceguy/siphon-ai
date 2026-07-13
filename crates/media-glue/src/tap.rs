@@ -61,7 +61,7 @@ use std::time::{Duration, Instant};
 
 use crate::idle::{IdleDetector, IdleEvent};
 use crate::room::{RoomEvent, RoomMembership, RoomSender};
-use crate::rtp_stats::RtpStatsTracker;
+use crate::rtp_stats::{RtpStatsTracker, RxStats};
 
 use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, EventBus, ForgeError, ForgeEvent};
 use forge_dtmf::DtmfDigit;
@@ -973,6 +973,28 @@ impl MediaTap {
                                         *rtt_ms,
                                     );
                                 }
+                                // Locally-measured RX-side counters
+                                // (0.30.0). No leg filter beyond the
+                                // call_id: in bridge mode exactly one
+                                // leg (the SIP peer) receives RTP, so
+                                // only that leg publishes snapshots.
+                                ForgeEvent::MediaStatsSnapshot {
+                                    call_id: cid,
+                                    rx_packets_received,
+                                    rx_packets_lost,
+                                    rx_packets_out_of_order,
+                                    rx_packets_duplicate,
+                                    rx_jitter_ms,
+                                    ..
+                                } if cid == &self.call_id => {
+                                    self.rtp_stats.note_media_stats(RxStats {
+                                        jitter_ms: *rx_jitter_ms,
+                                        packets_received: *rx_packets_received,
+                                        packets_lost: *rx_packets_lost,
+                                        packets_out_of_order: *rx_packets_out_of_order,
+                                        packets_duplicate: *rx_packets_duplicate,
+                                    });
+                                }
                                 ForgeEvent::QualityDegraded {
                                     call_id: cid,
                                     packet_loss_percent,
@@ -1466,10 +1488,23 @@ impl MediaTap {
                     if let Some(r) = snap.rtt_ms {
                         metrics::histogram!("siphon_ai_rtp_rtt_ms").record(r as f64);
                     }
+                    if let Some(rx) = &snap.rx {
+                        metrics::histogram!("siphon_ai_rtp_rx_jitter_ms")
+                            .record(rx.jitter_ms as f64);
+                    }
+                    if let Some(m) = snap.mos_estimate {
+                        metrics::histogram!("siphon_ai_rtp_mos_estimate").record(m as f64);
+                    }
                     let out = OutgoingEvent::RtpStats {
                         jitter_ms: snap.jitter_ms,
                         packet_loss_ratio: snap.packet_loss_ratio,
                         rtcp_rtt_ms: snap.rtt_ms,
+                        rx_jitter_ms: snap.rx.map(|rx| rx.jitter_ms),
+                        rx_packets_received: snap.rx.map(|rx| rx.packets_received),
+                        rx_packets_lost: snap.rx.map(|rx| rx.packets_lost),
+                        rx_packets_out_of_order: snap.rx.map(|rx| rx.packets_out_of_order),
+                        rx_packets_duplicate: snap.rx.map(|rx| rx.packets_duplicate),
+                        mos_estimate: snap.mos_estimate,
                     };
                     if let Err(e) = events_tx.try_send(out) {
                         warn!(

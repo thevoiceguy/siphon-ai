@@ -167,9 +167,20 @@ class RtpStats:
     type = "rtp_stats"
     call_id: str
     seq: int
+    # Remote-reported (RTCP RRs): how the far end receives the stream
+    # SiphonAI sends.
     jitter_ms: float | None = None
     packet_loss_ratio: float | None = None
     rtcp_rtt_ms: float | None = None
+    # Locally measured on the caller->SiphonAI stream (0.30.0). The
+    # rx_packets_* counters are cumulative since call start.
+    rx_jitter_ms: float | None = None
+    rx_packets_received: int | None = None
+    rx_packets_lost: int | None = None
+    rx_packets_out_of_order: int | None = None
+    rx_packets_duplicate: int | None = None
+    # Transport-only MOS-CQE estimate in [1.0, 5.0] (0.30.0).
+    mos_estimate: float | None = None
 
 
 @dataclass(frozen=True)

@@ -328,6 +328,16 @@ impl Runtime {
 
         let session_mgr_config = SessionManagerConfig {
             port_pool_config: rtp_port_pool(&media)?,
+            session_config: forge_engine::MediaSessionConfig {
+                // Local receive-side stats snapshots (0.30.0). Always on
+                // at the RTCP-conventional 5 s cadence: they feed the
+                // rtp_stats rx_* fields AND the CDR quality block, and
+                // the CDR needs them even when a route has WS rtp_stats
+                // emission disabled. Cost is one broadcast event per
+                // receiving leg per 5 s.
+                media_stats_interval: Some(std::time::Duration::from_secs(5)),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let session_mgr = SessionManager::new(session_mgr_config, Some(Arc::clone(&event_bus)));

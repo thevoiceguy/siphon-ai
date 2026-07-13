@@ -211,6 +211,18 @@ pub enum OutgoingEvent {
         /// Mean RTT in milliseconds. `None` until forge originates
         /// its own SRs (0.3.1 follow-up).
         rtcp_rtt_ms: Option<f32>,
+        /// Locally-measured RX-side jitter in milliseconds (0.30.0).
+        rx_jitter_ms: Option<f32>,
+        /// Cumulative unique RTP packets received from the caller.
+        rx_packets_received: Option<u64>,
+        /// Cumulative sequence-gap loss on the caller→SiphonAI stream.
+        rx_packets_lost: Option<u64>,
+        /// Cumulative late arrivals.
+        rx_packets_out_of_order: Option<u64>,
+        /// Cumulative duplicate receives.
+        rx_packets_duplicate: Option<u64>,
+        /// Transport-only MOS-CQE estimate in `[1.0, 5.0]`.
+        mos_estimate: Option<f32>,
     },
     Stop {
         reason: StopReason,
@@ -871,12 +883,24 @@ fn build_bridge_out(event: OutgoingEvent, call_id: CallId, seq: Seq) -> BridgeOu
             jitter_ms,
             packet_loss_ratio,
             rtcp_rtt_ms,
+            rx_jitter_ms,
+            rx_packets_received,
+            rx_packets_lost,
+            rx_packets_out_of_order,
+            rx_packets_duplicate,
+            mos_estimate,
         } => BridgeOut::RtpStats {
             call_id,
             seq,
             jitter_ms,
             packet_loss_ratio,
             rtcp_rtt_ms,
+            rx_jitter_ms,
+            rx_packets_received,
+            rx_packets_lost,
+            rx_packets_out_of_order,
+            rx_packets_duplicate,
+            mos_estimate,
         },
         OutgoingEvent::Stop { reason } => BridgeOut::Stop {
             call_id,

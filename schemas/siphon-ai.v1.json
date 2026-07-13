@@ -600,13 +600,21 @@
           "type": "object"
         },
         {
-          "description": "Periodic snapshot of RTP / RTCP quality, emitted every\n`[bridge].rtp_stats_interval_ms` (default 5 s, configurable\nper-route; `0` disables). Fields are JSON `null` until forge\nhas reported its first quality assessment for the call.\nCodec / sample rate are constant for the call — consumers\nshould correlate to the `start` message.",
+          "description": "Periodic snapshot of RTP / RTCP quality, emitted every\n`[bridge].rtp_stats_interval_ms` (default 5 s, configurable\nper-route; `0` disables). Fields are JSON `null` until forge\nhas reported its first quality assessment for the call.\nCodec / sample rate are constant for the call — consumers\nshould correlate to the `start` message.\n\nTwo viewpoints ride together (0.30.0): the original three fields\nare **remote-reported** (RTCP RRs: how the far end receives the\nstream SiphonAI sends), while the `rx_*` fields are **locally\nmeasured** on the stream SiphonAI receives from the caller. A\ncongested path is often asymmetric — compare the two sides.",
           "properties": {
             "call_id": {
               "$ref": "#/$defs/CallId"
             },
             "jitter_ms": {
-              "description": "Estimated inter-arrival jitter in milliseconds, or `null`.",
+              "description": "Estimated inter-arrival jitter in milliseconds, or `null`.\nRemote-reported (RTCP RR): describes SiphonAI→caller audio.",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "mos_estimate": {
+              "description": "Transport-only MOS-CQE estimate in `[1.0, 5.0]` (simplified\nE-model from local RX jitter/loss plus RTCP RTT — the same\nmath heplify-server applies to HEP QoS chunks, so Homer-side\nand WS-side numbers agree). Reflects transport impairment\nonly, not codec or content quality. `null` until enough\ninputs exist (0.30.0).",
               "format": "float",
               "type": [
                 "number",
@@ -614,7 +622,7 @@
               ]
             },
             "packet_loss_ratio": {
-              "description": "Packet loss as a ratio in `[0.0, 1.0]`, or `null`.",
+              "description": "Packet loss as a ratio in `[0.0, 1.0]`, or `null`.\nRemote-reported (RTCP RR): describes SiphonAI→caller audio.",
               "format": "float",
               "type": [
                 "number",
@@ -626,6 +634,50 @@
               "format": "float",
               "type": [
                 "number",
+                "null"
+              ]
+            },
+            "rx_jitter_ms": {
+              "description": "Locally-measured interarrival jitter (RFC 3550 §6.4.1) on the\ncaller→SiphonAI stream, in milliseconds. `null` until the\nfirst local media-stats snapshot (0.30.0).",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "rx_packets_duplicate": {
+              "description": "Re-receives of a recently seen sequence number. Cumulative,\nor `null` (0.30.0).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "rx_packets_lost": {
+              "description": "Packets lost in transit on the caller→SiphonAI stream\n(sequence-gap count; late arrivals repair it, so it can\nshrink between snapshots). Cumulative, or `null` (0.30.0).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "rx_packets_out_of_order": {
+              "description": "Packets that arrived after a newer sequence number had\nalready been seen. Cumulative, or `null` (0.30.0).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "rx_packets_received": {
+              "description": "Unique RTP packets received from the caller since call start\n(duplicates excluded). Cumulative, or `null` (0.30.0).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
                 "null"
               ]
             },

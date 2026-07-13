@@ -24,8 +24,67 @@
 //! RR has arrived, they are `Some(value)`. `rtt_ms` may stay `None`
 //! even when jitter/loss are populated — RTT requires forge to
 //! originate its own SRs (deferred to 0.3.1 per §9 decision 10).
+//!
+//! ## RX side (0.30.0)
+//!
+//! The RR-derived fields above are **remote-reported** — how the far
+//! end receives the stream we send. forge additionally publishes a
+//! periodic [`forge_core::ForgeEvent::MediaStatsSnapshot`] with
+//! **locally-measured** receive-side counters (loss, reorder,
+//! duplicates, RFC 3550 interarrival jitter on the stream we receive);
+//! [`RtpStatsTracker::note_media_stats`] caches the latest one. The
+//! two viewpoints ride the same `rtp_stats` wire event so consumers
+//! can spot asymmetric paths. A transport-only MOS-CQE estimate is
+//! derived from the RX side + RTCP RTT (see [`mos_estimate`]).
 
 use std::time::Duration;
+
+/// Locally-measured receive-side counters, cached verbatim from the
+/// latest `MediaStatsSnapshot`. Cumulative since call start.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RxStats {
+    pub jitter_ms: f32,
+    pub packets_received: u64,
+    pub packets_lost: u64,
+    pub packets_out_of_order: u64,
+    pub packets_duplicate: u64,
+}
+
+impl RxStats {
+    /// Loss as a percentage of packets expected (received + lost) —
+    /// the E-model's input unit.
+    fn loss_percent(&self) -> f32 {
+        let expected = self.packets_received + self.packets_lost;
+        if expected == 0 {
+            return 0.0;
+        }
+        (self.packets_lost as f32 / expected as f32) * 100.0
+    }
+}
+
+/// Transport-only MOS-CQE estimate in `[1.0, 5.0]` via the simplified
+/// E-model (ITU-T G.107 reduced to jitter/loss/RTT) — the same math
+/// heplify-server applies to our HEP QoS chunks, so Homer-side and
+/// WS-side numbers agree. Reflects transport impairment only, not
+/// codec or content quality.
+///
+/// `rtt_ms = 0.0` (RTT unknown) yields a slightly optimistic score;
+/// callers decide whether to compute at all (we require an RX
+/// snapshot, see [`RtpStatsTracker::snapshot`]).
+pub fn mos_estimate(jitter_ms: f32, loss_percent: f32, rtt_ms: f32) -> f32 {
+    // Effective one-way latency: RTT plus double-jitter headroom plus
+    // 10 ms codec/processing allowance (Cole–Rosenbluth convention).
+    let effective_latency = rtt_ms + jitter_ms * 2.0 + 10.0;
+    let mut r = if effective_latency < 160.0 {
+        93.2 - effective_latency / 40.0
+    } else {
+        93.2 - (effective_latency - 120.0) / 10.0
+    };
+    r -= loss_percent * 2.5;
+    r = r.clamp(0.0, 100.0);
+    let mos = 1.0 + 0.035 * r + 0.000_007 * r * (r - 52.0) * (100.0 - r);
+    mos.clamp(1.0, 5.0)
+}
 
 /// What [`RtpStatsTracker::snapshot`] returns. Used by the tap's
 /// periodic-emit arm to populate the wire event.
@@ -38,6 +97,12 @@ pub struct RtpStatsSnapshot {
     /// to 0.3.1 per DEV_PLAN_0.3.0.md §9 decision 10) — distinct from
     /// `Some(0.0)`, which is degenerate.
     pub rtt_ms: Option<f32>,
+    /// Latest locally-measured RX counters; `None` until the first
+    /// `MediaStatsSnapshot` arrives (0.30.0).
+    pub rx: Option<RxStats>,
+    /// Transport-only MOS-CQE estimate; populated whenever `rx` is
+    /// (RTT contributes when known, else 0 — see [`mos_estimate`]).
+    pub mos_estimate: Option<f32>,
 }
 
 /// Per-call RTP-stats state. Owned by the tap; updated from forge
@@ -48,6 +113,7 @@ pub struct RtpStatsTracker {
     last_jitter_ms: Option<f32>,
     last_packet_loss_ratio: Option<f32>,
     last_rtt_ms: Option<f32>,
+    last_rx: Option<RxStats>,
 }
 
 impl RtpStatsTracker {
@@ -58,6 +124,7 @@ impl RtpStatsTracker {
             last_jitter_ms: None,
             last_packet_loss_ratio: None,
             last_rtt_ms: None,
+            last_rx: None,
         }
     }
 
@@ -110,12 +177,30 @@ impl RtpStatsTracker {
         self.last_packet_loss_ratio = Some(0.0);
     }
 
-    /// Current snapshot for the periodic-emit arm.
+    /// forge published a `MediaStatsSnapshot` — cache the locally-
+    /// measured RX counters verbatim (they're cumulative; the newest
+    /// snapshot supersedes the previous one).
+    pub fn note_media_stats(&mut self, rx: RxStats) {
+        self.last_rx = Some(rx);
+    }
+
+    /// Current snapshot for the periodic-emit arm. `mos_estimate`
+    /// requires at least one RX snapshot (jitter + loss are its load-
+    /// bearing inputs); RTT sharpens it when RTCP has produced one.
     pub fn snapshot(&self) -> RtpStatsSnapshot {
+        let mos = self.last_rx.map(|rx| {
+            mos_estimate(
+                rx.jitter_ms,
+                rx.loss_percent(),
+                self.last_rtt_ms.unwrap_or(0.0),
+            )
+        });
         RtpStatsSnapshot {
             jitter_ms: self.last_jitter_ms,
             packet_loss_ratio: self.last_packet_loss_ratio,
             rtt_ms: self.last_rtt_ms,
+            rx: self.last_rx,
+            mos_estimate: mos,
         }
     }
 }
@@ -228,5 +313,101 @@ mod tests {
         let a = t.snapshot();
         let b = t.snapshot();
         assert_eq!(a, b);
+    }
+
+    fn rx(jitter_ms: f32, received: u64, lost: u64) -> RxStats {
+        RxStats {
+            jitter_ms,
+            packets_received: received,
+            packets_lost: lost,
+            packets_out_of_order: 0,
+            packets_duplicate: 0,
+        }
+    }
+
+    #[test]
+    fn fresh_tracker_has_no_rx_or_mos() {
+        let t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        let snap = t.snapshot();
+        assert!(snap.rx.is_none());
+        assert!(snap.mos_estimate.is_none(), "no MOS without RX inputs");
+    }
+
+    #[test]
+    fn media_stats_populates_rx_and_mos() {
+        let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        t.note_media_stats(rx(3.5, 1500, 6));
+        let snap = t.snapshot();
+        assert_eq!(snap.rx, Some(rx(3.5, 1500, 6)));
+        let mos = snap.mos_estimate.expect("MOS once RX data exists");
+        assert!((1.0..=5.0).contains(&mos), "mos = {mos}");
+    }
+
+    #[test]
+    fn newer_media_stats_supersede_older() {
+        // Counters are cumulative — latest snapshot wins outright.
+        let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        t.note_media_stats(rx(3.5, 500, 2));
+        t.note_media_stats(rx(4.0, 1500, 6));
+        assert_eq!(t.snapshot().rx, Some(rx(4.0, 1500, 6)));
+    }
+
+    #[test]
+    fn rx_does_not_disturb_remote_reported_fields() {
+        // The two viewpoints are independent halves of the same event.
+        let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        t.note_rtcp_report(17.2, 0.025, Some(42.0));
+        t.note_media_stats(rx(3.5, 1500, 6));
+        let snap = t.snapshot();
+        assert_eq!(snap.jitter_ms, Some(17.2));
+        assert_eq!(snap.rtt_ms, Some(42.0));
+        assert_eq!(snap.rx, Some(rx(3.5, 1500, 6)));
+    }
+
+    #[test]
+    fn mos_clean_call_scores_high() {
+        // ~0 jitter, 0 loss, no RTT: textbook R ≈ 92.9 → MOS ≈ 4.4.
+        let mos = mos_estimate(0.0, 0.0, 0.0);
+        assert!(mos > 4.3, "clean call MOS = {mos}");
+    }
+
+    #[test]
+    fn mos_degrades_monotonically_with_loss() {
+        let clean = mos_estimate(2.0, 0.0, 40.0);
+        let lossy = mos_estimate(2.0, 5.0, 40.0);
+        let awful = mos_estimate(2.0, 20.0, 40.0);
+        assert!(clean > lossy, "{clean} > {lossy}");
+        assert!(lossy > awful, "{lossy} > {awful}");
+        assert!(awful >= 1.0);
+    }
+
+    #[test]
+    fn mos_high_latency_takes_steeper_slope() {
+        // ≥160 ms effective latency switches to the steeper Id term:
+        // R drops 1 point per 10 ms instead of per 40 ms. At 620 ms
+        // effective (600 RTT + 2×5 jitter + 10) R = 43.2 → MOS ≈ 2.2,
+        // versus R = 90.2 → MOS ≈ 4.4 at 120 ms effective.
+        let low = mos_estimate(5.0, 0.0, 100.0); // eff = 120
+        let high = mos_estimate(5.0, 0.0, 600.0); // eff = 620
+        assert!(low - high > 1.5, "steep penalty: {low} vs {high}");
+        assert!(high >= 1.0);
+    }
+
+    #[test]
+    fn mos_stays_in_bounds_at_extremes() {
+        let worst = mos_estimate(500.0, 100.0, 2000.0);
+        assert_eq!(worst, 1.0);
+        let best = mos_estimate(0.0, 0.0, 0.0);
+        assert!(best <= 5.0);
+    }
+
+    #[test]
+    fn rx_loss_percent_handles_zero_expected() {
+        // Degenerate: snapshot before any packet counted. No panic,
+        // 0% loss.
+        let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        t.note_media_stats(rx(0.0, 0, 0));
+        let mos = t.snapshot().mos_estimate.expect("computable");
+        assert!(mos > 4.0);
     }
 }

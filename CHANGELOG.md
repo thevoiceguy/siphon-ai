@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-07-14
+
+### Added
+
+- **Reversible (server-arbitrated) barge-in** —
+  `[bridge.barge_in].mode = "pause"`
+  (`docs/design/DESIGN_REVERSIBLE_BARGE_IN.md`; #285/#286). Today a
+  cough, laugh, or backchannel ("uh-huh") that trips VAD irreversibly
+  kills the bot's playout. Pause mode reacts instantly but
+  *reversibly*: playout is flushed within one frame — exactly like
+  `auto_clear` — but the unplayed tail is retained, and the WS server
+  (the only layer with STT) rules on intent:
+  - `speech_started` carries `decision_pending: true` +
+    `decision_deadline_ms` when an arbitration arms;
+  - the server answers **`barge_in_confirm`** (real interruption —
+    tail dropped) or **`barge_in_reject`** (false positive — playout
+    resumes mid-utterance); a `clear` during the window acts as
+    confirm, and late verdicts are harmless no-ops;
+  - every resolution is acknowledged with
+    **`barge_in_resolved { outcome: confirmed | rejected | timeout }`**;
+  - no verdict within `decision_ms` (default 500) applies
+    `on_timeout` (default `confirm` — a server that never rules
+    degrades safely to "auto_clear delayed by the window");
+  - `resume_max_secs` (default 30) caps the retained audio;
+  - `start.barge_in_mode` announces the call's resolved policy;
+  - per-route overrides via `[route.bridge.barge_in]`, field-wise;
+  - the existing `debounce_ms` echo gate composes in front (acoustic
+    filter first, semantic arbitration second).
+  Arbitration only arms while the bot is playing, is suspended in
+  conference rooms, and resolves as confirm when preempted by
+  mute/hold/park/announce/room-join or a WS drop. Off by default;
+  protocol stays **v1** (all additions additive), CDR stays **v4**
+  (additive optional `quality` counters).
+- **Server SDKs**: typed `BargeInResolved` / extended `SpeechStarted`
+  and `Start`, plus `barge_in_confirm()` / `barge_in_reject()` (Python)
+  and `bargeInConfirm()` / `bargeInReject()` (TypeScript). The echo
+  reference servers answer arbitration requests with a reject by
+  default (`SIPHON_ECHO_BARGE_IN_VERDICT=confirm` flips it).
+- **Conformance**: new bundled `barge-in-pause` testkit scenario
+  (verdict within the deadline + timeout-outcome tolerance) and a
+  `session.barge_in_mode` scenario option.
+- **Metrics**: `siphon_ai_barge_in_decisions_total{outcome}` and
+  `siphon_ai_barge_in_decision_seconds` (explicit 50 ms–5 s buckets).
+- **SIPp harness**: `barge_in_pause` phase with *real caller media* —
+  a run-time-generated G.711 tone pcap (`gen_tone_pcap.py`, stdlib
+  only) replayed via `play_pcap_audio`, driving VAD → pause →
+  reject → resume end-to-end. The suite is now 36 scenarios.
+
+### Fixed
+
+- Route-level `[route.bridge.barge_in]` strings are now **validated at
+  config load** — previously a typo'd route `mode` was silently inert
+  (the runtime merge skipped unparseable values).
+
 ## [0.31.1] - 2026-07-14
 
 ### Security

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.1] - 2026-07-14
+
+### Security
+
+- **siphon-rs bumped to `f3454c7`**, picking up upstream **#61**: a
+  registration-hijack authentication-bypass fix plus remote parser
+  panic fixes. Deployments using `[[register]]` / digest auth should
+  update.
+
+### Changed
+
+- **forge-media bumped to `3c59b5f`** (lockstep with siphon-rs):
+  dependency migrations — rand 0.10, openssl 0.10.81, and SRTP moving
+  to aes 0.9 / aes-gcm 0.11 (cipher 0.5). Wire behavior is unchanged;
+  the SIPp SRTP-SDES and DTLS scenarios pass against the new cipher
+  stack.
+- **`metrics` facade 0.23 → 0.24** (+ `metrics-exporter-prometheus`
+  0.15 → 0.18) so forge and the daemon share one metrics recorder —
+  forge moved to metrics 0.24, and a version-split facade would have
+  silently dropped every `forge_*` series from `/metrics`. No metric
+  names or labels changed.
+
+No protocol, CDR, config, or API changes — a dependency-only patch.
+
 ## [0.31.0] - 2026-07-14
 
 ### Added

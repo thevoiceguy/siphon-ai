@@ -75,6 +75,8 @@ pub struct Config {
     pub webhooks: WebhooksConfig,
     /// `[audit]` — signed audit-event stream (0.20.0).
     pub audit: AuditConfig,
+    /// `[quality]` — per-call quality history records (0.31.0).
+    pub quality: QualityConfig,
     pub hep: HepConfig,
     /// `[admin]` — the authenticated admin API. `None` when no `[admin]`
     /// block is configured, in which case `/admin/*` is not served.
@@ -538,6 +540,37 @@ pub struct AuditWebhookConfig {
     pub timeout: Duration,
 }
 
+/// Resolved `[quality]` plan (0.31.0). The daemon translates this into
+/// real `siphon-ai-quality` sinks at runtime (config doesn't depend on
+/// the quality crate — same as CDR and audit).
+#[derive(Debug, Clone, Default)]
+pub struct QualityConfig {
+    /// `[quality].enabled`. Even when true, file and webhook are
+    /// individually off until their `enabled = true` is set.
+    pub enabled: bool,
+    /// Per-call record cadence.
+    pub interval: Duration,
+    pub file: Option<QualityFileConfig>,
+    pub webhook: Option<QualityWebhookConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct QualityFileConfig {
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct QualityWebhookConfig {
+    pub url: String,
+    pub auth_header: Option<String>,
+    /// HMAC-SHA256 signing secret. `None` ⇒ unsigned deliveries.
+    pub secret: Option<String>,
+    /// Durable spool directory. `None` ⇒ best-effort delivery.
+    pub spool_dir: Option<String>,
+    pub retry_max: u32,
+    pub timeout: Duration,
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
     pub id: String,
@@ -936,6 +969,18 @@ pub enum CompileError {
     #[error("[audit].enabled = true but neither [audit.file] nor [audit.webhook] is enabled; enable at least one sink or set [audit].enabled = false")]
     AuditNoSink,
 
+    #[error("[quality.file].path is required when [quality.file].enabled = true")]
+    QualityFilePathRequired,
+
+    #[error("[quality.webhook].url is required when [quality.webhook].enabled = true")]
+    QualityWebhookUrlRequired,
+
+    #[error("[quality].enabled = true but neither [quality.file] nor [quality.webhook] is enabled; enable at least one sink or set [quality].enabled = false")]
+    QualityNoSink,
+
+    #[error("[quality].interval_secs must be at least 1 (got {0})")]
+    QualityIntervalZero(u64),
+
     #[error("[observability].http_listen {0:?} is not a valid socket address: {1}")]
     BadObservabilityListen(String, std::net::AddrParseError),
 
@@ -1111,6 +1156,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let observability = compile_observability(raw.observability)?;
     let webhooks = compile_webhooks(raw.webhooks)?;
     let audit = compile_audit(raw.audit)?;
+    let quality = compile_quality(raw.quality)?;
     let hep = compile_hep(raw.hep)?;
     let admin = compile_admin(raw.admin)?;
     let shutdown = compile_shutdown(raw.shutdown);
@@ -1207,6 +1253,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         observability,
         webhooks,
         audit,
+        quality,
         hep,
         admin,
         shutdown,
@@ -2796,6 +2843,129 @@ fn compile_audit(raw: crate::raw::RawAudit) -> Result<AuditConfig, CompileError>
         file,
         webhook,
     })
+}
+
+fn compile_quality(raw: crate::raw::RawQuality) -> Result<QualityConfig, CompileError> {
+    if !raw.enabled {
+        // Master switch off; sub-block config parsed but ignored,
+        // matching the [cdr] / [audit] pattern.
+        return Ok(QualityConfig::default());
+    }
+    let interval_secs = raw.interval_secs.unwrap_or(30);
+    if interval_secs == 0 {
+        return Err(CompileError::QualityIntervalZero(0));
+    }
+    let file = if raw.file.enabled {
+        let path = raw.file.path.ok_or(CompileError::QualityFilePathRequired)?;
+        if path.is_empty() {
+            return Err(CompileError::QualityFilePathRequired);
+        }
+        Some(QualityFileConfig {
+            path: PathBuf::from(path),
+        })
+    } else {
+        None
+    };
+    let webhook = if raw.webhook.enabled {
+        let url = raw
+            .webhook
+            .url
+            .ok_or(CompileError::QualityWebhookUrlRequired)?;
+        if url.is_empty() {
+            return Err(CompileError::QualityWebhookUrlRequired);
+        }
+        Some(QualityWebhookConfig {
+            url,
+            auth_header: raw.webhook.auth_header.filter(|s| !s.is_empty()),
+            secret: raw.webhook.secret.filter(|s| !s.is_empty()),
+            spool_dir: raw.webhook.spool_dir.filter(|s| !s.is_empty()),
+            retry_max: raw.webhook.retry_max.unwrap_or(3),
+            timeout: Duration::from_millis(raw.webhook.timeout_ms.unwrap_or(5000)),
+        })
+    } else {
+        None
+    };
+    // `[quality].enabled = true` with no sink enabled is almost
+    // certainly a mistake. Fail loud rather than silently sample
+    // records into a null sink.
+    if file.is_none() && webhook.is_none() {
+        return Err(CompileError::QualityNoSink);
+    }
+    Ok(QualityConfig {
+        enabled: true,
+        interval: Duration::from_secs(interval_secs),
+        file,
+        webhook,
+    })
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::{compile_quality, CompileError};
+    use crate::raw::{RawQuality, RawQualityFile, RawQualityWebhook};
+
+    fn base() -> RawQuality {
+        RawQuality {
+            enabled: true,
+            interval_secs: None,
+            file: RawQualityFile::default(),
+            webhook: RawQualityWebhook::default(),
+        }
+    }
+
+    #[test]
+    fn disabled_compiles_to_default() {
+        let cfg = compile_quality(RawQuality::default()).unwrap();
+        assert!(!cfg.enabled);
+    }
+
+    #[test]
+    fn enabled_without_sinks_fails_loud() {
+        let err = compile_quality(base()).unwrap_err();
+        assert!(matches!(err, CompileError::QualityNoSink));
+    }
+
+    #[test]
+    fn file_sink_requires_path() {
+        let mut raw = base();
+        raw.file.enabled = true;
+        let err = compile_quality(raw).unwrap_err();
+        assert!(matches!(err, CompileError::QualityFilePathRequired));
+    }
+
+    #[test]
+    fn webhook_requires_url() {
+        let mut raw = base();
+        raw.webhook.enabled = true;
+        let err = compile_quality(raw).unwrap_err();
+        assert!(matches!(err, CompileError::QualityWebhookUrlRequired));
+    }
+
+    #[test]
+    fn zero_interval_rejected() {
+        let mut raw = base();
+        raw.interval_secs = Some(0);
+        raw.file.enabled = true;
+        raw.file.path = Some("/tmp/q.jsonl".into());
+        let err = compile_quality(raw).unwrap_err();
+        assert!(matches!(err, CompileError::QualityIntervalZero(0)));
+    }
+
+    #[test]
+    fn full_config_compiles_with_defaults() {
+        let mut raw = base();
+        raw.file.enabled = true;
+        raw.file.path = Some("/tmp/q.jsonl".into());
+        raw.webhook.enabled = true;
+        raw.webhook.url = Some("https://example.com/q".into());
+        let cfg = compile_quality(raw).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.interval, std::time::Duration::from_secs(30));
+        assert!(cfg.file.is_some());
+        let wh = cfg.webhook.unwrap();
+        assert_eq!(wh.retry_max, 3);
+        assert_eq!(wh.timeout, std::time::Duration::from_millis(5000));
+    }
 }
 
 #[cfg(test)]

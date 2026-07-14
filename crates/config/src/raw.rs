@@ -85,6 +85,11 @@ pub struct RawConfig {
     #[serde(default)]
     pub audit: RawAudit,
 
+    /// `[quality]` — per-call quality history records (0.31.0). Off by
+    /// default.
+    #[serde(default)]
+    pub quality: RawQuality,
+
     #[serde(default)]
     pub hep: RawHep,
 
@@ -920,6 +925,69 @@ pub struct RawAuditWebhook {
     #[serde(default)]
     pub secret: Option<String>,
     /// Optional durable spool directory. When set, an event that
+    /// exhausts the in-memory retry budget is persisted here and
+    /// retried by a background worker that survives restarts.
+    #[serde(default)]
+    pub spool_dir: Option<String>,
+    #[serde(default)]
+    pub retry_max: Option<u32>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// `[quality]` — per-call quality history records (0.31.0). Periodic +
+/// end-of-call quality summaries (same shape as the CDR `quality`
+/// block) shipped to a JSONL file (`[quality.file]`) and/or an
+/// HMAC-signed webhook (`[quality.webhook]`); enable either or both.
+/// Off by default. Restart-required (not hot-reloaded on SIGHUP).
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawQuality {
+    /// Master switch. When `false` no record task runs and the
+    /// sub-blocks are parsed but ignored.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Per-call record cadence in seconds. Default 30. The final
+    /// end-of-call record is always emitted (when the call measured
+    /// anything), regardless of cadence.
+    #[serde(default)]
+    pub interval_secs: Option<u64>,
+
+    #[serde(default)]
+    pub file: RawQualityFile,
+
+    #[serde(default)]
+    pub webhook: RawQualityWebhook,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawQualityFile {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Required when `enabled = true`. Append-only JSONL; the parent
+    /// directory must exist at startup (the daemon does NOT mkdir).
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawQualityWebhook {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Required when `enabled = true`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Optional `Authorization` header value, sent verbatim.
+    #[serde(default)]
+    pub auth_header: Option<String>,
+    /// HMAC-SHA256 signing secret. `${VAR}` / `${file:}` / `${cred:}`
+    /// resolved by the loader.
+    #[serde(default)]
+    pub secret: Option<String>,
+    /// Optional durable spool directory. When set, a record that
     /// exhausts the in-memory retry budget is persisted here and
     /// retried by a background worker that survives restarts.
     #[serde(default)]

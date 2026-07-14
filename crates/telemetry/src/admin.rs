@@ -84,7 +84,19 @@ pub struct AdminState {
     /// only in partially-built test states, where `/admin/v1/drain`
     /// then returns 503.
     pub drain: Option<DrainStatusFn>,
+    /// Live per-call quality snapshot (0.31.0), serving
+    /// `GET /admin/v1/calls/:id/stats`. Always installed by the runtime
+    /// (the quality tracker runs regardless of `[quality]`); `None`
+    /// only in partially-built test states → 503.
+    pub quality_stats: Option<QualityStatsFn>,
 }
+
+/// Closure resolving a bridge `call_id` to its live quality snapshot,
+/// pre-serialized by the runtime adapter. `None` = no active call with
+/// that id (→ 404). Same indirection rationale as
+/// [`CallRegistryHandle`] — keeps `siphon-ai-core` out of the
+/// telemetry crate's deps.
+pub type QualityStatsFn = Arc<dyn Fn(&str) -> Option<serde_json::Value> + Send + Sync>;
 
 /// Snapshot of the daemon's graceful-shutdown drain state (0.17.0),
 /// served by `GET /admin/v1/drain`. Lets an operator / deploy script
@@ -359,6 +371,17 @@ pub async fn dispatch(
             retrieve_call(state, id, &body)
         }
         (m, p)
+            if *m == hyper::Method::GET
+                && p.starts_with("/admin/v1/calls/")
+                && p.ends_with("/stats") =>
+        {
+            let id = p
+                .strip_prefix("/admin/v1/calls/")
+                .and_then(|s| s.strip_suffix("/stats"))
+                .unwrap_or("");
+            call_stats(state, id)
+        }
+        (m, p)
             if m == hyper::Method::POST
                 && p.starts_with("/admin/calls/")
                 && p.ends_with("/hangup") =>
@@ -448,6 +471,29 @@ fn drain_status(state: &AdminState) -> Response<Full<Bytes>> {
         return service_unavailable("drain status not installed");
     };
     json_response(StatusCode::OK, &json!(f()))
+}
+
+/// `GET /admin/v1/calls/:id/stats` (0.31.0) — live quality snapshot
+/// for one active call, in the CDR `quality` block's shape. 404 when
+/// no active call has that bridge `call_id`; ended calls answer
+/// through the CDR / `[quality]` history records instead.
+fn call_stats(state: &AdminState, call_id: &str) -> Response<Full<Bytes>> {
+    if call_id.is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({ "error": "empty call_id" }),
+        );
+    }
+    let Some(f) = state.quality_stats.as_ref() else {
+        return service_unavailable("quality stats not installed");
+    };
+    match f(call_id) {
+        Some(row) => json_response(StatusCode::OK, &row),
+        None => json_response(
+            StatusCode::NOT_FOUND,
+            &json!({ "error": "no active call with that call_id" }),
+        ),
+    }
 }
 
 fn hangup_call(state: &AdminState, sip_call_id: &str) -> Response<Full<Bytes>> {

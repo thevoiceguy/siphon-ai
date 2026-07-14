@@ -210,6 +210,13 @@ pub fn min_role(method: &hyper::Method, path: &str) -> Option<Role> {
 
         // ── Operator (live-call control) ──
         (&Method::POST, "/admin/v1/conferences") => Some(Role::Operator),
+        // ── ReadOnly (parameterised) ──
+        // /admin/v1/calls/:id/stats — live quality probe (0.31.0).
+        (m, p)
+            if *m == Method::GET && p.starts_with("/admin/v1/calls/") && p.ends_with("/stats") =>
+        {
+            Some(Role::ReadOnly)
+        }
         (m, p) => operator_pattern(m, p).then_some(Role::Operator),
     }
 }
@@ -254,6 +261,11 @@ pub fn route_label(method: &hyper::Method, path: &str) -> &'static str {
             if *m == Method::POST && p.starts_with("/admin/calls/") && p.ends_with("/hangup") =>
         {
             "POST /admin/calls/:id/hangup"
+        }
+        (m, p)
+            if *m == Method::GET && p.starts_with("/admin/v1/calls/") && p.ends_with("/stats") =>
+        {
+            "GET /admin/v1/calls/:id/stats"
         }
         (m, p)
             if *m == Method::POST && p.starts_with("/admin/v1/calls/") && p.ends_with("/park") =>

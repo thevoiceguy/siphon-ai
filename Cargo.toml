@@ -10,6 +10,7 @@ members = [
     "crates/http",
     "crates/media-glue",
     "crates/protocol-testkit",
+    "crates/quality",
     "crates/recording",
     "crates/routes",
     "crates/security",
@@ -33,6 +34,7 @@ homepage = "https://github.com/thevoiceguy/siphon-ai"
 siphon-ai-audit       = { path = "crates/audit" }
 siphon-ai-bridge      = { path = "crates/bridge" }
 siphon-ai-cdr         = { path = "crates/cdr" }
+siphon-ai-quality     = { path = "crates/quality" }
 siphon-ai-config      = { path = "crates/config" }
 siphon-ai-core        = { path = "crates/core" }
 siphon-ai-http        = { path = "crates/http" }

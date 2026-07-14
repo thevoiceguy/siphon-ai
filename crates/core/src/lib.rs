@@ -14,6 +14,7 @@ pub mod outbound;
 pub mod outbound_service;
 pub mod park;
 pub mod park_admin;
+pub mod quality_live;
 pub mod registry;
 pub mod transfer;
 

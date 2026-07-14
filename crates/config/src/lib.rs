@@ -37,9 +37,10 @@ pub use compile::{
     compile, AdminConfig, AdminTlsConfig, AuditConfig, AuditFileConfig, AuditWebhookConfig,
     CdrConfig, CdrFileConfig, CdrWebhookConfig, CompileError, ConferenceConfig, Config, Gateway,
     GatewayCredentials, HepConfig, MediaConfig, NodeConfig, ObservabilityConfig, OtlpConfig,
-    OutboundConfig, ParkConfig, ParkTimeoutAction, RegisterConfig, SecurityConfig, ShutdownConfig,
-    SipAdmissionConfig, SipAuthConfig, SipAuthUser, SipConfig, SipTlsConfig, SipTransport,
-    TrunkCidr, TrunkCidrParseError, TrunkConfig, WebhooksConfig,
+    OutboundConfig, ParkConfig, ParkTimeoutAction, QualityConfig, QualityFileConfig,
+    QualityWebhookConfig, RegisterConfig, SecurityConfig, ShutdownConfig, SipAdmissionConfig,
+    SipAuthConfig, SipAuthUser, SipConfig, SipTlsConfig, SipTransport, TrunkCidr,
+    TrunkCidrParseError, TrunkConfig, WebhooksConfig,
 };
 pub use env::{expand, expand_cow, EnvError, EnvSource, ProcessEnv};
 pub use raw::{

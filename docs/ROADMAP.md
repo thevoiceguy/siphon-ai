@@ -1,19 +1,22 @@
 # SiphonAI Roadmap
 
 The original v1 development plan (`docs/DEV_PLAN.md`) is **complete**, and
-the post-plan themes shipped through **v0.12.1**: admin auth + RBAC (0.10.0),
-webhook/CDR delivery durability (0.11.0), and the config CLI + `SIGHUP`
-reload (0.12.0/0.12.1). The product is feature-complete on the *call-handling*
-surface — codecs (G.711/Opus), SRTP (SDES + DTLS, both directions),
-hold/transfer/conference/park, outbound origination, recording, WS reconnect,
-and STIR/SHAKEN verification.
+the post-plan themes have shipped through **v0.32.0**. The product is
+feature-complete on the *call-handling* surface — codecs (G.711/Opus), SRTP
+(SDES + DTLS, both directions), hold/transfer/conference/park, outbound
+origination, recording (encrypted, S3, consent), reversible barge-in, WS
+reconnect, and STIR/SHAKEN verification — and both P0s plus **every P1
+theme** below are delivered: release & packaging (0.16.0), graceful shutdown
+(0.17.0), security & abuse hardening (0.18–0.20), observability completeness
+(0.21–0.23), recording compliance & storage (0.24–0.26), protocol SDKs &
+schemas (0.27–0.29), and per-call quality telemetry (0.30/0.31).
 
-What's left is mostly **operational maturity, security hardening, and a few
-high-value call features** — not core bridging. This document is the curated,
-prioritized backlog. Items are grouped by priority; within a theme the work
-would follow the usual cadence (design note → locked decisions → chunked PRs →
-tag-after-merge). Anything marked *upstream-gated* depends on a capability in
-`siphon-rs` / `forge-media` that doesn't exist yet.
+What's left is mostly **P2 call features and operator conveniences, plus the
+longer-horizon P3 items**. This document is the curated, prioritized backlog.
+Items are grouped by priority; within a theme the work follows the usual
+cadence (design note → locked decisions → chunked PRs → tag-after-merge).
+Anything marked *upstream-gated* depends on a capability in `siphon-rs` /
+`forge-media` that doesn't exist yet.
 
 ---
 
@@ -58,26 +61,21 @@ unlocks true rolling deploys:
 
 ## P1 — Security & abuse hardening
 
-### Listener & secret hardening *(bundle)*
-- **`[admin].tls`** — native TLS on the admin listener (today it's plain HTTP,
-  loopback-or-front-with-proxy only).
-- **Secret-manager integration** — beyond `${VAR}`: systemd credentials /
-  file-based secrets / Vault, so tokens and passwords needn't sit in the
-  environment.
+### Listener & secret hardening — ✅ delivered in v0.18.0
+- **`[admin].tls`** — native TLS on the admin listener, with SIGHUP cert
+  reload.
+- **Secret resolution** — `${file:…}` / `${cred:…}` (systemd credentials)
+  beyond `${VAR}`, so tokens and passwords needn't sit in the environment.
 
 (The optional `/metrics` bearer token moved to P2 — it's recon-hardening,
 not a PII fix.)
 
-### Inbound security — don't trust the network
-Today the only inbound gate is the `[[trunk]]` allowlist, and `from_hosts`
-matching is spoofable by an on-path attacker. Two complementary additions for
-internet-facing daemons (especially trunks without a static carrier IP):
-
-- **Inbound digest auth (RFC 3261 §22)** — challenge inbound INVITEs with a
-  digest credential. `docs/CONFIG.md` already names this the proper
-  "no trust in network" answer and marks it post-v1.
-- **Per-source INVITE rate limits + admission control** — a DoS posture
-  beyond the allowlist, complementing the existing fail2ban recipe.
+### Inbound security — ✅ delivered in v0.19.0
+- **Inbound digest auth (RFC 3261 §22)** — `[sip.auth]` challenges inbound
+  INVITEs with a digest credential; the proper "no trust in the network"
+  answer for trunks without a static carrier IP.
+- **Per-source INVITE rate limits + admission control** — `[sip.admission]`,
+  complementing the `[[trunk]]` allowlist and the fail2ban recipe.
 
 ### Signed audit-event stream — ✅ delivered in v0.20.0
 Admin requests were logged + metered, but there was no tamper-evident,
@@ -114,28 +112,24 @@ artifacts and distributed tracing. Scoped in
 - **OpenTelemetry / OTLP traces** — daemon-side export ✅ **delivered in
   v0.22.0** (`[observability.otlp]`): one OTLP trace per call across the
   daemon (INVITE handling → controller → WS bridge → media), off by default,
-  best-effort. Remaining: **v0.23.0** — W3C trace-context propagation to the
-  WS server so the developer's server joins the same trace (additive, protocol
-  stays v1; approved in DESIGN_OBSERVABILITY §5).
+  best-effort. W3C trace-context propagation to the WS server
+  (`start.trace_context` + upgrade headers) ✅ **delivered in v0.23.0** —
+  the developer's server joins the same trace. **Theme complete.**
 
 ---
 
-## P1 — Recording: compliance & storage
+## P1 — Recording: compliance & storage — ✅ delivered in v0.24.0–v0.26.0
 
-Recording (0.5.0) writes a plaintext WAV to a local dir — fine for a lab,
-short of what regulated industries (PCI/HIPAA/call-center) need. The gaps are
-documented in `docs/RECORDING.md`.
+All five gaps closed (design note `DESIGN_RECORDING_COMPLIANCE.md`):
 
-- **Encryption at rest** — envelope encryption with a KMS hook (the
-  compliance blocker).
-- **Object-storage sink** — S3-compatible upload + a retention policy
-  (lifecycle/TTL), instead of local-disk-only.
-- **Consent / announcement hooks** — a configurable "this call may be
-  recorded" prompt before capture starts.
-- **Compression & format** — Opus / FLAC output (smaller than WAV), plus
-  path templating (`{date}/{call_id}` etc.).
-- **Outbound recording** — extend capture to outbound legs (currently
-  inbound-only).
+- **Encryption at rest** — ✅ v0.24.0: `.wava` envelope encryption + a
+  decrypt CLI.
+- **Object-storage sink** — ✅ v0.25.0: S3-compatible upload with an
+  AWS-KMS KEK (no AWS SDK dependency).
+- **Consent / announcement hooks** — ✅ v0.26.0: pre-capture announcement +
+  a CDR consent stamp.
+- **Compression & format** — ✅ v0.25.0: Opus output.
+- **Outbound recording** — ✅ v0.26.0: outbound legs record like inbound.
 
 ---
 
@@ -159,23 +153,36 @@ barrier and make the contract testable:
 
 ---
 
-## P1 — Per-call quality telemetry (live + history)
+## P1 — Per-call quality telemetry (live + history) — ✅ delivered in v0.30.0/v0.31.0
 
-`/metrics` is aggregate and HEP is operator-side; there's no first-class way
-to feed a per-call view into the operator's own dashboards. Complements the
-CDR quality fields below (CDR = end-of-call record; this = the live stream +
-queryable history).
-
-- **Live per-call stats** — richer `rtp_stats` (jitter/loss/RTT, audio
-  timing, barge-in) streamed over the WS and/or an out-of-band webhook during
-  the call.
-- **History** — a queryable store / export so dashboards can chart per-call
-  quality over time, not just scrape Prometheus aggregates.
+- **Live per-call stats** — ✅ **v0.30.0**: richer `rtp_stats` (locally
+  measured RX counters + a transport MOS estimate) on the WS stream, plus
+  the CDR `quality` block (CDR v4).
+- **History** — ✅ **v0.31.0**: `[quality]` per-call history records
+  (file/webhook sinks), `GET /admin/v1/calls/{id}/stats` live snapshot, and
+  a Vector→Loki dashboard pipeline. Theme complete — see
+  `docs/design/DESIGN_QUALITY_TELEMETRY.md`.
 
 ---
 
 ## P2 — High-value call features
 
+- **Reversible barge-in** — ✅ **delivered in v0.32.0** (added to this list
+  retroactively; it emerged from field feedback on false barge-ins).
+  `[bridge.barge_in].mode = "pause"`: playout is flushed instantly but the
+  unplayed tail is retained, and the WS server rules on intent via
+  `barge_in_confirm`/`barge_in_reject` — a rejected false positive (cough,
+  backchannel) resumes the bot mid-utterance. See
+  `docs/design/DESIGN_REVERSIBLE_BARGE_IN.md`. Two follow-ups remain below.
+- **Neural VAD upgrade in forge-vad** (*upstream-gated*) — a Silero-class
+  local model (small ONNX, ~1 ms/frame CPU) to cut the acoustic
+  false-positive class (coughs, keyboard noise, music) before pause-mode
+  arbitration even arms. Complements — doesn't replace — the semantic
+  layer. Gate on real-call false-positive rates under `pause` + `debounce_ms`.
+- **"Duck" barge-in reaction** (*upstream-gated*) — attenuate instead of
+  pause. Needs a forge-media per-leg playout-gain API: the queued TTS tail
+  lives in forge's encoder queue, so tap-side gain can't touch it (the
+  reason v0.32.0 shipped pause, not duck).
 - **AMD (answering-machine / voicemail detection)** — human-vs-machine on
   answered outbound calls, surfaced as a WS event. Needs a `forge-amd`
   sibling to `forge-vad` (*upstream-gated*).
@@ -228,10 +235,10 @@ script the list).
   that expose the observability port widely. (Confirmed `/metrics` carries no
   PII — only aggregate counters + operator-chosen route/register names — so
   this is recon-hardening, not a PII fix.)
-- **CDR call-quality fields** — add `first_audio_out_ms` (bridge-connected →
-  first WS audio reaching the caller) and `barge_in_count`; both are flagged
-  as gaps in `docs/OPERATIONS.md`. Small, high-signal; bumps `CDR_VERSION`.
-  (The delayed-offer setup-failure CDR already shipped in 0.9.5.)
+- **CDR call-quality fields** — ✅ **delivered in v0.30.0**:
+  `first_audio_out_ms` and `barge_in_count` shipped in the CDR `quality`
+  block (CDR v4), closing the `docs/OPERATIONS.md` Q5/Q8 gaps; v0.32.0
+  added the optional barge-in arbitration counters alongside them.
 
 ---
 

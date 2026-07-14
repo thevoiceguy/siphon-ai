@@ -1204,3 +1204,669 @@ async fn notify_only_does_not_flush_on_speech_started() {
     drop(_playout_tx);
     let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
 }
+
+// ─── Barge-in pause (reversible, server-arbitrated) ────────────────
+//
+// `BargeInAction::Pause` (docs/design/DESIGN_REVERSIBLE_BARGE_IN.md):
+// a SpeechStarted while the bot is playing flushes forge exactly like
+// auto_clear but retains the unplayed tail; the server then rules via
+// `TapCommand::BargeInConfirm` / `BargeInReject`, or the decision
+// deadline applies the configured fallback.
+
+/// Shared fixture: a Pause policy with a generous resume cap.
+fn pause_action(
+    decision: Duration,
+    on_timeout: siphon_ai_media_glue::TimeoutVerdict,
+) -> siphon_ai_media_glue::BargeInAction {
+    siphon_ai_media_glue::BargeInAction::Pause {
+        decision,
+        on_timeout,
+        resume_max: Duration::from_secs(30),
+    }
+}
+
+/// Drain forge's outbound queue until an Audio frame arrives, return
+/// its first sample (the tests use constant-pattern frames). Panics
+/// on timeout.
+async fn next_audio_pattern(manager: &Arc<MediaBridgeManager>, call: &CallId) -> i16 {
+    tokio::time::timeout(Duration::from_millis(700), async {
+        loop {
+            if let Some(OutboundMediaRequest::Audio(f)) =
+                manager.try_recv_outbound_request(call).await
+            {
+                return f.samples[0];
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("audio frame reaches forge")
+}
+
+/// Wait until forge sees a Flush for leg A (draining Audio requests on
+/// the way — pre-pause pushes may still be queued).
+async fn await_flush(manager: &Arc<MediaBridgeManager>, call: &CallId) {
+    tokio::time::timeout(Duration::from_millis(700), async {
+        loop {
+            if let Some(req) = manager.try_recv_outbound_request(call).await {
+                if matches!(req, OutboundMediaRequest::Flush { .. }) {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("forge sees Flush")
+}
+
+/// Assert that no Audio request reaches forge within `window` (Flush
+/// requests are tolerated — several commands legitimately emit one).
+async fn assert_no_audio_for(manager: &Arc<MediaBridgeManager>, call: &CallId, window: Duration) {
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        if let Some(OutboundMediaRequest::Audio(f)) = manager.try_recv_outbound_request(call).await
+        {
+            panic!(
+                "unexpected audio reached forge during pause: {:?}",
+                f.samples[0]
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Full pause→reject round trip: the retained tail must be re-queued
+/// in order (ending with the newest frame), and the tap must keep
+/// pumping normally afterwards.
+#[tokio::test]
+async fn pause_reject_resumes_retained_tail() {
+    use chrono::Utc;
+    use forge_core::{EventBus as ForgeEventBus, ForgeEvent};
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::{TapCommand, TimeoutVerdict};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(64, 64));
+    let bus = Arc::new(ForgeEventBus::new());
+    let call = CallId::new("pause-reject");
+    let tap = MediaTap::attach_with_barge_in(
+        &manager,
+        &bus,
+        call.clone(),
+        8000,
+        pause_action(Duration::from_secs(5), TimeoutVerdict::Confirm),
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    // Queue a 100 ms utterance (5 frames, patterns 1..=5) and let the
+    // tap push it into forge.
+    for k in 1..=5i16 {
+        playout_tx
+            .send(pack_pcm16_le(&vec![k; 160]))
+            .await
+            .expect("send frame");
+    }
+    for _ in 0..5 {
+        let _ = next_audio_pattern(&manager, &call).await;
+    }
+
+    // Caller speaks → pause fires: flush lands on forge, the
+    // speech_started is forwarded, and nothing else plays.
+    bus.publish(ForgeEvent::SpeechStarted {
+        call_id: call.clone(),
+        timestamp: Utc::now(),
+    })
+    .expect("publish");
+    await_flush(&manager, &call).await;
+    let event = tokio::time::timeout(Duration::from_millis(500), events_rx.recv())
+        .await
+        .expect("speech_started arrives")
+        .expect("events_tx open");
+    assert!(matches!(event, OutgoingEvent::SpeechStarted { .. }));
+
+    // Server rules: false positive. The retained tail replays in
+    // order, ending with the newest frame (pattern 5). The playout
+    // clock only trims *played* frames, so at minimum the un-elapsed
+    // majority of the 100 ms utterance must come back.
+    cmd_tx
+        .send(TapCommand::BargeInReject)
+        .await
+        .expect("send reject");
+    let mut replayed = Vec::new();
+    loop {
+        let p = next_audio_pattern(&manager, &call).await;
+        replayed.push(p);
+        if p == 5 {
+            break;
+        }
+    }
+    assert!(
+        replayed.len() >= 3,
+        "expected most of the 5-frame tail to replay, got {replayed:?}",
+    );
+    assert!(
+        replayed.windows(2).all(|w| w[0] < w[1]),
+        "tail must replay in playout order, got {replayed:?}",
+    );
+
+    // Tap is back to normal pumping.
+    playout_tx
+        .send(pack_pcm16_le(&vec![7i16; 160]))
+        .await
+        .expect("send post-reject frame");
+    assert_eq!(next_audio_pattern(&manager, &call).await, 7);
+
+    drop(cmd_tx);
+    drop(_caller_rx);
+    drop(playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// Pause→confirm ends in the auto_clear end-state: tail dropped,
+/// nothing replays, and the barge-in is counted for the CDR (visible
+/// on the quality watch).
+#[tokio::test]
+async fn pause_confirm_drops_tail_and_counts_barge_in() {
+    use chrono::Utc;
+    use forge_core::{EventBus as ForgeEventBus, ForgeEvent};
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::{QualityReport, TapCommand, TimeoutVerdict};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(64, 64));
+    let bus = Arc::new(ForgeEventBus::new());
+    let call = CallId::new("pause-confirm");
+    let (quality_tx, quality_rx) = tokio::sync::watch::channel(QualityReport::default());
+    let tap = MediaTap::attach_with_barge_in(
+        &manager,
+        &bus,
+        call.clone(),
+        8000,
+        pause_action(Duration::from_secs(5), TimeoutVerdict::Confirm),
+    )
+    .expect("attach")
+    .with_quality_watch(quality_tx);
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, _events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    for k in 1..=5i16 {
+        playout_tx
+            .send(pack_pcm16_le(&vec![k; 160]))
+            .await
+            .expect("send frame");
+    }
+    for _ in 0..5 {
+        let _ = next_audio_pattern(&manager, &call).await;
+    }
+
+    bus.publish(ForgeEvent::SpeechStarted {
+        call_id: call.clone(),
+        timestamp: Utc::now(),
+    })
+    .expect("publish");
+    await_flush(&manager, &call).await;
+
+    cmd_tx
+        .send(TapCommand::BargeInConfirm)
+        .await
+        .expect("send confirm");
+    assert_no_audio_for(&manager, &call, Duration::from_millis(120)).await;
+    assert_eq!(
+        quality_rx.borrow().barge_in_count,
+        1,
+        "confirmed arbitration must count as a barge-in",
+    );
+
+    // Tap still alive.
+    playout_tx
+        .send(pack_pcm16_le(&vec![7i16; 160]))
+        .await
+        .expect("send post-confirm frame");
+    assert_eq!(next_audio_pattern(&manager, &call).await, 7);
+
+    drop(cmd_tx);
+    drop(_caller_rx);
+    drop(playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// No verdict within the window → `on_timeout = Confirm` drops the
+/// tail without any command; a late reject is a harmless no-op.
+#[tokio::test]
+async fn pause_timeout_confirm_applies_fallback() {
+    use chrono::Utc;
+    use forge_core::{EventBus as ForgeEventBus, ForgeEvent};
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::{TapCommand, TimeoutVerdict};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(64, 64));
+    let bus = Arc::new(ForgeEventBus::new());
+    let call = CallId::new("pause-timeout-confirm");
+    let tap = MediaTap::attach_with_barge_in(
+        &manager,
+        &bus,
+        call.clone(),
+        8000,
+        pause_action(Duration::from_millis(150), TimeoutVerdict::Confirm),
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, _events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    for k in 1..=3i16 {
+        playout_tx
+            .send(pack_pcm16_le(&vec![k; 160]))
+            .await
+            .expect("send frame");
+    }
+    for _ in 0..3 {
+        let _ = next_audio_pattern(&manager, &call).await;
+    }
+
+    bus.publish(ForgeEvent::SpeechStarted {
+        call_id: call.clone(),
+        timestamp: Utc::now(),
+    })
+    .expect("publish");
+    await_flush(&manager, &call).await;
+
+    // Past the 150 ms deadline the fallback confirms: nothing replays.
+    assert_no_audio_for(&manager, &call, Duration::from_millis(400)).await;
+
+    // A verdict arriving after the deadline must be ignored.
+    cmd_tx
+        .send(TapCommand::BargeInReject)
+        .await
+        .expect("send late reject");
+    assert_no_audio_for(&manager, &call, Duration::from_millis(120)).await;
+
+    playout_tx
+        .send(pack_pcm16_le(&vec![7i16; 160]))
+        .await
+        .expect("send post-timeout frame");
+    assert_eq!(next_audio_pattern(&manager, &call).await, 7);
+
+    drop(cmd_tx);
+    drop(_caller_rx);
+    drop(playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// `on_timeout = Reject` resumes the tail at the deadline with no
+/// server involvement at all.
+#[tokio::test]
+async fn pause_timeout_reject_resumes_tail() {
+    use chrono::Utc;
+    use forge_core::{EventBus as ForgeEventBus, ForgeEvent};
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::{TapCommand, TimeoutVerdict};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(64, 64));
+    let bus = Arc::new(ForgeEventBus::new());
+    let call = CallId::new("pause-timeout-reject");
+    let tap = MediaTap::attach_with_barge_in(
+        &manager,
+        &bus,
+        call.clone(),
+        8000,
+        pause_action(Duration::from_millis(150), TimeoutVerdict::Reject),
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, _events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (_cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    for k in 1..=3i16 {
+        playout_tx
+            .send(pack_pcm16_le(&vec![k; 160]))
+            .await
+            .expect("send frame");
+    }
+    for _ in 0..3 {
+        let _ = next_audio_pattern(&manager, &call).await;
+    }
+
+    bus.publish(ForgeEvent::SpeechStarted {
+        call_id: call.clone(),
+        timestamp: Utc::now(),
+    })
+    .expect("publish");
+    await_flush(&manager, &call).await;
+
+    // No verdict — the deadline itself resumes playout.
+    let mut replayed = Vec::new();
+    loop {
+        let p = next_audio_pattern(&manager, &call).await;
+        replayed.push(p);
+        if p == 3 {
+            break;
+        }
+    }
+    assert!(
+        replayed.windows(2).all(|w| w[0] < w[1]),
+        "tail must replay in order, got {replayed:?}",
+    );
+
+    drop(_cmd_tx);
+    drop(_caller_rx);
+    drop(playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// While the bot is silent there is nothing to pause: pause mode just
+/// forwards the event (no flush, no arbitration), and a stray verdict
+/// is a no-op.
+#[tokio::test]
+async fn pause_with_bot_silent_only_forwards() {
+    use chrono::Utc;
+    use forge_core::{EventBus as ForgeEventBus, ForgeEvent};
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::{TapCommand, TimeoutVerdict};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(64, 64));
+    let bus = Arc::new(ForgeEventBus::new());
+    let call = CallId::new("pause-silent");
+    let tap = MediaTap::attach_with_barge_in(
+        &manager,
+        &bus,
+        call.clone(),
+        8000,
+        pause_action(Duration::from_secs(5), TimeoutVerdict::Confirm),
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    bus.publish(ForgeEvent::SpeechStarted {
+        call_id: call.clone(),
+        timestamp: Utc::now(),
+    })
+    .expect("publish");
+
+    let event = tokio::time::timeout(Duration::from_millis(500), events_rx.recv())
+        .await
+        .expect("speech_started arrives")
+        .expect("events_tx open");
+    assert!(matches!(event, OutgoingEvent::SpeechStarted { .. }));
+
+    // No flush, no audio — nothing was playing.
+    let nothing = tokio::time::timeout(Duration::from_millis(80), async {
+        manager.try_recv_outbound_request(&call).await
+    })
+    .await;
+    assert!(
+        matches!(nothing, Ok(None)) || nothing.is_err(),
+        "silent-bot pause must NOT emit forge requests; got {nothing:?}",
+    );
+
+    // Stray verdict with nothing pending: ignored, tap stays alive.
+    cmd_tx
+        .send(TapCommand::BargeInReject)
+        .await
+        .expect("send stray reject");
+    playout_tx
+        .send(pack_pcm16_le(&vec![7i16; 160]))
+        .await
+        .expect("send frame");
+    assert_eq!(next_audio_pattern(&manager, &call).await, 7);
+
+    drop(cmd_tx);
+    drop(_caller_rx);
+    drop(playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// Server audio arriving mid-arbitration must NOT reach forge during
+/// the pause; on reject it plays after the retained tail (§5.3).
+#[tokio::test]
+async fn fresh_audio_during_pause_queues_behind_tail() {
+    use chrono::Utc;
+    use forge_core::{EventBus as ForgeEventBus, ForgeEvent};
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::{TapCommand, TimeoutVerdict};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(64, 64));
+    let bus = Arc::new(ForgeEventBus::new());
+    let call = CallId::new("pause-fresh");
+    let tap = MediaTap::attach_with_barge_in(
+        &manager,
+        &bus,
+        call.clone(),
+        8000,
+        pause_action(Duration::from_secs(5), TimeoutVerdict::Confirm),
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, _events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    for k in 1..=3i16 {
+        playout_tx
+            .send(pack_pcm16_le(&vec![k; 160]))
+            .await
+            .expect("send frame");
+    }
+    for _ in 0..3 {
+        let _ = next_audio_pattern(&manager, &call).await;
+    }
+
+    bus.publish(ForgeEvent::SpeechStarted {
+        call_id: call.clone(),
+        timestamp: Utc::now(),
+    })
+    .expect("publish");
+    await_flush(&manager, &call).await;
+
+    // Post-pause server audio: held back, not played.
+    playout_tx
+        .send(pack_pcm16_le(&vec![9i16; 160]))
+        .await
+        .expect("send fresh frame");
+    assert_no_audio_for(&manager, &call, Duration::from_millis(120)).await;
+
+    // Reject → tail first, fresh frame last.
+    cmd_tx
+        .send(TapCommand::BargeInReject)
+        .await
+        .expect("send reject");
+    let mut replayed = Vec::new();
+    loop {
+        let p = next_audio_pattern(&manager, &call).await;
+        replayed.push(p);
+        if p == 9 {
+            break;
+        }
+    }
+    assert!(
+        replayed.len() >= 2,
+        "expected tail + fresh frame, got {replayed:?}",
+    );
+    assert_eq!(*replayed.last().unwrap(), 9, "fresh audio plays last");
+    assert!(
+        replayed[..replayed.len() - 1].iter().all(|&p| p < 9),
+        "tail precedes fresh audio, got {replayed:?}",
+    );
+
+    drop(cmd_tx);
+    drop(_caller_rx);
+    drop(playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// A preempting command (Mute here, standing in for hold/park/announce
+/// /room — same code path) resolves the pending arbitration as
+/// confirm: the tail is gone, the barge-in is counted, and a late
+/// verdict is a no-op.
+#[tokio::test]
+async fn mute_resolves_pending_arbitration_as_confirm() {
+    use chrono::Utc;
+    use forge_core::{EventBus as ForgeEventBus, ForgeEvent};
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::{QualityReport, TapCommand, TimeoutVerdict};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(64, 64));
+    let bus = Arc::new(ForgeEventBus::new());
+    let call = CallId::new("pause-mute-preempt");
+    let (quality_tx, quality_rx) = tokio::sync::watch::channel(QualityReport::default());
+    let tap = MediaTap::attach_with_barge_in(
+        &manager,
+        &bus,
+        call.clone(),
+        8000,
+        pause_action(Duration::from_secs(5), TimeoutVerdict::Confirm),
+    )
+    .expect("attach")
+    .with_quality_watch(quality_tx);
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, _events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    for k in 1..=3i16 {
+        playout_tx
+            .send(pack_pcm16_le(&vec![k; 160]))
+            .await
+            .expect("send frame");
+    }
+    for _ in 0..3 {
+        let _ = next_audio_pattern(&manager, &call).await;
+    }
+
+    bus.publish(ForgeEvent::SpeechStarted {
+        call_id: call.clone(),
+        timestamp: Utc::now(),
+    })
+    .expect("publish");
+    await_flush(&manager, &call).await;
+
+    // Mute preempts: arbitration resolves as confirm (counted), and
+    // the later reject has nothing to act on.
+    cmd_tx.send(TapCommand::Mute).await.expect("send mute");
+    await_flush(&manager, &call).await; // Mute's own flush
+    assert_eq!(quality_rx.borrow().barge_in_count, 1);
+    cmd_tx
+        .send(TapCommand::BargeInReject)
+        .await
+        .expect("send late reject");
+    assert_no_audio_for(&manager, &call, Duration::from_millis(120)).await;
+
+    // Unmute → normal pumping resumes. Give the (lower-priority)
+    // command arm a beat to process the Unmute before pushing audio —
+    // the biased select polls the playout arm first, and a frame
+    // arriving while still muted is dropped by design.
+    cmd_tx.send(TapCommand::Unmute).await.expect("send unmute");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    playout_tx
+        .send(pack_pcm16_le(&vec![7i16; 160]))
+        .await
+        .expect("send frame");
+    assert_eq!(next_audio_pattern(&manager, &call).await, 7);
+
+    drop(cmd_tx);
+    drop(_caller_rx);
+    drop(playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// The debounce gate composes with pause mode: a start→stop blip
+/// inside the window (the bot's own echo shape) neither flushes nor
+/// arms arbitration, and the provisional event pair is suppressed —
+/// identical to the auto_clear debounce contract.
+#[tokio::test]
+async fn pause_respects_debounce_cancel() {
+    use chrono::Utc;
+    use forge_core::{EventBus as ForgeEventBus, ForgeEvent};
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::{TapCommand, TimeoutVerdict};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(64, 64));
+    let bus = Arc::new(ForgeEventBus::new());
+    let call = CallId::new("pause-debounce");
+    let tap = MediaTap::attach_with_barge_in(
+        &manager,
+        &bus,
+        call.clone(),
+        8000,
+        pause_action(Duration::from_secs(5), TimeoutVerdict::Confirm),
+    )
+    .expect("attach")
+    .with_barge_in_debounce(Some(Duration::from_millis(200)));
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(8);
+    let (_cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    // Long utterance so the bot is still "playing" when speech blips.
+    for k in 1..=10i16 {
+        playout_tx
+            .send(pack_pcm16_le(&vec![k; 160]))
+            .await
+            .expect("send frame");
+    }
+    for _ in 0..10 {
+        let _ = next_audio_pattern(&manager, &call).await;
+    }
+
+    let ts = Utc::now();
+    bus.publish(ForgeEvent::SpeechStarted {
+        call_id: call.clone(),
+        timestamp: ts,
+    })
+    .expect("publish start");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    bus.publish(ForgeEvent::SpeechStopped {
+        call_id: call.clone(),
+        timestamp: ts,
+        duration_ms: 50,
+    })
+    .expect("publish stop");
+
+    // Past the debounce window: no flush, no re-queued audio, no
+    // arbitration — and the provisional event pair was swallowed.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+    while tokio::time::Instant::now() < deadline {
+        if let Some(req) = manager.try_recv_outbound_request(&call).await {
+            panic!("cancelled debounce must not touch forge, got {req:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        events_rx.try_recv().is_err(),
+        "echo-shaped blip must not surface speech events",
+    );
+
+    drop(_cmd_tx);
+    drop(_caller_rx);
+    drop(playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}

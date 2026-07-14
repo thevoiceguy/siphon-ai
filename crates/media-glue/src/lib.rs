@@ -30,4 +30,4 @@ pub use setup::{
     InboundAccepted, InboundCall, MediaSetup, OutboundAccepted, OutboundOffer,
     OutboundOfferRequest, OutboundSrtp, SetupError, TapOptions,
 };
-pub use tap::{BargeInAction, MediaTap, MediaTapError, TapCommand, TapDisconnect};
+pub use tap::{BargeInAction, MediaTap, MediaTapError, TapCommand, TapDisconnect, TimeoutVerdict};

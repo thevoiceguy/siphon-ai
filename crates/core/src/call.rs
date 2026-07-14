@@ -270,6 +270,103 @@ pub struct QualityOutcome {
     pub stats: QualitySummary,
 }
 
+impl QualityOutcome {
+    /// Map the tap's live report + the bridge-connected epoch onto the
+    /// outcome shape. `None` when the call never measured anything —
+    /// the CDR omits the block and the record task emits nothing.
+    /// Shared by the CDR build and the quality record task (0.31.0) so
+    /// both feeds carry identical numbers.
+    pub(crate) fn from_report(
+        report: QualityReport,
+        connected_at: Option<Instant>,
+    ) -> Option<Self> {
+        let measured = !report.stats.is_empty()
+            || report.barge_in_count > 0
+            || report.first_audio_at.is_some();
+        measured.then(|| QualityOutcome {
+            first_audio_out_ms: match (report.first_audio_at, connected_at) {
+                (Some(first), Some(connected)) => {
+                    Some(first.saturating_duration_since(connected).as_millis() as u64)
+                }
+                _ => None,
+            },
+            barge_in_count: report.barge_in_count,
+            stats: report.stats,
+        })
+    }
+}
+
+/// Per-call quality history sampler (0.31.0). Emits one record per
+/// `interval` while the call measures anything, plus a final record
+/// when the tap winds down (its `quality_tx` drops → the watch
+/// closes). Runs entirely off the audio path: it only reads two watch
+/// channels at record cadence.
+async fn quality_record_task(
+    call_id: CallId,
+    mut quality_rx: tokio::sync::watch::Receiver<QualityReport>,
+    epoch_rx: tokio::sync::watch::Receiver<Option<Instant>>,
+    interval: Duration,
+) {
+    let mut seq: u64 = 0;
+    let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await; // consume the immediate first tick
+
+    let emit = |kind: siphon_ai_quality::RecordKind,
+                seq: u64,
+                report: QualityReport,
+                connected_at: Option<Instant>|
+     -> bool {
+        // Skip records with nothing measured (e.g. early ticks before
+        // the first media-stats snapshot) — an empty record tells an
+        // operator nothing a CDR's absence doesn't.
+        let Some(outcome) = QualityOutcome::from_report(report, connected_at) else {
+            return false;
+        };
+        siphon_ai_quality::emit(siphon_ai_quality::QualityRecord {
+            version: siphon_ai_quality::QUALITY_RECORD_VERSION,
+            kind,
+            call_id: call_id.as_str().to_string(),
+            ts: Utc::now(),
+            seq,
+            quality: crate::acceptor::quality_info(outcome),
+        });
+        true
+    };
+
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                if emit(
+                    siphon_ai_quality::RecordKind::Interval,
+                    seq,
+                    *quality_rx.borrow(),
+                    *epoch_rx.borrow(),
+                ) {
+                    seq += 1;
+                }
+            }
+            res = quality_rx.changed() => {
+                match res {
+                    // A fresh report — just mark it seen; the tick arm
+                    // samples on cadence.
+                    Ok(()) => {}
+                    // Tap dropped its sender → call is winding down.
+                    Err(_) => {
+                        emit(
+                            siphon_ai_quality::RecordKind::Final,
+                            seq,
+                            *quality_rx.borrow(),
+                            *epoch_rx.borrow(),
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Recording-consent audit trail surfaced on [`CallOutcome`] → CDR
 /// (0.26.0). `announced`/`announcement_ms` come from the daemon-played
 /// announcement; `server` is whatever the WS server reported via
@@ -846,9 +943,43 @@ impl CallController {
         // controller's `run` span so the WS-bridge, media-tap, and recording
         // spans nest under it — one trace per call in OTLP (0.22.0).
         // Readiness carries the "start on the wire" Instant — the epoch
-        // for the CDR `first_audio_out_ms` (0.30.0). Polled lazily at
-        // outcome build (`try_recv`), never awaited in the loop.
-        let (bridge_ready_tx, mut bridge_connected_rx) = oneshot::channel();
+        // for `first_audio_out_ms` (0.30.0). A tiny forwarder fans the
+        // oneshot into a watch so both the CDR build (below) and the
+        // quality record task (0.31.0) can read it without racing over
+        // a single consumer.
+        let (bridge_ready_tx, bridge_ready_rx) = oneshot::channel();
+        let (epoch_tx, epoch_rx) = tokio::sync::watch::channel(None::<Instant>);
+        tokio::spawn(async move {
+            if let Ok(connected_at) = bridge_ready_rx.await {
+                let _ = epoch_tx.send(Some(connected_at));
+            }
+            // Bridge died before ready → epoch stays None; forwarder ends.
+        });
+        // Live-stats registration (0.31.0): expose this call's quality
+        // feed to `GET /admin/v1/calls/{id}/stats` for the call's
+        // lifetime. RAII — dropping the guard on any exit path from
+        // `run` deregisters.
+        let _quality_live_guard = crate::quality_live::LiveQualityGuard::register(
+            call_id.as_str(),
+            quality_rx.clone(),
+            epoch_rx.clone(),
+        );
+        // Quality history records (0.31.0): when `[quality]` is
+        // configured, sample the tap's quality feed on the configured
+        // cadence + emit a final record at teardown. The task ends
+        // itself when the tap drops its `quality_tx` (watch closes), so
+        // its lifetime is bounded by the call — no JoinHandle needed.
+        if let Some(record_interval) = siphon_ai_quality::record_interval() {
+            tokio::spawn(
+                quality_record_task(
+                    call_id.clone(),
+                    quality_rx.clone(),
+                    epoch_rx.clone(),
+                    record_interval,
+                )
+                .instrument(tracing::Span::current()),
+            );
+        }
         let mut bridge_task: JoinHandle<Result<DisconnectReason, BridgeError>> = tokio::spawn(
             connect_and_run_with_ready(bridge, start, channels, Some(bridge_ready_tx))
                 .instrument(tracing::Span::current()),
@@ -2088,22 +2219,7 @@ impl CallController {
         // Latest quality state from the tap + the first session's
         // connect stamp. Omit the whole block when nothing measured —
         // a call that never went active has no quality story.
-        let quality_summary = {
-            let report = *quality_rx.borrow();
-            let measured = !report.stats.is_empty()
-                || report.barge_in_count > 0
-                || report.first_audio_at.is_some();
-            measured.then(|| QualityOutcome {
-                first_audio_out_ms: match (report.first_audio_at, bridge_connected_rx.try_recv()) {
-                    (Some(first), Ok(connected)) => {
-                        Some(first.saturating_duration_since(connected).as_millis() as u64)
-                    }
-                    _ => None,
-                },
-                barge_in_count: report.barge_in_count,
-                stats: report.stats,
-            })
-        };
+        let quality_summary = QualityOutcome::from_report(*quality_rx.borrow(), *epoch_rx.borrow());
 
         Ok(CallOutcome {
             call_id,

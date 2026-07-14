@@ -21,12 +21,14 @@ metrics.workspace     = true
 # Hot-swappable outbound gateway table for SIGHUP reload (0.12.1).
 arc-swap = "1"
 # Serialize the verstat verdict to JSON for the HEP3 Verstat chunk.
+serde.workspace       = true
 serde_json.workspace  = true
 
 # Internal crates
 siphon-ai-audit.workspace      = true
 siphon-ai-bridge.workspace     = true
 siphon-ai-cdr.workspace        = true
+siphon-ai-quality.workspace = true
 siphon-ai-media-glue.workspace = true
 siphon-ai-recording.workspace  = true
 siphon-ai-routes.workspace     = true

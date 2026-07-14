@@ -192,6 +192,10 @@ pub fn restart_fingerprints(c: &Config) -> Vec<(&'static str, String)> {
         // address. The token hashes are what change; no cleartext.
         ("[admin]", fp_hash(&c.admin)),
         ("[hep]", fp_hash(&c.hep)),
+        // Quality-record sinks + the per-call record cadence live behind
+        // a process-global OnceLock facade (0.31.0) — set once at
+        // startup, not swappable.
+        ("[quality]", fp_hash(&c.quality)),
         // `[shutdown].drain_timeout_secs` is read once at `run()` entry,
         // so a reload can't change an in-flight drain window —
         // restart-required.

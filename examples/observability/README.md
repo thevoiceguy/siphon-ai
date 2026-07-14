@@ -26,7 +26,15 @@ grafana/
                                registrations, delivery health, drain
     siphon-ai-call-quality.json  Call Quality — WS/SDP/duration latency, RTP RTT
                                & loss, conference mixer health
-compose.yaml                   Prometheus + auto-provisioned Grafana
+  dashboards/
+    siphon-ai-quality-history.json  Per-Call Quality History — [quality]
+                               records via Vector → Loki: MOS, RX loss,
+                               RR loss, first-audio latency, final-record
+                               table (0.31.0)
+vector.toml                    Vector pipeline: quality webhook (or JSONL
+                               file) → Loki, kind as the only extra label
+compose.yaml                   Prometheus + Loki + Vector + auto-provisioned
+                               Grafana
 ```
 
 ## Run it
@@ -38,6 +46,23 @@ docker compose -f examples/observability/compose.yaml up
 - **Grafana** → http://127.0.0.1:3000 (`admin` / `admin`) — both dashboards
   are pre-loaded under the `siphon-ai` tag.
 - **Prometheus** → http://127.0.0.1:9090 — check *Status → Rules* and *Alerts*.
+- **Quality history** (0.31.0): enable `[quality]` in the daemon pointing at
+  Vector —
+
+  ```toml
+  [quality]
+  enabled = true
+
+  [quality.webhook]
+  enabled = true
+  url = "http://127.0.0.1:9411/"
+  ```
+
+  Records land in Loki (label `job="siphon-quality"`), and the *Per-Call
+  Quality History* dashboard charts MOS / loss / first-audio latency per
+  `call_id`. The daemon's spool + retry semantics apply — a Vector restart
+  loses nothing when `[quality.webhook].spool_dir` is set. See the
+  ingestion guide in `docs/OPERATIONS.md`.
 
 By default Prometheus scrapes a daemon at `siphon-ai:9091` (mapped to the
 host gateway, so a daemon running on the host is reachable). Point it at your

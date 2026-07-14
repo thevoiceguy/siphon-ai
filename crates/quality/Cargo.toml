@@ -1,0 +1,29 @@
+[package]
+name        = "siphon-ai-quality"
+description = "Per-call quality history records: interval + end-of-call quality summaries shipped to a JSONL file and/or an HMAC-signed webhook."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+tokio.workspace       = true
+async-trait.workspace = true
+serde.workspace       = true
+serde_json.workspace  = true
+chrono.workspace      = true
+thiserror.workspace   = true
+tracing.workspace     = true
+metrics.workspace     = true
+# Internal — the record's stats payload IS the CDR `quality` block, so
+# the two shapes can never drift.
+siphon-ai-cdr.workspace = true
+# Internal — shared retrying JSON-POST transport (HMAC signing, spool,
+# idempotency, delivery metrics) behind the webhook sink.
+siphon-ai-http.workspace = true
+
+[dev-dependencies]
+parking_lot.workspace = true
+tempfile              = "3"

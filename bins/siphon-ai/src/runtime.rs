@@ -91,6 +91,10 @@ use siphon_ai_core::{
     ParkTimeoutAction as CoreParkTimeoutAction, StaticCredentials,
 };
 use siphon_ai_media_glue::MediaSetup;
+use siphon_ai_quality::{
+    FanoutSink as QualityFanoutSink, FileSink as QualityFileSink, HttpSink as QualityHttpSink,
+    HttpSinkConfig as QualityHttpSinkConfig, QualitySinkHandle,
+};
 use siphon_ai_sip_glue::{
     DialogTerminatorHandle, DrainFlag, RegisterSourceResolver, RegistrationEntry,
     RegistrationManager, RoutingHandler,
@@ -211,6 +215,7 @@ impl Runtime {
             observability,
             webhooks,
             audit,
+            quality,
             hep,
             park,
             admin,
@@ -317,6 +322,22 @@ impl Runtime {
         } else {
             None
         };
+
+        // ─── Quality history records (0.31.0) ──────────────────────
+        // Build the JSONL + signed-webhook sinks and install the
+        // process-wide facade; per-call record tasks in `core` sample
+        // the tap's quality feed at `[quality].interval_secs` and emit
+        // through it. When `[quality].enabled = false` nothing is
+        // installed and no record task is spawned. Restart-required —
+        // not swapped on SIGHUP in this release.
+        if quality.enabled {
+            let sink = build_quality_sink(&quality).await?;
+            siphon_ai_quality::install(sink, quality.interval);
+            info!(
+                interval_secs = quality.interval.as_secs(),
+                "quality history records active"
+            );
+        }
 
         // ─── Forge media stack ──────────────────────────────────────
         // One process-wide EventBus. Forge's session manager publishes
@@ -1021,6 +1042,12 @@ impl Runtime {
                 )) as AdminPark
             }),
             drain: Some(drain_status_fn),
+            // Live quality probe (0.31.0). Installed unconditionally —
+            // the tracker runs for every call regardless of [quality].
+            quality_stats: Some(Arc::new(|call_id: &str| {
+                siphon_ai_core::quality_live::snapshot(call_id)
+                    .and_then(|row| serde_json::to_value(row).ok())
+            })),
         };
         let observability_server =
             build_observability(observability, readiness.clone(), prometheus_handle).await?;
@@ -1999,6 +2026,46 @@ pub(crate) async fn build_audit_sink(cfg: &AuditConfig) -> Result<AuditSinkHandl
     } else {
         info!(allowlist = cfg.events.len(), "audit event allowlist active");
         Arc::new(AuditFilteredSink::new(fanned, cfg.events.clone())) as AuditSinkHandle
+    })
+}
+
+pub(crate) async fn build_quality_sink(
+    cfg: &siphon_ai_config::QualityConfig,
+) -> Result<QualitySinkHandle> {
+    let mut sinks: Vec<QualitySinkHandle> = Vec::new();
+
+    if let Some(file_cfg) = &cfg.file {
+        let sink = QualityFileSink::open(&file_cfg.path)
+            .await
+            .with_context(|| format!("open quality-record file {}", file_cfg.path.display()))?;
+        info!(path = %file_cfg.path.display(), "quality file sink active");
+        sinks.push(Arc::new(sink) as QualitySinkHandle);
+    }
+    if let Some(webhook_cfg) = &cfg.webhook {
+        let sink = QualityHttpSink::new(QualityHttpSinkConfig {
+            url: webhook_cfg.url.clone(),
+            auth_header: webhook_cfg.auth_header.clone(),
+            secret: webhook_cfg.secret.clone(),
+            spool_dir: webhook_cfg.spool_dir.clone(),
+            retry_max: webhook_cfg.retry_max,
+            timeout_ms: webhook_cfg.timeout.as_millis() as u64,
+        })
+        .map_err(|e| anyhow!("quality webhook client build failed: {e}"))?;
+        info!(
+            url = %webhook_cfg.url,
+            signed = webhook_cfg.secret.is_some(),
+            spooled = webhook_cfg.spool_dir.is_some(),
+            "quality webhook sink active"
+        );
+        sinks.push(Arc::new(sink) as QualitySinkHandle);
+    }
+
+    // Fan out to every enabled sub-sink; unwrap the single-sink case to
+    // skip the fan-out indirection.
+    Ok(if sinks.len() == 1 {
+        sinks.pop().unwrap()
+    } else {
+        Arc::new(QualityFanoutSink::new(sinks)) as QualitySinkHandle
     })
 }
 

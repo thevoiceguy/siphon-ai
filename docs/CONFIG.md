@@ -72,6 +72,7 @@ credentials. Resolved secret values are never logged.
 [admin]           # authenticated /admin/* listener (0.10.0); off → /admin not served
 [webhooks]        # lifecycle events (call_start, call_end, …)
 [audit]           # signed audit-event stream for SIEM (0.20.0); off by default
+[quality]         # per-call quality history records (0.31.0); off by default
 [hep]             # HEP3 shipping to Homer
 [shutdown]        # graceful drain on SIGTERM/SIGINT (0.17.0)
 ```
@@ -933,6 +934,63 @@ the DoS-shedding fast path — auditing it would amplify the attack).
 `sip_auth` records `failed` / `stale` credentials but **not** the normal
 first-leg `challenged` 401 or a successful `ok` (both track call volume,
 not security). See `docs/AUDIT.md` for the full event schema.
+
+## `[quality]` — per-call quality history records (0.31.0)
+
+The **history half** of per-call quality telemetry: one JSON record per
+call per `interval_secs`, plus a **final end-of-call summary**, in
+exactly the shape of the CDR `quality` block (see DEPLOY.md) plus
+framing (`kind`, `call_id`, `ts`, `seq`, `version`). Chart per-call
+quality over time in *your* store — SiphonAI ships a clean, signed,
+durable feed; it does not run a database. **Off by default.**
+
+Ships to an append-only JSONL **file** (for a log shipper) and/or an
+HMAC-signed **webhook** — enable either or both. The webhook reuses the
+same delivery transport as `[webhooks]`/`[cdr]`/`[audit]`, so `secret`,
+`spool_dir`, the `X-SiphonAI-Event-Id` idempotency header, and the
+`siphon_ai_webhook_*` delivery metrics (label `sink="quality"`) all
+behave identically. Restart-required — `[quality]` edits are flagged on
+SIGHUP but not applied live.
+
+```toml
+[quality]
+enabled       = true
+interval_secs = 30              # per-call record cadence
+
+[quality.file]                  # append-only JSONL, one record per line
+enabled = true
+path    = "/var/log/siphon-ai/quality.jsonl"
+
+[quality.webhook]               # HMAC-signed HTTP POST per record
+enabled     = true
+url         = "https://metrics.example.com/ingest"
+auth_header = "Bearer ${QUALITY_TOKEN}"
+secret      = "${QUALITY_HMAC_SECRET}"
+spool_dir   = "/var/lib/siphon-ai/spool/quality" # optional durable retry
+retry_max   = 3
+timeout_ms  = 5000
+```
+
+| Field                | Type    | Default        | Notes |
+|----------------------|---------|----------------|-------|
+| `enabled`            | bool    | `false`        | Master switch. `true` with **no** sub-sink enabled is a fatal config error. |
+| `interval_secs`      | integer | `30`           | Per-call record cadence; must be ≥ 1. The final record is emitted regardless, whenever the call measured anything. |
+| `file.enabled`       | bool    | `false`        | |
+| `file.path`          | path    | required if on | Append-only JSONL. Parent dir must exist (no `mkdir`); opened fail-loud at startup. |
+| `webhook.enabled`    | bool    | `false`        | |
+| `webhook.url`        | URL     | required if on | POST target. |
+| `webhook.auth_header`| string  | unset          | Sent verbatim. `${VAR}` / `${file:}` / `${cred:}` expansion works. |
+| `webhook.secret`     | string  | unset          | HMAC-SHA256 signing secret → `X-SiphonAI-Signature`. Unset ⇒ unsigned deliveries. |
+| `webhook.spool_dir`  | path    | unset          | Durable retry spool (survives restarts). Unset ⇒ best-effort. |
+| `webhook.retry_max`  | integer | `3`            | In-memory retries before spooling / dropping. |
+| `webhook.timeout_ms` | integer | `5000`         | Per-attempt timeout. |
+
+Records with nothing measured are skipped (early ticks before the first
+media-stats snapshot, calls that never went active), so consumers never
+see empty rows. Counters inside a record are **cumulative since call
+start** — diff successive `seq`s of the same `call_id` for rates. See
+`docs/OPERATIONS.md` for the end-to-end ingestion pipeline
+(webhook/file → Vector → Loki → Grafana).
 
 ## `[hep]`
 

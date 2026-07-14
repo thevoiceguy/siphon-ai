@@ -1,0 +1,134 @@
+{
+  "uid": "siphonai-quality-history",
+  "title": "SiphonAI — Per-Call Quality History",
+  "tags": ["siphon-ai"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "loki",
+        "type": "datasource",
+        "query": "loki",
+        "current": { "text": "Loki", "value": "siphonai-loki" },
+        "hide": 0
+      },
+      {
+        "name": "call_id",
+        "type": "textbox",
+        "label": "call_id (regex, empty = all)",
+        "query": ".*",
+        "current": { "text": ".*", "value": ".*" },
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "MOS estimate (avg per record, by call)",
+      "description": "Transport-only MOS-CQE from the [quality] records. One series per call_id matching the filter. 4.4 ≈ clean G.711; < 3.5 = users notice.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "fieldConfig": {
+        "defaults": {
+          "min": 1,
+          "max": 5,
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${loki}" },
+          "expr": "avg_over_time({job=\"siphon-quality\"} | json | call_id=~\"$call_id\" | unwrap mos_estimate_avg [$__auto]) by (call_id)",
+          "legendFormat": "{{call_id}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "RX packets lost (cumulative, by call)",
+      "description": "Sequence-gap loss on the caller→SiphonAI stream, cumulative since call start (late arrivals can shrink it). A rising staircase = ongoing loss.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${loki}" },
+          "expr": "max_over_time({job=\"siphon-quality\"} | json | call_id=~\"$call_id\" | unwrap rx_packets_lost [$__auto]) by (call_id)",
+          "legendFormat": "{{call_id}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "RR loss ratio (max per record, by call)",
+      "description": "Worst remote-reported cumulative-loss ratio (how the far end receives SiphonAI's stream). Compare with RX loss on the left to see which direction hurts.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${loki}" },
+          "expr": "max_over_time({job=\"siphon-quality\"} | json | call_id=~\"$call_id\" | unwrap max_packet_loss_ratio [$__auto]) by (call_id)",
+          "legendFormat": "{{call_id}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "First-audio latency (final records)",
+      "description": "first_audio_out_ms from each call's final record: WS start-on-the-wire → first server audio at playout. The STT/LLM/TTS first-token budget.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": { "drawStyle": "points", "pointSize": 6 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${loki}" },
+          "expr": "max_over_time({job=\"siphon-quality\", kind=\"final\"} | json | call_id=~\"$call_id\" | unwrap first_audio_out_ms [$__auto]) by (call_id)",
+          "legendFormat": "{{call_id}}"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Recent end-of-call summaries",
+      "description": "The final record per call — the same numbers the CDR quality block carries.",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "options": { "showHeader": true },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${loki}" },
+          "expr": "{job=\"siphon-quality\", kind=\"final\"} | json | call_id=~\"$call_id\" | line_format \"{{.call_id}}  mos_min={{.mos_estimate_min}} first_audio={{.first_audio_out_ms}}ms barge_ins={{.barge_in_count}} rx_lost={{.rx_packets_lost}}/{{.rx_packets_received}}\""
+        }
+      ]
+    }
+  ]
+}

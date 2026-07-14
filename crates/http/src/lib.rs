@@ -85,6 +85,8 @@ pub enum SinkKind {
     Cdr,
     /// `siphon-ai-audit` admin/security audit events.
     Audit,
+    /// `siphon-ai-quality` per-call quality records (0.31.0).
+    Quality,
 }
 
 impl SinkKind {
@@ -94,6 +96,7 @@ impl SinkKind {
             SinkKind::Lifecycle => "lifecycle",
             SinkKind::Cdr => "cdr",
             SinkKind::Audit => "audit",
+            SinkKind::Quality => "quality",
         }
     }
 }

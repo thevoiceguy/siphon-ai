@@ -513,6 +513,7 @@ no/invalid token → `401`.
 | GET    | `/admin/v1/parked`            | —               | readonly | **List parked calls** (0.7.0). `501` when `[park]` is disabled. |
 | POST   | `/admin/v1/calls/:id/park`    | JSON (opt.)     | operator | **Park an active call** (0.7.0). Body `{slot?}`; `202` (dispatched). `404` if no active call has that id. `501` when `[park]` is disabled. |
 | POST   | `/admin/v1/calls/:id/retrieve`| JSON (opt.)     | operator | **Retrieve a parked call** (0.7.0). Body `{ws_url?}`; `202` (dispatched). `404` unknown call, `409` if the call isn't parked. `501` when `[park]` is disabled. |
+| GET    | `/admin/v1/calls/:id/stats`   | —               | readonly | **Live per-call quality snapshot** (0.31.0). `:id` is the bridge `call_id` (the one on the WS `start` message / CDR). Returns `{call_id, sampled_at, …}` with the CDR `quality` block's fields flattened in — whatever is measured *right now*, unmeasured fields omitted. `404` when no active call has that id (ended calls answer through the CDR / `[quality]` records). |
 | GET    | `/admin/v1/drain`             | —               | readonly | **Graceful-shutdown drain status** (0.17.0). Returns `{draining, active_calls, drain_timeout_secs, remaining_secs}` — `remaining_secs` is the countdown to the deadline (non-null only while draining). Lets a deploy script confirm a pod entered drain and watch it empty. |
 
 ### Admin auth & RBAC
@@ -855,6 +856,51 @@ unless `[cdr.webhook].spool_dir` is set, which makes delivery durable
 across restarts. Set `[cdr.webhook].secret` to sign each POST. See
 [Webhook delivery: signing, idempotency, durability](#webhook-delivery-signing-idempotency-durability).
 
+## Quality record consumers
+
+With `[quality]` enabled (0.31.0), the daemon emits per-call quality
+history records: one per call per `interval_secs` **plus a final
+end-of-call summary**. A record is the CDR `quality` block flattened to
+the top level, with framing fields:
+
+```json
+{
+  "version": 1,
+  "kind": "interval",
+  "call_id": "siphon-6ce27797cc0a4997b90cbae2f46ce7a4",
+  "ts": "2026-07-13T21:14:07.812Z",
+  "seq": 3,
+  "barge_in_count": 1,
+  "first_audio_out_ms": 742,
+  "avg_jitter_ms": 11.5,
+  "max_jitter_ms": 30.0,
+  "avg_packet_loss_ratio": 0.004,
+  "max_packet_loss_ratio": 0.02,
+  "rx_packets_received": 4820,
+  "rx_packets_lost": 4,
+  "rx_packets_out_of_order": 1,
+  "rx_packets_duplicate": 0,
+  "mos_estimate_min": 4.1,
+  "mos_estimate_avg": 4.3
+}
+```
+
+- `kind` — `"interval"` (cadence sample) or `"final"` (end-of-call; the
+  same numbers the CDR carries).
+- `seq` — per-call record counter from 0; the final record continues
+  the sequence.
+- Counters are **cumulative since call start** — diff successive `seq`s
+  for rates. Unmeasured fields are omitted, not zeroed. Records with
+  nothing measured at all are skipped.
+- File sink: append-only JSONL, same rotation story as the CDR file.
+  Webhook sink: HMAC-signed + spooled exactly like `[cdr.webhook]`
+  (label `sink="quality"` on the delivery metrics).
+
+For a live *right-now* probe of one call, use
+`GET /admin/v1/calls/{id}/stats` (readonly role) instead of waiting for
+the next record. See `docs/OPERATIONS.md` for the end-to-end ingestion
+pipeline into Loki/Grafana.
+
 ## Lifecycle webhooks
 
 Off-band events (NOT the per-call WS bridge). Same delivery transport as the
@@ -1057,7 +1103,8 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_holds_total`                 | counter   | `result=ok\|failed`                   | Bot-initiated hold/resume re-INVITEs (0.7.2 — the WS server sends `hold`/`resume`). Covers both directions. `failed` = the re-INVITE was rejected / timed out / glared, or hold was rejected (already held by the far end, tap unavailable, not configured); the call stays in its prior media state. Does **not** count far-end (peer-initiated) holds. |
 | `siphon_ai_ws_reconnects_total`         | counter   | `result=recovered\|exhausted`         | WS reconnect episodes mid-call (0.7.3 — `[bridge].ws_reconnect_enabled`). One increment per unexpected drop that entered the reconnect path. `recovered` = re-dialed the same `ws_url` within `ws_reconnect_max_secs`; `exhausted` = the window elapsed (or the call ended mid-gap) and the call tore down (`ws_disconnect`). |
 | `siphon_ai_admin_requests_total`        | counter   | `endpoint`, `role`, `result=ok\|unauthenticated\|forbidden\|not_found` | Admin API requests on the `[admin]` listener (0.10.0). `endpoint` is the bounded route template (e.g. `POST /admin/v1/calls`, ids collapsed to `:id`), `role` is the authenticated token's role (`none` for `unauthenticated`). `unauthenticated` = 401 (missing/bad token); `forbidden` = 403 (role below the endpoint minimum). Pair with the structured audit log (actor = token name) for per-request detail. |
-| `siphon_ai_webhook_deliveries_total`    | counter   | `sink=lifecycle\|cdr\|audit`, `result=delivered\|spooled\|rejected\|dropped` | Terminal webhook/CDR/audit delivery outcomes (0.11.0; `audit` added 0.20.0). One increment per logical delivery. `delivered` = 2xx; `spooled` = persisted to the durable spool after the in-memory budget; `rejected` = non-retryable 4xx; `dropped` = budget (or spool) exhausted, or payload not serializable. |
+| `siphon_ai_webhook_deliveries_total`    | counter   | `sink=lifecycle\|cdr\|audit\|quality`, `result=delivered\|spooled\|rejected\|dropped` | Terminal webhook/CDR/audit/quality delivery outcomes (0.11.0; `audit` added 0.20.0, `quality` 0.31.0). One increment per logical delivery. `delivered` = 2xx; `spooled` = persisted to the durable spool after the in-memory budget; `rejected` = non-retryable 4xx; `dropped` = budget (or spool) exhausted, or payload not serializable. |
+| `siphon_ai_quality_records_total`       | counter   | `kind=interval\|final`               | Quality history records emitted through the `[quality]` sinks (0.31.0). Skipped-empty records don't count. |
 | `siphon_ai_webhook_delivery_attempts_total` | counter | `sink`, `outcome=ok\|transient\|error\|rejected` | Individual HTTP delivery attempts (0.11.0) — a retried delivery ticks several times. `transient` = retryable 5xx/408/429; `error` = connect/timeout; `rejected` = non-retryable 4xx. Divide by `siphon_ai_webhook_deliveries_total` for attempts-per-delivery. |
 | `siphon_ai_webhook_spool_depth`         | gauge     | `sink`                                | Deliveries waiting in the durable spool (0.11.0, set when `spool_dir` is configured). Sampled by the drain worker each pass (self-correcting across restarts). Healthy = 0; a rising value means deliveries are failing and backing up on disk. |
 | `siphon_ai_recording_uploads_total`     | counter   | `result`                              | Recording uploads to object storage (0.25.0): `ok` (durable), `failed` (will retry), `dropped` (retry budget exhausted / recording gone — stays local-only). |

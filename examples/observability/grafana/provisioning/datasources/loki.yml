@@ -1,0 +1,12 @@
+# Provisions the Loki datasource the quality-history dashboard references
+# by a fixed uid (`siphonai-loki`), so it loads without manual wiring.
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    uid: siphonai-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: false
+    editable: true

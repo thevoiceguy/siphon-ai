@@ -3324,6 +3324,7 @@ dependencies = [
  "opentelemetry",
  "rustls",
  "rustls-pemfile",
+ "serde_json",
  "sip-core",
  "sip-dns",
  "sip-parse",
@@ -3338,6 +3339,7 @@ dependencies = [
  "siphon-ai-core",
  "siphon-ai-http",
  "siphon-ai-media-glue",
+ "siphon-ai-quality",
  "siphon-ai-recording",
  "siphon-ai-routes",
  "siphon-ai-sip-glue",
@@ -3444,6 +3446,7 @@ dependencies = [
  "metrics 0.23.1",
  "metrics-exporter-prometheus",
  "parking_lot",
+ "serde",
  "serde_json",
  "sip-core",
  "sip-dialog",
@@ -3457,6 +3460,7 @@ dependencies = [
  "siphon-ai-cdr",
  "siphon-ai-http",
  "siphon-ai-media-glue",
+ "siphon-ai-quality",
  "siphon-ai-recording",
  "siphon-ai-routes",
  "siphon-ai-security",
@@ -3534,6 +3538,24 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "siphon-ai-quality"
+version = "0.30.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "metrics 0.23.1",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "siphon-ai-cdr",
+ "siphon-ai-http",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

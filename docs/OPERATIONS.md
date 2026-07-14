@@ -191,6 +191,40 @@ siphon_ai:rtp_packet_loss_ratio:p95   # SiphonAIHighPacketLoss    (> 5%/10m)
 These tell you *a fleet-wide quality problem is happening*; drop to Homer's
 per-leg RTP-QoS panel to see *which stream*.
 
+**Per-call quality over time — the middle layer (0.30.0/0.31.0):**
+between fleet aggregates and single-call Homer forensics sits the
+question "chart *this call's* (or *every call's*) quality over its
+lifetime, in my own dashboards." Three feeds, one shape (the CDR
+`quality` block — MOS estimate, RX loss/reorder counters, RR jitter/loss
+aggregates, `first_audio_out_ms`, `barge_in_count`):
+
+1. **Live** — `GET /admin/v1/calls/{id}/stats` (readonly role): what one
+   active call measures *right now*.
+2. **History** — `[quality]` records (0.31.0): one JSON record per call
+   per `interval_secs` + a final summary, to a JSONL file and/or an
+   HMAC-signed webhook. Ingestion pipeline (reference stack in
+   `examples/observability/`, runs with one `docker compose up`):
+
+   ```text
+   siphon-ai [quality.webhook] ──HTTP POST (signed, spooled)──► Vector :9411
+                                                                   │
+        [quality.file] quality.jsonl ──(alt: Vector file source)───┤
+                                                                   ▼
+                                             Loki (label job="siphon-quality",
+                                                   kind=interval|final)
+                                                                   ▼
+                                  Grafana "Per-Call Quality History" dashboard
+   ```
+
+   Only `kind` becomes a Loki label — `call_id` stays a JSON field
+   (per-call label values would explode the index; LogQL filters it via
+   `| json | call_id=~"..."`). Counters are cumulative per call; use
+   `max_over_time`-style unwraps rather than `rate` for staircase reads.
+   The daemon's spool (`[quality.webhook].spool_dir`) rides out Vector /
+   Loki restarts with no record loss.
+3. **Post-mortem** — the CDR `quality` block (v4): the final record's
+   numbers in the record you already ingest for billing.
+
 ### 7. What did the SIP exchange actually look like?
 
 **Source:** Homer UI's Call Flow view.

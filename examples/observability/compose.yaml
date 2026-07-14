@@ -33,6 +33,25 @@ services:
     extra_hosts:
       - "siphon-ai:host-gateway"
 
+  # ── Quality-history pipeline (0.31.0): [quality] records → Loki ──
+  # Point the daemon at Vector:  [quality.webhook].url = "http://127.0.0.1:9411/"
+  # (or use [quality.file] + Vector's file source — see vector.toml).
+  loki:
+    image: grafana/loki:3.0.0
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports:
+      - "127.0.0.1:3100:3100"
+
+  vector:
+    image: timberio/vector:0.39.0-alpine
+    command: ["--config", "/etc/vector/vector.toml"]
+    volumes:
+      - ./vector.toml:/etc/vector/vector.toml:ro
+    ports:
+      - "127.0.0.1:9411:9411"
+    depends_on:
+      - loki
+
   grafana:
     image: grafana/grafana:latest
     environment:
@@ -48,3 +67,4 @@ services:
       - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
+      - loki

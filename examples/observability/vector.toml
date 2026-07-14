@@ -1,0 +1,55 @@
+# Vector pipeline: SiphonAI [quality] records → Loki (0.31.0).
+#
+# Two interchangeable intake modes — enable ONE:
+#
+#   1. Webhook intake (default here): point the daemon's
+#      [quality.webhook].url at this Vector instance and records arrive
+#      pushed, spooled, and retried by the daemon:
+#
+#        [quality.webhook]
+#        enabled = true
+#        url     = "http://127.0.0.1:9411/"
+#
+#      (Signature note: this reference pipeline does not verify
+#      X-SiphonAI-Signature — Vector forwards the body as-is. Verify at
+#      a terminating receiver if your ingest path crosses trust
+#      boundaries, or keep the webhook loopback-only like this lab.)
+#
+#   2. File tailing: enable [quality.file] in the daemon and swap the
+#      source below for the commented `quality_file` variant — the
+#      classic log-shipper pattern, useful when Vector runs as a
+#      sidecar with access to the JSONL path.
+#
+# Labels: only `job` and the low-cardinality `kind` (interval|final)
+# become Loki labels. `call_id` stays a JSON field — per-call ids as
+# labels would explode Loki's index (same rule as CLAUDE.md's "no
+# call_id metric labels"); LogQL filters on it just fine via `| json`.
+
+[sources.quality_webhook]
+type = "http_server"
+address = "0.0.0.0:9411"
+decoding.codec = "json"
+
+# [sources.quality_file]
+# type = "file"
+# include = ["/var/log/siphon-ai/quality.jsonl"]
+# decoding.codec = "json"
+
+[transforms.quality_labels]
+type = "remap"
+inputs = ["quality_webhook"]
+source = '''
+# Lift the record kind to a Loki label; keep everything else as fields.
+.kind_label = to_string(.kind) ?? "unknown"
+'''
+
+[sinks.loki]
+type = "loki"
+inputs = ["quality_labels"]
+endpoint = "http://loki:3100"
+encoding.codec = "json"
+labels.job = "siphon-quality"
+labels.kind = "{{ kind_label }}"
+# One JSON record per Loki line; timestamps come from ingest time (the
+# record's own `ts` field remains inside the JSON for queries).
+remove_label_fields = true

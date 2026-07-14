@@ -71,8 +71,8 @@ use forge_engine::{
     PlayoutMode,
 };
 use siphon_ai_bridge::{
-    pack_pcm16_le, unpack_pcm16_le, AudioError, ConferenceLeftReason, DtmfMethod, OutgoingEvent,
-    Reframer,
+    pack_pcm16_le, unpack_pcm16_le, AudioError, BargeInOutcome, ConferenceLeftReason, DtmfMethod,
+    OutgoingEvent, Reframer,
 };
 use siphon_ai_recording::RecFrame;
 use thiserror::Error;
@@ -580,9 +580,15 @@ impl MediaTap {
     /// the WS drops. The retained tail is moot in every such case, and
     /// the interruption stands for CDR purposes. A `None` pending is a
     /// no-op, so call sites don't need their own guard.
-    fn abandon_arbitration(&mut self, pending: &mut Option<PendingVerdict>, site: &'static str) {
+    fn abandon_arbitration(
+        &mut self,
+        pending: &mut Option<PendingVerdict>,
+        events_tx: &mpsc::Sender<OutgoingEvent>,
+        site: &'static str,
+    ) {
         if let Some(p) = pending.take() {
             self.note_barge_in_decision(p.armed_at, "confirmed", true);
+            emit_resolved(events_tx, &self.call_id, BargeInOutcome::Confirmed);
             debug!(
                 call_id = %self.call_id,
                 site,
@@ -855,7 +861,7 @@ impl MediaTap {
                         // resolves as confirm (§7.2 of the design note);
                         // flushed-and-quiet is the right state alongside
                         // the reconnect hold music.
-                        self.abandon_arbitration(&mut pending_verdict, "ws_drop");
+                        self.abandon_arbitration(&mut pending_verdict, &events_tx, "ws_drop");
                         ws_dropped = true;
                     } else {
                         debug!("caller_audio_tx receiver dropped; ending tap");
@@ -889,7 +895,7 @@ impl MediaTap {
                                 "playout_audio_rx closed; holding for reconnect");
                             // Same as the caller_audio_tx arm: no arbiter,
                             // pending verdict resolves as confirm.
-                            self.abandon_arbitration(&mut pending_verdict, "ws_drop");
+                            self.abandon_arbitration(&mut pending_verdict, &events_tx, "ws_drop");
                             ws_dropped = true;
                             continue;
                         }
@@ -1269,7 +1275,7 @@ impl MediaTap {
                                 }
                                 _ => {}
                             }
-                            if let Some(out) = derive_outgoing_event(&self.call_id, ev) {
+                            if let Some(mut out) = derive_outgoing_event(&self.call_id, ev) {
                                 // Hook the idle detector on every
                                 // SpeechStarted — regardless of
                                 // barge-in policy. Resets silence +
@@ -1402,6 +1408,11 @@ impl MediaTap {
                                                 fresh: Vec::new(),
                                                 armed_at: speech_now,
                                             });
+                                            // The forwarded speech_started IS
+                                            // the arbitration request — stamp
+                                            // the wire fields (§2 of the
+                                            // design note).
+                                            stamp_decision_pending(&mut out, decision);
                                         }
                                         BargeInAction::Notify => {}
                                     }
@@ -1493,7 +1504,7 @@ impl MediaTap {
                             // pending pause arbitration resolves as
                             // confirm (§7.2); the retained tail would be
                             // flushed below anyway.
-                            self.abandon_arbitration(&mut pending_verdict, "mute");
+                            self.abandon_arbitration(&mut pending_verdict, &events_tx, "mute");
                             // Sustained AI-side gate. Same drain +
                             // forge-flush combo as Clear so the
                             // caller hears silence immediately; the
@@ -1555,6 +1566,7 @@ impl MediaTap {
                                     &mut first_audio_pushed_at,
                                     &mut playout_until,
                                 );
+                                emit_resolved(&events_tx, &self.call_id, BargeInOutcome::Confirmed);
                                 debug!(
                                     call_id = %self.call_id,
                                     fresh = n,
@@ -1587,6 +1599,7 @@ impl MediaTap {
                                     &mut first_audio_pushed_at,
                                     &mut playout_until,
                                 );
+                                emit_resolved(&events_tx, &self.call_id, BargeInOutcome::Rejected);
                                 debug!(
                                     call_id = %self.call_id,
                                     resumed,
@@ -1606,7 +1619,7 @@ impl MediaTap {
                             // count is bumped once, via the arbitration
                             // path.
                             if pending_verdict.is_some() {
-                                self.abandon_arbitration(&mut pending_verdict, "clear");
+                                self.abandon_arbitration(&mut pending_verdict, &events_tx, "clear");
                             } else {
                                 // CDR barge_in_count: a server-driven clear
                                 // is the Notify-mode barge-in (the server
@@ -1666,7 +1679,7 @@ impl MediaTap {
                             // Arbitration is suspended in rooms (§7.2) —
                             // a pending one resolves as confirm before
                             // the re-plumb.
-                            self.abandon_arbitration(&mut pending_verdict, "join_room");
+                            self.abandon_arbitration(&mut pending_verdict, &events_tx, "join_room");
                             if room_send.is_some() {
                                 // Switching rooms: dropping the old
                                 // RoomSender signals the old room to
@@ -1733,7 +1746,7 @@ impl MediaTap {
                             // Park takes over the caller's ear — a
                             // pending pause arbitration resolves as
                             // confirm (§7.2).
-                            self.abandon_arbitration(&mut pending_verdict, "park");
+                            self.abandon_arbitration(&mut pending_verdict, &events_tx, "park");
                             // Parking while in a room first leaves it
                             // (drops the RoomSender → the room reaps us).
                             if let Some(send) = room_send.take() {
@@ -1783,7 +1796,7 @@ impl MediaTap {
                         TapCommand::Hold { moh } => {
                             // Same as Park: MOH takes over the caller's
                             // ear, pending arbitration resolves as confirm.
-                            self.abandon_arbitration(&mut pending_verdict, "hold");
+                            self.abandon_arbitration(&mut pending_verdict, &events_tx, "hold");
                             // Holding while in a room first leaves it
                             // (drops the RoomSender → the room reaps us),
                             // same as Park.
@@ -1809,7 +1822,7 @@ impl MediaTap {
                         TapCommand::Announce { source, done } => {
                             // The prompt preempts playout — pending
                             // arbitration resolves as confirm (§7.2).
-                            self.abandon_arbitration(&mut pending_verdict, "announce");
+                            self.abandon_arbitration(&mut pending_verdict, &events_tx, "announce");
                             if parked.is_some() || held.is_some() {
                                 // Park/hold owns the caller's ear; skip
                                 // the prompt rather than queue it.
@@ -2008,6 +2021,11 @@ impl MediaTap {
                                 fresh: Vec::new(),
                                 armed_at: Instant::now(),
                             });
+                            // The held speech_started (forwarded below)
+                            // is the arbitration request.
+                            if let Some(out) = pending_barge_in.as_mut() {
+                                stamp_decision_pending(out, decision);
+                            }
                             debug!(
                                 call_id = %self.call_id,
                                 "barge-in sustained past debounce; pause arbitration armed",
@@ -2079,6 +2097,7 @@ impl MediaTap {
                                     &mut first_audio_pushed_at,
                                     &mut playout_until,
                                 );
+                                emit_resolved(&events_tx, &self.call_id, BargeInOutcome::Timeout);
                                 debug!(
                                     call_id = %self.call_id,
                                     fresh,
@@ -2099,6 +2118,7 @@ impl MediaTap {
                                     &mut first_audio_pushed_at,
                                     &mut playout_until,
                                 );
+                                emit_resolved(&events_tx, &self.call_id, BargeInOutcome::Timeout);
                                 debug!(
                                     call_id = %self.call_id,
                                     resumed,
@@ -2328,6 +2348,39 @@ async fn begin_pause_arbitration(
     resume
 }
 
+/// Stamp the pause-mode arbitration fields onto a `speech_started`
+/// about to be forwarded (design note §2): the event IS the
+/// arbitration request, so the server knows a verdict is expected and
+/// how long it has. A no-op on any other event shape.
+fn stamp_decision_pending(out: &mut OutgoingEvent, decision: Duration) {
+    if let OutgoingEvent::SpeechStarted {
+        decision_pending,
+        decision_deadline_ms,
+        ..
+    } = out
+    {
+        *decision_pending = true;
+        *decision_deadline_ms = Some(decision.as_millis() as u64);
+    }
+}
+
+/// Best-effort `barge_in_resolved` emission at arbitration resolution.
+/// `debug!` (not `warn!`) on failure: the WS-drop abandonment path
+/// resolves against an already-closed events channel by design.
+fn emit_resolved(
+    events_tx: &mpsc::Sender<OutgoingEvent>,
+    call_id: &CallId,
+    outcome: BargeInOutcome,
+) {
+    if let Err(e) = events_tx.try_send(OutgoingEvent::BargeInResolved { outcome }) {
+        debug!(
+            call_id = %call_id,
+            error = %e,
+            "events_tx full or closed; dropping barge_in_resolved",
+        );
+    }
+}
+
 /// Re-anchor the Mark / barge-in playout bookkeeping after re-queuing
 /// `frames` chunks at arbitration resolution. Zero frames leaves
 /// everything cleared — the pause's flush already reset it.
@@ -2378,6 +2431,10 @@ fn derive_outgoing_event(call_id: &CallId, event: ForgeEvent) -> Option<Outgoing
             // wrap, but that won't happen for live calls). The WS
             // server decides how to display it.
             ts_ms: timestamp.timestamp_millis().max(0) as u64,
+            // Stamped by the pause-mode arm just before forwarding,
+            // when this event arms an arbitration (0.32.0).
+            decision_pending: false,
+            decision_deadline_ms: None,
         }),
         ForgeEvent::SpeechStopped {
             call_id: ev_call,

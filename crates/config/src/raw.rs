@@ -1193,7 +1193,23 @@ pub struct RawBargeIn {
     /// out, a VAD speech-started is held for this many ms and only flushes
     /// if speech sustains past it — an echo / brief-noise gate that does
     /// **not** delay barge-in while the bot is silent. `0` / unset = off
-    /// (immediate flush, the original behaviour). Only affects `auto_clear`.
+    /// (immediate flush, the original behaviour). Affects `auto_clear`
+    /// and `pause` (the acoustic gate in front of the semantic one).
     #[serde(default)]
     pub debounce_ms: Option<u64>,
+    /// Pause-mode server verdict deadline (0.32.0). Only meaningful —
+    /// and only accepted — when `mode = "pause"`. Default 500; `0` is
+    /// rejected at load (an unbounded pause would hang playout on a
+    /// lost verdict).
+    #[serde(default)]
+    pub decision_ms: Option<u64>,
+    /// Pause-mode fallback verdict at the deadline: `"confirm"`
+    /// (default — stay quiet) or `"reject"` (resume playout). Only
+    /// accepted when `mode = "pause"`.
+    #[serde(default)]
+    pub on_timeout: Option<String>,
+    /// Pause-mode cap on retained (resumable) audio, in seconds.
+    /// Default 30; `0` rejected. Only accepted when `mode = "pause"`.
+    #[serde(default)]
+    pub resume_max_secs: Option<u64>,
 }

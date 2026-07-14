@@ -107,6 +107,18 @@ class Call:
             {"type": "send_dtmf", "digit": digit, "duration_ms": duration_ms}
         )
 
+    async def barge_in_confirm(self) -> None:
+        """Verdict on a pending pause-mode barge-in arbitration (0.32.0):
+        the speech was a real interruption — the daemon drops the retained
+        playout tail. A no-op when no arbitration is pending."""
+        await self._command({"type": "barge_in_confirm"})
+
+    async def barge_in_reject(self) -> None:
+        """Verdict on a pending pause-mode barge-in arbitration (0.32.0):
+        false positive — playout resumes where it stopped. A no-op when no
+        arbitration is pending."""
+        await self._command({"type": "barge_in_reject"})
+
     async def mute(self) -> None:
         await self._command({"type": "mute"})
 

@@ -1203,6 +1203,21 @@ impl CallController {
                                 warn!(error = %e, "tap command channel full or closed; dropping Unmute");
                             }
                         }
+                        Some(BridgeIn::BargeInConfirm { call_id: cid }) => {
+                            debug!(ws_call_id = %cid, "forwarding BargeInConfirm to tap");
+                            // A dropped verdict degrades to the tap's own
+                            // decision deadline (`on_timeout`), so the
+                            // try_send drop policy is safe here too.
+                            if let Err(e) = tap_cmd_tx.try_send(TapCommand::BargeInConfirm) {
+                                warn!(error = %e, "tap command channel full or closed; dropping BargeInConfirm");
+                            }
+                        }
+                        Some(BridgeIn::BargeInReject { call_id: cid }) => {
+                            debug!(ws_call_id = %cid, "forwarding BargeInReject to tap");
+                            if let Err(e) = tap_cmd_tx.try_send(TapCommand::BargeInReject) {
+                                warn!(error = %e, "tap command channel full or closed; dropping BargeInReject");
+                            }
+                        }
                         Some(BridgeIn::StartRecording { call_id: cid }) => {
                             if rec_blocked {
                                 warn!(call_id = %cid,

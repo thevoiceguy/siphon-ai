@@ -179,6 +179,7 @@ MAY use it to detect dropped frames in their own logs.
 | `trace_context` | object \| absent | W3C trace context for this call's daemon-side OTLP trace (0.23.0). **Present only when `[observability.otlp]` is enabled**; absent otherwise (the default), so the protocol version stays `"1"` and a server that doesn't know the field ignores it. The same values are sent as `traceparent`/`tracestate` headers on the upgrade request — read whichever is easier for your stack. A server that adopts this as the parent of its own spans appears in the same trace waterfall as the daemon's SIP/media spans. |
 | `trace_context.traceparent` | string | W3C `traceparent`: `00-<32 hex trace-id>-<16 hex span-id>-<2 hex flags>`. The trace-id identifies the whole call's trace; the span-id is the daemon's call-root span. The flags byte reflects the daemon's sampling decision (`01` sampled, `00` not) — honouring it keeps sampling consistent across both services. |
 | `trace_context.tracestate` | string \| absent | W3C `tracestate` (vendor key/value list). Absent when there is nothing to forward — which is the common case. |
+| `barge_in_mode` | string \| absent | The call's resolved barge-in policy (0.32.0): `"auto_clear"`, `"notify_only"`, or `"pause"` — the per-route merge of `[bridge.barge_in]` (`enabled = false` reads as `"notify_only"`). Tells the server whether pause-mode verdicts (§4.11) are expected on this call, without out-of-band config agreement. Additive; a server that ignores it behaves exactly as before. |
 
 The `srtp` field is omitted from the JSON when SRTP is off; a v1
 WS server that doesn't know about it sees exactly the v0.2.0 shape.
@@ -247,12 +248,39 @@ are the same VAD signals that drive barge-in — see `[bridge.barge_in]` in
 
 The barge-in **mode** doesn't change *whether* these are sent, only what
 SiphonAI does alongside a `speech_started`: `auto_clear` (the default) also
-flushes pending outbound playout; `notify_only` leaves that to the server.
-One nuance: with `auto_clear` **and** a configured
+flushes pending outbound playout; `notify_only` leaves that to the server;
+`pause` (0.32.0) flushes **reversibly** and asks the server to rule — see
+below. One nuance: with `auto_clear` or `pause` **and** a configured
 `[bridge.barge_in].debounce_ms`, a `speech_started` that the debounce gate
 classifies as the bot's own echo/noise (a brief start→stop while the bot is
 playing) is suppressed together with its `speech_stopped`, so the server
 never sees that provisional pair.
+
+**Pause mode (0.32.0, `[bridge.barge_in].mode = "pause"`).** A
+`speech_started` that fires while the bot is playing arms a **barge-in
+arbitration**: SiphonAI instantly pauses playout (same one-frame reaction as
+`auto_clear`) but *retains* the unplayed tail, and the event carries two
+extra fields:
+
+```json
+{ "type": "speech_started", "call_id": "...", "seq": 42, "ts_ms": 1234,
+  "decision_pending": true, "decision_deadline_ms": 500 }
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `decision_pending` | bool \| absent | `true` when this event armed an arbitration. **Absent** (not `false`) otherwise — including in every non-pause mode — so pre-0.32.0 consumers see the exact shape they always saw. |
+| `decision_deadline_ms` | int \| absent | How long the server has to send `barge_in_confirm` / `barge_in_reject` (§4.11) before `[bridge.barge_in].on_timeout` applies. Present exactly when `decision_pending` is `true`. |
+
+The server rules with its own intelligence (typically STT partials: no
+transcript → cough → reject; "uh-huh" → backchannel → reject; anything
+substantive → confirm). A **reject** re-queues the retained tail and the
+bot resumes mid-utterance; a **confirm** drops it. Whatever resolves the
+arbitration — verdict, deadline, or a preempting command — SiphonAI emits
+`barge_in_resolved` (§3.14). While the bot is **silent**, or while the call
+is in a conference room, `pause` behaves like `notify_only` and these
+fields are absent. Caller→server audio keeps flowing throughout — the
+server needs it to produce the verdict.
 
 ### 3.3 `hold` / `resume` — peer paused or resumed media
 
@@ -494,6 +522,24 @@ round-trip, so the server knows the hold is real before relying on it.
 > `error { code: "hold_failed" }` (§3.10) instead, and the call is
 > unchanged.
 
+### 3.14 `barge_in_resolved` — pause-mode arbitration outcome (0.32.0)
+
+Emitted whenever a pause-mode barge-in arbitration (§3.2) resolves —
+**every** resolution, whatever caused it:
+
+```json
+{ "type": "barge_in_resolved", "call_id": "...", "seq": 44, "outcome": "confirmed" }
+```
+
+| `outcome` | Meaning |
+|---|---|
+| `"confirmed"` | The retained playout tail was dropped and the bot stays quiet. Sent for a server `barge_in_confirm`, a `clear` during the window, **and** for preempting commands (`mute`, `hold`, `park`, `conference_join`) that moot the arbitration. |
+| `"rejected"` | False positive — the retained tail was re-queued and playout resumed where it stopped, followed by any audio the server streamed during the pause. |
+| `"timeout"` | No verdict arrived within `decision_deadline_ms`; the configured `[bridge.barge_in].on_timeout` (default `confirm`) was applied. The one outcome the server can't infer from its own actions. |
+
+Servers that don't run pause mode never see this event. Only sent on the
+session that armed the arbitration.
+
 ---
 
 ## 4. Server → SiphonAI messages
@@ -511,6 +557,12 @@ Discards any audio queued for playout into the call but not yet sent.
 Audio that has already left the network has, of course, already been
 played to the caller and cannot be unsent. Pending `mark` events that
 were queued behind the cleared audio are dropped without firing.
+
+A `clear` that arrives while a pause-mode barge-in arbitration is
+pending (§3.2) **acts as `barge_in_confirm`** (§4.11): the retained tail
+is dropped and `barge_in_resolved { outcome: "confirmed" }` is emitted —
+so a mode-oblivious server that always clears on `speech_started` stays
+coherent under pause mode.
 
 ### 4.2 `mark` — insert a playback marker
 
@@ -753,6 +805,35 @@ silences the server's *own* audio (the caller's mic still reaches the
 server, the dialog stays `sendrecv`); `hold` signals the far end and plays
 hold music. The §3.3 `hold` *event* is the opposite direction — the peer
 holding *you*.
+
+### 4.11 `barge_in_confirm` / `barge_in_reject` — rule on a pause-mode barge-in (0.32.0)
+
+```json
+{ "type": "barge_in_confirm", "call_id": "..." }
+{ "type": "barge_in_reject",  "call_id": "..." }
+```
+
+Verdicts on a pending pause-mode arbitration (§3.2 — armed by a
+`speech_started` with `decision_pending: true`, only under
+`[bridge.barge_in].mode = "pause"`):
+
+- **`barge_in_confirm`** — the caller's speech was a real interruption.
+  The retained playout tail is dropped and the bot stays quiet. Audio the
+  server streamed *since* the pause plays immediately (the server barged
+  over itself — its choice).
+- **`barge_in_reject`** — false positive (cough, backchannel, noise). The
+  retained tail is re-queued and playout resumes where it stopped, then
+  any audio streamed during the pause plays behind it.
+
+Either verdict is acknowledged with `barge_in_resolved` (§3.14). A verdict
+with **no arbitration pending is a silent no-op** — verdicts race with the
+`decision_deadline_ms` deadline and with preempting commands by nature, so
+a late one must be harmless. Send the verdict as soon as your STT gives you
+enough signal; if the deadline fires first, `[bridge.barge_in].on_timeout`
+(default `confirm`) rules instead and the resolution arrives as
+`outcome: "timeout"`.
+
+**Self-scoped (§5.3):** both act only on the session's own call.
 
 ---
 

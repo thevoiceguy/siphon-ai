@@ -22,7 +22,13 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "sdks" / "python" / "src"))
 
 from siphon_ai_server import events  # noqa: E402
-from siphon_ai_server.events import Start, UnknownEvent, parse_event  # noqa: E402
+from siphon_ai_server.events import (  # noqa: E402
+    BargeInResolved,
+    SpeechStarted,
+    Start,
+    UnknownEvent,
+    parse_event,
+)
 
 SCHEMA = json.loads((REPO / "schemas" / "siphon-ai.v1.json").read_text())
 PROTOCOL_MD = (REPO / "docs" / "PROTOCOL.md").read_text()
@@ -120,6 +126,8 @@ class CommandSchemaTest(unittest.TestCase):
             {"type": "conference_leave"},
             {"type": "hold"},
             {"type": "resume"},
+            {"type": "barge_in_confirm"},
+            {"type": "barge_in_reject"},
         ]
         emitted_types = set()
         for msg in commands:
@@ -170,6 +178,58 @@ class ToleranceTest(unittest.TestCase):
         self.assertIsInstance(event, Start)
         self.assertEqual(event.from_, "+13125551212")
         self.assertFalse(event.reconnected)
+
+    def test_speech_started_decision_fields_default_off(self) -> None:
+        # Pre-0.32.0 shape: no decision fields on the wire.
+        plain = parse_event(
+            '{"type": "speech_started", "call_id": "c", "seq": 4, "ts_ms": 1234}'
+        )
+        self.assertIsInstance(plain, SpeechStarted)
+        self.assertFalse(plain.decision_pending)
+        self.assertIsNone(plain.decision_deadline_ms)
+        # Pause-mode arbitration armed (0.32.0).
+        armed = parse_event(
+            '{"type": "speech_started", "call_id": "c", "seq": 5, "ts_ms": 1300,'
+            ' "decision_pending": true, "decision_deadline_ms": 500}'
+        )
+        self.assertTrue(armed.decision_pending)
+        self.assertEqual(armed.decision_deadline_ms, 500)
+
+    def test_barge_in_resolved_parses_every_outcome(self) -> None:
+        for outcome in ("confirmed", "rejected", "timeout"):
+            event = parse_event(
+                json.dumps(
+                    {
+                        "type": "barge_in_resolved",
+                        "call_id": "c",
+                        "seq": 6,
+                        "outcome": outcome,
+                    }
+                )
+            )
+            self.assertIsInstance(event, BargeInResolved)
+            self.assertEqual(event.outcome, outcome)
+
+    def test_start_barge_in_mode_optional(self) -> None:
+        raw = {
+            "type": "start",
+            "version": "1",
+            "call_id": "c",
+            "seq": 0,
+            "from": "+13125551212",
+            "to": "5000",
+            "direction": "inbound",
+            "audio": {
+                "encoding": "pcm16le",
+                "sample_rate": 8000,
+                "channels": 1,
+                "frame_ms": 20,
+            },
+            "sip": {"call_id": "x@y", "headers": {}},
+        }
+        self.assertIsNone(parse_event(json.dumps(raw)).barge_in_mode)
+        raw["barge_in_mode"] = "pause"
+        self.assertEqual(parse_event(json.dumps(raw)).barge_in_mode, "pause")
 
     def test_malformed_json_raises(self) -> None:
         with self.assertRaises(ValueError):

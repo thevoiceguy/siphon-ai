@@ -207,6 +207,25 @@ pub enum BargeInMode {
     /// Forward the event AND drop pending outbound playout the
     /// moment speech-started fires.
     AutoClear,
+    /// Reversible barge-in (0.32.0,
+    /// `docs/design/DESIGN_REVERSIBLE_BARGE_IN.md`): flush playout on
+    /// speech-started like `AutoClear` but retain the unplayed tail;
+    /// the WS server confirms or rejects within
+    /// [`BargeInConfig::decision`], else
+    /// [`BargeInConfig::on_timeout`] applies.
+    Pause,
+}
+
+/// Fallback verdict when a pause-mode arbitration's decision window
+/// elapses without a server ruling. Core-level mirror of
+/// `siphon_ai_media_glue::TimeoutVerdict` so the config crate doesn't
+/// reach through core into media-glue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BargeInTimeout {
+    /// Treat as a real barge-in: stay quiet (the safe default).
+    Confirm,
+    /// Treat as a false positive: resume the retained playout.
+    Reject,
 }
 
 /// Resolved barge-in plan after merging globals + route overrides.
@@ -224,6 +243,17 @@ pub struct BargeInConfig {
     /// that doesn't delay barge-in while the bot is silent. From
     /// `[bridge.barge_in].debounce_ms`.
     pub debounce: Option<std::time::Duration>,
+    /// Pause-mode server verdict deadline, from
+    /// `[bridge.barge_in].decision_ms` (0.32.0). Only consulted when
+    /// `mode = Pause`; the default (500 ms) covers STT-partial latency
+    /// for the major engines with margin.
+    pub decision: std::time::Duration,
+    /// Pause-mode fallback at the deadline, from
+    /// `[bridge.barge_in].on_timeout` (0.32.0).
+    pub on_timeout: BargeInTimeout,
+    /// Pause-mode cap on retained audio, from
+    /// `[bridge.barge_in].resume_max_secs` (0.32.0).
+    pub resume_max: std::time::Duration,
 }
 
 impl Default for BargeInConfig {
@@ -232,6 +262,9 @@ impl Default for BargeInConfig {
             enabled: true,
             mode: BargeInMode::AutoClear,
             debounce: None,
+            decision: std::time::Duration::from_millis(500),
+            on_timeout: BargeInTimeout::Confirm,
+            resume_max: std::time::Duration::from_secs(30),
         }
     }
 }
@@ -706,6 +739,21 @@ pub fn resolve_barge_in(defaults: &BridgeDefaults, route: &CompiledRoute) -> Bar
     if let Some(ms) = route.bridge.barge_in.debounce_ms {
         out.debounce = (ms > 0).then(|| std::time::Duration::from_millis(ms));
     }
+    // Pause-mode knobs (0.32.0). Field-wise like everything else:
+    // a route can retune the decision window without restating the
+    // mode. Zero values are rejected at config load, so no clamping
+    // here.
+    if let Some(ms) = route.bridge.barge_in.decision_ms {
+        out.decision = std::time::Duration::from_millis(ms);
+    }
+    if let Some(v) = route.bridge.barge_in.on_timeout.as_deref() {
+        if let Some(parsed) = parse_barge_in_timeout_route(v) {
+            out.on_timeout = parsed;
+        }
+    }
+    if let Some(secs) = route.bridge.barge_in.resume_max_secs {
+        out.resume_max = std::time::Duration::from_secs(secs);
+    }
     out
 }
 
@@ -713,6 +761,15 @@ fn parse_barge_in_mode_route(s: &str) -> Option<BargeInMode> {
     match s {
         "auto_clear" => Some(BargeInMode::AutoClear),
         "notify_only" => Some(BargeInMode::NotifyOnly),
+        "pause" => Some(BargeInMode::Pause),
+        _ => None,
+    }
+}
+
+fn parse_barge_in_timeout_route(s: &str) -> Option<BargeInTimeout> {
+    match s {
+        "confirm" => Some(BargeInTimeout::Confirm),
+        "reject" => Some(BargeInTimeout::Reject),
         _ => None,
     }
 }
@@ -1341,6 +1398,28 @@ pub(crate) fn barge_in_to_tap_action(cfg: &BargeInConfig) -> siphon_ai_media_glu
     match cfg.mode {
         BargeInMode::AutoClear => siphon_ai_media_glue::BargeInAction::AutoClear,
         BargeInMode::NotifyOnly => siphon_ai_media_glue::BargeInAction::Notify,
+        BargeInMode::Pause => siphon_ai_media_glue::BargeInAction::Pause {
+            decision: cfg.decision,
+            on_timeout: match cfg.on_timeout {
+                BargeInTimeout::Confirm => siphon_ai_media_glue::TimeoutVerdict::Confirm,
+                BargeInTimeout::Reject => siphon_ai_media_glue::TimeoutVerdict::Reject,
+            },
+            resume_max: cfg.resume_max,
+        },
+    }
+}
+
+/// The wire-facing announcement of a call's resolved barge-in policy
+/// (`start.barge_in_mode`, 0.32.0). `enabled = false` reads as
+/// notify-only — that's exactly how the tap behaves.
+pub(crate) fn barge_in_mode_info(cfg: &BargeInConfig) -> siphon_ai_bridge::BargeInModeInfo {
+    if !cfg.enabled {
+        return siphon_ai_bridge::BargeInModeInfo::NotifyOnly;
+    }
+    match cfg.mode {
+        BargeInMode::AutoClear => siphon_ai_bridge::BargeInModeInfo::AutoClear,
+        BargeInMode::NotifyOnly => siphon_ai_bridge::BargeInModeInfo::NotifyOnly,
+        BargeInMode::Pause => siphon_ai_bridge::BargeInModeInfo::Pause,
     }
 }
 
@@ -1351,6 +1430,7 @@ pub(crate) fn barge_in_to_tap_action(cfg: &BargeInConfig) -> siphon_ai_media_glu
 /// SIP Call-ID per PROTOCOL.md §1) the caller has chosen. `seq` is
 /// always 0 here — the bridge connection task overwrites it with 0
 /// anyway, but we keep the field truthful.
+#[allow(clippy::too_many_arguments)] // start-message facts arrive from disjoint layers; a builder struct would just relocate the list
 pub fn build_start_msg(
     bridge_call_id: BridgeCallId,
     facts: &InviteFacts,
@@ -1359,6 +1439,7 @@ pub fn build_start_msg(
     forward_headers: &[String],
     srtp: Option<siphon_ai_bridge::protocol::SrtpInfo>,
     verstat: Option<Box<siphon_ai_security::VerificationResult>>,
+    barge_in_mode: siphon_ai_bridge::BargeInModeInfo,
 ) -> StartMsg {
     let mut headers = std::collections::HashMap::with_capacity(forward_headers.len());
     for name in forward_headers {
@@ -1401,6 +1482,9 @@ pub fn build_start_msg(
         // Stamped by `CallController::run` (the call's trace root) just
         // before the bridge connects — the acceptor doesn't know it yet.
         trace_context: None,
+        // The per-route resolved barge-in policy (0.32.0) so the server
+        // knows whether pause-mode verdicts are expected.
+        barge_in_mode: Some(barge_in_mode),
     }
 }
 
@@ -1418,6 +1502,7 @@ pub fn build_outbound_start_msg(
     sip_call_id: &str,
     answer: &AnswerOutcome,
     srtp: Option<siphon_ai_bridge::protocol::SrtpInfo>,
+    barge_in_mode: siphon_ai_bridge::BargeInModeInfo,
 ) -> StartMsg {
     StartMsg {
         version: PROTOCOL_VERSION.to_string(),
@@ -1445,6 +1530,9 @@ pub fn build_outbound_start_msg(
         // Stamped by `CallController::run` (the call's trace root) just
         // before the bridge connects — not known at origination time.
         trace_context: None,
+        // Outbound calls resolve barge-in from the global defaults
+        // (no route matched an originated call).
+        barge_in_mode: Some(barge_in_mode),
     }
 }
 
@@ -3518,6 +3606,7 @@ impl BridgingAcceptor {
             &self.defaults.forward_headers,
             srtp_info,
             verstat,
+            barge_in_mode_info(&resolve_barge_in(&self.defaults, route)),
         );
 
         let transfer = self.transfer.get().map(|installed| TransferContext {
@@ -3666,6 +3755,10 @@ struct PendingDelayedOffer {
     cdr_to: String,
     /// WS URL the call would have bridged to (CDR).
     cdr_ws_url: String,
+    /// Resolved barge-in policy announcement for `start.barge_in_mode`
+    /// (0.32.0) — captured here because the route isn't in scope when
+    /// the ACK answer finally arrives.
+    barge_in_mode: siphon_ai_bridge::BargeInModeInfo,
 }
 
 impl BridgingAcceptor {
@@ -3913,6 +4006,7 @@ impl BridgingAcceptor {
                 cdr_from,
                 cdr_to,
                 cdr_ws_url,
+                barge_in_mode: barge_in_mode_info(&resolve_barge_in(&self.defaults, route)),
             },
         );
 
@@ -3988,6 +4082,7 @@ impl BridgingAcceptor {
             cdr_from,
             cdr_to,
             cdr_ws_url,
+            barge_in_mode,
         } = pending;
 
         // Emit a CDR for a negotiation that fails here (post-200, pre-active).
@@ -4124,6 +4219,7 @@ impl BridgingAcceptor {
             &self.defaults.forward_headers,
             srtp_info,
             verstat,
+            barge_in_mode,
         );
 
         // In-dialog transfer / hold on a delayed-offer leg is a follow-up
@@ -5230,6 +5326,7 @@ a=sendrecv\r\n";
             &[],
             None,
             None,
+            siphon_ai_bridge::BargeInModeInfo::AutoClear,
         );
         assert_eq!(start.version, PROTOCOL_VERSION);
         assert_eq!(start.call_id.as_str(), "siphon-1");
@@ -5255,6 +5352,7 @@ a=sendrecv\r\n";
             "out-abc@trunk.example",
             &answer,
             None,
+            siphon_ai_bridge::BargeInModeInfo::AutoClear,
         );
         assert_eq!(start.direction, Direction::Outbound);
         assert_eq!(start.from, "+13125551234");
@@ -5299,6 +5397,7 @@ a=sendrecv\r\n";
             &["User-Agent".into(), "X-Tenant-Id".into()],
             None,
             None,
+            siphon_ai_bridge::BargeInModeInfo::AutoClear,
         );
 
         // Forwarded headers come back canonical-cased.
@@ -5338,6 +5437,7 @@ a=sendrecv\r\n";
             &["USER-AGENT".into()],
             None,
             None,
+            siphon_ai_bridge::BargeInModeInfo::AutoClear,
         );
         assert_eq!(
             start.sip.headers.get("User-Agent").map(String::as_str),

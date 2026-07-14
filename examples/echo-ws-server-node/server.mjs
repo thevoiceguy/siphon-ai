@@ -70,6 +70,24 @@ const server = new SiphonServer(
         // generated audio use call.sendAudio, the SDK's paced re-framer.
         call.sendAudioFrame(item.pcm);
         framesEchoed += 1;
+      } else if (item.type === "speech_started" && item.decision_pending) {
+        // Pause-mode barge-in arbitration (0.32.0). An echo server never
+        // wants to stop echoing, so reject the barge-in — unless the
+        // harness asks for a confirm via SIPHON_ECHO_BARGE_IN_VERDICT=confirm.
+        const verdict =
+          process.env.SIPHON_ECHO_BARGE_IN_VERDICT === "confirm"
+            ? "confirm"
+            : "reject";
+        if (verdict === "confirm") call.bargeInConfirm();
+        else call.bargeInReject();
+        console.log(
+          `speech_started call_id=${start.call_id} decision_pending` +
+            ` deadline_ms=${item.decision_deadline_ms} verdict=${verdict}`,
+        );
+      } else if (item.type === "barge_in_resolved") {
+        console.log(
+          `barge_in_resolved call_id=${start.call_id} outcome=${item.outcome}`,
+        );
       } else if (item.type === "stop") {
         console.log(`stop call_id=${start.call_id} reason=${item.reason}`);
         break;

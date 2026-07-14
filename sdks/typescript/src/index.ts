@@ -26,6 +26,7 @@ export {
   KNOWN_EVENT_TYPES,
   parseEvent,
   type AudioFormat,
+  type BargeInResolved,
   type BridgeEvent,
   type ConferenceJoined,
   type ConferenceLeft,

@@ -21,6 +21,10 @@ pub const BUNDLED: &[(&str, &str)] = &[
         include_str!("../scenarios/hangup-semantics.toml"),
     ),
     ("keepalive", include_str!("../scenarios/keepalive.toml")),
+    (
+        "barge-in-pause",
+        include_str!("../scenarios/barge-in-pause.toml"),
+    ),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +54,26 @@ pub struct Session {
     /// own cadence and never come near the bound.
     #[serde(default = "default_pacing_slack")]
     pub pacing_slack_frames: u64,
+    /// `start.barge_in_mode` announced to the candidate server (0.32.0):
+    /// `"auto_clear"`, `"notify_only"`, or `"pause"`. Omitted from the
+    /// `start` message when unset, matching a pre-0.32.0 daemon.
+    #[serde(default, with = "barge_in_mode_serde")]
+    pub barge_in_mode: Option<siphon_ai_bridge::BargeInModeInfo>,
+}
+
+/// TOML-friendly (de)serialization for the optional mode string —
+/// reuses the wire enum's own snake_case serde names so the scenario
+/// grammar can't drift from the protocol.
+mod barge_in_mode_serde {
+    use serde::{Deserialize, Deserializer};
+    use siphon_ai_bridge::BargeInModeInfo;
+
+    pub fn deserialize<'de, D>(d: D) -> Result<Option<BargeInModeInfo>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<BargeInModeInfo>::deserialize(d)
+    }
 }
 
 impl Default for Session {
@@ -59,6 +83,7 @@ impl Default for Session {
             from: default_from(),
             to: default_to(),
             pacing_slack_frames: default_pacing_slack(),
+            barge_in_mode: None,
         }
     }
 }

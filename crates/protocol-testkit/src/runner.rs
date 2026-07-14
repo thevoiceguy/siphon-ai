@@ -265,6 +265,7 @@ async fn open_session(
         retrieved: false,
         reconnected,
         trace_context: None,
+        barge_in_mode: scenario.session.barge_in_mode,
     });
     client.send_text(serde_json::to_string(&start)?).await?;
     Ok(SessionState {
@@ -507,6 +508,8 @@ fn command_name(command: &BridgeIn) -> &'static str {
         BridgeIn::SendDtmf { .. } => "send_dtmf",
         BridgeIn::Mute { .. } => "mute",
         BridgeIn::Unmute { .. } => "unmute",
+        BridgeIn::BargeInConfirm { .. } => "barge_in_confirm",
+        BridgeIn::BargeInReject { .. } => "barge_in_reject",
         BridgeIn::StartRecording { .. } => "start_recording",
         BridgeIn::StopRecording { .. } => "stop_recording",
         BridgeIn::PauseRecording { .. } => "pause_recording",

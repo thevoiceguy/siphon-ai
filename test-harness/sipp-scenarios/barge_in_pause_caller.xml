@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  barge_in_pause_caller — SIPp is the caller (UAC) with REAL media:
+  after answer it replays a generated G.711 tone pcap (__PCAP__ is
+  substituted by run-all.sh) as ~3 s of "caller speech". With the
+  daemon in [bridge.barge_in] mode = "pause" and the echo WS server
+  bridged, the tone (a) gets echoed back, so the bot is mid-playout,
+  and (b) trips forge-vad, arming a pause arbitration. The echo server
+  replies barge_in_reject (its default verdict), the daemon resumes
+  the retained playout, and the phase asserts
+  siphon_ai_barge_in_decisions_total{outcome="rejected"} ticked.
+-->
+<scenario name="barge_in_pause_caller">
+  <send>
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [media_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+
+  <recv response="200" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- Caller "speech": replay the generated tone capture. pcapplay
+       paces packets by the capture's own 20 ms timestamps. -->
+  <nop>
+    <action>
+      <exec play_pcap_audio="__PCAP__"/>
+    </action>
+  </nop>
+
+  <!-- Let the tone (3 s), the VAD trip, the arbitration round-trip,
+       and the post-reject resume all complete before hanging up. -->
+  <pause milliseconds="4500"/>
+
+  <send>
+<![CDATA[
+BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-bye
+Max-Forwards: 70
+From: <sip:sipp@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 BYE
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="200" rtd="true"/>
+</scenario>

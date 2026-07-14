@@ -1,6 +1,6 @@
 # Design: Per-call quality telemetry (live + history)
 
-**Status: LOCKED (2026-07-13) — decisions in §6 confirmed; implementing per §7.**
+**Status: SHIPPED — v0.30.0 + v0.31.0 (2026-07-13/14). Retrospective in §8.**
 Theme: ROADMAP P1 "Per-call quality telemetry (live + history)", bundled
 with the P2 "CDR call-quality fields" item (the ROADMAP itself notes they
 complement each other).
@@ -140,3 +140,40 @@ quality summary at all. Two documented gaps (`docs/OPERATIONS.md` Q5/Q8:
    OPERATIONS.md ingestion guide. Verify: records flow + signature
    validates; spool survives restart; dashboard renders; theme
    retrospective here.
+
+## 8. Retrospective (2026-07-14, theme complete)
+
+**Shipped as planned, two releases:**
+
+- **v0.30.0** (#279 + #280): forge-media#81 (`MediaStatsSnapshot` +
+  `RxStreamStats`), `rtp_stats` `rx_*` + `mos_estimate` (protocol stayed
+  v1), CDR v4 `quality` block, OPERATIONS Q5/Q8 closed.
+- **v0.31.0** (single feature PR + release): `crates/quality`
+  (records = the CDR block flattened, JSONL + HMAC/spool webhook over
+  `siphon-ai-http`), `[quality]` config, per-call record task,
+  `GET /admin/v1/calls/{id}/stats` via a `core::quality_live` RAII
+  registry, Vector→Loki reference pipeline + Grafana history dashboard.
+
+**Deviations from the locked design, all small:**
+
+- D2 naming: `rx_packets_dropped` → `rx_packets_lost` (the forwarding
+  path measures sequence-gap transit loss, not jitter-buffer drops);
+  `rx_packets_duplicate` added for forge/WS/CDR symmetry.
+- The forge counters weren't actually on the media path yet — the
+  jitter buffer that §2 pointed at is unused there. forge-media#81
+  added RFC 3550-style tracking to the forwarding engine itself.
+- The bridge-ready oneshot became an `Instant`-carrying watch: three
+  consumers (CDR build, record task, live endpoint) need the
+  first-audio epoch, not one.
+
+**What worked well:** one shape (`siphon_ai_cdr::QualityInfo`) feeding
+three surfaces (CDR / records / live endpoint) killed every drift
+question at review time; the audit crate was a near-verbatim template
+for the sink stack (a day saved); the tap's watch channel meant zero
+new state on the audio path.
+
+**Worth remembering:** the local SIPp suite silently fails 8/34 without
+the echo server on :8765 (cost an hour of triage before a main-branch
+baseline proved it environmental); forge's `--features ha` restore path
+doesn't compile in default local checks — CI caught the missing
+`rx_stream` initializer.

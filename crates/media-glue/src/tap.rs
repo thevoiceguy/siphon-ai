@@ -55,6 +55,7 @@
 //!   from forge-vad. Each transition publishes once — hysteresis
 //!   inside the detector filters per-frame jitter.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -182,6 +183,21 @@ pub enum TapCommand {
     /// if the tap is not currently muted.
     Unmute,
 
+    /// Server verdict on a pause-mode barge-in arbitration
+    /// ([`BargeInAction::Pause`]): the speech was a real interruption
+    /// — drop the retained playout tail and stay quiet. Audio the
+    /// server streamed since the pause plays immediately (it barged
+    /// over itself — its choice). A no-op when no arbitration is
+    /// pending: verdicts race with the deadline and with preempting
+    /// commands by nature, so a late one must be harmless.
+    BargeInConfirm,
+
+    /// Server verdict: false positive (cough / backchannel / noise) —
+    /// re-queue the retained tail and resume playout where it
+    /// stopped, followed by any audio streamed since the pause. Same
+    /// no-op semantics as [`BargeInConfirm`](Self::BargeInConfirm).
+    BargeInReject,
+
     /// Re-plumb this call into a conference room (0.7.0 §2.1). The
     /// membership comes from `RoomHandle::join` (driven by core's
     /// `ConferenceRegistry`). While joined:
@@ -261,6 +277,39 @@ pub enum BargeInAction {
     /// Drop pending outbound playout (drain the tap-side audio
     /// channel + ask forge to flush leg A) AND forward the event.
     AutoClear,
+    /// Reversible barge-in (`docs/design/DESIGN_REVERSIBLE_BARGE_IN.md`):
+    /// flush playout immediately — the same one-frame reaction as
+    /// `AutoClear` — but retain the unplayed tail so the WS server
+    /// (the only layer with STT) can rule on intent.
+    /// [`TapCommand::BargeInConfirm`] drops the tail;
+    /// [`TapCommand::BargeInReject`] re-queues it and playout resumes
+    /// where it stopped. No verdict within `decision` applies
+    /// `on_timeout`. Arbitration only arms while the bot is playing,
+    /// and degrades to `Notify` inside a conference room (design
+    /// note §7.2).
+    Pause {
+        /// Server verdict deadline (`[bridge.barge_in].decision_ms`).
+        decision: Duration,
+        /// Fallback verdict at the deadline.
+        on_timeout: TimeoutVerdict,
+        /// Cap on retained audio (`[bridge.barge_in].resume_max_secs`).
+        /// A single utterance longer than this loses its oldest
+        /// unplayed frames — warned once per call.
+        resume_max: Duration,
+    },
+}
+
+/// What a [`BargeInAction::Pause`] arbitration falls back to when the
+/// server doesn't rule within the decision window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutVerdict {
+    /// Treat the speech as a real barge-in: drop the retained tail and
+    /// stay quiet. The safe default — never talk over the caller. A
+    /// server that ignores arbitration entirely therefore degrades to
+    /// "auto_clear delayed by the decision window".
+    Confirm,
+    /// Treat it as a false positive: resume the retained playout.
+    Reject,
 }
 
 /// Why the tap pump exited cleanly.
@@ -505,6 +554,92 @@ impl MediaTap {
         }
     }
 
+    /// Record the resolution of a pause-mode barge-in arbitration:
+    /// the decision metrics always; the CDR barge-in count only when
+    /// the resolution treats the speech as a real interruption
+    /// (confirm-shaped outcomes — a rejected arbitration was, by the
+    /// server's own ruling, not a barge-in).
+    fn note_barge_in_decision(
+        &mut self,
+        armed_at: Instant,
+        outcome: &'static str,
+        is_barge_in: bool,
+    ) {
+        metrics::counter!("siphon_ai_barge_in_decisions_total", "outcome" => outcome).increment(1);
+        metrics::histogram!("siphon_ai_barge_in_decision_seconds")
+            .record(armed_at.elapsed().as_secs_f64());
+        if is_barge_in {
+            self.barge_in_count += 1;
+            self.publish_quality();
+        }
+    }
+
+    /// Resolve a pending pause arbitration as confirm without
+    /// re-queuing anything — used when another feature takes over the
+    /// caller's ear (mute / clear / hold / park / announce / room) or
+    /// the WS drops. The retained tail is moot in every such case, and
+    /// the interruption stands for CDR purposes. A `None` pending is a
+    /// no-op, so call sites don't need their own guard.
+    fn abandon_arbitration(&mut self, pending: &mut Option<PendingVerdict>, site: &'static str) {
+        if let Some(p) = pending.take() {
+            self.note_barge_in_decision(p.armed_at, "confirmed", true);
+            debug!(
+                call_id = %self.call_id,
+                site,
+                "pending barge-in arbitration resolved as confirm",
+            );
+        }
+    }
+
+    /// Re-queue retained playout chunks into forge at arbitration
+    /// resolution (design note §5.3). `fork_recording` is set for the
+    /// post-pause `fresh` audio (first time it plays) and unset for
+    /// the `resume` tail (already forked at its original push — the
+    /// recording must not carry it twice). Re-pushed chunks re-enter
+    /// the shadow ring so an immediate second barge-in stays
+    /// reversible; the caller re-anchors the playout clock afterwards
+    /// via [`restore_playout_clock`].
+    async fn repush_chunks(
+        &self,
+        chunks: Vec<Vec<u8>>,
+        fork_recording: bool,
+        shadow: &mut VecDeque<Vec<u8>>,
+        shadow_cap: usize,
+    ) -> Result<u64, MediaTapError> {
+        let mut pushed = 0u64;
+        for bytes in chunks {
+            let samples = unpack_pcm16_le(&bytes)?;
+            if fork_recording {
+                if let Some((rec, drops)) = &self.recording {
+                    if let Err(mpsc::error::TrySendError::Full(_)) =
+                        rec.try_send(RecFrame::Bot(bytes.clone()))
+                    {
+                        drops.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+            let frame = OutboundMediaFrame {
+                target: MediaTarget::A,
+                sample_rate: self.sample_rate,
+                samples,
+                playback_id: None,
+                mode: PlayoutMode::Append,
+            };
+            self.handle
+                .send_audio(frame)
+                .await
+                .map_err(|e| MediaTapError::PlayoutFailed(e.to_string()))?;
+            if shadow_cap > 0 {
+                if shadow.len() == shadow_cap {
+                    shadow.pop_front();
+                }
+                shadow.push_back(bytes);
+            }
+            pushed += 1;
+        }
+        Ok(pushed)
+    }
+
     /// Install the playout-gated barge-in debounce from
     /// `[bridge.barge_in].debounce_ms` (and any per-route override).
     /// `None`/`Some(0)` disables it (immediate flush, pre-0.7.1 behaviour).
@@ -679,6 +814,26 @@ impl MediaTap {
         tokio::pin!(barge_debounce);
         let mut pending_barge_in: Option<OutgoingEvent> = None;
 
+        // Pause-mode barge-in arbitration (§5 of the design note).
+        // `shadow` holds the *unplayed* playout tail — each pushed frame
+        // is retained until the playout clock says it has played (plus
+        // one frame of early-bias slop) — so a reject can re-queue what
+        // the pause's flush dropped. Capacity 0 in the other modes
+        // makes every push a no-op. `pending_verdict` gates the
+        // deadline arm; same pinned-placeholder pattern as the
+        // debounce timer above.
+        let shadow_cap = match self.barge_in_action {
+            BargeInAction::Pause { resume_max, .. } => {
+                (resume_max.as_millis() as u64 / PLAYOUT_FRAME_MS).max(1) as usize
+            }
+            _ => 0,
+        };
+        let mut shadow: VecDeque<Vec<u8>> = VecDeque::with_capacity(shadow_cap.min(2048));
+        let mut shadow_truncation_warned = false;
+        let mut pending_verdict: Option<PendingVerdict> = None;
+        let arb_deadline = tokio::time::sleep(Duration::from_secs(86_400));
+        tokio::pin!(arb_deadline);
+
         loop {
             tokio::select! {
                 biased;
@@ -696,6 +851,11 @@ impl MediaTap {
                         // `commands_rx` closing.
                         debug!(call_id = %self.call_id,
                             "caller_audio_tx receiver dropped; holding for reconnect");
+                        // The arbiter is gone — a pending pause verdict
+                        // resolves as confirm (§7.2 of the design note);
+                        // flushed-and-quiet is the right state alongside
+                        // the reconnect hold music.
+                        self.abandon_arbitration(&mut pending_verdict, "ws_drop");
                         ws_dropped = true;
                     } else {
                         debug!("caller_audio_tx receiver dropped; ending tap");
@@ -727,6 +887,9 @@ impl MediaTap {
                             // down (mirrors the caller_audio_tx arm).
                             debug!(call_id = %self.call_id,
                                 "playout_audio_rx closed; holding for reconnect");
+                            // Same as the caller_audio_tx arm: no arbiter,
+                            // pending verdict resolves as confirm.
+                            self.abandon_arbitration(&mut pending_verdict, "ws_drop");
                             ws_dropped = true;
                             continue;
                         }
@@ -757,6 +920,26 @@ impl MediaTap {
                     // play, so they don't move the "audio queued so
                     // far" clock.
                     if self.muted {
+                        continue;
+                    }
+                    // Pause-mode arbitration in flight: post-pause server
+                    // audio queues behind the retained tail (§5.3 of the
+                    // design note) instead of reaching forge mid-pause —
+                    // it's re-queued (and recording-forked) at
+                    // resolution. Bounded by the shadow cap; a server
+                    // that floods faster than real time during the
+                    // sub-second window loses the excess.
+                    if let Some(p) = pending_verdict.as_mut() {
+                        if p.fresh.len() < shadow_cap {
+                            p.fresh.push(bytes);
+                        } else if !shadow_truncation_warned {
+                            shadow_truncation_warned = true;
+                            warn!(
+                                call_id = %self.call_id,
+                                cap_frames = shadow_cap,
+                                "barge-in pause buffer full; dropping incoming playout",
+                            );
+                        }
                         continue;
                     }
                     // In a room, bot playout becomes the `ws`
@@ -813,6 +996,31 @@ impl MediaTap {
                         playout_until.map_or(push_now, |c| c.max(push_now))
                             + Duration::from_millis(PLAYOUT_FRAME_MS),
                     );
+                    // Pause mode: shadow the pushed frame so a barge-in
+                    // reject can re-queue it, then drop frames the
+                    // playout clock says have already played — the ring
+                    // only ever holds the unplayed tail plus one frame
+                    // of early-bias slop (repeating ≤20 ms on resume
+                    // beats skipping a syllable). Steady-state cost is
+                    // moving the already-owned `bytes` Vec, no copy.
+                    if shadow_cap > 0 {
+                        if shadow.len() == shadow_cap {
+                            shadow.pop_front();
+                            if !shadow_truncation_warned {
+                                shadow_truncation_warned = true;
+                                warn!(
+                                    call_id = %self.call_id,
+                                    cap_frames = shadow_cap,
+                                    "utterance exceeds barge-in resume_max; oldest unplayed audio won't survive a reject",
+                                );
+                            }
+                        }
+                        shadow.push_back(bytes);
+                        let keep = unplayed_frames(playout_until, push_now).saturating_add(1);
+                        while shadow.len() > keep {
+                            shadow.pop_front();
+                        }
+                    }
                 }
 
                 // Caller → server: PCM16 samples from forge, reframed and packed.
@@ -1072,31 +1280,51 @@ impl MediaTap {
                                 if matches!(out, OutgoingEvent::SpeechStarted { .. }) {
                                     self.idle_detector.note_speech_started(Instant::now());
                                 }
-                                // Barge-in `auto_clear`: when forge-vad
-                                // reports speech-started AND this call's
-                                // policy is AutoClear, drop pending
-                                // outbound playout before forwarding the
-                                // WS event. The drain catches bytes in
-                                // the controller→tap audio channel that
-                                // haven't yet reached forge; the flush
-                                // dumps forge's encoder queue. Reset the
-                                // Mark bookkeeping so the next `Mark`
-                                // doesn't wait on now-dropped audio.
-                                //
-                                // Playout-gated debounce (echo/noise): if
-                                // the bot is currently talking and a
-                                // debounce is configured, the speech is
-                                // *provisional* — hold the event (no flush,
-                                // no forward) and let the `barge_debounce`
-                                // timer confirm it or a `SpeechStopped`
-                                // cancel it. While the bot is silent,
-                                // barge-in stays immediate.
-                                if matches!(out, OutgoingEvent::SpeechStarted { .. })
-                                    && self.barge_in_action == BargeInAction::AutoClear
+                                // Barge-in reaction beyond forwarding the
+                                // event. `auto_clear` drops pending
+                                // outbound playout; `pause` does the same
+                                // flush but retains the unplayed tail and
+                                // arms the server arbitration (design note
+                                // §5.2). Pause degrades to notify-only in
+                                // a room (§7.2), while an arbitration is
+                                // already pending (forge-vad won't re-fire
+                                // without a SpeechStopped between, but the
+                                // bus is best-effort), and while the bot
+                                // is silent — nothing to pause.
+                                let speech_now = Instant::now();
+                                let reaction = if matches!(out, OutgoingEvent::SpeechStarted { .. })
                                 {
+                                    match self.barge_in_action {
+                                        BargeInAction::Notify => None,
+                                        BargeInAction::AutoClear => Some(self.barge_in_action),
+                                        BargeInAction::Pause { .. }
+                                            if room_send.is_some()
+                                                || pending_verdict.is_some()
+                                                || !bot_is_playing(playout_until, speech_now) =>
+                                        {
+                                            None
+                                        }
+                                        pause @ BargeInAction::Pause { .. } => Some(pause),
+                                    }
+                                } else {
+                                    None
+                                };
+                                if let Some(action) = reaction {
+                                    // Playout-gated debounce (echo/noise):
+                                    // if the bot is currently talking and a
+                                    // debounce is configured, the speech is
+                                    // *provisional* — hold the event (no
+                                    // flush, no forward) and let the
+                                    // `barge_debounce` timer confirm it or
+                                    // a `SpeechStopped` cancel it. While
+                                    // the bot is silent, barge-in stays
+                                    // immediate. Applies to both flushing
+                                    // modes: the gate is the acoustic
+                                    // filter, arbitration the semantic one
+                                    // — they compose (§7.1).
                                     let gate = self
                                         .barge_in_debounce
-                                        .filter(|_| bot_is_playing(playout_until, Instant::now()));
+                                        .filter(|_| bot_is_playing(playout_until, speech_now));
                                     if let Some(debounce) = gate {
                                         if pending_barge_in.is_none() {
                                             barge_debounce
@@ -1111,37 +1339,72 @@ impl MediaTap {
                                         }
                                         continue; // timer or speech-stopped decides
                                     }
-                                    self.barge_in_count += 1;
-                                    self.publish_quality();
-                                    let mut drained = 0usize;
-                                    while let Ok(_bytes) = playout_audio_rx.try_recv() {
-                                        drained += 1;
+                                    match action {
+                                        BargeInAction::AutoClear => {
+                                            // Drop pending outbound playout
+                                            // before forwarding the WS
+                                            // event. The drain catches bytes
+                                            // in the controller→tap audio
+                                            // channel that haven't yet
+                                            // reached forge; the flush dumps
+                                            // forge's encoder queue. Reset
+                                            // the Mark bookkeeping so the
+                                            // next `Mark` doesn't wait on
+                                            // now-dropped audio.
+                                            self.barge_in_count += 1;
+                                            self.publish_quality();
+                                            let mut drained = 0usize;
+                                            while let Ok(_bytes) = playout_audio_rx.try_recv() {
+                                                drained += 1;
+                                            }
+                                            // In a room, the queued tail also
+                                            // lives in the room's ws buffer.
+                                            if let Some(send) = &room_send {
+                                                send.clear_ws_input();
+                                            }
+                                            if let Err(e) = self
+                                                .handle
+                                                .flush(Some(MediaTarget::A), None)
+                                                .await
+                                            {
+                                                warn!(
+                                                    call_id = %self.call_id,
+                                                    error = %e,
+                                                    "forge flush failed during auto_clear",
+                                                );
+                                            } else {
+                                                debug!(
+                                                    call_id = %self.call_id,
+                                                    drained,
+                                                    "auto_clear: dropped pending playout on speech",
+                                                );
+                                            }
+                                            frames_sent_to_forge = 0;
+                                            first_audio_pushed_at = None;
+                                            playout_until = None;
+                                        }
+                                        BargeInAction::Pause { decision, .. } => {
+                                            let resume = begin_pause_arbitration(
+                                                &self.call_id,
+                                                &self.handle,
+                                                &mut playout_audio_rx,
+                                                &mut shadow,
+                                            )
+                                            .await;
+                                            frames_sent_to_forge = 0;
+                                            first_audio_pushed_at = None;
+                                            playout_until = None;
+                                            arb_deadline
+                                                .as_mut()
+                                                .reset(tokio::time::Instant::now() + decision);
+                                            pending_verdict = Some(PendingVerdict {
+                                                resume,
+                                                fresh: Vec::new(),
+                                                armed_at: speech_now,
+                                            });
+                                        }
+                                        BargeInAction::Notify => {}
                                     }
-                                    // In a room, the queued tail also
-                                    // lives in the room's ws buffer.
-                                    if let Some(send) = &room_send {
-                                        send.clear_ws_input();
-                                    }
-                                    if let Err(e) = self
-                                        .handle
-                                        .flush(Some(MediaTarget::A), None)
-                                        .await
-                                    {
-                                        warn!(
-                                            call_id = %self.call_id,
-                                            error = %e,
-                                            "forge flush failed during auto_clear",
-                                        );
-                                    } else {
-                                        debug!(
-                                            call_id = %self.call_id,
-                                            drained,
-                                            "auto_clear: dropped pending playout on speech",
-                                        );
-                                    }
-                                    frames_sent_to_forge = 0;
-                                    first_audio_pushed_at = None;
-                                    playout_until = None;
                                 }
                                 // A speech-stopped within the debounce
                                 // window cancels the held barge-in — it was
@@ -1226,6 +1489,11 @@ impl MediaTap {
                     };
                     match cmd {
                         TapCommand::Mute => {
+                            // Mute takes over the caller's ear — a
+                            // pending pause arbitration resolves as
+                            // confirm (§7.2); the retained tail would be
+                            // flushed below anyway.
+                            self.abandon_arbitration(&mut pending_verdict, "mute");
                             // Sustained AI-side gate. Same drain +
                             // forge-flush combo as Clear so the
                             // caller hears silence immediately; the
@@ -1273,12 +1541,80 @@ impl MediaTap {
                                 "unmuted; AI playout resumes",
                             );
                         }
+                        TapCommand::BargeInConfirm => {
+                            if let Some(p) = pending_verdict.take() {
+                                self.note_barge_in_decision(p.armed_at, "confirmed", true);
+                                // The pause already flushed; only the
+                                // post-pause server audio plays (§5.3).
+                                let n = self
+                                    .repush_chunks(p.fresh, true, &mut shadow, shadow_cap)
+                                    .await?;
+                                restore_playout_clock(
+                                    n,
+                                    &mut frames_sent_to_forge,
+                                    &mut first_audio_pushed_at,
+                                    &mut playout_until,
+                                );
+                                debug!(
+                                    call_id = %self.call_id,
+                                    fresh = n,
+                                    "barge-in confirmed by server; retained tail dropped",
+                                );
+                            } else {
+                                debug!(
+                                    call_id = %self.call_id,
+                                    "barge_in_confirm with no pending arbitration; ignoring",
+                                );
+                            }
+                        }
+                        TapCommand::BargeInReject => {
+                            if let Some(p) = pending_verdict.take() {
+                                self.note_barge_in_decision(p.armed_at, "rejected", false);
+                                // Resume where playout stopped: the
+                                // retained tail first (already recording-
+                                // forked at its original push — §5.3 "no
+                                // double-record"), then the post-pause
+                                // server audio.
+                                let resumed = self
+                                    .repush_chunks(p.resume, false, &mut shadow, shadow_cap)
+                                    .await?;
+                                let fresh = self
+                                    .repush_chunks(p.fresh, true, &mut shadow, shadow_cap)
+                                    .await?;
+                                restore_playout_clock(
+                                    resumed + fresh,
+                                    &mut frames_sent_to_forge,
+                                    &mut first_audio_pushed_at,
+                                    &mut playout_until,
+                                );
+                                debug!(
+                                    call_id = %self.call_id,
+                                    resumed,
+                                    fresh,
+                                    "barge-in rejected by server; playout resumed",
+                                );
+                            } else {
+                                debug!(
+                                    call_id = %self.call_id,
+                                    "barge_in_reject with no pending arbitration; ignoring",
+                                );
+                            }
+                        }
                         TapCommand::Clear => {
-                            // CDR barge_in_count: a server-driven clear is
-                            // the Notify-mode barge-in (the server heard
-                            // speech_started and interrupted its playout).
-                            self.barge_in_count += 1;
-                            self.publish_quality();
+                            // `clear` during a pending pause arbitration
+                            // acts as confirm (design note §2) — the
+                            // count is bumped once, via the arbitration
+                            // path.
+                            if pending_verdict.is_some() {
+                                self.abandon_arbitration(&mut pending_verdict, "clear");
+                            } else {
+                                // CDR barge_in_count: a server-driven clear
+                                // is the Notify-mode barge-in (the server
+                                // heard speech_started and interrupted its
+                                // playout).
+                                self.barge_in_count += 1;
+                                self.publish_quality();
+                            }
                             // Drain any bytes queued in the
                             // controller→tap audio channel before
                             // they can reach forge. The mpsc bound
@@ -1327,6 +1663,10 @@ impl MediaTap {
                             );
                         }
                         TapCommand::JoinRoom { membership } => {
+                            // Arbitration is suspended in rooms (§7.2) —
+                            // a pending one resolves as confirm before
+                            // the re-plumb.
+                            self.abandon_arbitration(&mut pending_verdict, "join_room");
                             if room_send.is_some() {
                                 // Switching rooms: dropping the old
                                 // RoomSender signals the old room to
@@ -1390,6 +1730,10 @@ impl MediaTap {
                             }
                         }
                         TapCommand::Park { moh } => {
+                            // Park takes over the caller's ear — a
+                            // pending pause arbitration resolves as
+                            // confirm (§7.2).
+                            self.abandon_arbitration(&mut pending_verdict, "park");
                             // Parking while in a room first leaves it
                             // (drops the RoomSender → the room reaps us).
                             if let Some(send) = room_send.take() {
@@ -1437,6 +1781,9 @@ impl MediaTap {
                             }
                         }
                         TapCommand::Hold { moh } => {
+                            // Same as Park: MOH takes over the caller's
+                            // ear, pending arbitration resolves as confirm.
+                            self.abandon_arbitration(&mut pending_verdict, "hold");
                             // Holding while in a room first leaves it
                             // (drops the RoomSender → the room reaps us),
                             // same as Park.
@@ -1460,6 +1807,9 @@ impl MediaTap {
                             moh_tick.reset();
                         }
                         TapCommand::Announce { source, done } => {
+                            // The prompt preempts playout — pending
+                            // arbitration resolves as confirm (§7.2).
+                            self.abandon_arbitration(&mut pending_verdict, "announce");
                             if parked.is_some() || held.is_some() {
                                 // Park/hold owns the caller's ear; skip
                                 // the prompt rather than queue it.
@@ -1629,36 +1979,74 @@ impl MediaTap {
                 }
 
                 // Barge-in debounce elapsed with a candidate still held →
-                // the speech sustained past the window, so it's a real
-                // barge-in: flush the bot's playout and forward the held
-                // `speech_started`. (A `SpeechStopped` would have cleared
-                // `pending_barge_in` first, disabling this arm.)
+                // the speech sustained past the acoustic gate, so it's a
+                // real barge-in for this layer. `auto_clear` flushes the
+                // bot's playout; `pause` runs the same flush but retains
+                // the tail and arms the semantic arbitration (§7.1: the
+                // two filters compose). Either way the held
+                // `speech_started` is forwarded. (A `SpeechStopped`
+                // would have cleared `pending_barge_in` first, disabling
+                // this arm.)
                 _ = &mut barge_debounce, if pending_barge_in.is_some() => {
-                    self.barge_in_count += 1;
-                    self.publish_quality();
-                    let mut drained = 0usize;
-                    while let Ok(_bytes) = playout_audio_rx.try_recv() {
-                        drained += 1;
+                    match self.barge_in_action {
+                        BargeInAction::Pause { decision, .. } if pending_verdict.is_none() => {
+                            let resume = begin_pause_arbitration(
+                                &self.call_id,
+                                &self.handle,
+                                &mut playout_audio_rx,
+                                &mut shadow,
+                            )
+                            .await;
+                            frames_sent_to_forge = 0;
+                            first_audio_pushed_at = None;
+                            playout_until = None;
+                            arb_deadline
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + decision);
+                            pending_verdict = Some(PendingVerdict {
+                                resume,
+                                fresh: Vec::new(),
+                                armed_at: Instant::now(),
+                            });
+                            debug!(
+                                call_id = %self.call_id,
+                                "barge-in sustained past debounce; pause arbitration armed",
+                            );
+                        }
+                        BargeInAction::Pause { .. } => {
+                            // An arbitration is somehow already pending
+                            // (shouldn't happen — the gate only arms
+                            // while playing, and the pause cleared the
+                            // clock). Just forward the held event below.
+                        }
+                        _ => {
+                            self.barge_in_count += 1;
+                            self.publish_quality();
+                            let mut drained = 0usize;
+                            while let Ok(_bytes) = playout_audio_rx.try_recv() {
+                                drained += 1;
+                            }
+                            if let Some(send) = &room_send {
+                                send.clear_ws_input();
+                            }
+                            if let Err(e) = self.handle.flush(Some(MediaTarget::A), None).await {
+                                warn!(
+                                    call_id = %self.call_id,
+                                    error = %e,
+                                    "forge flush failed during confirmed barge-in",
+                                );
+                            } else {
+                                debug!(
+                                    call_id = %self.call_id,
+                                    drained,
+                                    "barge-in confirmed after debounce; dropped pending playout",
+                                );
+                            }
+                            frames_sent_to_forge = 0;
+                            first_audio_pushed_at = None;
+                            playout_until = None;
+                        }
                     }
-                    if let Some(send) = &room_send {
-                        send.clear_ws_input();
-                    }
-                    if let Err(e) = self.handle.flush(Some(MediaTarget::A), None).await {
-                        warn!(
-                            call_id = %self.call_id,
-                            error = %e,
-                            "forge flush failed during confirmed barge-in",
-                        );
-                    } else {
-                        debug!(
-                            call_id = %self.call_id,
-                            drained,
-                            "barge-in confirmed after debounce; dropped pending playout",
-                        );
-                    }
-                    frames_sent_to_forge = 0;
-                    first_audio_pushed_at = None;
-                    playout_until = None;
                     if let Some(out) = pending_barge_in.take() {
                         if let Err(e) = events_tx.try_send(out) {
                             warn!(
@@ -1666,6 +2054,58 @@ impl MediaTap {
                                 error = %e,
                                 "events_tx full or closed; dropping confirmed barge-in event"
                             );
+                        }
+                    }
+                }
+
+                // Pause-mode decision window elapsed without a server
+                // verdict → apply the configured fallback (§1: the
+                // default `confirm` fails toward not talking over the
+                // caller, so a server that never arbitrates degrades to
+                // "auto_clear delayed by the decision window").
+                _ = &mut arb_deadline, if pending_verdict.is_some() => {
+                    if let (Some(p), BargeInAction::Pause { on_timeout, .. }) =
+                        (pending_verdict.take(), self.barge_in_action)
+                    {
+                        match on_timeout {
+                            TimeoutVerdict::Confirm => {
+                                self.note_barge_in_decision(p.armed_at, "timeout", true);
+                                let fresh = self
+                                    .repush_chunks(p.fresh, true, &mut shadow, shadow_cap)
+                                    .await?;
+                                restore_playout_clock(
+                                    fresh,
+                                    &mut frames_sent_to_forge,
+                                    &mut first_audio_pushed_at,
+                                    &mut playout_until,
+                                );
+                                debug!(
+                                    call_id = %self.call_id,
+                                    fresh,
+                                    "barge-in arbitration timed out; confirmed (tail dropped)",
+                                );
+                            }
+                            TimeoutVerdict::Reject => {
+                                self.note_barge_in_decision(p.armed_at, "timeout", false);
+                                let resumed = self
+                                    .repush_chunks(p.resume, false, &mut shadow, shadow_cap)
+                                    .await?;
+                                let fresh = self
+                                    .repush_chunks(p.fresh, true, &mut shadow, shadow_cap)
+                                    .await?;
+                                restore_playout_clock(
+                                    resumed + fresh,
+                                    &mut frames_sent_to_forge,
+                                    &mut first_audio_pushed_at,
+                                    &mut playout_until,
+                                );
+                                debug!(
+                                    call_id = %self.call_id,
+                                    resumed,
+                                    fresh,
+                                    "barge-in arbitration timed out; rejected (playout resumed)",
+                                );
+                            }
                         }
                     }
                 }
@@ -1829,6 +2269,83 @@ fn bot_is_playing(playout_until: Option<Instant>, now: Instant) -> bool {
     }
 }
 
+/// How many queued 20 ms frames the playout clock says have NOT yet
+/// played. The shadow ring is trimmed to this (plus one frame of
+/// early-bias slop) on every push, so at pause time the ring IS the
+/// resume tail. Rounds up — estimation slop must lean toward
+/// repeating audio, never skipping it.
+fn unplayed_frames(playout_until: Option<Instant>, now: Instant) -> usize {
+    match playout_until {
+        Some(end) if end > now => {
+            ((end - now).as_millis() as u64).div_ceil(PLAYOUT_FRAME_MS) as usize
+        }
+        _ => 0,
+    }
+}
+
+/// In-flight pause-mode barge-in arbitration (design note §5).
+struct PendingVerdict {
+    /// The unplayed tail retained at pause time (shadow ring +
+    /// drained controller→tap channel bytes, in playout order).
+    /// Re-queued on reject, dropped on confirm.
+    resume: Vec<Vec<u8>>,
+    /// Audio the WS server streamed *after* the pause (§5.3) — queued
+    /// behind the tail on reject, plays immediately on confirm.
+    fresh: Vec<Vec<u8>>,
+    /// When the arbitration armed, for the decision-latency histogram.
+    armed_at: Instant,
+}
+
+/// Arm a pause arbitration (design note §5.2): capture the resume
+/// tail — the shadow ring (everything estimated unplayed) plus
+/// whatever is still queued in the controller→tap channel — then
+/// flush forge so the caller hears the bot stop within one frame,
+/// exactly like `auto_clear`. The caller resets the Mark/playout
+/// bookkeeping and arms the decision deadline.
+async fn begin_pause_arbitration(
+    call_id: &CallId,
+    handle: &MediaBridgeHandle,
+    playout_audio_rx: &mut mpsc::Receiver<Vec<u8>>,
+    shadow: &mut VecDeque<Vec<u8>>,
+) -> Vec<Vec<u8>> {
+    let mut resume: Vec<Vec<u8>> = shadow.drain(..).collect();
+    while let Ok(bytes) = playout_audio_rx.try_recv() {
+        resume.push(bytes);
+    }
+    if let Err(e) = handle.flush(Some(MediaTarget::A), None).await {
+        warn!(
+            call_id = %call_id,
+            error = %e,
+            "forge flush failed while arming pause arbitration",
+        );
+    } else {
+        debug!(
+            call_id = %call_id,
+            retained = resume.len(),
+            "barge-in pause armed; playout flushed, tail retained",
+        );
+    }
+    resume
+}
+
+/// Re-anchor the Mark / barge-in playout bookkeeping after re-queuing
+/// `frames` chunks at arbitration resolution. Zero frames leaves
+/// everything cleared — the pause's flush already reset it.
+fn restore_playout_clock(
+    frames: u64,
+    frames_sent_to_forge: &mut u64,
+    first_audio_pushed_at: &mut Option<Instant>,
+    playout_until: &mut Option<Instant>,
+) {
+    if frames == 0 {
+        return;
+    }
+    let now = Instant::now();
+    *frames_sent_to_forge = frames;
+    *first_audio_pushed_at = Some(now);
+    *playout_until = Some(now + Duration::from_millis(frames * PLAYOUT_FRAME_MS));
+}
+
 /// Returns `None` for events that aren't this call's, that aren't part
 /// of the v1 WS protocol surface, or that don't carry the final
 /// duration we need (DTMF `Start`/`Continue`).
@@ -1914,6 +2431,21 @@ mod tests {
             until,
             t0 + Duration::from_millis(200) + BARGE_IN_PLAYOUT_GRACE + Duration::from_millis(1)
         ));
+    }
+
+    #[test]
+    fn unplayed_frames_rounds_up_and_clamps_at_zero() {
+        let t0 = Instant::now();
+        // Nothing queued / clock in the past → 0.
+        assert_eq!(unplayed_frames(None, t0), 0);
+        assert_eq!(unplayed_frames(Some(t0), t0 + Duration::from_millis(1)), 0);
+        // Exact multiples and mid-frame remainders round UP — slop
+        // must lean toward repeating audio, never skipping it.
+        let until = Some(t0 + Duration::from_millis(100));
+        assert_eq!(unplayed_frames(until, t0), 5);
+        assert_eq!(unplayed_frames(until, t0 + Duration::from_millis(39)), 4);
+        assert_eq!(unplayed_frames(until, t0 + Duration::from_millis(40)), 3);
+        assert_eq!(unplayed_frames(until, t0 + Duration::from_millis(99)), 1);
     }
 
     #[test]

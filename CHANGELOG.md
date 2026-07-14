@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-07-14
+
+### Added
+
+- **`[quality]` per-call quality history records** (P1 "Per-call
+  quality telemetry", release 2 of 2 — the theme is complete). One JSON
+  record per call per `interval_secs` (default 30) plus a **final
+  end-of-call summary**, in exactly the CDR `quality` block's shape
+  flattened with framing (`version`/`kind`/`call_id`/`ts`/`seq`) — one
+  shape feeds the CDR, the records, and the live endpoint, so they can
+  never drift. Ships to an append-only JSONL file and/or an HMAC-signed
+  webhook over the shared delivery transport (signing,
+  `X-SiphonAI-Event-Id` idempotency, and durable spool exactly as
+  `[cdr.webhook]`; delivery metrics under `sink="quality"`). Off by
+  default; restart-required; fail-loud when enabled with no sink.
+  Records with nothing measured are skipped.
+- **`GET /admin/v1/calls/{id}/stats`** (readonly role): live quality
+  snapshot for one active call — the "what is this call doing *right
+  now*" probe, same field shape as the CDR block. `404` when no active
+  call has that bridge `call_id`.
+- **Quality-history ingestion pipeline** in `examples/observability`:
+  Loki + Vector services (webhook intake or JSONL file tailing; only
+  `kind` becomes a Loki label — `call_id` stays a JSON field per the
+  cardinality rule) and a **Per-Call Quality History** Grafana
+  dashboard (MOS, RX loss, RR loss ratio, first-audio latency,
+  end-of-call summary table). End-to-end ingestion guide in
+  `docs/OPERATIONS.md` (live / history / CDR — three layers, one
+  shape).
+- **Metric**: `siphon_ai_quality_records_total{kind=interval|final}`.
+
+The WS protocol stays **v1** and the CDR stays **v4** — this release
+adds delivery surfaces, not wire changes.
+
 ## [0.30.0] - 2026-07-13
 
 ### Added

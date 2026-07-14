@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-07-13
+
+### Added
+
+- **Local receive-side RTP stats on `rtp_stats`** (P1 "Per-call quality
+  telemetry", release 1 of 2). The `rtp_stats` WS event was
+  remote-reported only — RTCP Receiver Reports describing how the far
+  end hears the stream SiphonAI *sends*. It now also carries the side
+  SiphonAI *receives*, measured locally by forge-media
+  (`MediaStatsSnapshot`, forge-media#81; pin bumped to `5fa76fb38675`):
+  additive optional `rx_jitter_ms` (RFC 3550 §6.4.1 interarrival
+  jitter at the negotiated RTP clock), and cumulative
+  `rx_packets_received` / `rx_packets_lost` (sequence-gap transit
+  loss; late arrivals repair it) / `rx_packets_out_of_order` /
+  `rx_packets_duplicate`. A congested path is often asymmetric —
+  the two viewpoints on one event tell "they hear us badly" from
+  "we hear them badly". The WS protocol stays **v1**; schema
+  regenerated and both server SDKs updated in lockstep.
+- **`mos_estimate`** on `rtp_stats`: transport-only MOS-CQE in
+  `[1.0, 5.0]` via the simplified E-model over local RX jitter/loss
+  plus RTCP RTT — the same math heplify-server applies to SiphonAI's
+  HEP QoS chunks, so Homer-side and WS-side scores agree. `null`
+  until RX data exists.
+- **CDR `quality` block** — **CDR `version` 3 → 4** (additive-optional
+  block; bumped per the 0.9.5 new-block precedent). Per-call summary
+  in the record operators already ingest: `first_audio_out_ms` (WS
+  `start` on the wire → first server audio frame reaching playout —
+  the STT/LLM/TTS first-token latency; closes OPERATIONS.md Q5),
+  `barge_in_count` (`auto_clear` firings + server `clear` commands;
+  closes Q8), `avg/max_jitter_ms`, `avg/max_packet_loss_ratio`,
+  `avg_rtcp_rtt_ms` (RTCP-RR aggregates), end-of-call `rx_packets_*`
+  totals, and `mos_estimate_min/avg`. Unmeasured fields are omitted,
+  not zeroed; the block is omitted entirely for calls that never went
+  active.
+- **Metrics**: `siphon_ai_rtp_rx_jitter_ms` and
+  `siphon_ai_rtp_mos_estimate` histograms, recorded on every
+  `rtp_stats` emission once RX data exists.
+
+### Changed
+
+- The daemon now configures forge-media to publish local media-stats
+  snapshots at a fixed 5 s cadence (RTCP-conventional). They feed both
+  the `rtp_stats` `rx_*` fields and the CDR `quality` block, so the
+  CDR populates even on routes with WS `rtp_stats` emission disabled.
+  Cost: one broadcast event per receiving leg per 5 s.
+
 ## [0.29.0] - 2026-07-10
 
 ### Added

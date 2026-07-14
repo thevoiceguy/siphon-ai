@@ -219,7 +219,11 @@ jobs:
       - name: Install sip-tester + python venv
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends sip-tester python3-venv
+          sudo apt-get install -y --no-install-recommends sip-tester python3-venv libcap2-bin
+          # sipp's pcap playback (the barge_in_pause phase's caller media)
+          # opens a raw IPv4 socket on this distro's build; grant the
+          # capability rather than running the whole suite as root.
+          sudo setcap cap_net_raw+ep "$(command -v sipp)"
 
       - name: Install Rust toolchain
         run: rustup show

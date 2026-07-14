@@ -1960,6 +1960,93 @@ EOF
     trap - EXIT
 fi
 
+# ─── Always-on auxiliary phase: pause-mode barge-in ───────────────
+# Exercises reversible barge-in (0.32.0, DESIGN_REVERSIBLE_BARGE_IN.md)
+# end-to-end with REAL caller media — the one thing the signaling-only
+# scenarios can't do, because forge-vad needs actual speech energy:
+#   * gen_tone_pcap.py synthesizes ~3 s of G.711 tone RTP at run time
+#     (stdlib only; no binary audio in the repo),
+#   * SIPp replays it as the caller — the echo WS bridges it back, so
+#     the bot is mid-playout when the VAD fires,
+#   * the pause arbitration arms; the echo server's default verdict
+#     (barge_in_reject) resumes the retained playout.
+# Pass = the SIPp scenario completed AND
+# siphon_ai_barge_in_decisions_total{outcome="rejected"} ticked.
+echo
+echo "─── auxiliary phase: barge_in_pause ───────────────────"
+BI_WS_PORT=8793
+BI_OBS_PORT=9091
+BI_WS_LOG=$(mktemp -t echo-ws-bi.XXXXXX.log)
+BI_DAEMON_LOG=$(mktemp -t siphon-ai-bi.XXXXXX.log)
+BI_CONFIG=$(mktemp -t siphon-ai-bi.XXXXXX.toml)
+BI_PCAP=$(mktemp -t siphon-ai-bi.XXXXXX.pcap)
+BI_XML=$(mktemp -t siphon-ai-bi.XXXXXX.xml)
+
+python3 "$SCRIPT_DIR/gen_tone_pcap.py" "$BI_PCAP" 3.0
+sed "s|__PCAP__|$BI_PCAP|" \
+    "$SCRIPT_DIR/barge_in_pause_caller.xml" >"$BI_XML"
+
+cat >"$BI_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-bi"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$BI_WS_PORT/"
+[bridge.barge_in]
+mode = "pause"
+# Generous window so a slow CI box can't race the echo's verdict into
+# a timeout; the reject normally lands within a few ms.
+decision_ms = 2000
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$BI_OBS_PORT"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+BI_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$BI_PYTHON" ]] || BI_PYTHON=python3
+"$BI_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$BI_WS_PORT" \
+    >"$BI_WS_LOG" 2>&1 &
+BI_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$BI_CONFIG" \
+    >"$BI_DAEMON_LOG" 2>&1 &
+BI_DAEMON_PID=$!
+bi_cleanup() {
+    kill "$BI_WS_PID" "$BI_DAEMON_PID" 2>/dev/null || true
+    wait "$BI_WS_PID" "$BI_DAEMON_PID" 2>/dev/null || true
+}
+trap bi_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── barge_in_pause ───────────────────────────────────"
+bi_ok=0
+if sipp -i 127.0.0.1 -sf "$BI_XML" -m 1 -timeout 15s -trace_err \
+        -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1; then
+    # The echo's reject must have resolved the arbitration.
+    if curl -s "http://127.0.0.1:$BI_OBS_PORT/metrics" \
+        | grep -q 'siphon_ai_barge_in_decisions_total{outcome="rejected"}'; then
+        bi_ok=1
+    fi
+fi
+if (( bi_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (daemon: $BI_DAEMON_LOG; ws: $BI_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+bi_cleanup
+trap - EXIT
+
 # ─── Always-on auxiliary phase: graceful drain ────────────────────
 # Exercises the 0.17.0 SIGTERM drain end-to-end (DESIGN_GRACEFUL_SHUTDOWN
 # §5):

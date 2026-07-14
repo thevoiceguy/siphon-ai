@@ -52,9 +52,14 @@ quality summary at all. Two documented gaps (`docs/OPERATIONS.md` Q5/Q8:
   absent = unknown, exactly like `rtcp_rtt_ms` today). Existing fields
   keep their meaning (remote-reported / TX quality); new fields are
   explicitly RX-side: `rx_jitter_ms`, `rx_packets_received`,
-  `rx_packets_dropped`, `rx_packets_out_of_order`, plus `mos_estimate`
-  (see D5). Schema regenerated; both SDKs + PROTOCOL.md updated in the
-  same PR (§7.1 checklist now enforces this).
+  `rx_packets_lost`, `rx_packets_out_of_order`, `rx_packets_duplicate`,
+  plus `mos_estimate` (see D5). Schema regenerated; both SDKs +
+  PROTOCOL.md updated in the same PR (§7.1 checklist now enforces this).
+  *(Implementation note: the note originally said `rx_packets_dropped`,
+  mirroring forge's jitter-buffer naming — but the forwarding path
+  measures sequence-gap transit loss, so the field shipped as
+  `rx_packets_lost`, the RFC 3550 term. `rx_packets_duplicate` was added
+  for forge/WS/CDR symmetry.)*
 - **CDR `quality` block** (additive optional; **CDR_VERSION → 4**):
   `first_audio_out_ms` (bridge-connected → first WS binary frame),
   `barge_in_count` (tap `Clear` count), `avg/max_jitter_ms`,

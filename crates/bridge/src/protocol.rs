@@ -130,13 +130,21 @@ pub enum BridgeOut {
     /// has reported its first quality assessment for the call.
     /// Codec / sample rate are constant for the call — consumers
     /// should correlate to the `start` message.
+    ///
+    /// Two viewpoints ride together (0.30.0): the original three fields
+    /// are **remote-reported** (RTCP RRs: how the far end receives the
+    /// stream SiphonAI sends), while the `rx_*` fields are **locally
+    /// measured** on the stream SiphonAI receives from the caller. A
+    /// congested path is often asymmetric — compare the two sides.
     RtpStats {
         call_id: CallId,
         seq: Seq,
         /// Estimated inter-arrival jitter in milliseconds, or `null`.
+        /// Remote-reported (RTCP RR): describes SiphonAI→caller audio.
         #[serde(skip_serializing_if = "Option::is_none", default)]
         jitter_ms: Option<f32>,
         /// Packet loss as a ratio in `[0.0, 1.0]`, or `null`.
+        /// Remote-reported (RTCP RR): describes SiphonAI→caller audio.
         #[serde(skip_serializing_if = "Option::is_none", default)]
         packet_loss_ratio: Option<f32>,
         /// Mean round-trip time over the reporting window in milliseconds,
@@ -144,6 +152,36 @@ pub enum BridgeOut {
         /// (deferred to 0.3.1 per DEV_PLAN_0.3.0.md §9 decision 10).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         rtcp_rtt_ms: Option<f32>,
+        /// Locally-measured interarrival jitter (RFC 3550 §6.4.1) on the
+        /// caller→SiphonAI stream, in milliseconds. `null` until the
+        /// first local media-stats snapshot (0.30.0).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        rx_jitter_ms: Option<f32>,
+        /// Unique RTP packets received from the caller since call start
+        /// (duplicates excluded). Cumulative, or `null` (0.30.0).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        rx_packets_received: Option<u64>,
+        /// Packets lost in transit on the caller→SiphonAI stream
+        /// (sequence-gap count; late arrivals repair it, so it can
+        /// shrink between snapshots). Cumulative, or `null` (0.30.0).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        rx_packets_lost: Option<u64>,
+        /// Packets that arrived after a newer sequence number had
+        /// already been seen. Cumulative, or `null` (0.30.0).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        rx_packets_out_of_order: Option<u64>,
+        /// Re-receives of a recently seen sequence number. Cumulative,
+        /// or `null` (0.30.0).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        rx_packets_duplicate: Option<u64>,
+        /// Transport-only MOS-CQE estimate in `[1.0, 5.0]` (simplified
+        /// E-model from local RX jitter/loss plus RTCP RTT — the same
+        /// math heplify-server applies to HEP QoS chunks, so Homer-side
+        /// and WS-side numbers agree). Reflects transport impairment
+        /// only, not codec or content quality. `null` until enough
+        /// inputs exist (0.30.0).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        mos_estimate: Option<f32>,
     },
 
     /// The caller pressed a DTMF key.
@@ -903,6 +941,12 @@ mod tests {
             jitter_ms: Some(11.2),
             packet_loss_ratio: Some(0.012),
             rtcp_rtt_ms: None,
+            rx_jitter_ms: None,
+            rx_packets_received: None,
+            rx_packets_lost: None,
+            rx_packets_out_of_order: None,
+            rx_packets_duplicate: None,
+            mos_estimate: None,
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
@@ -913,6 +957,43 @@ mod tests {
             !obj.contains_key("rtcp_rtt_ms"),
             "rtcp_rtt_ms must be absent (not null) when None"
         );
+        // 0.30.0 RX-side fields are likewise absent (not null) pre-data.
+        for k in [
+            "rx_jitter_ms",
+            "rx_packets_received",
+            "rx_packets_lost",
+            "rx_packets_out_of_order",
+            "rx_packets_duplicate",
+            "mos_estimate",
+        ] {
+            assert!(!obj.contains_key(k), "{k} must be absent when None");
+        }
+    }
+
+    #[test]
+    fn bridge_out_rtp_stats_with_rx_fields() {
+        // 0.30.0: both viewpoints populated — remote-reported TX side
+        // plus locally-measured RX side and the derived MOS estimate.
+        let raw = r#"{ "type": "rtp_stats", "call_id": "c", "seq": 51, "jitter_ms": 12.5, "packet_loss_ratio": 0.004, "rtcp_rtt_ms": 42.0, "rx_jitter_ms": 3.75, "rx_packets_received": 1500, "rx_packets_lost": 6, "rx_packets_out_of_order": 2, "rx_packets_duplicate": 1, "mos_estimate": 4.2 }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        let BridgeOut::RtpStats {
+            rx_jitter_ms,
+            rx_packets_received,
+            rx_packets_lost,
+            rx_packets_out_of_order,
+            rx_packets_duplicate,
+            mos_estimate,
+            ..
+        } = msg
+        else {
+            panic!("expected RtpStats");
+        };
+        assert_eq!(rx_jitter_ms, Some(3.75));
+        assert_eq!(rx_packets_received, Some(1500));
+        assert_eq!(rx_packets_lost, Some(6));
+        assert_eq!(rx_packets_out_of_order, Some(2));
+        assert_eq!(rx_packets_duplicate, Some(1));
+        assert_eq!(mos_estimate, Some(4.2));
     }
 
     #[test]

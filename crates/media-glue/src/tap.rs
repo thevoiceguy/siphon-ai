@@ -61,7 +61,7 @@ use std::time::{Duration, Instant};
 
 use crate::idle::{IdleDetector, IdleEvent};
 use crate::room::{RoomEvent, RoomMembership, RoomSender};
-use crate::rtp_stats::RtpStatsTracker;
+use crate::rtp_stats::{QualityReport, RtpStatsTracker, RxStats};
 
 use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, EventBus, ForgeError, ForgeEvent};
 use forge_dtmf::DtmfDigit;
@@ -349,6 +349,20 @@ pub struct MediaTap {
     /// [`Self::with_rtp_stats_interval`] before `run()`. See
     /// `crates/media-glue/src/rtp_stats.rs` for the rationale.
     rtp_stats: RtpStatsTracker,
+    /// Live whole-call quality feed for the CDR `quality` block
+    /// (0.30.0). When set, the tap `send_replace`s a fresh
+    /// [`QualityReport`] on every quality-relevant moment (RTCP note,
+    /// media-stats note, playout clear, first server audio). Watch
+    /// semantics: the controller only ever wants the latest value, so
+    /// missed intermediate states cost nothing. Set by the
+    /// `CallController` via [`Self::with_quality_watch`] before `run()`.
+    quality_tx: Option<tokio::sync::watch::Sender<QualityReport>>,
+    /// Playout clears (`auto_clear` firings + server `clear` commands),
+    /// for the CDR `barge_in_count`.
+    barge_in_count: u32,
+    /// First WS-server audio frame reaching playout — sticky, unlike
+    /// the Mark-estimation clock which resets on Mute/Clear.
+    first_audio_at: Option<Instant>,
     /// Recording fork. `None` (default) → no recording. When set, the tap
     /// `try_send`s a copy of each leg's 20 ms frame to the sender —
     /// best-effort and non-blocking, so a backed-up recording writer never
@@ -433,6 +447,9 @@ impl MediaTap {
             muted: false,
             idle_detector: IdleDetector::new(None, None, Instant::now()),
             rtp_stats: RtpStatsTracker::new(None),
+            quality_tx: None,
+            barge_in_count: 0,
+            first_audio_at: None,
             recording: None,
             survive_ws_drop: false,
         })
@@ -466,6 +483,26 @@ impl MediaTap {
     pub fn with_rtp_stats_interval(mut self, interval: Option<Duration>) -> Self {
         self.rtp_stats = RtpStatsTracker::new(interval);
         self
+    }
+
+    /// Install the quality watch feed (0.30.0). The controller keeps
+    /// the receiver and reads the latest [`QualityReport`] at teardown
+    /// for the CDR `quality` block.
+    pub fn with_quality_watch(mut self, tx: tokio::sync::watch::Sender<QualityReport>) -> Self {
+        self.quality_tx = Some(tx);
+        self
+    }
+
+    /// Push the current quality state to the watch feed. Control-rate
+    /// only (RTCP cadence / clears / first audio) — never per-frame.
+    fn publish_quality(&self) {
+        if let Some(tx) = &self.quality_tx {
+            tx.send_replace(QualityReport {
+                stats: self.rtp_stats.quality_summary(),
+                barge_in_count: self.barge_in_count,
+                first_audio_at: self.first_audio_at,
+            });
+        }
     }
 
     /// Install the playout-gated barge-in debounce from
@@ -764,6 +801,10 @@ impl MediaTap {
                     if frames_sent_to_forge == 0 {
                         first_audio_pushed_at = Some(push_now);
                     }
+                    if self.first_audio_at.is_none() {
+                        self.first_audio_at = Some(push_now);
+                        self.publish_quality();
+                    }
                     frames_sent_to_forge += 1;
                     // Advance the barge-in playout clock: from the later of
                     // `now` and the current cursor (re-anchors after a gap),
@@ -894,6 +935,10 @@ impl MediaTap {
                     if frames_sent_to_forge == 0 {
                         first_audio_pushed_at = Some(push_now);
                     }
+                    if self.first_audio_at.is_none() {
+                        self.first_audio_at = Some(push_now);
+                        self.publish_quality();
+                    }
                     frames_sent_to_forge += 1;
                     playout_until = Some(
                         playout_until.map_or(push_now, |c| c.max(push_now))
@@ -972,6 +1017,30 @@ impl MediaTap {
                                         *packet_loss_ratio,
                                         *rtt_ms,
                                     );
+                                    self.publish_quality();
+                                }
+                                // Locally-measured RX-side counters
+                                // (0.30.0). No leg filter beyond the
+                                // call_id: in bridge mode exactly one
+                                // leg (the SIP peer) receives RTP, so
+                                // only that leg publishes snapshots.
+                                ForgeEvent::MediaStatsSnapshot {
+                                    call_id: cid,
+                                    rx_packets_received,
+                                    rx_packets_lost,
+                                    rx_packets_out_of_order,
+                                    rx_packets_duplicate,
+                                    rx_jitter_ms,
+                                    ..
+                                } if cid == &self.call_id => {
+                                    self.rtp_stats.note_media_stats(RxStats {
+                                        jitter_ms: *rx_jitter_ms,
+                                        packets_received: *rx_packets_received,
+                                        packets_lost: *rx_packets_lost,
+                                        packets_out_of_order: *rx_packets_out_of_order,
+                                        packets_duplicate: *rx_packets_duplicate,
+                                    });
+                                    self.publish_quality();
                                 }
                                 ForgeEvent::QualityDegraded {
                                     call_id: cid,
@@ -1042,6 +1111,8 @@ impl MediaTap {
                                         }
                                         continue; // timer or speech-stopped decides
                                     }
+                                    self.barge_in_count += 1;
+                                    self.publish_quality();
                                     let mut drained = 0usize;
                                     while let Ok(_bytes) = playout_audio_rx.try_recv() {
                                         drained += 1;
@@ -1203,6 +1274,11 @@ impl MediaTap {
                             );
                         }
                         TapCommand::Clear => {
+                            // CDR barge_in_count: a server-driven clear is
+                            // the Notify-mode barge-in (the server heard
+                            // speech_started and interrupted its playout).
+                            self.barge_in_count += 1;
+                            self.publish_quality();
                             // Drain any bytes queued in the
                             // controller→tap audio channel before
                             // they can reach forge. The mpsc bound
@@ -1466,10 +1542,23 @@ impl MediaTap {
                     if let Some(r) = snap.rtt_ms {
                         metrics::histogram!("siphon_ai_rtp_rtt_ms").record(r as f64);
                     }
+                    if let Some(rx) = &snap.rx {
+                        metrics::histogram!("siphon_ai_rtp_rx_jitter_ms")
+                            .record(rx.jitter_ms as f64);
+                    }
+                    if let Some(m) = snap.mos_estimate {
+                        metrics::histogram!("siphon_ai_rtp_mos_estimate").record(m as f64);
+                    }
                     let out = OutgoingEvent::RtpStats {
                         jitter_ms: snap.jitter_ms,
                         packet_loss_ratio: snap.packet_loss_ratio,
                         rtcp_rtt_ms: snap.rtt_ms,
+                        rx_jitter_ms: snap.rx.map(|rx| rx.jitter_ms),
+                        rx_packets_received: snap.rx.map(|rx| rx.packets_received),
+                        rx_packets_lost: snap.rx.map(|rx| rx.packets_lost),
+                        rx_packets_out_of_order: snap.rx.map(|rx| rx.packets_out_of_order),
+                        rx_packets_duplicate: snap.rx.map(|rx| rx.packets_duplicate),
+                        mos_estimate: snap.mos_estimate,
                     };
                     if let Err(e) = events_tx.try_send(out) {
                         warn!(
@@ -1545,6 +1634,8 @@ impl MediaTap {
                 // `speech_started`. (A `SpeechStopped` would have cleared
                 // `pending_barge_in` first, disabling this arm.)
                 _ = &mut barge_debounce, if pending_barge_in.is_some() => {
+                    self.barge_in_count += 1;
+                    self.publish_quality();
                     let mut drained = 0usize;
                     while let Ok(_bytes) = playout_audio_rx.try_recv() {
                         drained += 1;

@@ -10,7 +10,7 @@
 pub(crate) mod idle;
 pub mod moh;
 pub mod room;
-pub(crate) mod rtp_stats;
+pub mod rtp_stats;
 pub mod sdp;
 pub mod setup;
 pub mod tap;
@@ -20,6 +20,7 @@ pub use room::{
     spawn_room, RoomConfig, RoomEvent, RoomHandle, RoomJoinError, RoomLifecycle, RoomMembership,
     RoomObserver,
 };
+pub use rtp_stats::{QualityReport, QualitySummary, RxStats};
 pub use sdp::{
     audio_remote_addr, build_answer, generate_offer, negotiate_answer, negotiate_offer_answer,
     parse_offer, rewrite_sdp_direction, AnswerOutcome, Codec, LocalCapabilities, MediaDirection,

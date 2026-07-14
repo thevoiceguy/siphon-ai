@@ -154,13 +154,12 @@ log timestamps. The `SiphonAISlowWsConnect` alert fires on
 `siphon_ai:ws_connect_seconds:p99 > 1` for 10m — a slow WS server (or the
 network to it) means callers hear dead air at answer.
 
-**Gap:** The CDR doesn't carry `first_audio_out_ms` — the time
-from `bridge connected` to the first audio frame from the WS
-server reaching the caller. That's the metric operators
-typically want for "how slow is my STT/LLM/TTS chain at first
-token." Filed as a follow-up; needs a CDR schema bump (additive
-optional field — no `version` bump required per the CDR
-backwards-compat policy).
+**Closed (0.30.0):** the CDR now carries
+`quality.first_audio_out_ms` (CDR v4) — the time from "WS `start` on
+the wire" to the first audio frame from the WS server reaching playout
+toward the caller. That's the metric operators want for "how slow is
+my STT/LLM/TTS chain at first token"; pair it with
+`siphon_ai_ws_connect_seconds` to separate connect time.
 
 ### 6. Did the caller experience audio quality issues?
 
@@ -217,10 +216,10 @@ The events come from `forge-vad`'s `ForgeEvent::SpeechStarted` /
 correlate with the WS server's `clear` messages emitted under
 `auto_clear` mode.
 
-**Gap:** The CDR doesn't include a `barge_in_count` — operators
-who want to know "did this call barge in, and how often" have to
-scrape logs. Filed as a follow-up CDR schema addition (same
-backwards-compat note as Q5).
+**Closed (0.30.0):** the CDR now includes
+`quality.barge_in_count` (CDR v4) — `auto_clear` firings plus
+server-sent `clear` commands over the call's lifetime, so "did this
+call barge in, and how often" reads straight from the record.
 
 ### 9. Did the WS server send an unexpected message?
 
@@ -280,8 +279,8 @@ paths.
 | Question | Gap                                                          | Sketch of fix                                                       |
 |----------|--------------------------------------------------------------|---------------------------------------------------------------------|
 | Q3       | `call ended` log doesn't include the SIP terminator method   | Add `sip_terminator="BYE"` field to the `acceptor::call_ended` log |
-| Q5       | No `first_audio_out_ms` in CDR                               | Track `Instant` from `bridge connected` to first WS binary frame; add additive optional field to CDR schema |
-| Q8       | No `barge_in_count` in CDR                                   | Count `MediaTap::Clear` invocations per call; add additive field   |
+| Q5       | ~~No `first_audio_out_ms` in CDR~~ **CLOSED 0.30.0** — CDR v4 `quality.first_audio_out_ms` | Shipped: WS-connect instant → first server audio frame at playout |
+| Q8       | ~~No `barge_in_count` in CDR~~ **CLOSED 0.30.0** — CDR v4 `quality.barge_in_count` | Shipped: `auto_clear` firings + server `clear` commands per call |
 
 None block the operability bar — all are answerable through
 log scraping today; the follow-ups make them visible in

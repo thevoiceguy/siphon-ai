@@ -81,9 +81,19 @@ export interface DeadAirDetected extends Base {
 
 export interface RtpStats extends Base {
   type: "rtp_stats";
+  /** Remote-reported (RTCP RR): how the far end receives SiphonAI's stream. */
   jitter_ms?: number | null;
   packet_loss_ratio?: number | null;
   rtcp_rtt_ms?: number | null;
+  /** Locally measured on the caller→SiphonAI stream (0.30.0). */
+  rx_jitter_ms?: number | null;
+  /** Cumulative since call start. */
+  rx_packets_received?: number | null;
+  rx_packets_lost?: number | null;
+  rx_packets_out_of_order?: number | null;
+  rx_packets_duplicate?: number | null;
+  /** Transport-only MOS-CQE estimate in [1.0, 5.0] (0.30.0). */
+  mos_estimate?: number | null;
 }
 
 export interface Dtmf extends Base {

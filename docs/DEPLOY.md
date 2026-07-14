@@ -711,7 +711,7 @@ re-opens on `SIGHUP` (in practice — restart is simpler).
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "call_id": "siphon-6ce27797cc0a4997b90cbae2f46ce7a4",
   "sip_call_id": "1-2651348@127.0.0.1",
   "started_at": "2026-05-12T18:10:32.481Z",
@@ -727,6 +727,21 @@ re-opens on `SIGHUP` (in practice — restart is simpler).
     "cause": "local_shutdown",
     "bridge_disconnect": "stop_sent",
     "tap_disconnect":    "call_ended"
+  },
+  "quality": {
+    "first_audio_out_ms": 742,
+    "barge_in_count": 3,
+    "avg_jitter_ms": 11.5,
+    "max_jitter_ms": 30.0,
+    "avg_packet_loss_ratio": 0.004,
+    "max_packet_loss_ratio": 0.02,
+    "avg_rtcp_rtt_ms": 41.7,
+    "rx_packets_received": 14820,
+    "rx_packets_lost": 12,
+    "rx_packets_out_of_order": 3,
+    "rx_packets_duplicate": 0,
+    "mos_estimate_min": 3.9,
+    "mos_estimate_avg": 4.3
   }
 }
 ```
@@ -743,9 +758,10 @@ Timer H), `"missing_sdp_answer"`, `"invalid_sdp_answer"`,
 an **empty `audio`** block (no codec was negotiated) and blank
 `bridge_disconnect` / `tap_disconnect`.
 
-The `version` integer is **2** as of 0.9.5 — it bumps on changes that
-could break a strict consumer (here, the new `termination.cause`
-values). Adding a new optional *field* stays additive and does not bump.
+The `version` integer is **4** as of 0.30.0 (the optional `quality`
+block; 3 in 0.17.0 for `drain_forced`, 2 in 0.9.5 for the delayed-offer
+causes). It bumps on changes that could break a strict consumer. Adding
+a new optional *field* stays additive and does not bump.
 
 Two optional STIR/SHAKEN fields appear when `[security.stir_shaken]` is
 enabled (added in 0.4.0; schema stays at version 1 — both are omitted
@@ -797,6 +813,26 @@ call never reconnected):
   An episode is one unexpected WS drop that entered the reconnect path
   (`[bridge].ws_reconnect_enabled`; see PROTOCOL.md §5.7). Cross-check
   `siphon_ai_ws_reconnects_total` for the recovered/exhausted split.
+
+One optional quality object appears when the call produced any quality
+signal (added in 0.30.0 — **CDR `version` 4**; omitted for calls that
+never went active). Fields inside are individually optional — a signal
+that never produced data is omitted, not zeroed, so `"clean"` and
+`"unmeasured"` stay distinguishable:
+
+- `quality.first_audio_out_ms` — ms from "WS `start` on the wire" to the
+  first server audio frame reaching playout toward the caller: the
+  end-to-end first-token latency of the operator's STT/LLM/TTS chain.
+  Pair with `siphon_ai_ws_connect_seconds` to decompose connect time.
+- `quality.barge_in_count` — playout clears over the call: `auto_clear`
+  firings (daemon-side barge-in) plus server-sent `clear` commands.
+- `quality.avg/max_jitter_ms`, `avg/max_packet_loss_ratio`,
+  `avg_rtcp_rtt_ms` — aggregates over the call's RTCP Receiver Reports
+  (remote-reported: how the far end received SiphonAI's stream).
+- `quality.rx_packets_*` — end-of-call totals measured locally on the
+  caller→SiphonAI stream (received / lost / out-of-order / duplicate).
+- `quality.mos_estimate_min/avg` — worst / mean transport-only MOS-CQE
+  estimate (1.0–5.0; see PROTOCOL.md §3.8 `mos_estimate`).
 
 Outbound originated calls (0.6.0, `POST /admin/v1/calls`) produce the same
 record with `direction: "outbound"` — the schema stays at version 1 (the
@@ -1005,6 +1041,8 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_rtp_jitter_ms`               | histogram | —                                     | RTP jitter snapshot recorded on every `rtp_stats` emission (when forge has reported a value). |
 | `siphon_ai_rtp_packet_loss_ratio`       | histogram | —                                     | Packet-loss ratio (0.0-1.0) recorded on every `rtp_stats` emission. |
 | `siphon_ai_rtp_rtt_ms`                  | histogram | —                                     | RTCP-derived round-trip time (ms) per received Receiver Report (RFC 3550 §A.7). Populated since 0.3.2 (forge originates SRs); explicit buckets 10ms–1s. Records a sample roughly every RTCP cycle (~5s) once bidirectional RTCP is flowing. |
+| `siphon_ai_rtp_rx_jitter_ms`            | histogram | —                                     | Locally-measured interarrival jitter (RFC 3550 §6.4.1) on the caller→SiphonAI stream, recorded on every `rtp_stats` emission once local media-stats snapshots exist (0.30.0). The receive-side counterpart of `siphon_ai_rtp_jitter_ms` (which is remote-reported). |
+| `siphon_ai_rtp_mos_estimate`            | histogram | —                                     | Transport-only MOS-CQE estimate (1.0–5.0), simplified E-model over local RX jitter/loss + RTCP RTT, recorded on every `rtp_stats` emission once RX data exists (0.30.0). Same math heplify-server applies to HEP QoS chunks. |
 | `siphon_ai_sip_tls_reload_attempts_total` | counter | `outcome=ok\|failed`                  | One tick per SIGHUP cert-reload attempt. `failed` means a broken cert/key on disk; the listener keeps serving the previous cert. |
 | `siphon_ai_admin_tls_reload_attempts_total` | counter | `outcome=ok\|failed`                | Same as above for the `[admin.tls]` listener cert (0.18.0). One tick per SIGHUP admin-cert reload; `failed` keeps the previous cert. Only emitted when `[admin.tls]` is configured. |
 | `siphon_ai_config_reloads_total`        | counter   | `result=applied\|no_change\|failed`   | SIGHUP config-file reloads (0.12.0). `applied` = a changed config loaded and the hot-reloadable sections (routes, webhook/CDR sinks) were swapped; `no_change` = the file was byte-identical to the last load; `failed` = the new config didn't load/compile and the running config was kept. Alert on `failed` after a deploy. |

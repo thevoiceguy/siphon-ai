@@ -25,6 +25,12 @@
 //! for calls force-ended at the graceful-shutdown drain deadline. Same
 //! rationale as v2 — a new cause value, no field shape change.
 //!
+//! **v4 (0.30.0):** added the optional [`QualityInfo`] block (per-call
+//! quality summary: first-audio latency, barge-in count, jitter / loss /
+//! RTT aggregates, local RX counters, MOS estimate). Additive-optional,
+//! but bumped per the 0.9.5 precedent for new blocks so consumers can
+//! gate on `version >= 4` instead of probing for the field.
+//!
 //! ## What we record vs. what we don't
 //!
 //! - **From / To** users only — full SIP URIs are recorded as the
@@ -42,15 +48,15 @@ use serde::{Deserialize, Serialize};
 /// Schema version of the CDR record. Bump per CLAUDE.md §7.7
 /// whenever a change could break consumer parsers.
 ///
-/// v3 (0.17.0): adds the `drain_forced` `termination.cause` value for
-/// calls force-ended at the graceful-shutdown drain deadline — a new
-/// value in an existing enum field, so a strict parser pinning the
-/// cause set could reject it. No field added/removed.
-pub const CDR_VERSION: u32 = 3;
+/// v4 (0.30.0): adds the optional `quality` block (see [`QualityInfo`]).
+/// Additive-optional; bumped per the 0.9.5 new-block precedent.
+pub const CDR_VERSION: u32 = 4;
 
 /// One call's complete record. Always serialised as a single JSON
 /// object on a single line for JSONL file sinks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// (`PartialEq` only, no `Eq` — the v4 `quality` block carries floats.)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CdrRecord {
     /// Schema version. Bump per CLAUDE.md §7.7.
     pub version: u32,
@@ -140,6 +146,14 @@ pub struct CdrRecord {
     /// field → CDR schema stays at version 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconnect: Option<ReconnectInfo>,
+
+    /// Per-call quality summary (0.30.0, CDR v4), present when the call
+    /// produced any quality signal (media flowed, playout was cleared,
+    /// or the WS server sent audio). Omitted for calls that never went
+    /// active. Closes the OPERATIONS.md Q5 (`first_audio_out_ms`) and
+    /// Q8 (`barge_in_count`) gaps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<QualityInfo>,
 }
 
 /// Recording-consent audit trail on the CDR (0.26.0).
@@ -175,6 +189,58 @@ pub struct HoldInfo {
     pub count: u32,
     /// Cumulative wall-time the call spent held, in milliseconds.
     pub total_ms: u64,
+}
+
+/// Per-call quality summary on the CDR (0.30.0, CDR v4).
+///
+/// Jitter / loss / RTT aggregates are computed over the RTCP Receiver
+/// Reports received during the call (remote-reported: how the far end
+/// received the stream SiphonAI sent). The `rx_packets_*` totals and the
+/// MOS aggregates come from locally-measured receive-side snapshots
+/// (see the `rtp_stats` `rx_*` fields in PROTOCOL.md §3.8). Every field
+/// is optional — a signal that never produced data is omitted, not
+/// zeroed, so consumers can tell "clean" from "unmeasured".
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct QualityInfo {
+    /// Milliseconds from "WS bridge connected" to the first audio frame
+    /// from the WS server reaching playout toward the caller — the
+    /// operator's "how slow is my STT/LLM/TTS chain at first token".
+    /// Absent when the server never sent audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_audio_out_ms: Option<u64>,
+    /// Playout clears over the call's lifetime: `auto_clear` firings
+    /// (daemon-side barge-in) plus server-sent `clear` commands. Absent
+    /// (not `0`) only when the whole block would otherwise be absent.
+    pub barge_in_count: u32,
+    /// Mean / max of the RR-reported interarrival jitter (ms) across the
+    /// call's RTCP reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_jitter_ms: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_jitter_ms: Option<f32>,
+    /// Mean / max of the RR-reported cumulative-loss ratio `[0.0, 1.0]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_packet_loss_ratio: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_packet_loss_ratio: Option<f32>,
+    /// Mean RTCP round-trip time (ms) across reports that carried one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_rtcp_rtt_ms: Option<f32>,
+    /// End-of-call totals from the local receive side (caller→SiphonAI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx_packets_received: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx_packets_lost: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx_packets_out_of_order: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx_packets_duplicate: Option<u64>,
+    /// Worst / mean transport-only MOS-CQE estimate over the call
+    /// (`[1.0, 5.0]`; see PROTOCOL.md §3.8 `mos_estimate`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mos_estimate_min: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mos_estimate_avg: Option<f32>,
 }
 
 /// Per-call WS-reconnect accounting on the CDR (0.7.3). An episode is one
@@ -311,6 +377,7 @@ mod tests {
             park: None,
             hold: None,
             reconnect: None,
+            quality: None,
         }
     }
 
@@ -362,13 +429,50 @@ mod tests {
     }
 
     #[test]
-    fn version_field_is_present_and_is_3() {
-        // Bumped to 3 in 0.17.0 (new `drain_forced` termination cause —
-        // see the module versioning note). Was 2 in 0.9.5 (delayed-offer
-        // failure causes).
-        assert_eq!(CDR_VERSION, 3);
+    fn version_field_is_present_and_is_4() {
+        // Bumped to 4 in 0.30.0 (new optional `quality` block — see the
+        // module versioning note). Was 3 in 0.17.0 (`drain_forced`) and
+        // 2 in 0.9.5 (delayed-offer failure causes).
+        assert_eq!(CDR_VERSION, 4);
         let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
-        assert_eq!(v["version"], serde_json::json!(3));
+        assert_eq!(v["version"], serde_json::json!(4));
+    }
+
+    #[test]
+    fn quality_block_round_trips_and_omits_when_absent() {
+        // Absent block → no `quality` key at all (v3 parsers see the
+        // same shape they always did, minus the version number).
+        let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
+        assert!(v.get("quality").is_none(), "absent block must be omitted");
+
+        // Populated block round-trips; unmeasured fields inside are
+        // omitted, not null.
+        let mut rec = sample();
+        rec.quality = Some(QualityInfo {
+            first_audio_out_ms: Some(742),
+            barge_in_count: 3,
+            avg_jitter_ms: Some(11.5),
+            max_jitter_ms: Some(30.0),
+            avg_packet_loss_ratio: Some(0.004),
+            max_packet_loss_ratio: Some(0.02),
+            avg_rtcp_rtt_ms: None, // RTT never measured
+            rx_packets_received: Some(14_820),
+            rx_packets_lost: Some(12),
+            rx_packets_out_of_order: Some(3),
+            rx_packets_duplicate: Some(0),
+            mos_estimate_min: Some(3.9),
+            mos_estimate_avg: Some(4.3),
+        });
+        let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
+        assert_eq!(v["quality"]["first_audio_out_ms"], 742);
+        assert_eq!(v["quality"]["barge_in_count"], 3);
+        assert_eq!(v["quality"]["rx_packets_received"], 14_820);
+        assert!(
+            v["quality"].get("avg_rtcp_rtt_ms").is_none(),
+            "unmeasured field omitted, not null"
+        );
+        let back: CdrRecord = serde_json::from_value(v).unwrap();
+        assert_eq!(back, rec);
     }
 
     #[test]

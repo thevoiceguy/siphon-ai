@@ -32,7 +32,7 @@ pub mod webhook;
 pub use file::{FileSink, FileSinkError};
 pub use hep::HepCdrSink;
 pub use schema::{
-    AudioInfo, CdrRecord, ConsentInfo, Direction, HoldInfo, ParkInfo, ReconnectInfo,
+    AudioInfo, CdrRecord, ConsentInfo, Direction, HoldInfo, ParkInfo, QualityInfo, ReconnectInfo,
     TerminationCause, TerminationInfo, CDR_VERSION,
 };
 pub use sink::{CdrSink, CdrSinkHandle, MultiSink, NullSink};

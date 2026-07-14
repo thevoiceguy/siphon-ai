@@ -211,6 +211,18 @@ pub enum OutgoingEvent {
         /// Mean RTT in milliseconds. `None` until forge originates
         /// its own SRs (0.3.1 follow-up).
         rtcp_rtt_ms: Option<f32>,
+        /// Locally-measured RX-side jitter in milliseconds (0.30.0).
+        rx_jitter_ms: Option<f32>,
+        /// Cumulative unique RTP packets received from the caller.
+        rx_packets_received: Option<u64>,
+        /// Cumulative sequence-gap loss on the caller→SiphonAI stream.
+        rx_packets_lost: Option<u64>,
+        /// Cumulative late arrivals.
+        rx_packets_out_of_order: Option<u64>,
+        /// Cumulative duplicate receives.
+        rx_packets_duplicate: Option<u64>,
+        /// Transport-only MOS-CQE estimate in `[1.0, 5.0]`.
+        mos_estimate: Option<f32>,
     },
     Stop {
         reason: StopReason,
@@ -334,15 +346,17 @@ pub async fn connect_and_run(
 
 /// [`connect_and_run`] plus an optional readiness signal: `ready_tx` (when
 /// `Some`) fires **once** the WS handshake has succeeded and the `start`
-/// message has been written to the socket. The reconnect drive (0.7.3)
-/// uses it to keep the caller on hold music until a redial is actually
-/// live, rather than dropping MOH optimistically on a socket that may
-/// still fail. A dropped receiver is ignored (the send is best-effort).
+/// message has been written to the socket, carrying that moment's
+/// `Instant`. The reconnect drive (0.7.3) uses it to keep the caller on
+/// hold music until a redial is actually live, rather than dropping MOH
+/// optimistically on a socket that may still fail; the controller also
+/// keeps it as the epoch for the CDR `first_audio_out_ms` (0.30.0). A
+/// dropped receiver is ignored (the send is best-effort).
 pub async fn connect_and_run_with_ready(
     config: BridgeConfig,
     mut start: StartMsg,
     channels: BridgeChannels,
-    ready_tx: Option<oneshot::Sender<()>>,
+    ready_tx: Option<oneshot::Sender<std::time::Instant>>,
 ) -> Result<DisconnectReason, BridgeError> {
     start.seq = 0;
     let call_id = start.call_id.clone();
@@ -504,7 +518,7 @@ async fn run_loop(
     start: StartMsg,
     channels: BridgeChannels,
     call_id: CallId,
-    ready_tx: Option<oneshot::Sender<()>>,
+    ready_tx: Option<oneshot::Sender<std::time::Instant>>,
     liveness: Liveness,
 ) -> Result<DisconnectReason, BridgeError> {
     let BridgeChannels {
@@ -531,9 +545,11 @@ async fn run_loop(
     sink.send(Message::Text(start_json)).await?;
 
     // Handshake done and `start` is on the wire — signal readiness so a
-    // reconnect drive can drop hold music now (0.7.3). Best-effort.
+    // reconnect drive can drop hold music now (0.7.3), stamping the
+    // moment for the CDR first-audio latency epoch (0.30.0).
+    // Best-effort.
     if let Some(tx) = ready_tx {
-        let _ = tx.send(());
+        let _ = tx.send(std::time::Instant::now());
     }
 
     // Subsequent SiphonAI→server messages use seq starting at 1.
@@ -871,12 +887,24 @@ fn build_bridge_out(event: OutgoingEvent, call_id: CallId, seq: Seq) -> BridgeOu
             jitter_ms,
             packet_loss_ratio,
             rtcp_rtt_ms,
+            rx_jitter_ms,
+            rx_packets_received,
+            rx_packets_lost,
+            rx_packets_out_of_order,
+            rx_packets_duplicate,
+            mos_estimate,
         } => BridgeOut::RtpStats {
             call_id,
             seq,
             jitter_ms,
             packet_loss_ratio,
             rtcp_rtt_ms,
+            rx_jitter_ms,
+            rx_packets_received,
+            rx_packets_lost,
+            rx_packets_out_of_order,
+            rx_packets_duplicate,
+            mos_estimate,
         },
         OutgoingEvent::Stop { reason } => BridgeOut::Stop {
             call_id,

@@ -194,6 +194,41 @@ class EchoServerSmokeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(echoed, b"\x01\x00" * 160)
                 await ws.close()
 
+    async def _drive_pending_barge_in(self) -> dict:
+        """Send an armed `speech_started` and return the verdict reply."""
+        opts = _opts()
+        async with running_server(opts) as server:
+            port = await _bound_port(server)
+            async with connect(
+                f"ws://127.0.0.1:{port}", subprotocols=[srv.SUBPROTOCOL]
+            ) as ws:
+                await ws.send(json.dumps(_start_msg()))
+                await ws.send(json.dumps({
+                    "type": "speech_started",
+                    "call_id": "smoke-1",
+                    "seq": 3,
+                    "ts_ms": 1234,
+                    "decision_pending": True,
+                    "decision_deadline_ms": 500,
+                }))
+                msg = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                self.assertIsInstance(msg, str, "expected text frame")
+                await ws.close()
+                return json.loads(msg)
+
+    async def test_pending_barge_in_rejected_by_default(self):
+        os.environ.pop("SIPHON_ECHO_BARGE_IN_VERDICT", None)
+        payload = await self._drive_pending_barge_in()
+        self.assertEqual(payload["type"], "barge_in_reject")
+        self.assertEqual(payload["call_id"], "smoke-1")
+
+    async def test_pending_barge_in_confirmed_via_env(self):
+        os.environ["SIPHON_ECHO_BARGE_IN_VERDICT"] = "confirm"
+        self.addCleanup(os.environ.pop, "SIPHON_ECHO_BARGE_IN_VERDICT", None)
+        payload = await self._drive_pending_barge_in()
+        self.assertEqual(payload["type"], "barge_in_confirm")
+        self.assertEqual(payload["call_id"], "smoke-1")
+
     async def test_invalid_json_is_ignored_not_fatal(self):
         opts = _opts()
         async with running_server(opts) as server:

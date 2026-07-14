@@ -152,6 +152,13 @@ pub struct BridgeChannels {
 pub enum OutgoingEvent {
     SpeechStarted {
         ts_ms: u64,
+        /// `true` when this event armed a pause-mode barge-in
+        /// arbitration (0.32.0) — the tap stamps it before forwarding;
+        /// [`BridgeOut::SpeechStarted`] carries it to the wire.
+        decision_pending: bool,
+        /// The arbitration's decision window in milliseconds; `Some`
+        /// exactly when `decision_pending` is `true`.
+        decision_deadline_ms: Option<u64>,
     },
     SpeechStopped {
         ts_ms: u64,
@@ -181,6 +188,13 @@ pub enum OutgoingEvent {
     /// A bot-initiated [`BridgeIn::Resume`] re-INVITE restored two-way
     /// audio (0.7.2) → [`BridgeOut::Resumed`].
     Resumed,
+    /// A pause-mode barge-in arbitration resolved (0.32.0) →
+    /// [`BridgeOut::BargeInResolved`]. Emitted by the tap on every
+    /// resolution: server verdict, deadline timeout, or a preempting
+    /// command.
+    BargeInResolved {
+        outcome: crate::protocol::BargeInOutcome,
+    },
     /// Caller has been silent (no VAD speech) for at least
     /// `duration_ms`. Configurable via `[bridge].silence_threshold_ms`;
     /// `0` disables. Fires once per silence stretch — the next event
@@ -842,10 +856,16 @@ fn serialize_or_drop(out: &BridgeOut) -> String {
 
 fn build_bridge_out(event: OutgoingEvent, call_id: CallId, seq: Seq) -> BridgeOut {
     match event {
-        OutgoingEvent::SpeechStarted { ts_ms } => BridgeOut::SpeechStarted {
+        OutgoingEvent::SpeechStarted {
+            ts_ms,
+            decision_pending,
+            decision_deadline_ms,
+        } => BridgeOut::SpeechStarted {
             call_id,
             seq,
             ts_ms,
+            decision_pending,
+            decision_deadline_ms,
         },
         OutgoingEvent::SpeechStopped { ts_ms, duration_ms } => BridgeOut::SpeechStopped {
             call_id,
@@ -873,6 +893,11 @@ fn build_bridge_out(event: OutgoingEvent, call_id: CallId, seq: Seq) -> BridgeOu
         OutgoingEvent::Resume => BridgeOut::Resume { call_id, seq },
         OutgoingEvent::Held => BridgeOut::Held { call_id, seq },
         OutgoingEvent::Resumed => BridgeOut::Resumed { call_id, seq },
+        OutgoingEvent::BargeInResolved { outcome } => BridgeOut::BargeInResolved {
+            call_id,
+            seq,
+            outcome,
+        },
         OutgoingEvent::SilenceDetected { duration_ms } => BridgeOut::SilenceDetected {
             call_id,
             seq,
@@ -981,6 +1006,8 @@ fn bridge_in_call_id(msg: &BridgeIn) -> &str {
         BridgeIn::SendDtmf { call_id, .. } => call_id.as_str(),
         BridgeIn::Mute { call_id } => call_id.as_str(),
         BridgeIn::Unmute { call_id } => call_id.as_str(),
+        BridgeIn::BargeInConfirm { call_id } => call_id.as_str(),
+        BridgeIn::BargeInReject { call_id } => call_id.as_str(),
         BridgeIn::StartRecording { call_id } => call_id.as_str(),
         BridgeIn::StopRecording { call_id } => call_id.as_str(),
         BridgeIn::PauseRecording { call_id } => call_id.as_str(),

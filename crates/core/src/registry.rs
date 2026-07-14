@@ -439,6 +439,7 @@ mod tests {
                 retrieved: false,
                 reconnected: false,
                 trace_context: None,
+                barge_in_mode: None,
             },
             media_tap: tap,
             transfer: None,

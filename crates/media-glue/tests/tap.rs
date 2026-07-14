@@ -978,8 +978,15 @@ async fn forge_speech_started_emits_outgoing_speech_started() {
         .expect("events_tx open");
 
     match event {
-        OutgoingEvent::SpeechStarted { ts_ms } => {
+        OutgoingEvent::SpeechStarted {
+            ts_ms,
+            decision_pending,
+            decision_deadline_ms,
+        } => {
             assert_eq!(ts_ms, ts.timestamp_millis().max(0) as u64);
+            // No arbitration on the default (Notify) policy.
+            assert!(!decision_pending);
+            assert_eq!(decision_deadline_ms, None);
         }
         other => panic!("expected SpeechStarted, got {other:?}"),
     }
@@ -1331,7 +1338,19 @@ async fn pause_reject_resumes_retained_tail() {
         .await
         .expect("speech_started arrives")
         .expect("events_tx open");
-    assert!(matches!(event, OutgoingEvent::SpeechStarted { .. }));
+    // 0.32.0: the forwarded event IS the arbitration request — it must
+    // carry the pending flag and the decision window.
+    assert!(
+        matches!(
+            event,
+            OutgoingEvent::SpeechStarted {
+                decision_pending: true,
+                decision_deadline_ms: Some(5000),
+                ..
+            }
+        ),
+        "expected arbitration-stamped SpeechStarted, got {event:?}",
+    );
 
     // Server rules: false positive. The retained tail replays in
     // order, ending with the newest frame (pattern 5). The playout
@@ -1341,6 +1360,20 @@ async fn pause_reject_resumes_retained_tail() {
         .send(TapCommand::BargeInReject)
         .await
         .expect("send reject");
+    // Every resolution emits `barge_in_resolved` (0.32.0).
+    let resolved = tokio::time::timeout(Duration::from_millis(500), events_rx.recv())
+        .await
+        .expect("barge_in_resolved arrives")
+        .expect("events_tx open");
+    assert!(
+        matches!(
+            resolved,
+            OutgoingEvent::BargeInResolved {
+                outcome: siphon_ai_bridge::BargeInOutcome::Rejected,
+            }
+        ),
+        "expected rejected resolution, got {resolved:?}",
+    );
     let mut replayed = Vec::new();
     loop {
         let p = next_audio_pattern(&manager, &call).await;

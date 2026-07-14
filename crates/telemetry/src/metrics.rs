@@ -296,6 +296,16 @@ pub const ROOM_TICK_LAG_SECONDS: &str = "siphon_ai_room_tick_lag_seconds";
 /// drain phase.
 pub const DRAIN_SECONDS: &str = "siphon_ai_drain_seconds";
 
+/// Time from a pause-mode barge-in arbitration arming to its
+/// resolution, in **seconds** (0.32.0,
+/// `[bridge.barge_in].mode = "pause"`). Includes timeout resolutions,
+/// so the distribution's ceiling is the configured `decision_ms`.
+/// Literal must match the `histogram!` call site in
+/// `siphon-ai-media-glue::tap`. The companion counter
+/// `siphon_ai_barge_in_decisions_total{outcome}` carries the verdict
+/// split.
+pub const BARGE_IN_DECISION_SECONDS: &str = "siphon_ai_barge_in_decision_seconds";
+
 /// Outbound webhook / CDR delivery latency in **seconds** (0.11.0):
 /// accepted → 2xx, recorded only on success. Labeled by `sink`
 /// (`lifecycle` / `cdr`). Captures retry/backoff dwell, so a slow
@@ -352,6 +362,12 @@ pub fn prometheus_builder() -> Result<PrometheusBuilder, InitError> {
         })
         .and_then(|b| {
             b.set_buckets_for_metric(Matcher::Full(DRAIN_SECONDS.to_string()), &DRAIN_BUCKETS)
+        })
+        .and_then(|b| {
+            b.set_buckets_for_metric(
+                Matcher::Full(BARGE_IN_DECISION_SECONDS.to_string()),
+                &BARGE_IN_DECISION_BUCKETS,
+            )
         })
         .map_err(|e| InitError::Install(e.to_string()))
 }
@@ -527,6 +543,15 @@ pub fn register_descriptions() {
         Unit::Seconds,
         "How far past its 20 ms cadence a conference room's mix tick fired."
     );
+    describe_histogram!(
+        BARGE_IN_DECISION_SECONDS,
+        Unit::Seconds,
+        "Pause-mode barge-in arbitration latency: armed on speech_started, resolved by verdict/timeout/preemption."
+    );
+    describe_counter!(
+        "siphon_ai_barge_in_decisions_total",
+        "Pause-mode barge-in arbitration resolutions by outcome (confirmed, rejected, timeout)."
+    );
     describe_counter!(
         CONFIG_RELOADS_TOTAL,
         "SIGHUP config reloads by result (applied, no_change, failed)."
@@ -602,6 +627,12 @@ pub const DRAIN_BUCKETS: [f64; 9] = [0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 90.0,
 /// tens of ms; a multi-hundred-MB WAV to a remote region can take tens
 /// of seconds.
 pub const RECORDING_UPLOAD_BUCKETS: [f64; 9] = [0.05, 0.1, 0.25, 0.5, 1.0, 5.0, 15.0, 60.0, 300.0];
+
+/// Verdict latency clusters around STT-partial turnaround (50–500 ms);
+/// the tail is bounded by `decision_ms` (default 0.5 s, operators may
+/// raise it to a few seconds), so resolution past 5 s means a
+/// misconfigured window rather than a slow server.
+pub const BARGE_IN_DECISION_BUCKETS: [f64; 9] = [0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 2.5, 5.0];
 
 #[cfg(test)]
 mod tests {

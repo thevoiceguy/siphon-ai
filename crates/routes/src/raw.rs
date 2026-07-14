@@ -145,6 +145,13 @@ pub struct BargeInOverride {
     pub enabled: Option<bool>,
     pub mode: Option<String>,
     pub debounce_ms: Option<u64>,
+    /// Pause-mode server verdict deadline override (0.32.0). Same
+    /// field-wise merge as the rest: `None` inherits the global.
+    pub decision_ms: Option<u64>,
+    /// Pause-mode deadline fallback override: `"confirm"` | `"reject"`.
+    pub on_timeout: Option<String>,
+    /// Pause-mode retained-audio cap override, in seconds.
+    pub resume_max_secs: Option<u64>,
 }
 
 /// `[route.media]` overrides. Same merge rules as `BridgeOverride`.

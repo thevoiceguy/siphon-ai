@@ -73,6 +73,20 @@ pub enum BridgeOut {
         seq: Seq,
         /// Milliseconds since `start` was sent (monotonic, NOT wall-clock).
         ts_ms: u64,
+        /// `true` when this event armed a pause-mode barge-in
+        /// arbitration (0.32.0, `[bridge.barge_in].mode = "pause"`):
+        /// playout is paused with its tail retained, and SiphonAI
+        /// expects [`BridgeIn::BargeInConfirm`] /
+        /// [`BridgeIn::BargeInReject`] within `decision_deadline_ms`.
+        /// Additive — omitted (and `false`) in every other mode, so
+        /// pre-0.32.0 servers see the exact shape they always saw.
+        #[serde(default, skip_serializing_if = "is_false")]
+        decision_pending: bool,
+        /// Milliseconds the server has to rule before
+        /// `[bridge.barge_in].on_timeout` applies. Present exactly
+        /// when `decision_pending` is `true`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_deadline_ms: Option<u64>,
     },
 
     /// VAD detected the caller stopping speaking.
@@ -287,6 +301,19 @@ pub enum BridgeOut {
     /// two-way audio (0.7.2). Mirror of [`BridgeOut::Held`].
     Resumed { call_id: CallId, seq: Seq },
 
+    /// A pause-mode barge-in arbitration resolved (0.32.0). Emitted for
+    /// **every** resolution — a server verdict, the decision deadline
+    /// (`outcome: "timeout"`, the one case the server can't know about),
+    /// or a preempting command (mute / clear / hold / park / announce /
+    /// conference join, reported as `"confirmed"`). See
+    /// [`BridgeOut::SpeechStarted`]'s `decision_pending` for how an
+    /// arbitration arms.
+    BargeInResolved {
+        call_id: CallId,
+        seq: Seq,
+        outcome: BargeInOutcome,
+    },
+
     /// Last message SiphonAI sends. Followed by a clean WS close (1000).
     Stop {
         call_id: CallId,
@@ -382,6 +409,15 @@ pub struct StartMsg {
     /// servers that predate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_context: Option<TraceContext>,
+    /// The call's resolved barge-in mode (0.32.0) — the per-route merge
+    /// of `[bridge.barge_in]` — so servers/SDKs can tell whether
+    /// pause-mode verdicts ([`BridgeIn::BargeInConfirm`] /
+    /// [`BridgeIn::BargeInReject`]) are expected on this call. Like the
+    /// other post-v1 `start` fields, additive: `skip_serializing_if`
+    /// keeps it off the wire when unset, and a server that ignores it
+    /// behaves exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub barge_in_mode: Option<BargeInModeInfo>,
 }
 
 /// serde `skip_serializing_if` helper — keep `retrieved: false` off the
@@ -516,6 +552,44 @@ pub enum StopReason {
     Error,
 }
 
+/// How a pause-mode barge-in arbitration resolved
+/// ([`BridgeOut::BargeInResolved`], 0.32.0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum BargeInOutcome {
+    /// The speech was a real interruption: the retained playout tail
+    /// was dropped and the bot stays quiet. Reported for server
+    /// [`BridgeIn::BargeInConfirm`] verdicts AND for preempting
+    /// commands that moot the arbitration.
+    Confirmed,
+    /// False positive (cough / backchannel / noise): the retained
+    /// tail was re-queued and playout resumed where it stopped.
+    Rejected,
+    /// No verdict arrived within the decision window;
+    /// `[bridge.barge_in].on_timeout` was applied.
+    Timeout,
+}
+
+/// The call's resolved barge-in mode, announced on
+/// [`StartMsg::barge_in_mode`] (0.32.0) so servers and SDKs can tell
+/// whether pause-mode verdicts are expected without out-of-band config
+/// agreement. Wire values match `[bridge.barge_in].mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum BargeInModeInfo {
+    /// SiphonAI flushes playout itself on `speech_started`.
+    AutoClear,
+    /// Events only; the server drives `clear` if it wants a flush.
+    /// Also announced when `[bridge.barge_in].enabled = false`.
+    NotifyOnly,
+    /// Reversible barge-in: `speech_started` may arm an arbitration
+    /// (`decision_pending: true`) the server rules on via
+    /// [`BridgeIn::BargeInConfirm`] / [`BridgeIn::BargeInReject`].
+    Pause,
+}
+
 /// Why a [`BridgeOut::ConferenceLeft`] fired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -631,6 +705,23 @@ pub enum BridgeIn {
     /// Resume AI-side playout after a [`BridgeIn::Mute`]. A no-op
     /// if the call is not muted.
     Unmute { call_id: CallId },
+
+    /// Verdict on a pending pause-mode barge-in arbitration (0.32.0,
+    /// `[bridge.barge_in].mode = "pause"`): the caller's speech was a
+    /// real interruption — drop the retained playout tail and stay
+    /// quiet. Audio the server streamed since the pause plays
+    /// immediately. A no-op when no arbitration is pending (verdicts
+    /// race with the deadline by nature, so a late one must be
+    /// harmless). A [`BridgeIn::Clear`] during a pending arbitration
+    /// has the same effect.
+    BargeInConfirm { call_id: CallId },
+
+    /// Verdict: the speech was a false positive (cough / backchannel /
+    /// noise) — re-queue the retained tail and resume playout where it
+    /// stopped (0.32.0). Same no-op semantics as
+    /// [`BridgeIn::BargeInConfirm`]. SiphonAI replies with
+    /// [`BridgeOut::BargeInResolved`] either way.
+    BargeInReject { call_id: CallId },
 
     /// Begin recording this call (when `[recording].mode = "on_demand"`).
     /// No-op if recording is off for the call or already in progress.
@@ -830,6 +921,29 @@ mod tests {
     }
 
     #[test]
+    fn bridge_out_start_with_barge_in_mode() {
+        // 0.32.0: the resolved barge-in policy rides on `start` —
+        // additive, absent on the legacy shape (tests above).
+        let raw = r#"{
+          "type": "start",
+          "version": "1",
+          "call_id": "siphon-7f3a9b21",
+          "seq": 0,
+          "from": "+13125551212",
+          "to": "5000",
+          "direction": "inbound",
+          "audio": { "encoding": "pcm16le", "sample_rate": 8000, "channels": 1, "frame_ms": 20 },
+          "sip": { "call_id": "abc123@pbx.example.com", "headers": {} },
+          "barge_in_mode": "pause"
+        }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        let BridgeOut::Start(start) = msg else {
+            panic!("expected Start variant");
+        };
+        assert_eq!(start.barge_in_mode, Some(BargeInModeInfo::Pause));
+    }
+
+    #[test]
     fn bridge_out_start_omits_headers_when_absent() {
         // sip.headers is optional; missing in JSON → empty map.
         let raw = r#"{
@@ -856,8 +970,57 @@ mod tests {
         let msg: BridgeOut = assert_round_trip(raw);
         assert!(matches!(
             msg,
-            BridgeOut::SpeechStarted { ref call_id, seq: 42, ts_ms: 1234 } if call_id.as_str() == "c"
+            BridgeOut::SpeechStarted { ref call_id, seq: 42, ts_ms: 1234, .. } if call_id.as_str() == "c"
         ));
+    }
+
+    #[test]
+    fn bridge_out_speech_started_with_pending_decision() {
+        // Pause mode (0.32.0): the event doubles as the arbitration
+        // request. The legacy shape (test above) must stay byte-stable —
+        // both fields are skip_serializing_if.
+        let raw = r#"{ "type": "speech_started", "call_id": "c", "seq": 42, "ts_ms": 1234, "decision_pending": true, "decision_deadline_ms": 500 }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        assert!(matches!(
+            msg,
+            BridgeOut::SpeechStarted {
+                decision_pending: true,
+                decision_deadline_ms: Some(500),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bridge_out_barge_in_resolved() {
+        for (raw, expect) in [
+            (
+                r#"{ "type": "barge_in_resolved", "call_id": "c", "seq": 44, "outcome": "confirmed" }"#,
+                BargeInOutcome::Confirmed,
+            ),
+            (
+                r#"{ "type": "barge_in_resolved", "call_id": "c", "seq": 45, "outcome": "rejected" }"#,
+                BargeInOutcome::Rejected,
+            ),
+            (
+                r#"{ "type": "barge_in_resolved", "call_id": "c", "seq": 46, "outcome": "timeout" }"#,
+                BargeInOutcome::Timeout,
+            ),
+        ] {
+            let msg: BridgeOut = assert_round_trip(raw);
+            let BridgeOut::BargeInResolved { outcome, .. } = msg else {
+                panic!("expected BargeInResolved");
+            };
+            assert_eq!(outcome, expect);
+        }
+    }
+
+    #[test]
+    fn bridge_in_barge_in_verdicts() {
+        let msg: BridgeIn = assert_round_trip(r#"{ "type": "barge_in_confirm", "call_id": "c" }"#);
+        assert!(matches!(msg, BridgeIn::BargeInConfirm { .. }));
+        let msg: BridgeIn = assert_round_trip(r#"{ "type": "barge_in_reject", "call_id": "c" }"#);
+        assert!(matches!(msg, BridgeIn::BargeInReject { .. }));
     }
 
     #[test]
@@ -1446,6 +1609,7 @@ mod tests {
             retrieved: false,
             reconnected: false,
             trace_context: None,
+            barge_in_mode: None,
         };
         let v = serde_json::to_value(&start_false).unwrap();
         assert!(
@@ -1493,6 +1657,7 @@ mod tests {
             retrieved: false,
             reconnected: false,
             trace_context: None,
+            barge_in_mode: None,
         };
         let v = serde_json::to_value(&base).unwrap();
         assert!(
@@ -1672,6 +1837,7 @@ mod tests {
             retrieved: false,
             reconnected: false,
             trace_context: None,
+            barge_in_mode: None,
         });
         let v: Value = serde_json::to_value(&start).unwrap();
         let obj = v.as_object().unwrap();
@@ -1730,6 +1896,7 @@ mod tests {
                 retrieved: false,
                 reconnected: false,
                 trace_context: None,
+                barge_in_mode: None,
             })
         };
 
@@ -1793,6 +1960,7 @@ mod tests {
                 retrieved: false,
                 reconnected: false,
                 trace_context,
+                barge_in_mode: None,
             })
         };
 
@@ -1869,6 +2037,7 @@ mod tests {
                 retrieved: false,
                 reconnected: false,
                 trace_context: None,
+                barge_in_mode: None,
             })
         };
 

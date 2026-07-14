@@ -131,6 +131,20 @@ export class Call implements AsyncIterable<CallItem> {
     this.command({ type: "send_dtmf", digit, duration_ms: durationMs });
   }
 
+  /** Verdict on a pending pause-mode barge-in arbitration (0.32.0): the
+   * speech was a real interruption — the daemon drops the retained
+   * playout tail. A no-op when no arbitration is pending. */
+  bargeInConfirm(): void {
+    this.command({ type: "barge_in_confirm" });
+  }
+
+  /** Verdict on a pending pause-mode barge-in arbitration (0.32.0):
+   * false positive — playout resumes where it stopped. A no-op when no
+   * arbitration is pending. */
+  bargeInReject(): void {
+    this.command({ type: "barge_in_reject" });
+  }
+
   mute(): void {
     this.command({ type: "mute" });
   }

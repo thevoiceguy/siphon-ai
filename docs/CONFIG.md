@@ -197,8 +197,11 @@ mode = "session_progress"
 | Field         | Type   | Default       | Notes |
 |---------------|--------|---------------|-------|
 | `enabled`     | bool   | `true`        | When `false`, VAD events still flow but `mode` degrades to `notify_only`. |
-| `mode`        | `"auto_clear" \| "notify_only"` | `"auto_clear"` | `auto_clear` drops pending playout the moment forge-vad reports speech. |
-| `debounce_ms` | integer | `0` (off) | **Playout-gated barge-in debounce (0.7.x).** While the bot is playing out, a speech-started is held for this many ms and only flushes if speech *sustains* past it — an echo / brief-background-noise gate. Crucially it does **not** delay barge-in while the bot is silent, so a caller interrupting between bot phrases is still instant. `0`/unset = off (immediate flush, the original behaviour). Only affects `auto_clear`. Start around `150`–`250` if the bot is hearing its own echo or background noise as barge-in. Per-route override via `[route.bridge.barge_in].debounce_ms`. |
+| `mode`        | `"auto_clear" \| "notify_only" \| "pause"` | `"auto_clear"` | `auto_clear` drops pending playout the moment forge-vad reports speech. `pause` (0.32.0) drops it **reversibly** — the unplayed tail is retained and the WS server rules on intent via `barge_in_confirm`/`barge_in_reject` (PROTOCOL.md §3.2/§4.11); a reject resumes playout where it stopped. Announced to the server on `start.barge_in_mode`. |
+| `debounce_ms` | integer | `0` (off) | **Playout-gated barge-in debounce (0.7.x).** While the bot is playing out, a speech-started is held for this many ms and only flushes if speech *sustains* past it — an echo / brief-background-noise gate. Crucially it does **not** delay barge-in while the bot is silent, so a caller interrupting between bot phrases is still instant. `0`/unset = off (immediate flush, the original behaviour). Affects `auto_clear` and `pause` (the acoustic gate runs in front of the semantic arbitration — they compose). Start around `150`–`250` if the bot is hearing its own echo or background noise as barge-in. Per-route override via `[route.bridge.barge_in].debounce_ms`. |
+| `decision_ms` | integer | `500` | **Pause mode only** (rejected under any other mode; `0` rejected). How long the server has to send a verdict before `on_timeout` applies. 500 ms covers STT-partial latency for the major engines; raise it if your server's first partial routinely takes longer. Per-route override via `[route.bridge.barge_in].decision_ms`. |
+| `on_timeout` | `"confirm" \| "reject"` | `"confirm"` | **Pause mode only.** Fallback verdict at the deadline. `confirm` fails toward silence (never talk over the caller) — a server that ignores arbitration entirely thereby degrades to "auto_clear delayed by `decision_ms`". `reject` fails toward resuming playout. |
+| `resume_max_secs` | integer | `30` | **Pause mode only** (`0` rejected). Cap on retained (resumable) audio per call — memory ceiling ≈ `secs × sample_rate × 2` bytes. A single utterance longer than this loses its oldest unplayed frames on a reject (warned once per call). |
 
 > **When to use `debounce_ms`.** If the bot stops talking because it hears
 > its own audio echoed back (poor far-end echo cancellation) or background
@@ -208,6 +211,18 @@ mode = "session_progress"
 > echo cancellation: a caller who genuinely interrupts *during* bot speech
 > waits up to `debounce_ms` before the bot yields. For full-duplex
 > interruption with no trade-off, server-side AEC is the proper fix.
+
+> **When to use `mode = "pause"` (0.32.0).** If false barge-ins are
+> *speech-shaped* — coughs, laughs, backchannels ("uh-huh") that debounce
+> can't filter — pause mode lets the layer that actually has STT decide,
+> while keeping the reaction instant and reversible: the bot goes quiet
+> within one frame, and a `barge_in_reject` resumes it mid-utterance. A
+> false positive then costs a sub-second dip instead of a killed
+> utterance. Requires a WS server that sends verdicts (SDKs ≥ 0.32.0
+> expose `barge_in_confirm()` / `barge_in_reject()`); a server that
+> never rules degrades safely via `on_timeout`. Arbitration is suspended
+> inside conference rooms (behaves as `notify_only` there). See
+> `docs/design/DESIGN_REVERSIBLE_BARGE_IN.md` for the full model.
 
 ### `[bridge.tls]` (0.3.0+)
 

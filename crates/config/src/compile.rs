@@ -767,8 +767,33 @@ pub enum CompileError {
     )]
     UnknownCallProgressMode(String),
 
-    #[error("[bridge.barge_in].mode is {0:?}; expected \"auto_clear\" or \"notify_only\"")]
+    #[error(
+        "[bridge.barge_in].mode is {0:?}; expected \"auto_clear\", \"notify_only\", or \"pause\""
+    )]
     UnknownBargeInMode(String),
+
+    #[error("[bridge.barge_in].on_timeout is {0:?}; expected \"confirm\" or \"reject\"")]
+    UnknownBargeInTimeout(String),
+
+    #[error(
+        "[bridge.barge_in].{field} is 0; pause-mode barge-in needs a positive value \
+         (an unbounded pause would hang playout on a lost verdict)"
+    )]
+    BargeInZero { field: &'static str },
+
+    #[error(
+        "[bridge.barge_in].{field} is set but the effective mode is {mode:?}; \
+         decision_ms / on_timeout / resume_max_secs only apply to mode = \"pause\""
+    )]
+    BargeInFieldWithoutPause { field: &'static str, mode: String },
+
+    #[error(
+        "route {route:?} [bridge.barge_in].{problem} — \
+         expected \"auto_clear\", \"notify_only\", or \"pause\" for mode, \
+         \"confirm\" or \"reject\" for on_timeout, and positive pause values \
+         only on a route whose effective mode is \"pause\""
+    )]
+    RouteBadBargeIn { route: String, problem: String },
 
     #[error(
         "ws_reconnect_max_secs must be > 0 when ws_reconnect_enabled = true \
@@ -1203,6 +1228,63 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
                 return Err(CompileError::RouteRecordingWithoutDir {
                     route: route.name.clone(),
                 });
+            }
+        }
+    }
+
+    // Route barge-in overrides (0.32.0). The acceptor's runtime merge
+    // silently skips unparseable strings, so a typo would otherwise be
+    // an inert key — validate here, where the global mode is in scope
+    // for the effective-mode check on the pause-only fields.
+    for route in routes.iter() {
+        let b = &route.bridge.barge_in;
+        let route_mode = match b.mode.as_deref() {
+            None => None,
+            Some(m) => match parse_barge_in_mode(m) {
+                Ok(parsed) => Some(parsed),
+                Err(_) => {
+                    return Err(CompileError::RouteBadBargeIn {
+                        route: route.name.clone(),
+                        problem: format!("mode is {m:?}"),
+                    });
+                }
+            },
+        };
+        if let Some(v) = b.on_timeout.as_deref() {
+            if parse_barge_in_timeout(v).is_err() {
+                return Err(CompileError::RouteBadBargeIn {
+                    route: route.name.clone(),
+                    problem: format!("on_timeout is {v:?}"),
+                });
+            }
+        }
+        for (field, value) in [
+            ("decision_ms", b.decision_ms),
+            ("resume_max_secs", b.resume_max_secs),
+        ] {
+            if value == Some(0) {
+                return Err(CompileError::RouteBadBargeIn {
+                    route: route.name.clone(),
+                    problem: format!("{field} is 0"),
+                });
+            }
+        }
+        let effective = route_mode.unwrap_or(bridge_defaults.barge_in.mode);
+        if effective != siphon_ai_core::BargeInMode::Pause {
+            for (field, set) in [
+                ("decision_ms", b.decision_ms.is_some()),
+                ("on_timeout", b.on_timeout.is_some()),
+                ("resume_max_secs", b.resume_max_secs.is_some()),
+            ] {
+                if set {
+                    return Err(CompileError::RouteBadBargeIn {
+                        route: route.name.clone(),
+                        problem: format!(
+                            "{field} is set but the route's effective mode is {:?}",
+                            mode_label(effective)
+                        ),
+                    });
+                }
             }
         }
     }
@@ -2185,14 +2267,72 @@ fn compile_barge_in_default(
         // 0 = explicitly off; any positive value arms the playout gate.
         cfg.debounce = (ms > 0).then(|| std::time::Duration::from_millis(ms));
     }
+    // Pause-mode knobs (0.32.0). Setting them under any other mode is a
+    // config mistake the operator should hear about at startup, not a
+    // silently inert key (CLAUDE.md §4.6 fail-loud rule).
+    let is_pause = cfg.mode == siphon_ai_core::BargeInMode::Pause;
+    if let Some(ms) = raw.decision_ms {
+        if !is_pause {
+            return Err(CompileError::BargeInFieldWithoutPause {
+                field: "decision_ms",
+                mode: mode_label(cfg.mode).into(),
+            });
+        }
+        if ms == 0 {
+            return Err(CompileError::BargeInZero {
+                field: "decision_ms",
+            });
+        }
+        cfg.decision = std::time::Duration::from_millis(ms);
+    }
+    if let Some(v) = raw.on_timeout.as_deref() {
+        if !is_pause {
+            return Err(CompileError::BargeInFieldWithoutPause {
+                field: "on_timeout",
+                mode: mode_label(cfg.mode).into(),
+            });
+        }
+        cfg.on_timeout = parse_barge_in_timeout(v)?;
+    }
+    if let Some(secs) = raw.resume_max_secs {
+        if !is_pause {
+            return Err(CompileError::BargeInFieldWithoutPause {
+                field: "resume_max_secs",
+                mode: mode_label(cfg.mode).into(),
+            });
+        }
+        if secs == 0 {
+            return Err(CompileError::BargeInZero {
+                field: "resume_max_secs",
+            });
+        }
+        cfg.resume_max = std::time::Duration::from_secs(secs);
+    }
     Ok(cfg)
+}
+
+fn mode_label(mode: siphon_ai_core::BargeInMode) -> &'static str {
+    match mode {
+        siphon_ai_core::BargeInMode::AutoClear => "auto_clear",
+        siphon_ai_core::BargeInMode::NotifyOnly => "notify_only",
+        siphon_ai_core::BargeInMode::Pause => "pause",
+    }
 }
 
 fn parse_barge_in_mode(s: &str) -> Result<siphon_ai_core::BargeInMode, CompileError> {
     match s {
         "auto_clear" => Ok(siphon_ai_core::BargeInMode::AutoClear),
         "notify_only" => Ok(siphon_ai_core::BargeInMode::NotifyOnly),
+        "pause" => Ok(siphon_ai_core::BargeInMode::Pause),
         other => Err(CompileError::UnknownBargeInMode(other.to_string())),
+    }
+}
+
+fn parse_barge_in_timeout(s: &str) -> Result<siphon_ai_core::BargeInTimeout, CompileError> {
+    match s {
+        "confirm" => Ok(siphon_ai_core::BargeInTimeout::Confirm),
+        "reject" => Ok(siphon_ai_core::BargeInTimeout::Reject),
+        other => Err(CompileError::UnknownBargeInTimeout(other.to_string())),
     }
 }
 
@@ -3123,6 +3263,104 @@ mod barge_in_tests {
             compile_barge_in_default(&raw).unwrap().debounce,
             Some(Duration::from_millis(200))
         );
+    }
+
+    #[test]
+    fn pause_mode_parses_with_defaults() {
+        let raw = RawBargeIn {
+            mode: Some("pause".into()),
+            ..Default::default()
+        };
+        let cfg = compile_barge_in_default(&raw).unwrap();
+        assert_eq!(cfg.mode, siphon_ai_core::BargeInMode::Pause);
+        // Locked defaults (design note §11.3 / §11.9).
+        assert_eq!(cfg.decision, Duration::from_millis(500));
+        assert_eq!(cfg.on_timeout, siphon_ai_core::BargeInTimeout::Confirm);
+        assert_eq!(cfg.resume_max, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn pause_fields_parse_under_pause_mode() {
+        let raw = RawBargeIn {
+            mode: Some("pause".into()),
+            decision_ms: Some(300),
+            on_timeout: Some("reject".into()),
+            resume_max_secs: Some(10),
+            ..Default::default()
+        };
+        let cfg = compile_barge_in_default(&raw).unwrap();
+        assert_eq!(cfg.decision, Duration::from_millis(300));
+        assert_eq!(cfg.on_timeout, siphon_ai_core::BargeInTimeout::Reject);
+        assert_eq!(cfg.resume_max, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn pause_fields_without_pause_mode_fail_loud() {
+        for raw in [
+            RawBargeIn {
+                decision_ms: Some(300),
+                ..Default::default()
+            },
+            RawBargeIn {
+                mode: Some("notify_only".into()),
+                on_timeout: Some("confirm".into()),
+                ..Default::default()
+            },
+            RawBargeIn {
+                mode: Some("auto_clear".into()),
+                resume_max_secs: Some(10),
+                ..Default::default()
+            },
+        ] {
+            let err = compile_barge_in_default(&raw).unwrap_err();
+            assert!(
+                matches!(err, super::CompileError::BargeInFieldWithoutPause { .. }),
+                "expected BargeInFieldWithoutPause, got {err:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn pause_zero_values_fail_loud() {
+        for raw in [
+            RawBargeIn {
+                mode: Some("pause".into()),
+                decision_ms: Some(0),
+                ..Default::default()
+            },
+            RawBargeIn {
+                mode: Some("pause".into()),
+                resume_max_secs: Some(0),
+                ..Default::default()
+            },
+        ] {
+            let err = compile_barge_in_default(&raw).unwrap_err();
+            assert!(
+                matches!(err, super::CompileError::BargeInZero { .. }),
+                "expected BargeInZero, got {err:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_mode_and_timeout_error() {
+        let raw = RawBargeIn {
+            mode: Some("pause_mode".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            compile_barge_in_default(&raw).unwrap_err(),
+            super::CompileError::UnknownBargeInMode(_)
+        ));
+        let raw = RawBargeIn {
+            mode: Some("pause".into()),
+            on_timeout: Some("resume".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            compile_barge_in_default(&raw).unwrap_err(),
+            super::CompileError::UnknownBargeInTimeout(_)
+        ));
     }
 }
 

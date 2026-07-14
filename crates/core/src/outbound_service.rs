@@ -324,6 +324,9 @@ impl OutboundOriginateHandle for OutboundService {
             }),
         };
         let recording_upload = self.recording_upload.clone();
+        // Announced on `start.barge_in_mode` (0.32.0); extracted before
+        // the spawn like the reconnect defaults (no `self` inside).
+        let barge_in_mode = crate::acceptor::barge_in_mode_info(&self.defaults.barge_in);
 
         info!(call_id = %bridge_id_str, gateway = %gateway, "originating outbound call");
         let log_id = bridge_id_str.clone();
@@ -367,6 +370,7 @@ impl OutboundOriginateHandle for OutboundService {
                         ws_reconnect_moh_file,
                         recording_setup,
                         recording_upload,
+                        barge_in_mode,
                     };
                     run_call(originator, call, bridge, ctx).await;
                 }
@@ -447,6 +451,9 @@ struct OutboundCallContext {
     recording_setup: Option<RecordingSetup>,
     /// `[recording.storage]` upload settings for the teardown enqueue.
     recording_upload: Option<std::sync::Arc<siphon_ai_http::upload::UploadSettings>>,
+    /// Resolved barge-in announcement for `start.barge_in_mode` (0.32.0)
+    /// — outbound legs use the daemon `[bridge]` defaults (no route).
+    barge_in_mode: siphon_ai_bridge::BargeInModeInfo,
 }
 
 /// Run an answered outbound call's audio bridge to completion, tear it
@@ -515,6 +522,7 @@ async fn run_call(
         &sip_call_id,
         &accepted.answer,
         srtp_info,
+        ctx.barge_in_mode,
     );
     // Outbound legs are transferable too (DEV_PLAN_0.6.1 §2.4): the
     // bot can consult an agent and hand this callee off. The REFER
@@ -723,6 +731,7 @@ mod tests {
             ws_reconnect_moh_file: None,
             recording_setup: None,
             recording_upload: None,
+            barge_in_mode: siphon_ai_bridge::BargeInModeInfo::AutoClear,
         };
         let view = CallTerminationView {
             cause: CdrTerminationCause::ServerHangup,

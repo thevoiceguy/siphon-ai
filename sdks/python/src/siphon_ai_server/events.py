@@ -24,6 +24,7 @@ __all__ = [
     "Start",
     "SpeechStarted",
     "SpeechStopped",
+    "BargeInResolved",
     "FarEndHold",
     "FarEndResume",
     "SilenceDetected",
@@ -107,6 +108,11 @@ class Start:
     trace_context: TraceContext | None = None
     retrieved: bool = False
     reconnected: bool = False
+    # The call's resolved barge-in policy (0.32.0): "auto_clear",
+    # "notify_only", or "pause". When "pause", `speech_started` may arm an
+    # arbitration this server rules on via `Call.barge_in_confirm()` /
+    # `Call.barge_in_reject()`. Absent from pre-0.32.0 daemons.
+    barge_in_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +121,25 @@ class SpeechStarted:
     call_id: str
     seq: int
     ts_ms: int
+    # True when this event armed a pause-mode barge-in arbitration
+    # (0.32.0): playout is paused with its tail retained, and the daemon
+    # expects `barge_in_confirm`/`barge_in_reject` within
+    # `decision_deadline_ms`. Omitted (False) in every other mode.
+    decision_pending: bool = False
+    # Milliseconds the server has to rule before the daemon's configured
+    # `on_timeout` applies. Present exactly when `decision_pending`.
+    decision_deadline_ms: int | None = None
+
+
+@dataclass(frozen=True)
+class BargeInResolved:
+    """A pause-mode barge-in arbitration resolved (0.32.0). ``outcome`` is
+    ``"confirmed"``, ``"rejected"``, or ``"timeout"``."""
+
+    type = "barge_in_resolved"
+    call_id: str
+    seq: int
+    outcome: str
 
 
 @dataclass(frozen=True)
@@ -314,6 +339,7 @@ Event = Union[
     Start,
     SpeechStarted,
     SpeechStopped,
+    BargeInResolved,
     FarEndHold,
     FarEndResume,
     SilenceDetected,
@@ -339,6 +365,7 @@ _EVENT_TYPES: dict[str, type] = {
     "start": Start,
     "speech_started": SpeechStarted,
     "speech_stopped": SpeechStopped,
+    "barge_in_resolved": BargeInResolved,
     "hold": FarEndHold,
     "resume": FarEndResume,
     "silence_detected": SilenceDetected,

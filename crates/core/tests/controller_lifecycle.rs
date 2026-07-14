@@ -59,6 +59,7 @@ fn start_msg(call_id: &str) -> StartMsg {
         retrieved: false,
         reconnected: false,
         trace_context: None,
+        barge_in_mode: None,
     }
 }
 

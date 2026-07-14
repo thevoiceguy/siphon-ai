@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 from dataclasses import dataclass
@@ -37,8 +38,10 @@ except ImportError:  # pragma: no cover
 
 from siphon_ai_server import (  # noqa: E402
     AudioFrame,
+    BargeInResolved,
     Call,
     SiphonServer,
+    SpeechStarted,
     Start,
     Stop,
     UnknownEvent,
@@ -177,6 +180,28 @@ async def handle(call: Call, opts: Options) -> None:
                     bytes_echoed,
                     start.call_id,
                 )
+        elif isinstance(item, SpeechStarted) and item.decision_pending:
+            # Pause-mode barge-in arbitration (0.32.0). An echo server
+            # never wants to stop echoing, so reject the barge-in —
+            # unless the harness asks for a confirm via
+            # SIPHON_ECHO_BARGE_IN_VERDICT=confirm.
+            verdict = os.environ.get("SIPHON_ECHO_BARGE_IN_VERDICT", "reject")
+            if verdict == "confirm":
+                await call.barge_in_confirm()
+            else:
+                await call.barge_in_reject()
+            LOG.info(
+                "speech_started call_id=%s decision_pending deadline_ms=%s verdict=%s",
+                start.call_id,
+                item.decision_deadline_ms,
+                verdict,
+            )
+        elif isinstance(item, BargeInResolved):
+            LOG.info(
+                "barge_in_resolved call_id=%s outcome=%s",
+                start.call_id,
+                item.outcome,
+            )
         elif isinstance(item, Stop):
             LOG.info("stop call_id=%s reason=%s", start.call_id, item.reason)
             break

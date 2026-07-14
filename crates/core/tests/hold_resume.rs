@@ -106,6 +106,7 @@ async fn push_bridge_event_emits_hold_and_resume_on_ws() {
             retrieved: false,
             reconnected: false,
             trace_context: None,
+            barge_in_mode: None,
         },
         media_tap: tap,
         transfer: None,

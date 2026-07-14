@@ -45,11 +45,40 @@ export interface Start extends Base {
   trace_context?: TraceContext;
   retrieved?: boolean;
   reconnected?: boolean;
+  /**
+   * The call's resolved barge-in policy (0.32.0). When `"pause"`,
+   * `speech_started` may arm an arbitration this server rules on via
+   * `call.bargeInConfirm()` / `call.bargeInReject()`. Absent from
+   * pre-0.32.0 daemons.
+   */
+  barge_in_mode?: "auto_clear" | "notify_only" | "pause";
 }
 
 export interface SpeechStarted extends Base {
   type: "speech_started";
   ts_ms: number;
+  /**
+   * `true` when this event armed a pause-mode barge-in arbitration
+   * (0.32.0): playout is paused with its tail retained, and the daemon
+   * expects `barge_in_confirm`/`barge_in_reject` within
+   * `decision_deadline_ms`. Omitted (`false`) in every other mode.
+   */
+  decision_pending?: boolean;
+  /**
+   * Milliseconds the server has to rule before the daemon's configured
+   * `on_timeout` applies. Present exactly when `decision_pending`.
+   */
+  decision_deadline_ms?: number;
+}
+
+/**
+ * A pause-mode barge-in arbitration resolved (0.32.0) — emitted for
+ * every resolution: a server verdict, the decision deadline, or a
+ * preempting command.
+ */
+export interface BargeInResolved extends Base {
+  type: "barge_in_resolved";
+  outcome: "confirmed" | "rejected" | "timeout";
 }
 
 export interface SpeechStopped extends Base {
@@ -182,6 +211,7 @@ export type BridgeEvent =
   | Start
   | SpeechStarted
   | SpeechStopped
+  | BargeInResolved
   | FarEndHold
   | FarEndResume
   | SilenceDetected
@@ -206,6 +236,7 @@ export const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set([
   "start",
   "speech_started",
   "speech_stopped",
+  "barge_in_resolved",
   "hold",
   "resume",
   "silence_detected",

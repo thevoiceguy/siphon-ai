@@ -117,6 +117,8 @@ test("every command the SDK can emit validates against $defs/BridgeIn", () => {
     { type: "conference_leave" },
     { type: "hold" },
     { type: "resume" },
+    { type: "barge_in_confirm" },
+    { type: "barge_in_reject" },
   ];
   const emitted = new Set<string>();
   for (const msg of commands) {
@@ -128,6 +130,30 @@ test("every command the SDK can emit validates against $defs/BridgeIn", () => {
     emitted.add(msg.type as string);
   }
   assert.deepEqual(emitted, bridgeInTypes, "must exercise every BridgeIn command");
+});
+
+test("pause-mode barge-in shapes parse typed (0.32.0)", () => {
+  // Pre-0.32.0 speech_started shape: decision fields simply absent.
+  const plain = parseEvent(
+    '{"type":"speech_started","call_id":"c","seq":4,"ts_ms":1234}',
+  );
+  assert.equal(plain.type, "speech_started");
+  assert.ok(plain.type === "speech_started" && !plain.decision_pending);
+
+  const armed = parseEvent(
+    '{"type":"speech_started","call_id":"c","seq":5,"ts_ms":1300,"decision_pending":true,"decision_deadline_ms":500}',
+  );
+  assert.ok(armed.type === "speech_started");
+  assert.equal(armed.decision_pending, true);
+  assert.equal(armed.decision_deadline_ms, 500);
+
+  for (const outcome of ["confirmed", "rejected", "timeout"]) {
+    const resolved = parseEvent(
+      `{"type":"barge_in_resolved","call_id":"c","seq":6,"outcome":"${outcome}"}`,
+    );
+    assert.ok(resolved.type === "barge_in_resolved");
+    assert.equal(resolved.outcome, outcome);
+  }
 });
 
 test("unknown type wraps, unknown fields pass through, malformed throws", () => {

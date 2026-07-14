@@ -60,6 +60,46 @@
       ],
       "type": "object"
     },
+    "BargeInModeInfo": {
+      "description": "The call's resolved barge-in mode, announced on\n[`StartMsg::barge_in_mode`] (0.32.0) so servers and SDKs can tell\nwhether pause-mode verdicts are expected without out-of-band config\nagreement. Wire values match `[bridge.barge_in].mode`.",
+      "oneOf": [
+        {
+          "const": "auto_clear",
+          "description": "SiphonAI flushes playout itself on `speech_started`.",
+          "type": "string"
+        },
+        {
+          "const": "notify_only",
+          "description": "Events only; the server drives `clear` if it wants a flush.\nAlso announced when `[bridge.barge_in].enabled = false`.",
+          "type": "string"
+        },
+        {
+          "const": "pause",
+          "description": "Reversible barge-in: `speech_started` may arm an arbitration\n(`decision_pending: true`) the server rules on via\n[`BridgeIn::BargeInConfirm`] / [`BridgeIn::BargeInReject`].",
+          "type": "string"
+        }
+      ]
+    },
+    "BargeInOutcome": {
+      "description": "How a pause-mode barge-in arbitration resolved\n([`BridgeOut::BargeInResolved`], 0.32.0).",
+      "oneOf": [
+        {
+          "const": "confirmed",
+          "description": "The speech was a real interruption: the retained playout tail\nwas dropped and the bot stays quiet. Reported for server\n[`BridgeIn::BargeInConfirm`] verdicts AND for preempting\ncommands that moot the arbitration.",
+          "type": "string"
+        },
+        {
+          "const": "rejected",
+          "description": "False positive (cough / backchannel / noise): the retained\ntail was re-queued and playout resumed where it stopped.",
+          "type": "string"
+        },
+        {
+          "const": "timeout",
+          "description": "No verdict arrived within the decision window;\n`[bridge.barge_in].on_timeout` was applied.",
+          "type": "string"
+        }
+      ]
+    },
     "BridgeIn": {
       "description": "Messages a WebSocket server sends to SiphonAI.\n\nServers MUST include `call_id` matching the value SiphonAI sent in\n`start`. Servers MUST NOT include `seq`.",
       "oneOf": [
@@ -210,6 +250,40 @@
             },
             "type": {
               "const": "unmute",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Verdict on a pending pause-mode barge-in arbitration (0.32.0,\n`[bridge.barge_in].mode = \"pause\"`): the caller's speech was a\nreal interruption — drop the retained playout tail and stay\nquiet. Audio the server streamed since the pause plays\nimmediately. A no-op when no arbitration is pending (verdicts\nrace with the deadline by nature, so a late one must be\nharmless). A [`BridgeIn::Clear`] during a pending arbitration\nhas the same effect.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "type": {
+              "const": "barge_in_confirm",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Verdict: the speech was a false positive (cough / backchannel /\nnoise) — re-queue the retained tail and resume playout where it\nstopped (0.32.0). Same no-op semantics as\n[`BridgeIn::BargeInConfirm`]. SiphonAI replies with\n[`BridgeOut::BargeInResolved`] either way.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "type": {
+              "const": "barge_in_reject",
               "type": "string"
             }
           },
@@ -430,6 +504,19 @@
           "properties": {
             "call_id": {
               "$ref": "#/$defs/CallId"
+            },
+            "decision_deadline_ms": {
+              "description": "Milliseconds the server has to rule before\n`[bridge.barge_in].on_timeout` applies. Present exactly\nwhen `decision_pending` is `true`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "decision_pending": {
+              "description": "`true` when this event armed a pause-mode barge-in\narbitration (0.32.0, `[bridge.barge_in].mode = \"pause\"`):\nplayout is paused with its tail retained, and SiphonAI\nexpects [`BridgeIn::BargeInConfirm`] /\n[`BridgeIn::BargeInReject`] within `decision_deadline_ms`.\nAdditive — omitted (and `false`) in every other mode, so\npre-0.32.0 servers see the exact shape they always saw.",
+              "type": "boolean"
             },
             "seq": {
               "format": "uint64",
@@ -1024,6 +1111,33 @@
           "type": "object"
         },
         {
+          "description": "A pause-mode barge-in arbitration resolved (0.32.0). Emitted for\n**every** resolution — a server verdict, the decision deadline\n(`outcome: \"timeout\"`, the one case the server can't know about),\nor a preempting command (mute / clear / hold / park / announce /\nconference join, reported as `\"confirmed\"`). See\n[`BridgeOut::SpeechStarted`]'s `decision_pending` for how an\narbitration arms.",
+          "properties": {
+            "call_id": {
+              "$ref": "#/$defs/CallId"
+            },
+            "outcome": {
+              "$ref": "#/$defs/BargeInOutcome"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "barge_in_resolved",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "call_id",
+            "seq",
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
           "description": "Last message SiphonAI sends. Followed by a clean WS close (1000).",
           "properties": {
             "call_id": {
@@ -1237,6 +1351,17 @@
       "properties": {
         "audio": {
           "$ref": "#/$defs/AudioFormat"
+        },
+        "barge_in_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BargeInModeInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The call's resolved barge-in mode (0.32.0) — the per-route merge\nof `[bridge.barge_in]` — so servers/SDKs can tell whether\npause-mode verdicts ([`BridgeIn::BargeInConfirm`] /\n[`BridgeIn::BargeInReject`]) are expected on this call. Like the\nother post-v1 `start` fields, additive: `skip_serializing_if`\nkeeps it off the wire when unset, and a server that ignores it\nbehaves exactly as before."
         },
         "call_id": {
           "$ref": "#/$defs/CallId"

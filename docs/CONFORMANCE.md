@@ -53,6 +53,7 @@ PASS: 5 passed, 0 failed — target ws://127.0.0.1:8080/ is conformant with prot
 | `recording-controls` | Recording lifecycle events tolerated; audio path unaffected |
 | `hangup-semantics` | Abrupt drop + `start { reconnected: true }` accepted; `hangup` honored if sent |
 | `keepalive` | Pings answered; session survives idle gaps |
+| `barge-in-pause` | Pause-mode arbitration (0.32.0): a `speech_started` with `decision_pending: true` draws a `barge_in_confirm`/`barge_in_reject` verdict within the deadline (the reference echo servers reject); `barge_in_resolved` outcomes — including an uncaused `timeout` — are tolerated |
 
 The bundled scenarios assume an **echo-shaped** server (it sends audio
 only in response to caller audio) — that's what makes pacing and silence

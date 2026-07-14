@@ -30,6 +30,7 @@ from .call import Call
 from .events import (
     AudioFormat,
     AudioFrame,
+    BargeInResolved,
     ConferenceJoined,
     ConferenceLeft,
     DeadAirDetected,
@@ -65,6 +66,7 @@ __all__ = [
     "AudioFormat",
     "AudioFrame",
     "AudioSender",
+    "BargeInResolved",
     "Call",
     "ConferenceJoined",
     "ConferenceLeft",

@@ -429,7 +429,7 @@ pub struct MediaTap {
     /// `tap_cmd_tx`), not the audio channels. `false` (default) = the v1
     /// behaviour where a closed WS channel ends the tap. Set by the
     /// acceptor from `[bridge].ws_reconnect_enabled` via
-    /// [`Self::with_ws_reconnect`].
+    /// [`Self::with_survive_ws_drop`].
     survive_ws_drop: bool,
 }
 
@@ -672,7 +672,7 @@ impl MediaTap {
     /// and teardown routes through `commands_rx` closing instead. See
     /// [`Self::survive_ws_drop`]. The acceptor sets this from the call's
     /// resolved `[bridge].ws_reconnect_enabled`.
-    pub fn with_ws_reconnect(mut self, enabled: bool) -> Self {
+    pub fn with_survive_ws_drop(mut self, enabled: bool) -> Self {
         self.survive_ws_drop = enabled;
         self
     }
@@ -1823,14 +1823,27 @@ impl MediaTap {
                             // The prompt preempts playout — pending
                             // arbitration resolves as confirm (§7.2).
                             self.abandon_arbitration(&mut pending_verdict, &events_tx, "announce");
-                            if parked.is_some() || held.is_some() {
-                                // Park/hold owns the caller's ear; skip
-                                // the prompt rather than queue it.
+                            if held.is_some() {
+                                // Hold owns the caller's ear; skip the
+                                // prompt rather than queue it.
                                 debug!(call_id = %self.call_id,
-                                       "announce skipped: call is parked/held");
+                                       "announce skipped: call is held");
                                 let _ = done.send(0);
                             } else {
-                                info!(call_id = %self.call_id, "announcement started");
+                                // Announce-over-park (0.34.0,
+                                // DESIGN_WS_FAILURE_PROMPT.md §3.3): an
+                                // announcement STARTED while parked plays
+                                // — the tick prefers it over MOH until
+                                // EOF (the WS-failure prompt after an
+                                // exhausted reconnect window). The
+                                // reverse order is unchanged: a Park
+                                // arriving mid-announcement still cuts
+                                // it short (consent semantics).
+                                info!(
+                                    call_id = %self.call_id,
+                                    over_moh = parked.is_some(),
+                                    "announcement started",
+                                );
                                 announcing = Some((source, done, 0));
                                 moh_tick.reset();
                             }
@@ -1936,9 +1949,12 @@ impl MediaTap {
                 // per 20 ms into the caller leg. Active in either state;
                 // both share the same MohSource-driven tick.
                 _ = moh_tick.tick(), if parked.is_some() || held.is_some() || announcing.is_some() => {
-                    // Announcement plays only when neither park nor hold
-                    // owns the tick (they preempt it at the command site).
-                    if parked.is_none() && held.is_none() {
+                    // A running announcement owns the tick over parked
+                    // MOH (announce-over-park, 0.34.0 §3.3) — but never
+                    // over hold, whose command site skips announcements
+                    // outright. At announcement EOF a parked call falls
+                    // back to MOH on the next tick.
+                    if held.is_none() && (announcing.is_some() || parked.is_none()) {
                         if let Some((source, _, frames)) = announcing.as_mut() {
                             match source.next_frame() {
                                 Some(samples) => {

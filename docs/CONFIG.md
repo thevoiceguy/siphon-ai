@@ -183,6 +183,8 @@ mode = "session_progress"
 | `server_start_deadline_secs` | integer | `5`     | The WS server must send its first audio frame (or a `hangup`) within this window of `start`, else the call is torn down with `error { code: "server_too_slow" }` (PROTOCOL §3.1/§3.10). Raise it for servers that legitimately need longer to first audio (cold-start LLM/TTS); `0` disables the deadline. Daemon-wide. |
 | `ws_reconnect_enabled`     | bool      | `false`  | Opt-in automatic WS reconnect mid-call (0.7.3). When `true`, an **unexpected** WS drop (server closed the socket without a `hangup`, IO/TLS error, keepalive timeout) keeps the caller on hold music and re-dials the same `ws_url`, resuming on a fresh session (`start.reconnected: true`, PROTOCOL §3.1) instead of tearing the call down (PROTOCOL §5.7). **Note:** to *end* a call with this on, the server sends `hangup` — a bare socket close is treated as a drop and reconnected. Per-route override via `[route.bridge].ws_reconnect_enabled`. |
 | `ws_reconnect_max_secs`    | integer   | `30`     | Total window (seconds) a call may spend reconnecting before falling back to §5.7 teardown — how long the caller hears hold music before SiphonAI gives up. Must be `> 0` when `ws_reconnect_enabled = true` (fail-loud at load). Per-route override via `[route.bridge].ws_reconnect_max_secs`. |
+| `on_ws_failure`            | `"hangup" \| "play_prompt"` | `"hangup"` | What a call does when its WS becomes **unusable** (0.34.0): unexpected drop, connect failure at answer, keepalive timeout, `protocol_error`, `server_too_slow`, or an exhausted reconnect window. `hangup` = immediate teardown (the v1 behaviour). `play_prompt` = play `ws_failure_prompt_file` to the caller first (*"we're experiencing difficulties…"*), then the normal BYE teardown — CDR cause unchanged, `duration_ms` grows by the prompt. Never fires when the server *intended* the ending (`hangup`/clean `stop`), on caller actions, on `rtp_timeout`, or during drain. Previously a per-route-only key accepting `"hangup"` alone; now also the global default. Per-route override via `[route.bridge].on_ws_failure`. |
+| `ws_failure_prompt_file`   | path      | unset    | WAV played by `on_ws_failure = "play_prompt"` — **bridge rate** (8/16 kHz mono, like `[media].moh_file` and the consent announcement; no resampler). Required + existence-checked at load when any effective policy is `play_prompt`; files longer than the 30 s playback cap warn at load. Per-call unusability (e.g. rate mismatch on a 16 kHz call with an 8 kHz file) **fails open** to a plain hangup — the prompt is a courtesy, not compliance. Per-route override via `[route.bridge].ws_failure_prompt_file`. |
 
 > **Detection cadence.** Silence / dead-air events are polled every
 > 500 ms, so the `duration_ms` on the wire may overshoot the
@@ -261,7 +263,7 @@ regex = false                    # per-route flag; on means every string value i
 [route.bridge]
 ws_url = "wss://reception.example.com/sip-bridge"
 ws_auth_header = "Bearer ${BRIDGE_TOKEN_RECEPTION}"
-on_ws_failure = "hangup"         # v1 only supports "hangup"
+on_ws_failure = "hangup"         # or "play_prompt" (0.34.0) — see [bridge].on_ws_failure
 [route.media]
 codecs = ["pcma", "pcmu"]        # override the global priority for this route
 dtmf = "off"

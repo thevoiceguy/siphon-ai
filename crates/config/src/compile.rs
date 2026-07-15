@@ -754,9 +754,21 @@ pub enum CompileError {
 
     #[error(
         "route {route:?} sets [route.bridge].on_ws_failure = {value:?}; expected \
-         \"hangup\" (play_prompt is post-v1)"
+         \"hangup\" or \"play_prompt\""
     )]
     UnknownOnWsFailure { route: String, value: String },
+
+    #[error("[bridge].on_ws_failure is {0:?}; expected \"hangup\" or \"play_prompt\"")]
+    UnknownGlobalOnWsFailure(String),
+
+    #[error(
+        "{scope} resolves on_ws_failure = \"play_prompt\" but no \
+         ws_failure_prompt_file is set (route override or [bridge] default)"
+    )]
+    WsFailurePromptFileRequired { scope: String },
+
+    #[error("ws_failure_prompt_file {path:?} does not exist or is unreadable: {err}")]
+    WsFailurePromptFileMissing { path: String, err: String },
 
     #[error("[media].dtmf is {0:?}; expected \"rfc2833\" or \"off\"")]
     UnknownDtmfMode(String),
@@ -1285,6 +1297,65 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
                         ),
                     });
                 }
+            }
+        }
+    }
+
+    // WS-failure prompt cross-check (0.34.0): wherever the *effective*
+    // policy is play_prompt, the *effective* prompt file must be set
+    // and exist — fail loud at startup, not on the first failing call
+    // (CLAUDE.md §4.6). Files longer than the 30 s playback safety cap
+    // get a load-time warning (best-effort WAV header probe).
+    {
+        let check_prompt = |scope: String,
+                            file: Option<&std::path::PathBuf>|
+         -> Result<(), CompileError> {
+            let Some(path) = file else {
+                return Err(CompileError::WsFailurePromptFileRequired { scope });
+            };
+            if let Err(err) = std::fs::metadata(path) {
+                return Err(CompileError::WsFailurePromptFileMissing {
+                    path: path.display().to_string(),
+                    err: err.to_string(),
+                });
+            }
+            if let Some(secs) = wav_duration_secs(path) {
+                if secs > 30 {
+                    warn!(
+                        path = %path.display(),
+                        duration_secs = secs,
+                        "ws_failure_prompt_file is longer than the 30 s playback cap; it will be cut short"
+                    );
+                }
+            }
+            Ok(())
+        };
+        if bridge_defaults.ws_failure_action == siphon_ai_core::WsFailureAction::PlayPrompt {
+            check_prompt(
+                "global [bridge]".to_string(),
+                bridge_defaults.ws_failure_prompt_file.as_ref(),
+            )?;
+        }
+        for route in routes.iter() {
+            let effective_play = match route.bridge.on_ws_failure.as_deref() {
+                Some("play_prompt") => true,
+                Some(_) => false,
+                None => {
+                    bridge_defaults.ws_failure_action == siphon_ai_core::WsFailureAction::PlayPrompt
+                }
+            };
+            if effective_play {
+                let route_file = route
+                    .bridge
+                    .ws_failure_prompt_file
+                    .as_ref()
+                    .map(std::path::PathBuf::from);
+                check_prompt(
+                    format!("route {:?}", route.name),
+                    route_file
+                        .as_ref()
+                        .or(bridge_defaults.ws_failure_prompt_file.as_ref()),
+                )?;
             }
         }
     }
@@ -2155,6 +2226,22 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
     }
     let ws_reconnect_max = Duration::from_secs(ws_reconnect_secs);
 
+    // WS-failure policy (0.34.0). The global default; the
+    // play_prompt-requires-file cross-check runs in `compile` where
+    // the routes are in scope too.
+    let ws_failure_action = match raw.on_ws_failure.as_deref() {
+        None => siphon_ai_core::WsFailureAction::Hangup,
+        Some("hangup") => siphon_ai_core::WsFailureAction::Hangup,
+        Some("play_prompt") => siphon_ai_core::WsFailureAction::PlayPrompt,
+        Some(other) => {
+            return Err(CompileError::UnknownGlobalOnWsFailure(other.to_string()));
+        }
+    };
+    let ws_failure_prompt_file = raw
+        .ws_failure_prompt_file
+        .as_ref()
+        .map(std::path::PathBuf::from);
+
     // `None` → 60 s default; `Some(0)` → watchdog off. The merge
     // step in `resolve_inactivity_timeout` handles per-route 0 →
     // disabled the same way.
@@ -2246,7 +2333,30 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         bridge_tls,
         ws_reconnect_enabled,
         ws_reconnect_max,
+        ws_failure_action,
+        ws_failure_prompt_file,
     })
+}
+
+/// Best-effort duration probe of a canonical PCM WAV (44-byte header):
+/// `data_len / (rate × channels × 2)`. Returns `None` on anything
+/// non-canonical — the load-time 30 s warning is a courtesy, not a
+/// gate (playability is decided per-call by `AnnounceSource`).
+fn wav_duration_secs(path: &std::path::Path) -> Option<u64> {
+    use std::io::Read;
+    let mut header = [0u8; 44];
+    let mut f = std::fs::File::open(path).ok()?;
+    f.read_exact(&mut header).ok()?;
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return None;
+    }
+    let channels = u16::from_le_bytes([header[22], header[23]]) as u64;
+    let rate = u32::from_le_bytes([header[24], header[25], header[26], header[27]]) as u64;
+    let data_len = u32::from_le_bytes([header[40], header[41], header[42], header[43]]) as u64;
+    if channels == 0 || rate == 0 {
+        return None;
+    }
+    Some(data_len / (rate * channels * 2))
 }
 
 /// Translate `[bridge.barge_in]` into a resolved
@@ -2377,7 +2487,7 @@ fn compile_dialplan(routes: Vec<siphon_ai_routes::RawRoute>) -> Result<RouteSet,
     // path needs a forge-driven prompt player that isn't built.
     for route in set.iter() {
         if let Some(mode) = route.bridge.on_ws_failure.as_deref() {
-            if !mode.eq_ignore_ascii_case("hangup") {
+            if !matches!(mode, "hangup" | "play_prompt") {
                 return Err(CompileError::UnknownOnWsFailure {
                     route: route.name.clone(),
                     value: mode.to_string(),

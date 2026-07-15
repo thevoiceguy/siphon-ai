@@ -193,6 +193,27 @@ pub struct BridgeDefaults {
     /// reconnect gives up and §5.7 teardown runs. Only meaningful when
     /// `ws_reconnect_enabled`.
     pub ws_reconnect_max: Duration,
+    /// What a call does when its WS becomes unusable (0.34.0,
+    /// `[bridge].on_ws_failure`): immediate teardown (the default) or
+    /// play [`Self::ws_failure_prompt_file`] first. Per-route override
+    /// via `[route.bridge].on_ws_failure`.
+    pub ws_failure_action: WsFailureAction,
+    /// WAV played on a WS failure when the effective action is
+    /// `PlayPrompt` (`[bridge].ws_failure_prompt_file`). Presence is
+    /// validated at config load; per-call usability (sample rate) is
+    /// checked at play time and fails open to a plain hangup.
+    pub ws_failure_prompt_file: Option<std::path::PathBuf>,
+}
+
+/// `[bridge].on_ws_failure` / `[route.bridge].on_ws_failure` policy
+/// (0.34.0, `docs/design/DESIGN_WS_FAILURE_PROMPT.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WsFailureAction {
+    /// Tear down immediately — the v1 behaviour.
+    #[default]
+    Hangup,
+    /// Play the configured prompt to the caller, then tear down.
+    PlayPrompt,
 }
 
 /// What the daemon does when forge-vad reports speech-started.
@@ -346,6 +367,8 @@ impl Default for BridgeDefaults {
             bridge_tls: None,
             ws_reconnect_enabled: false,
             ws_reconnect_max: Duration::from_secs(30),
+            ws_failure_action: WsFailureAction::Hangup,
+            ws_failure_prompt_file: None,
         }
     }
 }
@@ -794,6 +817,39 @@ pub fn resolve_ws_reconnect(
         .filter(|d| !d.is_zero())
         .unwrap_or(defaults.ws_reconnect_max);
     (enabled, max)
+}
+
+/// Resolve the WS-failure prompt for one call (0.34.0): `Some(file)`
+/// when the effective `on_ws_failure` is `play_prompt`, else `None`
+/// (plain hangup). Policy and file merge field-wise like every other
+/// `[route.bridge]` override. Config load already guarantees the file
+/// is set + exists whenever any effective policy is `play_prompt`;
+/// the `None`-anyway branch is belt-and-braces fail-open.
+pub fn resolve_ws_failure_prompt(
+    defaults: &BridgeDefaults,
+    route: &CompiledRoute,
+) -> Option<std::path::PathBuf> {
+    let action = match route.bridge.on_ws_failure.as_deref() {
+        Some(s) => parse_ws_failure_route(s).unwrap_or(defaults.ws_failure_action),
+        None => defaults.ws_failure_action,
+    };
+    if action != WsFailureAction::PlayPrompt {
+        return None;
+    }
+    route
+        .bridge
+        .ws_failure_prompt_file
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .or_else(|| defaults.ws_failure_prompt_file.clone())
+}
+
+fn parse_ws_failure_route(s: &str) -> Option<WsFailureAction> {
+    match s {
+        "hangup" => Some(WsFailureAction::Hangup),
+        "play_prompt" => Some(WsFailureAction::PlayPrompt),
+        _ => None,
+    }
 }
 
 /// Resolve the inactivity watchdog for one call. Route value wins
@@ -3682,14 +3738,17 @@ impl BridgingAcceptor {
         };
 
         let (ws_reconnect_enabled, ws_reconnect_max) = resolve_ws_reconnect(&self.defaults, route);
+        let ws_failure_prompt = resolve_ws_failure_prompt(&self.defaults, route);
         let cfg = CallControllerConfig {
             call_id: bridge_call_id.clone(),
             bridge: bridge_config.clone(),
             start: start.clone(),
-            // Reconnect-enabled calls put the tap in survive-WS-drop mode
-            // so an unexpected bridge drop doesn't tear it down before the
-            // controller can redial (0.7.3).
-            media_tap: tap.with_ws_reconnect(ws_reconnect_enabled),
+            // Reconnect-enabled and play_prompt calls put the tap in
+            // survive-WS-drop mode so an unexpected bridge drop doesn't
+            // tear it down before the controller can redial (0.7.3) or
+            // play the failure prompt (0.34.0).
+            media_tap: tap
+                .with_survive_ws_drop(ws_reconnect_enabled || ws_failure_prompt.is_some()),
             transfer,
             recording,
             conference: self.conference.clone(),
@@ -3700,6 +3759,7 @@ impl BridgingAcceptor {
             // Reconnect MOH reuses the shared [media].moh_file (same source
             // park and hold use).
             ws_reconnect_moh_file: self.hold_moh_file.clone(),
+            ws_failure_prompt,
         };
         let (controller, handle) = CallController::new(cfg);
 
@@ -3759,6 +3819,9 @@ struct PendingDelayedOffer {
     /// (0.32.0) — captured here because the route isn't in scope when
     /// the ACK answer finally arrives.
     barge_in_mode: siphon_ai_bridge::BargeInModeInfo,
+    /// Resolved WS-failure prompt (0.34.0) — same route-out-of-scope
+    /// capture as `barge_in_mode`.
+    ws_failure_prompt: Option<std::path::PathBuf>,
 }
 
 impl BridgingAcceptor {
@@ -4007,6 +4070,7 @@ impl BridgingAcceptor {
                 cdr_to,
                 cdr_ws_url,
                 barge_in_mode: barge_in_mode_info(&resolve_barge_in(&self.defaults, route)),
+                ws_failure_prompt: resolve_ws_failure_prompt(&self.defaults, route),
             },
         );
 
@@ -4083,6 +4147,7 @@ impl BridgingAcceptor {
             cdr_to,
             cdr_ws_url,
             barge_in_mode,
+            ws_failure_prompt,
         } = pending;
 
         // Emit a CDR for a negotiation that fails here (post-200, pre-active).
@@ -4229,7 +4294,9 @@ impl BridgingAcceptor {
             call_id: bridge_call_id.clone(),
             bridge: bridge_config.clone(),
             start: start.clone(),
-            media_tap: accepted.tap.with_ws_reconnect(ws_reconnect_enabled),
+            media_tap: accepted
+                .tap
+                .with_survive_ws_drop(ws_reconnect_enabled || ws_failure_prompt.is_some()),
             transfer: None,
             recording,
             conference: self.conference.clone(),
@@ -4238,6 +4305,7 @@ impl BridgingAcceptor {
             ws_reconnect_enabled,
             ws_reconnect_max,
             ws_reconnect_moh_file: self.hold_moh_file.clone(),
+            ws_failure_prompt,
         };
         let (controller, handle) = CallController::new(cfg);
         let prepared = PreparedCall {

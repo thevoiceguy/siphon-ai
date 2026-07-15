@@ -21,9 +21,9 @@ pub mod transfer;
 pub use acceptor::{
     build_bridge_config, build_outbound_start_msg, build_start_msg, default_call_id_factory,
     extract_offer_sdp, extract_sip_call_id, resolve_barge_in, resolve_codecs, resolve_dtmf_pt,
-    AcceptError, AcceptSecurityPolicy, BargeInConfig, BargeInMode, BargeInTimeout,
-    BridgeBuildError, BridgeDefaults, BridgingAcceptor, CallIdFactory, CallProgressMode,
-    OfferError, PreparedCall, SrtpMode,
+    resolve_ws_failure_prompt, AcceptError, AcceptSecurityPolicy, BargeInConfig, BargeInMode,
+    BargeInTimeout, BridgeBuildError, BridgeDefaults, BridgingAcceptor, CallIdFactory,
+    CallProgressMode, OfferError, PreparedCall, SrtpMode, WsFailureAction,
 };
 pub use call::{
     CallController, CallControllerConfig, CallError, CallHandle, CallOutcome, CallState,

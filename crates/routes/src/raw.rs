@@ -91,6 +91,9 @@ pub struct BridgeOverride {
     pub ws_auth_header: Option<String>,
     pub audio_direction: Option<String>,
     pub on_ws_failure: Option<String>,
+    /// Per-route override of `[bridge].ws_failure_prompt_file`
+    /// (0.34.0). `None` inherits the global.
+    pub ws_failure_prompt_file: Option<String>,
     pub ws_connect_timeout_ms: Option<u64>,
     /// Per-route override of `[bridge].ws_reconnect_enabled` (0.7.3).
     /// `None` = inherit the global.

@@ -1157,6 +1157,22 @@ pub struct RawBridge {
     /// override via `[route.bridge].ws_reconnect_max_secs`.
     #[serde(default)]
     pub ws_reconnect_max_secs: Option<u64>,
+    /// What a call does when its WS becomes unusable (0.34.0,
+    /// DESIGN_WS_FAILURE_PROMPT.md): `"hangup"` (default — immediate
+    /// teardown, the v1 behaviour) or `"play_prompt"` (play
+    /// `ws_failure_prompt_file` to the caller, then tear down).
+    /// Previously a per-route-only key that accepted `"hangup"` alone;
+    /// this is the new global default. Per-route override via
+    /// `[route.bridge].on_ws_failure`.
+    #[serde(default)]
+    pub on_ws_failure: Option<String>,
+    /// WAV played to the caller on a WS failure when `on_ws_failure =
+    /// "play_prompt"` — bridge rate (8/16 kHz mono), like the consent
+    /// announcement. Required (and checked for existence) at load when
+    /// any effective policy is `play_prompt`. Per-route override via
+    /// `[route.bridge].ws_failure_prompt_file`.
+    #[serde(default)]
+    pub ws_failure_prompt_file: Option<String>,
 }
 
 /// `[bridge.tls]` — mTLS settings for the bridge WS leg.

@@ -1903,3 +1903,199 @@ async fn pause_respects_debounce_cancel() {
     drop(playout_tx);
     let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
 }
+
+// ─── Announce over park (0.34.0, DESIGN_WS_FAILURE_PROMPT.md §3.3) ──
+
+/// Minimal mono PCM16 WAV of `n_samples` constant-valued samples —
+/// constant so announce frames are distinguishable from MOH comfort
+/// noise (random) on the forge side.
+fn write_const_wav(path: &std::path::Path, rate: u32, n_samples: usize, value: i16) {
+    let data_len = (n_samples * 2) as u32;
+    let mut b = Vec::new();
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data_len).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&rate.to_le_bytes());
+    b.extend_from_slice(&(rate * 2).to_le_bytes());
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&data_len.to_le_bytes());
+    for _ in 0..n_samples {
+        b.extend_from_slice(&value.to_le_bytes());
+    }
+    std::fs::write(path, b).unwrap();
+}
+
+/// An announcement STARTED while parked must play (the WS-failure
+/// prompt after an exhausted reconnect window), then the tick returns
+/// to MOH. Pins the 0.34.0 announce-over-park ordering rule.
+#[tokio::test]
+async fn announce_started_while_parked_plays_then_moh_resumes() {
+    use siphon_ai_media_glue::{AnnounceSource, MohSource, TapCommand};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(64, 64));
+    let call = CallId::new("announce-over-park");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, _events_rx) = mpsc::channel::<siphon_ai_bridge::OutgoingEvent>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    cmd_tx
+        .send(TapCommand::Park {
+            moh: Box::new(MohSource::new(None, 8000)),
+        })
+        .await
+        .expect("send park");
+
+    // MOH (comfort noise) is flowing.
+    let moh_frame = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(OutboundMediaRequest::Audio(f)) =
+                manager.try_recv_outbound_request(&call).await
+            {
+                return f.samples;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("MOH flows while parked");
+    assert!(
+        moh_frame.iter().any(|&s| s != 3000),
+        "comfort noise must not look like the prompt",
+    );
+
+    // Start the announcement WHILE parked — 5 frames of constant 3000.
+    let dir = std::env::temp_dir().join(format!("siphon_aop_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("prompt.wav");
+    write_const_wav(&wav, 8000, 800, 3000);
+    let source = AnnounceSource::new(&wav, 8000).expect("prompt opens");
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(TapCommand::Announce {
+            source: Box::new(source),
+            done: done_tx,
+        })
+        .await
+        .expect("send announce");
+
+    // Prompt frames (all-3000) must reach forge despite the park.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(OutboundMediaRequest::Audio(f)) =
+                manager.try_recv_outbound_request(&call).await
+            {
+                if f.samples.iter().all(|&s| s == 3000) {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("announcement plays over parked MOH");
+
+    // EOF: done fires with the played length; MOH resumes after.
+    let ms = tokio::time::timeout(Duration::from_secs(2), done_rx)
+        .await
+        .expect("done in time")
+        .expect("done sender kept");
+    assert_eq!(ms, 100, "5 × 20 ms frames");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(OutboundMediaRequest::Audio(f)) =
+                manager.try_recv_outbound_request(&call).await
+            {
+                if f.samples.iter().any(|&s| s != 3000) {
+                    return; // comfort noise again → MOH resumed
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("MOH resumes after the announcement");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    drop(cmd_tx);
+    drop(_caller_rx);
+    drop(_playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// The reverse order is unchanged (0.26.0 consent semantics): a Park
+/// arriving while an announcement plays cuts it short — `done` fires
+/// early with the partial play time.
+#[tokio::test]
+async fn park_still_cuts_a_running_announcement() {
+    use siphon_ai_media_glue::{AnnounceSource, MohSource, TapCommand};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(64, 64));
+    let call = CallId::new("park-cuts-announce");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, _events_rx) = mpsc::channel::<siphon_ai_bridge::OutgoingEvent>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    // Long announcement (5 s), no park yet.
+    let dir = std::env::temp_dir().join(format!("siphon_pca_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("long.wav");
+    write_const_wav(&wav, 8000, 8000 * 5, 3000);
+    let source = AnnounceSource::new(&wav, 8000).expect("prompt opens");
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(TapCommand::Announce {
+            source: Box::new(source),
+            done: done_tx,
+        })
+        .await
+        .expect("send announce");
+
+    // Let a few frames play, then park.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cmd_tx
+        .send(TapCommand::Park {
+            moh: Box::new(MohSource::new(None, 8000)),
+        })
+        .await
+        .expect("send park");
+
+    let ms = tokio::time::timeout(Duration::from_secs(2), done_rx)
+        .await
+        .expect("done in time")
+        .expect("done sender kept");
+    assert!(
+        ms < 5_000,
+        "park must cut the announcement short, got {ms} ms",
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    drop(cmd_tx);
+    drop(_caller_rx);
+    drop(_playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}

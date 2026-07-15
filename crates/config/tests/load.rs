@@ -931,10 +931,11 @@ any = true
 }
 
 #[test]
-fn on_ws_failure_only_accepts_hangup() {
-    // v1 supports "hangup" only — `play_prompt` would need a
-    // forge-driven prompt player that isn't built. Reject the
-    // unsupported mode at load time instead of silently ignoring it.
+fn on_ws_failure_play_prompt_requires_a_file() {
+    // 0.34.0: `play_prompt` is now a real mode — but an effective
+    // play_prompt with no effective prompt file anywhere is a config
+    // mistake, rejected at load (fail loud, not on the first failing
+    // call).
     let env = MapEnv::new([]);
     let toml = r#"
 [sip]
@@ -953,9 +954,128 @@ on_ws_failure = "play_prompt"
     let err = load_from_str_with_env(toml, &env).unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("on_ws_failure") && msg.contains("play_prompt"),
-        "expected on_ws_failure rejection, got: {msg}"
+        msg.contains("ws_failure_prompt_file"),
+        "expected the file-required rejection, got: {msg}"
     );
+}
+
+#[test]
+fn on_ws_failure_play_prompt_with_file_compiles_globally_and_inherits() {
+    // Global play_prompt + file: compiles, and a route with no
+    // override inherits it (the cross-check accepts the global file).
+    let dir = std::env::temp_dir().join(format!("siphon_wsfp_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("prompt.wav");
+    std::fs::write(&wav, b"RIFF").unwrap(); // existence is the load gate
+    let env = MapEnv::new([]);
+    let toml = format!(
+        r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+on_ws_failure = "play_prompt"
+ws_failure_prompt_file = "{}"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#,
+        wav.display()
+    );
+    let cfg = load_from_str_with_env(&toml, &env).expect("global play_prompt + file compiles");
+    assert_eq!(
+        cfg.bridge_defaults.ws_failure_action,
+        siphon_ai_core::WsFailureAction::PlayPrompt
+    );
+    assert_eq!(
+        cfg.bridge_defaults.ws_failure_prompt_file.as_deref(),
+        Some(wav.as_path())
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn on_ws_failure_missing_file_and_unknown_value_fail() {
+    let env = MapEnv::new([]);
+    // File doesn't exist → load error.
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+on_ws_failure = "play_prompt"
+ws_failure_prompt_file = "/nonexistent/prompt.wav"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let msg = load_from_str_with_env(toml, &env).unwrap_err().to_string();
+    assert!(
+        msg.contains("does not exist"),
+        "expected missing-file rejection, got: {msg}"
+    );
+    // Unknown value → load error (global and route grammar agree).
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+on_ws_failure = "play-prompt"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let msg = load_from_str_with_env(toml, &env).unwrap_err().to_string();
+    assert!(
+        msg.contains("on_ws_failure"),
+        "expected unknown-value rejection, got: {msg}"
+    );
+}
+
+#[test]
+fn route_hangup_override_opts_out_of_global_play_prompt() {
+    // A route explicitly on "hangup" under a global play_prompt is
+    // valid without any file of its own.
+    let dir = std::env::temp_dir().join(format!("siphon_wsfp_opt_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("prompt.wav");
+    std::fs::write(&wav, b"RIFF").unwrap();
+    let env = MapEnv::new([]);
+    let toml = format!(
+        r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+on_ws_failure = "play_prompt"
+ws_failure_prompt_file = "{}"
+
+[[route]]
+name = "quiet"
+[route.match]
+request_uri_user = "7000"
+[route.bridge]
+on_ws_failure = "hangup"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#,
+        wav.display()
+    );
+    load_from_str_with_env(&toml, &env).expect("route-level hangup opt-out compiles");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

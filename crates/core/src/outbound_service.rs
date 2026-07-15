@@ -327,6 +327,12 @@ impl OutboundOriginateHandle for OutboundService {
         // Announced on `start.barge_in_mode` (0.32.0); extracted before
         // the spawn like the reconnect defaults (no `self` inside).
         let barge_in_mode = crate::acceptor::barge_in_mode_info(&self.defaults.barge_in);
+        // Outbound legs resolve the WS-failure prompt from the global
+        // defaults (no route). Extracted before the spawn like the rest.
+        let ws_failure_prompt = (self.defaults.ws_failure_action
+            == crate::acceptor::WsFailureAction::PlayPrompt)
+            .then(|| self.defaults.ws_failure_prompt_file.clone())
+            .flatten();
 
         info!(call_id = %bridge_id_str, gateway = %gateway, "originating outbound call");
         let log_id = bridge_id_str.clone();
@@ -371,6 +377,7 @@ impl OutboundOriginateHandle for OutboundService {
                         recording_setup,
                         recording_upload,
                         barge_in_mode,
+                        ws_failure_prompt,
                     };
                     run_call(originator, call, bridge, ctx).await;
                 }
@@ -454,6 +461,9 @@ struct OutboundCallContext {
     /// Resolved barge-in announcement for `start.barge_in_mode` (0.32.0)
     /// — outbound legs use the daemon `[bridge]` defaults (no route).
     barge_in_mode: siphon_ai_bridge::BargeInModeInfo,
+    /// WS-failure prompt (0.34.0), from the daemon `[bridge]` defaults
+    /// (no route on originated calls). `None` = plain hangup.
+    ws_failure_prompt: Option<std::path::PathBuf>,
 }
 
 /// Run an answered outbound call's audio bridge to completion, tear it
@@ -562,7 +572,9 @@ async fn run_call(
         // Reconnect-enabled legs put the tap in survive-WS-drop mode so an
         // unexpected drop doesn't tear it down before the controller redials
         // (0.7.3) — same as the acceptor does for inbound.
-        media_tap: accepted.tap.with_ws_reconnect(ctx.ws_reconnect_enabled),
+        media_tap: accepted
+            .tap
+            .with_survive_ws_drop(ctx.ws_reconnect_enabled || ctx.ws_failure_prompt.is_some()),
         transfer: Some(transfer),
         recording: ctx.recording_setup.clone(),
         conference: ctx.conference.clone(),
@@ -573,6 +585,7 @@ async fn run_call(
         ws_reconnect_enabled: ctx.ws_reconnect_enabled,
         ws_reconnect_max: ctx.ws_reconnect_max,
         ws_reconnect_moh_file: ctx.ws_reconnect_moh_file.clone(),
+        ws_failure_prompt: ctx.ws_failure_prompt.clone(),
     };
     let (controller, handle) = CallController::new(cfg);
     // Reachable by the admin conference API for this leg's lifetime.
@@ -732,6 +745,7 @@ mod tests {
             recording_setup: None,
             recording_upload: None,
             barge_in_mode: siphon_ai_bridge::BargeInModeInfo::AutoClear,
+            ws_failure_prompt: None,
         };
         let view = CallTerminationView {
             cause: CdrTerminationCause::ServerHangup,

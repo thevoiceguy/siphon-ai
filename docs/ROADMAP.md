@@ -186,8 +186,13 @@ barrier and make the contract testable:
 - **AMD (answering-machine / voicemail detection)** — human-vs-machine on
   answered outbound calls, surfaced as a WS event. Needs a `forge-amd`
   sibling to `forge-vad` (*upstream-gated*).
-- **WS-failure prompt playback** — on a WS failure, play a configurable prompt
-  before teardown instead of only `hangup`.
+- **WS-failure prompt playback** — ✅ **delivered in v0.34.0**:
+  `[bridge].on_ws_failure = "play_prompt"` + `ws_failure_prompt_file`
+  (per-route overridable) play a configurable WAV on every
+  siphon-initiated WS-unusable teardown — including after an exhausted
+  reconnect window (announce-over-park) — before the normal BYE.
+  Fail-open, 30 s cap, CDR causes unchanged. See
+  `DESIGN_WS_FAILURE_PROMPT.md`.
 
 ---
 

@@ -117,6 +117,7 @@ async fn push_bridge_event_emits_hold_and_resume_on_ws() {
         ws_reconnect_enabled: false,
         ws_reconnect_max: std::time::Duration::from_secs(30),
         ws_reconnect_moh_file: None,
+        ws_failure_prompt: None,
     };
     let (controller, handle) = CallController::new(cfg);
     let run = tokio::spawn(async move { controller.run().await });

@@ -88,7 +88,7 @@ use tracing::{debug, info, instrument, warn, Instrument};
 use crate::transfer::{plan_refer, ReferPlan, TransferContext, TransferOutcome};
 use siphon_ai_telemetry::{
     HOLDS_TOTAL, PARKED_CALLS_ACTIVE, PARKS_TOTAL, RETRIEVES_TOTAL, TRANSFERS_TOTAL,
-    WS_RECONNECTS_TOTAL,
+    WS_FAILURE_PROMPTS_TOTAL, WS_RECONNECTS_TOTAL,
 };
 
 /// Bounded channel capacity for audio frames. 10 × 20 ms = 200 ms
@@ -113,6 +113,11 @@ const RECORDING_CHANNEL_CAPACITY: usize = 100;
 /// Bounded channel capacity for control-plane messages. Per
 /// CLAUDE.md §6.2, control channels get small bounded buffers.
 const CONTROL_CHANNEL_CAPACITY: usize = 8;
+
+/// Hard cap on WS-failure prompt playback (0.34.0, design note §9.5):
+/// a wedged tap must not wedge teardown. Fixed, not a knob — a failure
+/// prompt longer than this is a config smell (warned at load).
+const WS_FAILURE_PROMPT_CAP: Duration = Duration::from_secs(30);
 
 /// Inputs to one call. Construct via [`CallControllerConfig::new`].
 pub struct CallControllerConfig {
@@ -176,6 +181,13 @@ pub struct CallControllerConfig {
     /// MOH file for the reconnect gap — the same shared `[media].moh_file`
     /// hold/park use. `None` → generated comfort silence.
     pub ws_reconnect_moh_file: Option<std::path::PathBuf>,
+
+    /// WS-failure prompt (0.34.0, DESIGN_WS_FAILURE_PROMPT.md).
+    /// `Some(file)` = the route's effective `on_ws_failure` is
+    /// `"play_prompt"`: on a siphon-initiated WS-unusable teardown the
+    /// controller plays this WAV to the caller (lazy-loaded, fail-open)
+    /// before the normal BYE teardown. `None` = plain hangup (default).
+    pub ws_failure_prompt: Option<std::path::PathBuf>,
 }
 
 /// Where in its life a call is. State transitions are logged at
@@ -782,6 +794,7 @@ impl CallController {
             ws_reconnect_enabled,
             ws_reconnect_max,
             ws_reconnect_moh_file,
+            ws_failure_prompt,
         } = cfg;
 
         // W3C trace propagation (0.23.0): render this `run` span — the
@@ -1104,6 +1117,16 @@ impl CallController {
         let reconnect_deadline_sleep = tokio::time::sleep(Duration::from_secs(86_400));
         tokio::pin!(reconnect_deadline_sleep);
         let mut reconnect_deadline_armed = false;
+
+        // WS-failure prompt (0.34.0, DESIGN_WS_FAILURE_PROMPT.md §3.2).
+        // `Some` while the prompt plays: the loop stays alive (caller
+        // hangup / tap end / shutdown keep their normal arms) and the
+        // done-oneshot — or the fixed 30 s safety cap — completes the
+        // deferred teardown. Same pinned-placeholder pattern as the
+        // reconnect timers.
+        let mut ws_prompt_done_rx: Option<oneshot::Receiver<u64>> = None;
+        let ws_prompt_deadline = tokio::time::sleep(Duration::from_secs(86_400));
+        tokio::pin!(ws_prompt_deadline);
 
         let shutdown = handle.notify.clone();
 
@@ -1895,6 +1918,54 @@ impl CallController {
                     metrics::counter!(WS_RECONNECTS_TOTAL, "result" => "exhausted").increment(1);
                     warn!(call_id = %call_id, window_secs = ws_reconnect_max.as_secs(),
                         "ws reconnect window elapsed; tearing down (ws_disconnect)");
+                    // Stop the reconnect machinery either way; with
+                    // play_prompt the caller hears the failure prompt
+                    // over the parked MOH (announce-over-park, 0.34.0
+                    // §3.3) before the teardown.
+                    reconnecting = false;
+                    reconnect_backoff_armed = false;
+                    reconnect_deadline_armed = false;
+                    if let Some(rx) = ws_failure_prompt.as_deref().and_then(|p| {
+                        start_ws_failure_prompt(
+                            p, call_sample_rate, &tap_cmd_tx, &call_id, "reconnect_exhausted",
+                        )
+                    }) {
+                        ws_prompt_done_rx = Some(rx);
+                        ws_prompt_deadline
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + WS_FAILURE_PROMPT_CAP);
+                    } else {
+                        termination = CallTermination::BridgeEnded;
+                        break;
+                    }
+                }
+
+                // ─── WS-failure prompt resolved (0.34.0 §3.2) ────────────
+                done = recv_announce_done(&mut ws_prompt_done_rx), if ws_prompt_done_rx.is_some() => {
+                    ws_prompt_done_rx = None;
+                    match done {
+                        Ok(ms) => {
+                            info!(call_id = %call_id, ms_played = ms,
+                                "ws-failure prompt finished; tearing down");
+                            metrics::counter!(WS_FAILURE_PROMPTS_TOTAL, "result" => "played")
+                                .increment(1);
+                        }
+                        Err(_) => {
+                            // The tap dropped the done sender (it ended
+                            // mid-prompt) — teardown proceeds regardless.
+                            debug!(call_id = %call_id, "ws-failure prompt ended early");
+                            metrics::counter!(WS_FAILURE_PROMPTS_TOTAL, "result" => "cut_short")
+                                .increment(1);
+                        }
+                    }
+                    termination = CallTermination::BridgeEnded;
+                    break;
+                }
+                _ = &mut ws_prompt_deadline, if ws_prompt_done_rx.is_some() => {
+                    warn!(call_id = %call_id,
+                        "ws-failure prompt hit the 30 s safety cap; tearing down");
+                    metrics::counter!(WS_FAILURE_PROMPTS_TOTAL, "result" => "timeout").increment(1);
+                    ws_prompt_done_rx = None;
                     termination = CallTermination::BridgeEnded;
                     break;
                 }
@@ -1939,8 +2010,21 @@ impl CallController {
                                 "ws redial failed; backing off");
                         } else {
                             warn!(call_id = %call_id, "ws reconnect window closed; tearing down");
-                            termination = CallTermination::BridgeEnded;
-                            break;
+                            if let Some(rx) = ws_failure_prompt.as_deref().and_then(|p| {
+                                start_ws_failure_prompt(
+                                    p, call_sample_rate, &tap_cmd_tx, &call_id,
+                                    "reconnect_exhausted",
+                                )
+                            }) {
+                                reconnecting = false;
+                                ws_prompt_done_rx = Some(rx);
+                                ws_prompt_deadline
+                                    .as_mut()
+                                    .reset(tokio::time::Instant::now() + WS_FAILURE_PROMPT_CAP);
+                            } else {
+                                termination = CallTermination::BridgeEnded;
+                                break;
+                            }
                         }
                     } else if ws_reconnect_enabled && reconnect_eligible(inner_ref) {
                         // First eligible unexpected drop → hold the caller
@@ -1972,6 +2056,24 @@ impl CallController {
                         reconnect_backoff_armed = true;
                         warn!(call_id = %call_id, window_secs = ws_reconnect_max.as_secs(),
                             "ws bridge dropped unexpectedly; reconnecting");
+                    } else if ws_failure_prompt.is_some() && ws_failure_prompt_eligible(inner_ref) {
+                        // play_prompt (0.34.0 §1): a siphon-initiated
+                        // WS-unusable ending — apologise to the caller
+                        // before the BYE. A server-intended ending
+                        // (StopSent) or our own teardown skips it.
+                        if let Some(rx) = ws_failure_prompt.as_deref().and_then(|p| {
+                            start_ws_failure_prompt(
+                                p, call_sample_rate, &tap_cmd_tx, &call_id, "ws_drop",
+                            )
+                        }) {
+                            ws_prompt_done_rx = Some(rx);
+                            ws_prompt_deadline
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + WS_FAILURE_PROMPT_CAP);
+                        } else {
+                            termination = CallTermination::BridgeEnded;
+                            break;
+                        }
                     } else {
                         termination = CallTermination::BridgeEnded;
                         break;
@@ -2066,6 +2168,14 @@ impl CallController {
         }
 
         log_state(&call_id, CallState::Terminating);
+
+        // A WS-failure prompt still pending here means something else
+        // ended the call mid-prompt (caller BYE, shutdown, tap end) —
+        // account it as cut short (0.34.0 §3.4).
+        if ws_prompt_done_rx.is_some() {
+            debug!(call_id = %call_id, "ws-failure prompt cut short by teardown");
+            metrics::counter!(WS_FAILURE_PROMPTS_TOTAL, "result" => "cut_short").increment(1);
+        }
 
         // ─── Park teardown ───────────────────────────────────────
         // If we broke out while still parked (timeout-hangup, or a
@@ -2253,6 +2363,65 @@ impl CallController {
 
 fn log_state(call_id: &CallId, state: CallState) {
     info!(call_id = %call_id, ?state, "call state");
+}
+
+/// Whether a bridge outcome is a *siphon-initiated, WS-unusable*
+/// teardown — the failure classes the `play_prompt` policy covers
+/// (0.34.0, design note §1). Excluded: `StopSent` (we ended the session
+/// on purpose — server hangup, transfer, park, drain) and
+/// `ControllerHungUp` (the teardown started on our side — caller BYE,
+/// admin hangup). Everything else — bare close, connect/IO/keepalive
+/// errors, `server_too_slow`, `protocol_error` — is the platform
+/// failing the caller.
+fn ws_failure_prompt_eligible(outcome: &Result<DisconnectReason, BridgeError>) -> bool {
+    !matches!(
+        outcome,
+        Ok(DisconnectReason::StopSent | DisconnectReason::ControllerHungUp)
+    )
+}
+
+/// Start the WS-failure prompt (design note §3.2): lazy-load the WAV
+/// at the call's rate and hand it to the tap's one-shot announce
+/// player. Returns the done-oneshot to wait on, or `None` when the
+/// prompt can't start (unusable file / tap gone) — the caller falls
+/// open to the plain-hangup teardown. Emits the `unusable` metric on
+/// the fail-open paths; `played`/`cut_short`/`timeout` are emitted at
+/// resolution by the run loop.
+fn start_ws_failure_prompt(
+    prompt: &std::path::Path,
+    sample_rate: u32,
+    tap_cmd_tx: &mpsc::Sender<TapCommand>,
+    call_id: &CallId,
+    failure: &'static str,
+) -> Option<oneshot::Receiver<u64>> {
+    let source = match AnnounceSource::new(prompt, sample_rate) {
+        Ok(src) => src,
+        Err(err) => {
+            warn!(
+                call_id = %call_id,
+                file = %prompt.display(),
+                error = %err,
+                "ws-failure prompt unusable; falling open to plain hangup",
+            );
+            metrics::counter!(WS_FAILURE_PROMPTS_TOTAL, "result" => "unusable").increment(1);
+            return None;
+        }
+    };
+    let (done_tx, done_rx) = oneshot::channel();
+    if tap_cmd_tx
+        .try_send(TapCommand::Announce {
+            source: Box::new(source),
+            done: done_tx,
+        })
+        .is_err()
+    {
+        warn!(call_id = %call_id, "tap unavailable for ws-failure prompt; plain hangup");
+        metrics::counter!(WS_FAILURE_PROMPTS_TOTAL, "result" => "unusable").increment(1);
+        return None;
+    }
+    info!(call_id = %call_id, failure, file = %prompt.display(),
+        "ws failure; playing prompt before teardown");
+    Some(done_rx)
 }
 
 /// Whether a finished bridge's outcome is an **unexpected** drop that WS

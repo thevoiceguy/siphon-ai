@@ -2047,6 +2047,93 @@ fi
 bi_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: WS-failure prompt ─────────────────
+# Exercises `[bridge].on_ws_failure = "play_prompt"` (0.34.0,
+# DESIGN_WS_FAILURE_PROMPT.md) end-to-end: the echo WS drops the
+# socket mid-call (--drop-after-ms, no reconnect configured), the
+# daemon plays a runtime-generated tone WAV to the caller (stdlib
+# `wave` — no binary audio in the repo), then sends the normal BYE.
+# The caller scenario (park_caller.xml) just answers and waits for
+# that BYE. Pass = scenario completed AND
+# siphon_ai_ws_failure_prompts_total{result="played"} ticked.
+echo
+echo "─── auxiliary phase: ws_failure_prompt ────────────────"
+FP_WS_PORT=8795
+FP_OBS_PORT=9091
+FP_WS_LOG=$(mktemp -t echo-ws-fp.XXXXXX.log)
+FP_DAEMON_LOG=$(mktemp -t siphon-ai-fp.XXXXXX.log)
+FP_CONFIG=$(mktemp -t siphon-ai-fp.XXXXXX.toml)
+FP_WAV=$(mktemp -t siphon-ai-fp.XXXXXX.wav)
+
+# 1.5 s of 440 Hz tone at 8 kHz mono PCM16.
+python3 - "$FP_WAV" <<'PY'
+import math, struct, sys, wave
+with wave.open(sys.argv[1], "wb") as w:
+    w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+    n = 12000
+    w.writeframes(b"".join(
+        struct.pack("<h", int(9000 * math.sin(2 * math.pi * 440 * i / 8000)))
+        for i in range(n)))
+PY
+
+cat >"$FP_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-fp"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$FP_WS_PORT/"
+on_ws_failure = "play_prompt"
+ws_failure_prompt_file = "$FP_WAV"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$FP_OBS_PORT"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+FP_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$FP_PYTHON" ]] || FP_PYTHON=python3
+"$FP_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$FP_WS_PORT" \
+    --drop-after-ms 700 \
+    >"$FP_WS_LOG" 2>&1 &
+FP_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$FP_CONFIG" \
+    >"$FP_DAEMON_LOG" 2>&1 &
+FP_DAEMON_PID=$!
+fp_cleanup() {
+    kill "$FP_WS_PID" "$FP_DAEMON_PID" 2>/dev/null || true
+    wait "$FP_WS_PID" "$FP_DAEMON_PID" 2>/dev/null || true
+}
+trap fp_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── ws_failure_prompt_plays ──────────────────────────"
+fp_ok=0
+if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/park_caller.xml" -m 1 -timeout 20s -trace_err \
+        -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1; then
+    if curl -s "http://127.0.0.1:$FP_OBS_PORT/metrics" \
+        | grep -q 'siphon_ai_ws_failure_prompts_total{result="played"} 1'; then
+        fp_ok=1
+    fi
+fi
+if (( fp_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (daemon: $FP_DAEMON_LOG; ws: $FP_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+fp_cleanup
+trap - EXIT
+
 # ─── Always-on auxiliary phase: registration admin ────────────────
 # Exercises the 0.33.0 registration write actions end-to-end
 # (DESIGN_REGISTRATION_ADMIN.md §6) with SIPp as the REGISTRAR — the

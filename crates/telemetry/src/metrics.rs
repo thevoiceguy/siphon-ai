@@ -113,6 +113,15 @@ pub const OUTBOUND_SRTP_TOTAL: &str = "siphon_ai_outbound_srtp_total";
 /// `siphon-ai-telemetry::http`.
 pub const ADMIN_REQUESTS_TOTAL: &str = "siphon_ai_admin_requests_total";
 
+/// WS-failure prompt playbacks (0.34.0,
+/// `[bridge].on_ws_failure = "play_prompt"`). Labeled by `result`:
+/// `played` (EOF reached), `cut_short` (caller hung up / teardown
+/// preempted it), `unusable` (prompt file failed to load at call time
+/// — rate mismatch or unreadable; the call fell open to a plain
+/// hangup), `timeout` (the 30 s playback safety cap fired). Literal
+/// must match the call site in `siphon-ai-core::call`.
+pub const WS_FAILURE_PROMPTS_TOTAL: &str = "siphon_ai_ws_failure_prompts_total";
+
 /// Operator-triggered registration actions accepted by the admin API
 /// (0.33.0): `POST /admin/v1/registrations/{name}/refresh|restart`.
 /// Labeled by `name` (the `[[register]].name` — operator-chosen,
@@ -564,6 +573,10 @@ pub fn register_descriptions() {
     describe_counter!(
         REGISTER_ADMIN_TRIGGERS_TOTAL,
         "Operator registration triggers accepted by the admin API, by name and action (refresh, restart)."
+    );
+    describe_counter!(
+        WS_FAILURE_PROMPTS_TOTAL,
+        "WS-failure prompt playbacks by result (played, cut_short, unusable, timeout)."
     );
     describe_counter!(
         CONFIG_RELOADS_TOTAL,

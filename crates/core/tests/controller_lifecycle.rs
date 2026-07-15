@@ -124,7 +124,7 @@ fn make_controller_reconnect(
         8000,
     )
     .expect("attach tap")
-    .with_ws_reconnect(true);
+    .with_survive_ws_drop(true);
     Box::leak(Box::new(manager));
     let cfg = CallControllerConfig {
         call_id: CallId::new(call_id),
@@ -145,6 +145,7 @@ fn make_controller_reconnect(
         ws_reconnect_enabled: true,
         ws_reconnect_max: window,
         ws_reconnect_moh_file: None,
+        ws_failure_prompt: None,
     };
     CallController::new(cfg)
 }
@@ -223,6 +224,7 @@ fn make_controller_full(
         ws_reconnect_enabled: false,
         ws_reconnect_max: std::time::Duration::from_secs(30),
         ws_reconnect_moh_file: None,
+        ws_failure_prompt: None,
     };
     CallController::new(cfg)
 }
@@ -264,6 +266,7 @@ fn make_controller_inactivity(
         ws_reconnect_enabled: false,
         ws_reconnect_max: Duration::from_secs(30),
         ws_reconnect_moh_file: None,
+        ws_failure_prompt: None,
     };
     CallController::new(cfg)
 }
@@ -769,4 +772,155 @@ async fn rtp_inactivity_emits_rtp_timeout_then_stop() {
         "server should receive error{{rtp_timeout}}"
     );
     assert!(saw_stop, "a fatal error must be followed by stop");
+}
+
+// ─── WS-failure prompt (0.34.0, DESIGN_WS_FAILURE_PROMPT.md) ─────────
+
+/// Minimal mono PCM16 WAV of constant-valued samples, so prompt frames
+/// are identifiable on the forge side.
+fn write_const_wav(path: &std::path::Path, rate: u32, n_samples: usize, value: i16) {
+    let data_len = (n_samples * 2) as u32;
+    let mut b = Vec::new();
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data_len).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&rate.to_le_bytes());
+    b.extend_from_slice(&(rate * 2).to_le_bytes());
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&data_len.to_le_bytes());
+    for _ in 0..n_samples {
+        b.extend_from_slice(&value.to_le_bytes());
+    }
+    std::fs::write(path, b).unwrap();
+}
+
+/// Controller with `on_ws_failure = play_prompt` semantics: the tap in
+/// survive-WS-drop mode + the prompt path on the config. Returns the
+/// forge manager so the test can observe the prompt frames.
+fn make_controller_prompt(
+    port: u16,
+    call_id: &str,
+    prompt: std::path::PathBuf,
+) -> (
+    CallController,
+    siphon_ai_core::CallHandle,
+    Arc<MediaBridgeManager>,
+) {
+    let manager = Arc::new(MediaBridgeManager::new());
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        ForgeCallId::new(call_id),
+        8000,
+    )
+    .expect("attach tap")
+    .with_survive_ws_drop(true);
+    let cfg = CallControllerConfig {
+        call_id: CallId::new(call_id),
+        bridge: BridgeConfig {
+            ws_url: format!("ws://127.0.0.1:{port}/"),
+            auth_header: None,
+            connect_timeout: Duration::from_secs(2),
+            tls: None,
+            ..Default::default()
+        },
+        start: start_msg(call_id),
+        media_tap: tap,
+        transfer: None,
+        recording: None,
+        conference: None,
+        park: None,
+        hold: None,
+        ws_reconnect_enabled: false,
+        ws_reconnect_max: Duration::from_secs(30),
+        ws_reconnect_moh_file: None,
+        ws_failure_prompt: Some(prompt),
+    };
+    let (controller, handle) = CallController::new(cfg);
+    (controller, handle, manager)
+}
+
+#[tokio::test]
+async fn ws_drop_with_play_prompt_plays_then_tears_down() {
+    // Server reads `start` then drops the socket — an unexpected,
+    // siphon-initiated-teardown failure. With play_prompt the caller
+    // hears the prompt (observed as constant-sample frames reaching
+    // forge) before the controller completes the normal teardown.
+    let port = one_shot_server(|mut ws| async move {
+        let _ = ws.next().await;
+        drop(ws);
+    })
+    .await;
+
+    let dir = std::env::temp_dir().join(format!("siphon_wsp_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("failure.wav");
+    write_const_wav(&wav, 8000, 8000 / 2, 3000); // 0.5 s prompt
+
+    let (controller, _handle, manager) = make_controller_prompt(port, "wsp-1", wav);
+    let call = ForgeCallId::new("wsp-1");
+
+    let watcher = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move {
+            // True once a prompt frame (all samples == 3000) hits forge.
+            loop {
+                if let Some(forge_engine::OutboundMediaRequest::Audio(f)) =
+                    manager.try_recv_outbound_request(&call).await
+                {
+                    if !f.samples.is_empty() && f.samples.iter().all(|&s| s == 3000) {
+                        return true;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+    };
+
+    let outcome = controller.run().await.expect("run");
+    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+    let bridge = outcome.bridge.expect("bridge result");
+    // An abrupt drop surfaces as ServerClosed or a raw IO/protocol
+    // error depending on how the socket died — both are prompt-eligible
+    // failures, and neither is rewritten by the prompt.
+    assert!(
+        matches!(bridge, Ok(DisconnectReason::ServerClosed) | Err(_)),
+        "cause unchanged by the prompt, got {bridge:?}",
+    );
+    let saw_prompt = tokio::time::timeout(Duration::from_secs(1), watcher)
+        .await
+        .expect("prompt frames observed before teardown finished")
+        .expect("watcher join");
+    assert!(saw_prompt);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn ws_drop_with_unusable_prompt_falls_open_to_hangup() {
+    // The prompt file vanished after config load (or is garbage): the
+    // call must fall open to today's immediate teardown — never wedge.
+    let port = one_shot_server(|mut ws| async move {
+        let _ = ws.next().await;
+        drop(ws);
+    })
+    .await;
+
+    let (controller, _handle, _manager) = make_controller_prompt(
+        port,
+        "wsp-2",
+        std::path::PathBuf::from("/nonexistent/failure.wav"),
+    );
+    let started = std::time::Instant::now();
+    let outcome = controller.run().await.expect("run");
+    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "fail-open must not wait on any prompt machinery",
+    );
 }

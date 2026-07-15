@@ -252,7 +252,7 @@ demand shows up.
 
 - `print-config --format json` (config CLI nicety).
 - CSV CDR output (alongside JSON/JSONL).
-- Marker-bit fix — pending forge-media PR, then bump the pins.
+- ~~Marker-bit fix~~ — ✅ done: forge-media #68 (marker bit only on talkspurt start) merged 2026-06-04 and is included in the `3c59b5f` pin shipped with v0.31.1 (verified: the pin is 13 commits ahead of the merge commit).
 
 ---
 

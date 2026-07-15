@@ -140,6 +140,49 @@ password  = "${TWILIO_TRUNK_PASSWORD}"
   sketches) needs an siphon-rs API to install a per-target
   `ClientConfig` and isn't done. 0.3.1+ follow-up.
 
+## Operating registrations (admin API, 0.33.0)
+
+A binding normally re-REGISTERs on its own refresh timer
+(`expires − 60 s`) or, after a failure, on an exponential backoff
+(5 s → 300 s cap). When a registrar drops or stales a binding
+server-side, force it back **without touching the daemon** via the
+authenticated `[admin]` listener (operator role):
+
+```sh
+# Re-assert the binding now, off-cycle (also resets a failure backoff):
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:9191/admin/v1/registrations/cucm-main/refresh
+
+# Full cycle — REGISTER Expires:0 to clear the server-side binding,
+# then a fresh REGISTER (stale server state, contact rebinding):
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:9191/admin/v1/registrations/cucm-main/restart
+```
+
+Both return `202` with the binding's accept-time row — the REGISTER
+round-trip is asynchronous. Watch the outcome on any of:
+`GET /admin/registrations` (status flips), the metrics below
+(`register_attempts_total` ticks), or the `registration_state_changed`
+webhook. `404` = unknown name; `409` = the daemon is draining.
+
+**Reach for `refresh`** when the binding merely looks stale or the
+registrar restarted; **reach for `restart`** when a refresh doesn't
+stick (the registrar holds broken state) or the daemon's contact
+address changed. A restart's `Expires: 0` failing is non-fatal — the
+follow-up REGISTER replaces the binding anyway, and only the final
+attempt drives the status.
+
+### Parked bindings (`register_on_startup = false`)
+
+Since 0.33.0 a block with `register_on_startup = false` is **parked
+under operator control** rather than inert: the daemon spawns its
+drive task but sends no REGISTER until the first `refresh` (or
+`restart` — identical from the parked state) arrives. Use it for
+maintenance windows and staged cutovers: ship the config dark, kick
+the binding when the window opens. The row shows `disabled` until the
+first operator-triggered attempt. There is no "re-disable" action —
+parking a live binding again means a config change and restart.
+
 ## Observability
 
 ### Prometheus

@@ -30,9 +30,11 @@ pub mod readiness;
 
 pub use admin::{
     AddParticipantRequest, AdminCallRegistry, AdminConference, AdminOutbound, AdminPark,
-    AdminState, CallRegistryHandle, ConferenceAdminError, ConferenceAdminHandle, ConferenceRow,
-    CreateConferenceRequest, OriginateRejection, OriginateRequest, OutboundOriginateHandle,
-    ParkAdminError, ParkAdminHandle, ParkRequest, ParkedRow, RegistrationRow, RetrieveRequest,
+    AdminRegistrations, AdminState, CallRegistryHandle, ConferenceAdminError,
+    ConferenceAdminHandle, ConferenceRow, CreateConferenceRequest, OriginateRejection,
+    OriginateRequest, OutboundOriginateHandle, ParkAdminError, ParkAdminHandle, ParkRequest,
+    ParkedRow, RegistrationAction, RegistrationAdminError, RegistrationAdminHandle,
+    RegistrationRow, RetrieveRequest,
 };
 pub use auth::{AdminAuth, AdminToken, AuthReject, Role};
 pub use hep::{HepBuildError, HepTelemetry, HepTelemetryBuild, HepWorkerHandle};

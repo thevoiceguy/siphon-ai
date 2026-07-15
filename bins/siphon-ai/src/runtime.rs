@@ -992,6 +992,7 @@ impl Runtime {
         // crashing — see telemetry::admin docs.
         let call_registry_for_admin = acceptor.registry().clone();
         let registration_mgr_for_admin = registration_mgr.clone();
+        let registration_mgr_for_registration_admin = registration_mgr.clone();
         // `GET /admin/v1/drain` status closure (0.17.0). Reads the live
         // drain flag + registry depth + published deadline. Installed
         // unconditionally — drain state exists regardless of `[shutdown]`.
@@ -1048,6 +1049,12 @@ impl Runtime {
                 siphon_ai_core::quality_live::snapshot(call_id)
                     .and_then(|row| serde_json::to_value(row).ok())
             })),
+            // Registration write actions (0.33.0). Installed
+            // unconditionally — zero [[register]] blocks just means
+            // every trigger 404s.
+            registrations: Some(Arc::new(RegistrationAdmin {
+                mgr: registration_mgr_for_registration_admin,
+            }) as siphon_ai_telemetry::AdminRegistrations),
         };
         let observability_server =
             build_observability(observability, readiness.clone(), prometheus_handle).await?;
@@ -1500,6 +1507,38 @@ fn registration_state_to_row(s: siphon_ai_sip_glue::RegistrationState) -> Regist
         last_attempt_at: s.last_attempt_at.map(|t| t.to_rfc3339()),
         expires_at: s.expires_at.map(|t| t.to_rfc3339()),
         last_error: s.last_error,
+    }
+}
+
+/// Bridges the admin `POST /admin/v1/registrations/:name/…` endpoints
+/// (0.33.0) to the per-binding drive tasks via the manager's command
+/// registry. Same telemetry↔runtime seam as [`RuntimeCallRegistry`].
+struct RegistrationAdmin {
+    mgr: siphon_ai_sip_glue::RegistrationManager,
+}
+
+impl siphon_ai_telemetry::RegistrationAdminHandle for RegistrationAdmin {
+    fn trigger(
+        &self,
+        name: &str,
+        action: siphon_ai_telemetry::RegistrationAction,
+    ) -> std::result::Result<RegistrationRow, siphon_ai_telemetry::RegistrationAdminError> {
+        use siphon_ai_sip_glue::{RegistrationCommand, SendCommandError};
+        use siphon_ai_telemetry::{RegistrationAction, RegistrationAdminError};
+        let cmd = match action {
+            RegistrationAction::Refresh => RegistrationCommand::Refresh,
+            RegistrationAction::Restart => RegistrationCommand::Restart,
+        };
+        self.mgr.send_command(name, cmd).map_err(|e| match e {
+            SendCommandError::UnknownName => RegistrationAdminError::NotFound,
+            SendCommandError::ShuttingDown => RegistrationAdminError::ShuttingDown,
+        })?;
+        // Accept-time snapshot for the 202 body; the outcome is
+        // asynchronous (DESIGN_REGISTRATION_ADMIN.md §3).
+        self.mgr
+            .get(name)
+            .map(registration_state_to_row)
+            .ok_or(RegistrationAdminError::NotFound)
     }
 }
 

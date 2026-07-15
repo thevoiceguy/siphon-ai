@@ -36,9 +36,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
-use tokio::sync::Notify;
-use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tokio::sync::{mpsc, Notify};
+use tracing::{debug, warn};
 
 /// Primitive shape of one `[[register]]` block as the manager
 /// consumes it.
@@ -67,9 +66,9 @@ pub enum RegistrationStatus {
     /// error). The daemon will retry after a backoff.
     Failed,
     /// `[[register]].register_on_startup = false` — the block is
-    /// configured but the daemon won't drive REGISTER until told to.
-    /// v1 has no "tell to register" RPC; this is reserved for the
-    /// admin-endpoint follow-up.
+    /// configured but parked: the drive task sends no REGISTER until
+    /// the first operator command arrives (0.33.0,
+    /// `POST /admin/v1/registrations/{name}/refresh`).
     Disabled,
 }
 
@@ -136,8 +135,36 @@ struct RegistrationManagerInner {
     /// [`RegistrationManager::resolve_source`] to identify which
     /// registration an inbound INVITE arrived on.
     by_addr: RwLock<HashMap<SocketAddr, String>>,
+    /// `name → command sender` into that binding's drive task
+    /// (0.33.0, DESIGN_REGISTRATION_ADMIN.md). Populated once at
+    /// spawn time — registrations are restart-required config, so
+    /// this never changes for the process lifetime.
+    commands: RwLock<HashMap<String, mpsc::Sender<RegistrationCommand>>>,
     /// Fires on shutdown — every task awaits it via `notified()`.
     shutdown: Notify,
+}
+
+/// Operator-triggered action on one registration's drive task
+/// (0.33.0). Delivered over a small bounded channel the task selects
+/// on alongside its refresh timer and the shutdown signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationCommand {
+    /// Fire an immediate authenticated REGISTER, off-cycle. During a
+    /// failure backoff this also resets the backoff to its initial
+    /// value — an operator kick is "retry now with a clean slate".
+    Refresh,
+    /// Full cycle: REGISTER `Expires: 0` to clear the binding
+    /// (RFC 3261 §10.2.2), then a fresh authenticated REGISTER.
+    Restart,
+}
+
+/// Why [`RegistrationManager::send_command`] didn't queue a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendCommandError {
+    /// No `[[register]]` block with that name.
+    UnknownName,
+    /// The drive task has exited (daemon draining / shutting down).
+    ShuttingDown,
 }
 
 impl RegistrationManager {
@@ -222,6 +249,58 @@ impl RegistrationManager {
             inner: Arc::clone(&self.inner),
         }
     }
+
+    /// Create (and register) the command channel for one binding's
+    /// drive task. Called exactly once per `[[register]]` block at
+    /// spawn time; the returned receiver becomes the task's third
+    /// select arm. Bound 2: one command can queue behind an in-flight
+    /// REGISTER round-trip without ever interleaving REGISTERs for
+    /// the same binding.
+    pub fn register_command_channel(&self, name: &str) -> mpsc::Receiver<RegistrationCommand> {
+        let (tx, rx) = mpsc::channel(2);
+        let prev = self.inner.commands.write().insert(name.to_string(), tx);
+        if prev.is_some() {
+            warn!(
+                name,
+                "register_command_channel called twice for one binding; this is a programming bug"
+            );
+        }
+        rx
+    }
+
+    /// Queue an operator command to one binding's drive task
+    /// (0.33.0, the admin `refresh`/`restart` endpoints).
+    ///
+    /// A **full channel is success**: two commands are already
+    /// queued, and whatever is queued guarantees a fresh REGISTER
+    /// cycle — dropping the extra kick loses nothing. A **closed**
+    /// channel means the task exited (drain/shutdown) → the caller
+    /// maps it to `409`.
+    pub fn send_command(
+        &self,
+        name: &str,
+        command: RegistrationCommand,
+    ) -> Result<(), SendCommandError> {
+        let tx = self
+            .inner
+            .commands
+            .read()
+            .get(name)
+            .cloned()
+            .ok_or(SendCommandError::UnknownName)?;
+        match tx.try_send(command) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                debug!(
+                    name,
+                    ?command,
+                    "registration command queue full; kick already pending"
+                );
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(SendCommandError::ShuttingDown),
+        }
+    }
 }
 
 /// Cheap, cloneable handle to the manager's shutdown notify. Tasks
@@ -267,19 +346,10 @@ pub fn refresh_delay(expires: Duration) -> Duration {
     raw.max(timing::MIN_REFRESH_DELAY)
 }
 
-/// Convenience: spawn a no-op registration task that just sets the
-/// state to `Disabled` and waits for shutdown. The daemon binary
-/// uses this for blocks where `register_on_startup = false`. Real
-/// register-on-startup tasks live in the daemon binary because they
-/// need an `IntegratedUAC` whose construction sip-glue doesn't own.
-pub fn spawn_disabled_task(manager: RegistrationManager, name: String) -> JoinHandle<()> {
-    let signal = manager.shutdown_signal();
-    tokio::spawn(async move {
-        info!(name = %name, "registration disabled by config");
-        signal.cancelled().await;
-        debug!(name = %name, "disabled registration task exiting");
-    })
-}
+// `spawn_disabled_task` was removed in 0.33.0
+// (DESIGN_REGISTRATION_ADMIN.md §4): a `register_on_startup = false`
+// block now runs the ordinary drive task parked awaiting its first
+// operator command, so the no-op placeholder has no callers.
 
 #[cfg(test)]
 mod tests {
@@ -404,6 +474,51 @@ mod tests {
         assert!(b.get("x").is_some());
         b.set_status("x", RegistrationStatus::Registered, None, None);
         assert_eq!(a.get("x").unwrap().status, RegistrationStatus::Registered);
+    }
+
+    #[tokio::test]
+    async fn send_command_reaches_the_registered_channel() {
+        let mgr = RegistrationManager::new();
+        mgr.seed(&[cfg("pbx", "10.0.0.1:5060", true)]);
+        let mut rx = mgr.register_command_channel("pbx");
+        mgr.send_command("pbx", RegistrationCommand::Refresh)
+            .expect("send");
+        assert_eq!(rx.recv().await, Some(RegistrationCommand::Refresh));
+    }
+
+    #[test]
+    fn send_command_unknown_name_is_not_found() {
+        let mgr = RegistrationManager::new();
+        assert_eq!(
+            mgr.send_command("nope", RegistrationCommand::Refresh),
+            Err(SendCommandError::UnknownName)
+        );
+    }
+
+    #[test]
+    fn send_command_full_queue_is_accepted() {
+        // Bound 2: a queued kick already guarantees a fresh cycle, so
+        // dropping the third is success, not backpressure (§2 of the
+        // design note).
+        let mgr = RegistrationManager::new();
+        let _rx = mgr.register_command_channel("pbx");
+        mgr.send_command("pbx", RegistrationCommand::Refresh)
+            .expect("1st");
+        mgr.send_command("pbx", RegistrationCommand::Restart)
+            .expect("2nd");
+        mgr.send_command("pbx", RegistrationCommand::Refresh)
+            .expect("3rd (dropped, still accepted)");
+    }
+
+    #[test]
+    fn send_command_after_task_exit_is_shutting_down() {
+        let mgr = RegistrationManager::new();
+        let rx = mgr.register_command_channel("pbx");
+        drop(rx); // the drive task exited (drain/shutdown)
+        assert_eq!(
+            mgr.send_command("pbx", RegistrationCommand::Restart),
+            Err(SendCommandError::ShuttingDown)
+        );
     }
 
     #[tokio::test]

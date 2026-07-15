@@ -40,12 +40,13 @@ use sip_transaction::{TransactionManager, TransportDispatcher};
 use sip_uac::integrated::{IntegratedUAC, RequestTarget};
 use siphon_ai_config::{RegisterConfig, SipTransport};
 use siphon_ai_sip_glue::{
-    refresh_delay, spawn_disabled_task, RegistrationManager, RegistrationStatus, ShutdownSignal,
+    refresh_delay, RegistrationCommand, RegistrationManager, RegistrationStatus, ShutdownSignal,
 };
 use siphon_ai_telemetry::metrics::{REGISTER_ATTEMPTS_TOTAL, REGISTER_STATE};
 use siphon_ai_webhooks::{
     RegistrationStateChangedEvent, WebhookEvent, WebhookSinkHandle, WEBHOOK_VERSION,
 };
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 
@@ -67,9 +68,9 @@ mod outcome {
 
 /// Spawn one driver task per `[[register]]` block.
 ///
-/// Blocks with `register_on_startup = false` get a no-op task that
-/// just waits for shutdown (same as before — see
-/// [`spawn_disabled_task`]).
+/// Blocks with `register_on_startup = false` run the same drive task
+/// **parked**: no REGISTER until the first operator command arrives
+/// (0.33.0, `POST /admin/v1/registrations/{name}/refresh`).
 ///
 /// All tasks share the same shutdown signal, so a single
 /// `manager.shutdown()` call from the runtime's teardown wakes all of
@@ -98,14 +99,11 @@ pub fn spawn_registration_tasks(
 
     let mut handles = Vec::with_capacity(configs.len());
     for cfg in configs {
-        if !cfg.register_on_startup {
-            info!(
-                name = %cfg.name,
-                "[[register]] disabled by config (register_on_startup = false)"
-            );
-            handles.push(spawn_disabled_task(manager.clone(), cfg.name.clone()));
-            continue;
-        }
+        // Since 0.33.0 a `register_on_startup = false` block runs the
+        // SAME drive task, parked awaiting its first admin command
+        // (`POST /admin/v1/registrations/{name}/refresh` — the
+        // "tell to register" RPC the Disabled status reserved) —
+        // DESIGN_REGISTRATION_ADMIN.md §4.
         handles.push(spawn_one(
             manager.clone(),
             cfg.clone(),
@@ -129,6 +127,9 @@ fn spawn_one(
     webhook_sink: WebhookSinkHandle,
 ) -> JoinHandle<()> {
     let signal = manager.shutdown_signal();
+    // Registered synchronously at spawn time so the admin endpoints
+    // can reach every binding the moment the runtime is up.
+    let commands = manager.register_command_channel(&cfg.name);
     tokio::spawn(async move {
         if let Err(e) = drive(
             &manager,
@@ -138,6 +139,7 @@ fn spawn_one(
             resolver,
             local_addr_str,
             webhook_sink,
+            commands,
             signal,
         )
         .await
@@ -147,14 +149,33 @@ fn spawn_one(
     })
 }
 
-/// Inner loop. Returns `Err` only on unrecoverable setup failures
-/// (UAC builder rejected the config). Per-attempt failures stay in
-/// the loop and roll over to a backoff retry.
+/// SIP side of one REGISTER attempt, abstracted so [`run_loop`]'s
+/// select/backoff/restart mechanics are unit-testable without live
+/// SIP (the tests script outcomes and record requested expires).
+trait RegisterBackend {
+    async fn register(&self, expires_secs: u32) -> RegisterOutcome;
+}
+
+/// The real backend: an [`IntegratedUAC`] against the configured
+/// registrar.
+struct UacBackend {
+    uac: IntegratedUAC,
+    registrar: RequestTarget,
+}
+
+impl RegisterBackend for UacBackend {
+    async fn register(&self, expires_secs: u32) -> RegisterOutcome {
+        perform_register(&self.uac, self.registrar.clone(), expires_secs).await
+    }
+}
+
+/// Unrecoverable setup (UAC builder / registrar URI), then hand off
+/// to the loop.
 ///
-/// 8 args is over clippy's 7-arg threshold; each is independent
+/// 9 args is over clippy's 7-arg threshold; each is independent
 /// daemon-side plumbing (manager, cfg, two transaction/transport
-/// arcs, resolver, local addr, webhook sink, shutdown). Bundling
-/// them into a `Drive Context` struct buys nothing — the call site
+/// arcs, resolver, local addr, webhook sink, commands, shutdown).
+/// Bundling them into a context struct buys nothing — the call site
 /// is one place and each arg is named at construction.
 #[allow(clippy::too_many_arguments)]
 #[instrument(skip_all, fields(name = %cfg.name, server = %cfg.server_addr))]
@@ -166,24 +187,120 @@ async fn drive(
     resolver: Arc<SipResolver>,
     local_addr_str: String,
     webhook_sink: WebhookSinkHandle,
+    commands: mpsc::Receiver<RegistrationCommand>,
     signal: ShutdownSignal,
 ) -> anyhow::Result<()> {
-    let uac = build_uac(cfg, transaction_mgr, dispatcher, resolver, &local_addr_str)?;
+    let backend = UacBackend {
+        uac: build_uac(cfg, transaction_mgr, dispatcher, resolver, &local_addr_str)?,
+        registrar: registrar_target(cfg)?,
+    };
+    run_loop(
+        manager,
+        &cfg.name,
+        cfg.expires.as_secs() as u32,
+        !cfg.register_on_startup,
+        &backend,
+        commands,
+        webhook_sink,
+        signal,
+    )
+    .await;
+    Ok(())
+}
+
+/// The drive loop proper. Every wait — the parked state, the
+/// registered-refresh sleep, and the failure backoff — selects over
+/// **timer / operator command / shutdown** (0.33.0,
+/// DESIGN_REGISTRATION_ADMIN.md §2):
+///
+/// - `Refresh` fires an immediate REGISTER; during a backoff it also
+///   resets the backoff to initial (an operator kick is "retry now
+///   with a clean slate").
+/// - `Restart` does the same but the next attempt is preceded by a
+///   REGISTER `Expires: 0` to clear the registrar-side binding. A
+///   failed unregister is warned and the fresh REGISTER proceeds —
+///   only the final REGISTER's outcome drives status/metrics/webhook.
+/// - `start_parked` (`register_on_startup = false`): no REGISTER
+///   until the first command arrives; either command starts the
+///   normal cycle (there is no binding to clear yet, so `Restart`
+///   from the parked state is identical to `Refresh`).
+#[allow(clippy::too_many_arguments)]
+async fn run_loop<B: RegisterBackend>(
+    manager: &RegistrationManager,
+    name: &str,
+    expires_secs: u32,
+    start_parked: bool,
+    backend: &B,
+    mut commands: mpsc::Receiver<RegistrationCommand>,
+    webhook_sink: WebhookSinkHandle,
+    signal: ShutdownSignal,
+) {
+    if start_parked {
+        info!("[[register]] parked (register_on_startup = false); awaiting operator command");
+        tokio::select! {
+            cmd = commands.recv() => match cmd {
+                Some(cmd) => {
+                    info!(?cmd, "parked registration started by operator");
+                    let prev = manager.get(name).map(|s| s.status);
+                    manager.set_status(name, RegistrationStatus::Pending, None, None);
+                    if prev != Some(RegistrationStatus::Pending) {
+                        publish_state(name, prev, RegistrationStatus::Pending);
+                        emit_webhook(
+                            &webhook_sink,
+                            name,
+                            prev,
+                            RegistrationStatus::Pending,
+                            None,
+                            None,
+                        )
+                        .await;
+                    }
+                }
+                None => {
+                    debug!("command channel closed while parked; exiting");
+                    return;
+                }
+            },
+            _ = signal.cancelled() => {
+                info!("shutdown signal received while parked");
+                return;
+            }
+        }
+    }
 
     info!("registration drive started");
 
     let mut backoff = BACKOFF_INITIAL;
-    let registrar = registrar_target(cfg)?;
-    let expires_secs = cfg.expires.as_secs() as u32;
+    // Set when an operator `Restart` is pending: the next attempt
+    // clears the binding first.
+    let mut unregister_first = false;
 
     loop {
         let mut prev_status = manager
-            .get(&cfg.name)
+            .get(name)
             .map(|s| s.status)
             .unwrap_or(RegistrationStatus::Pending);
 
+        if unregister_first {
+            unregister_first = false;
+            debug!("restart: clearing binding with Expires: 0");
+            if let RegisterOutcome::Failed {
+                outcome_label,
+                error_msg,
+            } = backend.register(0).await
+            {
+                // Best-effort: the goal state is "registered", and the
+                // follow-up REGISTER replaces the binding anyway.
+                warn!(
+                    outcome = outcome_label,
+                    error = %error_msg,
+                    "restart's unregister failed; proceeding to fresh REGISTER",
+                );
+            }
+        }
+
         debug!(?prev_status, "sending REGISTER");
-        let outcome = perform_register(&uac, registrar.clone(), expires_secs).await;
+        let outcome = backend.register(expires_secs).await;
 
         match outcome {
             RegisterOutcome::Registered { granted_expires } => {
@@ -191,21 +308,16 @@ async fn drive(
                     Utc::now() + chrono::Duration::seconds(granted_expires.as_secs() as i64);
                 metrics::counter!(
                     REGISTER_ATTEMPTS_TOTAL,
-                    "name" => cfg.name.clone(),
+                    "name" => name.to_string(),
                     "outcome" => outcome::REGISTERED,
                 )
                 .increment(1);
-                manager.set_status(
-                    &cfg.name,
-                    RegistrationStatus::Registered,
-                    None,
-                    Some(expires_at),
-                );
+                manager.set_status(name, RegistrationStatus::Registered, None, Some(expires_at));
                 if prev_status != RegistrationStatus::Registered {
-                    publish_state(&cfg.name, Some(prev_status), RegistrationStatus::Registered);
+                    publish_state(name, Some(prev_status), RegistrationStatus::Registered);
                     emit_webhook(
                         &webhook_sink,
-                        &cfg.name,
+                        name,
                         Some(prev_status),
                         RegistrationStatus::Registered,
                         None,
@@ -220,12 +332,22 @@ async fn drive(
                 );
                 backoff = BACKOFF_INITIAL;
 
-                // Sleep until refresh time OR shutdown.
+                // Sleep until refresh time, an operator command, OR
+                // shutdown.
                 let delay = refresh_delay(granted_expires);
                 debug!(delay_secs = delay.as_secs(), "sleeping until refresh");
-                if interruptible_sleep(delay, &signal).await.is_shutdown() {
-                    info!("shutdown signal received while registered");
-                    return Ok(());
+                match wait_for(delay, &mut commands, &signal).await {
+                    Wake::Elapsed => {}
+                    Wake::Command(cmd) => {
+                        info!(?cmd, "operator command; registering off-cycle");
+                        if cmd == RegistrationCommand::Restart {
+                            unregister_first = true;
+                        }
+                    }
+                    Wake::Shutdown => {
+                        info!("shutdown signal received while registered");
+                        return;
+                    }
                 }
             }
             RegisterOutcome::Failed {
@@ -234,21 +356,21 @@ async fn drive(
             } => {
                 metrics::counter!(
                     REGISTER_ATTEMPTS_TOTAL,
-                    "name" => cfg.name.clone(),
+                    "name" => name.to_string(),
                     "outcome" => outcome_label,
                 )
                 .increment(1);
                 manager.set_status(
-                    &cfg.name,
+                    name,
                     RegistrationStatus::Failed,
                     Some(error_msg.clone()),
                     None,
                 );
                 if prev_status != RegistrationStatus::Failed {
-                    publish_state(&cfg.name, Some(prev_status), RegistrationStatus::Failed);
+                    publish_state(name, Some(prev_status), RegistrationStatus::Failed);
                     emit_webhook(
                         &webhook_sink,
-                        &cfg.name,
+                        name,
                         Some(prev_status),
                         RegistrationStatus::Failed,
                         Some(error_msg.clone()),
@@ -263,12 +385,54 @@ async fn drive(
                     "registration failed; will retry after backoff"
                 );
 
-                if interruptible_sleep(backoff, &signal).await.is_shutdown() {
-                    info!("shutdown signal received during backoff");
-                    return Ok(());
+                match wait_for(backoff, &mut commands, &signal).await {
+                    Wake::Elapsed => backoff = (backoff * 2).min(BACKOFF_MAX),
+                    Wake::Command(cmd) => {
+                        // An operator kick outranks the exponential
+                        // politeness timer: retry now, clean slate.
+                        info!(?cmd, "operator command during backoff; retrying now");
+                        backoff = BACKOFF_INITIAL;
+                        if cmd == RegistrationCommand::Restart {
+                            unregister_first = true;
+                        }
+                    }
+                    Wake::Shutdown => {
+                        info!("shutdown signal received during backoff");
+                        return;
+                    }
                 }
-                backoff = (backoff * 2).min(BACKOFF_MAX);
             }
+        }
+    }
+}
+
+/// What woke a drive-loop wait.
+enum Wake {
+    Elapsed,
+    Command(RegistrationCommand),
+    Shutdown,
+}
+
+/// 3-arm wait: timer / operator command / shutdown. A closed command
+/// channel (can't happen in production — the manager owns the sender
+/// for the process lifetime) just disables that arm for the rest of
+/// the wait rather than busy-looping on `None`.
+async fn wait_for(
+    delay: Duration,
+    commands: &mut mpsc::Receiver<RegistrationCommand>,
+    signal: &ShutdownSignal,
+) -> Wake {
+    let sleep = tokio::time::sleep(delay);
+    tokio::pin!(sleep);
+    let mut commands_open = true;
+    loop {
+        tokio::select! {
+            _ = &mut sleep => return Wake::Elapsed,
+            _ = signal.cancelled() => return Wake::Shutdown,
+            cmd = commands.recv(), if commands_open => match cmd {
+                Some(cmd) => return Wake::Command(cmd),
+                None => commands_open = false,
+            },
         }
     }
 }
@@ -437,32 +601,254 @@ async fn emit_webhook(
     sink.emit(event).await;
 }
 
-/// Result of an interruptible sleep — either the requested delay
-/// elapsed naturally, or the shutdown signal woke us early.
-enum SleepOutcome {
-    Elapsed,
-    Shutdown,
-}
-
-impl SleepOutcome {
-    fn is_shutdown(&self) -> bool {
-        matches!(self, SleepOutcome::Shutdown)
-    }
-}
-
-async fn interruptible_sleep(delay: Duration, signal: &ShutdownSignal) -> SleepOutcome {
-    tokio::select! {
-        _ = tokio::time::sleep(delay) => SleepOutcome::Elapsed,
-        _ = signal.cancelled() => SleepOutcome::Shutdown,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;
     use sip_core::msg::StatusLine;
     use sip_core::{headers::Headers, Response};
+    use siphon_ai_sip_glue::RegistrationEntry;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    // ─── run_loop mechanics (scripted backend, virtual time) ────────
+
+    /// One recorded backend call: the requested `expires` and the
+    /// (virtual) time it happened.
+    type Call = (u32, tokio::time::Instant);
+
+    /// Scripted [`RegisterBackend`]: pops outcomes off a queue
+    /// (repeating `Registered` once exhausted) and records every call.
+    #[derive(Clone, Default)]
+    struct FakeBackend {
+        script: Arc<Mutex<VecDeque<RegisterOutcome>>>,
+        calls: Arc<Mutex<Vec<Call>>>,
+    }
+
+    impl RegisterBackend for FakeBackend {
+        async fn register(&self, expires_secs: u32) -> RegisterOutcome {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((expires_secs, tokio::time::Instant::now()));
+            self.script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(RegisterOutcome::Registered {
+                    granted_expires: Duration::from_secs(100_000),
+                })
+        }
+    }
+
+    fn ok_outcome() -> RegisterOutcome {
+        RegisterOutcome::Registered {
+            granted_expires: Duration::from_secs(100_000),
+        }
+    }
+
+    fn failed_outcome() -> RegisterOutcome {
+        RegisterOutcome::Failed {
+            outcome_label: outcome::REJECTED,
+            error_msg: "503 Service Unavailable".into(),
+        }
+    }
+
+    struct LoopFixture {
+        manager: RegistrationManager,
+        backend: FakeBackend,
+        handle: JoinHandle<()>,
+    }
+
+    /// Spawn `run_loop` against a fresh manager + scripted backend.
+    fn spawn_loop(script: Vec<RegisterOutcome>, start_parked: bool) -> LoopFixture {
+        let manager = RegistrationManager::new();
+        manager.seed(&[RegistrationEntry {
+            name: "pbx".into(),
+            server_addr: "10.0.0.1:5060".parse().unwrap(),
+            register_on_startup: !start_parked,
+        }]);
+        let backend = FakeBackend {
+            script: Arc::new(Mutex::new(script.into())),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let commands = manager.register_command_channel("pbx");
+        let signal = manager.shutdown_signal();
+        let handle = {
+            let manager = manager.clone();
+            let backend = backend.clone();
+            tokio::spawn(async move {
+                run_loop(
+                    &manager,
+                    "pbx",
+                    3600,
+                    start_parked,
+                    &backend,
+                    commands,
+                    Arc::new(siphon_ai_webhooks::NullSink),
+                    signal,
+                )
+                .await;
+            })
+        };
+        LoopFixture {
+            manager,
+            backend,
+            handle,
+        }
+    }
+
+    /// Poll (1 ms virtual-time steps) until the backend has seen `n`
+    /// calls. Panics after a bounded number of steps so a hung loop
+    /// fails the test rather than wedging it.
+    async fn wait_calls(backend: &FakeBackend, n: usize) {
+        for _ in 0..10_000 {
+            if backend.calls.lock().unwrap().len() >= n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!(
+            "backend never reached {n} calls (got {})",
+            backend.calls.lock().unwrap().len()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_command_registers_off_cycle() {
+        let fx = spawn_loop(vec![ok_outcome()], false);
+        wait_calls(&fx.backend, 1).await;
+
+        fx.manager
+            .send_command("pbx", RegistrationCommand::Refresh)
+            .expect("send");
+        wait_calls(&fx.backend, 2).await;
+
+        let calls = fx.backend.calls.lock().unwrap().clone();
+        assert_eq!(calls[1].0, 3600, "refresh sends a normal REGISTER");
+        // Off-cycle: the granted expires was 100 000 s (refresh timer
+        // ≈ 99 940 s out); the command-triggered attempt landed within
+        // the test's millisecond-scale polling, not at the timer.
+        let delta = calls[1].1 - calls[0].1;
+        assert!(
+            delta < Duration::from_secs(1_000),
+            "expected an off-cycle REGISTER, got one {delta:?} later",
+        );
+
+        fx.manager.shutdown();
+        let _ = fx.handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_command_clears_binding_then_reregisters() {
+        let fx = spawn_loop(vec![ok_outcome()], false);
+        wait_calls(&fx.backend, 1).await;
+
+        fx.manager
+            .send_command("pbx", RegistrationCommand::Restart)
+            .expect("send");
+        wait_calls(&fx.backend, 3).await;
+
+        let calls = fx.backend.calls.lock().unwrap().clone();
+        let expires: Vec<u32> = calls.iter().map(|c| c.0).collect();
+        assert_eq!(
+            expires,
+            vec![3600, 0, 3600],
+            "restart = Expires:0 unregister, then a fresh REGISTER",
+        );
+
+        fx.manager.shutdown();
+        let _ = fx.handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_proceeds_past_failed_unregister() {
+        // Script: initial register OK, the restart's unregister FAILS,
+        // the follow-up register succeeds — status must end Registered.
+        let fx = spawn_loop(vec![ok_outcome(), failed_outcome(), ok_outcome()], false);
+        wait_calls(&fx.backend, 1).await;
+
+        fx.manager
+            .send_command("pbx", RegistrationCommand::Restart)
+            .expect("send");
+        wait_calls(&fx.backend, 3).await;
+        // Let the outcome handling finish before asserting status.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        assert_eq!(
+            fx.manager.get("pbx").unwrap().status,
+            RegistrationStatus::Registered,
+            "only the final REGISTER drives status",
+        );
+
+        fx.manager.shutdown();
+        let _ = fx.handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn command_during_backoff_retries_immediately() {
+        // First attempt fails → 5 s backoff. A command inside that
+        // window must retry now, not at the backoff deadline.
+        let fx = spawn_loop(vec![failed_outcome(), ok_outcome()], false);
+        wait_calls(&fx.backend, 1).await;
+
+        fx.manager
+            .send_command("pbx", RegistrationCommand::Refresh)
+            .expect("send");
+        wait_calls(&fx.backend, 2).await;
+
+        let calls = fx.backend.calls.lock().unwrap().clone();
+        let delta = calls[1].1 - calls[0].1;
+        assert!(
+            delta < Duration::from_secs(4),
+            "expected the kick to preempt the 5 s backoff, got {delta:?}",
+        );
+
+        fx.manager.shutdown();
+        let _ = fx.handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn parked_binding_registers_only_on_first_command() {
+        let fx = spawn_loop(vec![ok_outcome()], true);
+
+        // Give the loop time (virtual) to misbehave if it were going
+        // to: no REGISTER may fire while parked.
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        assert!(
+            fx.backend.calls.lock().unwrap().is_empty(),
+            "parked binding must not REGISTER until told to",
+        );
+        assert_eq!(
+            fx.manager.get("pbx").unwrap().status,
+            RegistrationStatus::Disabled,
+        );
+
+        fx.manager
+            .send_command("pbx", RegistrationCommand::Refresh)
+            .expect("send");
+        wait_calls(&fx.backend, 1).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert_eq!(
+            fx.manager.get("pbx").unwrap().status,
+            RegistrationStatus::Registered,
+        );
+
+        fx.manager.shutdown();
+        let _ = fx.handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_exits_parked_and_sleeping_loops() {
+        let parked = spawn_loop(vec![], true);
+        let sleeping = spawn_loop(vec![ok_outcome()], false);
+        wait_calls(&sleeping.backend, 1).await;
+
+        parked.manager.shutdown();
+        sleeping.manager.shutdown();
+        parked.handle.await.expect("parked task exits");
+        sleeping.handle.await.expect("sleeping task exits");
+    }
 
     fn response_with(headers: &[(&str, &str)]) -> Response {
         let mut h = Headers::new();

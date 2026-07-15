@@ -42,7 +42,7 @@ pub use handler::{
 };
 pub use invite::InviteFacts;
 pub use register::{
-    refresh_delay, spawn_disabled_task, RegistrationEntry, RegistrationManager, RegistrationState,
-    RegistrationStatus, ShutdownSignal,
+    refresh_delay, RegistrationCommand, RegistrationEntry, RegistrationManager, RegistrationState,
+    RegistrationStatus, SendCommandError, ShutdownSignal,
 };
 pub use route::{route_invite, RouteDecision};

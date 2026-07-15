@@ -89,6 +89,12 @@ pub struct AdminState {
     /// (the quality tracker runs regardless of `[quality]`); `None`
     /// only in partially-built test states → 503.
     pub quality_stats: Option<QualityStatsFn>,
+    /// Registration write actions (0.33.0), serving
+    /// `POST /admin/v1/registrations/:name/refresh|restart`. Always
+    /// installed by the runtime (the manager exists even with zero
+    /// `[[register]]` blocks — triggers then 404); `None` only in
+    /// partially-built test states → 503.
+    pub registrations: Option<AdminRegistrations>,
 }
 
 /// Closure resolving a bridge `call_id` to its live quality snapshot,
@@ -322,6 +328,51 @@ pub struct RegistrationRow {
     pub last_error: Option<String>,
 }
 
+/// Operator write action on one `[[register]]` binding (0.33.0,
+/// DESIGN_REGISTRATION_ADMIN.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationAction {
+    /// Immediate off-cycle REGISTER.
+    Refresh,
+    /// REGISTER `Expires: 0` then a fresh REGISTER.
+    Restart,
+}
+
+impl RegistrationAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Refresh => "refresh",
+            Self::Restart => "restart",
+        }
+    }
+}
+
+/// Why a registration trigger wasn't queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationAdminError {
+    /// No `[[register]]` block with that name → `404`.
+    NotFound,
+    /// The binding's drive task has exited (drain/shutdown) → `409`.
+    ShuttingDown,
+}
+
+/// Handle the runtime installs so the two
+/// `POST /admin/v1/registrations/{name}/…` endpoints can reach the
+/// per-binding drive tasks. Returns the binding's accept-time row on
+/// success (the outcome is asynchronous — design note §3). Same
+/// indirection rationale as [`ParkAdminHandle`]: keeps sip-glue out
+/// of this crate's deps.
+pub trait RegistrationAdminHandle: Send + Sync + 'static {
+    fn trigger(
+        &self,
+        name: &str,
+        action: RegistrationAction,
+    ) -> Result<RegistrationRow, RegistrationAdminError>;
+}
+
+/// Boxed handle the runtime installs into [`AdminState`].
+pub type AdminRegistrations = Arc<dyn RegistrationAdminHandle>;
+
 // ─── Dispatcher ────────────────────────────────────────────────────
 
 /// Returns `Some(response)` when `path` is an admin route, `None`
@@ -348,6 +399,28 @@ pub async fn dispatch(
         (&hyper::Method::POST, "/admin/v1/conferences") => create_conference(state, &body),
         (&hyper::Method::GET, "/admin/v1/parked") => list_parked(state),
         (&hyper::Method::GET, "/admin/v1/drain") => drain_status(state),
+        (m, p)
+            if *m == hyper::Method::POST
+                && p.starts_with("/admin/v1/registrations/")
+                && p.ends_with("/refresh") =>
+        {
+            let name = p
+                .strip_prefix("/admin/v1/registrations/")
+                .and_then(|s| s.strip_suffix("/refresh"))
+                .unwrap_or("");
+            trigger_registration(state, name, RegistrationAction::Refresh)
+        }
+        (m, p)
+            if *m == hyper::Method::POST
+                && p.starts_with("/admin/v1/registrations/")
+                && p.ends_with("/restart") =>
+        {
+            let name = p
+                .strip_prefix("/admin/v1/registrations/")
+                .and_then(|s| s.strip_suffix("/restart"))
+                .unwrap_or("");
+            trigger_registration(state, name, RegistrationAction::Restart)
+        }
         (m, p)
             if *m == hyper::Method::POST
                 && p.starts_with("/admin/v1/calls/")
@@ -788,6 +861,56 @@ fn list_parked(state: &AdminState) -> Response<Full<Bytes>> {
     )
 }
 
+/// `POST /admin/v1/registrations/:name/refresh|restart` (0.33.0).
+/// `202` = the command is queued to the binding's drive task; the body
+/// carries the accept-time row (the REGISTER outcome is asynchronous —
+/// watch `GET /admin/registrations`, the `register_attempts_total`
+/// metric, or the `registration_state_changed` webhook).
+fn trigger_registration(
+    state: &AdminState,
+    name: &str,
+    action: RegistrationAction,
+) -> Response<Full<Bytes>> {
+    let Some(svc) = state.registrations.as_ref() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &json!({ "error": "registration admin unavailable" }),
+        );
+    };
+    if name.is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({ "error": "empty registration name" }),
+        );
+    }
+    match svc.trigger(name, action) {
+        Ok(row) => {
+            metrics::counter!(
+                crate::metrics::REGISTER_ADMIN_TRIGGERS_TOTAL,
+                "name" => name.to_string(),
+                "action" => action.as_str(),
+            )
+            .increment(1);
+            json_response(
+                StatusCode::ACCEPTED,
+                &json!({
+                    "accepted": true,
+                    "action": action.as_str(),
+                    "registration": row,
+                }),
+            )
+        }
+        Err(RegistrationAdminError::NotFound) => json_response(
+            StatusCode::NOT_FOUND,
+            &json!({ "error": format!("no [[register]] block named {name:?}") }),
+        ),
+        Err(RegistrationAdminError::ShuttingDown) => json_response(
+            StatusCode::CONFLICT,
+            &json!({ "error": "daemon is draining; registration tasks are shutting down" }),
+        ),
+    }
+}
+
 fn park_call(state: &AdminState, call_id: &str, body: &Bytes) -> Response<Full<Bytes>> {
     let Some(svc) = state.park.as_ref() else {
         return park_disabled();
@@ -915,6 +1038,128 @@ mod tests {
 
     fn empty_state() -> AdminState {
         AdminState::default()
+    }
+
+    // ─── registration triggers (0.33.0) ─────────────────────────────
+
+    struct StubRegistrations {
+        triggered: Mutex<Vec<(String, RegistrationAction)>>,
+        error: Option<RegistrationAdminError>,
+    }
+
+    impl RegistrationAdminHandle for StubRegistrations {
+        fn trigger(
+            &self,
+            name: &str,
+            action: RegistrationAction,
+        ) -> Result<RegistrationRow, RegistrationAdminError> {
+            if let Some(e) = self.error {
+                return Err(e);
+            }
+            self.triggered
+                .lock()
+                .unwrap()
+                .push((name.to_string(), action));
+            Ok(RegistrationRow {
+                name: name.to_string(),
+                server_addr: "10.0.0.9:5060".into(),
+                status: "failed".into(),
+                last_attempt_at: None,
+                expires_at: None,
+                last_error: Some("503 Service Unavailable".into()),
+            })
+        }
+    }
+
+    fn registrations_state(
+        error: Option<RegistrationAdminError>,
+    ) -> (AdminState, Arc<StubRegistrations>) {
+        let stub = Arc::new(StubRegistrations {
+            triggered: Mutex::new(Vec::new()),
+            error,
+        });
+        let state = AdminState {
+            registrations: Some(stub.clone() as AdminRegistrations),
+            ..AdminState::default()
+        };
+        (state, stub)
+    }
+
+    #[tokio::test]
+    async fn registration_refresh_is_202_with_accept_time_row() {
+        let (state, _stub) = registrations_state(None);
+        let resp = dispatch(
+            &hyper::Method::POST,
+            "/admin/v1/registrations/pbx-a/refresh",
+            Bytes::new(),
+            &state,
+        )
+        .await
+        .expect("admin dispatch");
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body: Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(body["accepted"], true);
+        assert_eq!(body["action"], "refresh");
+        assert_eq!(body["registration"]["name"], "pbx-a");
+        assert_eq!(body["registration"]["status"], "failed");
+    }
+
+    #[tokio::test]
+    async fn registration_restart_reaches_the_handle() {
+        let (state, stub) = registrations_state(None);
+        let resp = dispatch(
+            &hyper::Method::POST,
+            "/admin/v1/registrations/cucm/restart",
+            Bytes::new(),
+            &state,
+        )
+        .await
+        .expect("admin dispatch");
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let calls = stub.triggered.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![("cucm".to_string(), RegistrationAction::Restart)]
+        );
+    }
+
+    #[tokio::test]
+    async fn registration_unknown_name_is_404_and_draining_is_409() {
+        let (state, _stub) = registrations_state(Some(RegistrationAdminError::NotFound));
+        let resp = dispatch(
+            &hyper::Method::POST,
+            "/admin/v1/registrations/nope/refresh",
+            Bytes::new(),
+            &state,
+        )
+        .await
+        .expect("admin dispatch");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let (state, _stub) = registrations_state(Some(RegistrationAdminError::ShuttingDown));
+        let resp = dispatch(
+            &hyper::Method::POST,
+            "/admin/v1/registrations/pbx-a/restart",
+            Bytes::new(),
+            &state,
+        )
+        .await
+        .expect("admin dispatch");
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn registration_trigger_without_handle_is_503() {
+        let resp = dispatch(
+            &hyper::Method::POST,
+            "/admin/v1/registrations/pbx-a/refresh",
+            Bytes::new(),
+            &empty_state(),
+        )
+        .await
+        .expect("admin dispatch");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

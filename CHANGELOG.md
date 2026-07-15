@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-07-15
+
+### Added
+
+- **Registration management (admin API)** — operators can force a
+  `[[register]]` binding back **without bouncing the daemon** (which
+  tears down every active call). Two write actions on the
+  authenticated `[admin]` listener, operator role, audit-logged, no
+  new config (`docs/design/DESIGN_REGISTRATION_ADMIN.md`; #289):
+  - **`POST /admin/v1/registrations/{name}/refresh`** — immediate
+    off-cycle REGISTER; during a failure backoff the kick also resets
+    the backoff to its initial value.
+  - **`POST /admin/v1/registrations/{name}/restart`** — full cycle:
+    REGISTER `Expires: 0` to clear the registrar-side binding, then a
+    fresh REGISTER (stale server state, contact rebinding). A failed
+    unregister warns and proceeds — only the final attempt drives
+    status/metrics/webhook.
+  Both return `202` with the accept-time row; the outcome is
+  asynchronous and observable via `GET /admin/registrations`,
+  `siphon_ai_register_attempts_total`, and the
+  `registration_state_changed` webhook. `404` unknown name, `409`
+  while draining. Per-binding only (no "refresh all" in v1).
+- **Parked bindings**: `register_on_startup = false` now runs the
+  ordinary drive task **parked under operator control** — no REGISTER
+  until the first `refresh`/`restart` arrives (the "tell to register"
+  RPC the `disabled` status had reserved). Ship the config dark, kick
+  the binding when the maintenance window opens. No "re-disable"
+  action in v1.
+- **Metric**: `siphon_ai_register_admin_triggers_total{name,action}` —
+  accepted operator triggers; the resulting REGISTER lands on
+  `register_attempts_total` as usual.
+- **SIPp harness**: `registration_admin` phase — the suite's first
+  registrar-side scenario (SIPp answers REGISTER and asserts the
+  restart's `Expires: 0` on the wire). Suite is now 37 scenarios.
+
+No WS-protocol, CDR, config-schema, or webhook changes.
+
 ## [0.32.0] - 2026-07-14
 
 ### Added

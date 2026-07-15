@@ -191,40 +191,25 @@ barrier and make the contract testable:
 
 ---
 
-## P2 — Registration management (admin)
+## P2 — Registration management (admin) — ✅ delivered in v0.33.0
 
-Today a `[[register]]` row only re-REGISTERs on its own refresh timer (or a
-daemon restart). When an upstream (e.g. CUCM) drops or stales a binding,
-operators have no way to force it back without bouncing the daemon — which
-interrupts active calls. Extends the existing read-only `GET
-/admin/registrations` (0.10.0) on the authenticated `[admin]` listener with
-two write actions (operator role), neither of which touches media:
+Extends the read-only `GET /admin/registrations` (0.10.0) with two
+per-binding write actions (operator role, audit-logged, no new config —
+design note `DESIGN_REGISTRATION_ADMIN.md`):
 
-- **`POST /admin/registrations/{name}/refresh`** — fire an immediate
-  authenticated REGISTER for one binding, off-cycle, without a restart.
-  Implementation: give each registration task a `Notify` (or a small command
-  channel) and have its loop select over all three wake sources —
+- **`POST /admin/v1/registrations/{name}/refresh`** — immediate
+  off-cycle REGISTER (also resets a failure backoff). Implemented as
+  the sketched select-arm nudge: each drive task's waits select over
+  timer / command / shutdown.
+- **`POST /admin/v1/registrations/{name}/restart`** — REGISTER
+  `Expires: 0` then a fresh REGISTER, for server-side stale state or
+  contact rebinding.
 
-  ```rust
-  tokio::select! {
-      _ = tokio::time::sleep(refresh_delay)   => {}  // normal cadence
-      _ = refresh_signal.notified()           => {}  // operator-triggered
-      _ = shutdown_signal.cancelled()         => return,
-  }
-  ```
-
-  so a refresh just nudges the existing loop rather than spawning anything.
-
-- **`POST /admin/registrations/{name}/restart`** — full unregister/register
-  cycle: REGISTER with `Expires: 0` to clear the binding, then a fresh
-  authenticated REGISTER. For when a refresh isn't enough (server-side stale
-  state, contact rebinding after an IP change).
-
-Both return the resulting registration state (reuse the `GET` snapshot
-shape). `404` for an unknown `{name}`; bounded-cardinality metric on
-trigger; audit-logged (actor = token name) like every other admin write.
-Per-binding only — no global "refresh all" in the first cut (operators can
-script the list).
+Bonus over the original sketch: `register_on_startup = false` bindings
+are now **parked under operator control** — the first `refresh` starts
+them (the "tell to register" RPC). Still deliberately per-binding only
+(no "refresh all"), and no "re-disable" action — natural follow-ups if
+demand shows up.
 
 ---
 

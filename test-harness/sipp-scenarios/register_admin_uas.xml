@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  register_admin_uas — SIPp plays the REGISTRAR (UAS); SiphonAI is the
+  registering UAC (0.33.0, DESIGN_REGISTRATION_ADMIN.md §6). The daemon
+  runs the [[register]] block with register_on_startup = false, so
+  every REGISTER below is operator-triggered via the admin API:
+
+    1. REGISTER            — POST …/refresh started the parked binding
+    2. REGISTER Expires: 0 — POST …/restart, step 1 (clear the binding)
+    3. REGISTER            — restart, step 2 (fresh registration)
+
+  All three ride one Call-ID (the UAC keeps its registration dialog
+  state), so SIPp sees them as a single "call". The Expires: 0 check
+  on #2 pins the restart wire contract.
+-->
+<scenario name="register_admin_uas">
+  <recv request="REGISTER"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+[last_Contact:]
+Expires: 3600
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv request="REGISTER">
+    <action>
+      <!-- The restart's first REGISTER must clear the binding. -->
+      <ereg regexp="Expires:[ ]*0" search_in="msg" check_it="true" assign_to="junk"/>
+    </action>
+  </recv>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+[last_Contact:]
+Expires: 0
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv request="REGISTER"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+[last_Contact:]
+Expires: 3600
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- Consume the assigned var so sipp doesn't warn. -->
+  <nop>
+    <action>
+      <log message="restart unregister asserted: [$junk]"/>
+    </action>
+  </nop>
+</scenario>

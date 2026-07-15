@@ -227,6 +227,10 @@ fn operator_pattern(method: &hyper::Method, path: &str) -> bool {
     use hyper::Method;
     // /admin/calls/:id/hangup
     (*method == Method::POST && path.starts_with("/admin/calls/") && path.ends_with("/hangup"))
+        // /admin/v1/registrations/:name/refresh|restart (0.33.0)
+        || (*method == Method::POST
+            && path.starts_with("/admin/v1/registrations/")
+            && (path.ends_with("/refresh") || path.ends_with("/restart")))
         // /admin/v1/calls/:id/park
         || (*method == Method::POST
             && path.starts_with("/admin/v1/calls/")
@@ -261,6 +265,20 @@ pub fn route_label(method: &hyper::Method, path: &str) -> &'static str {
             if *m == Method::POST && p.starts_with("/admin/calls/") && p.ends_with("/hangup") =>
         {
             "POST /admin/calls/:id/hangup"
+        }
+        (m, p)
+            if *m == Method::POST
+                && p.starts_with("/admin/v1/registrations/")
+                && p.ends_with("/refresh") =>
+        {
+            "POST /admin/v1/registrations/:name/refresh"
+        }
+        (m, p)
+            if *m == Method::POST
+                && p.starts_with("/admin/v1/registrations/")
+                && p.ends_with("/restart") =>
+        {
+            "POST /admin/v1/registrations/:name/restart"
         }
         (m, p)
             if *m == Method::GET && p.starts_with("/admin/v1/calls/") && p.ends_with("/stats") =>
@@ -444,6 +462,24 @@ mod tests {
                 "/admin/v1/conferences/room1/participants/call9"
             ),
             Some(Role::Operator)
+        );
+        // Registration write actions (0.33.0) are operator-tier, and
+        // their labels are templated (bounded cardinality).
+        assert_eq!(
+            min_role(&Method::POST, "/admin/v1/registrations/pbx-a/refresh"),
+            Some(Role::Operator)
+        );
+        assert_eq!(
+            min_role(&Method::POST, "/admin/v1/registrations/pbx-a/restart"),
+            Some(Role::Operator)
+        );
+        assert_eq!(
+            route_label(&Method::POST, "/admin/v1/registrations/pbx-a/refresh"),
+            "POST /admin/v1/registrations/:name/refresh"
+        );
+        assert_eq!(
+            route_label(&Method::POST, "/admin/v1/registrations/pbx-a/restart"),
+            "POST /admin/v1/registrations/:name/restart"
         );
         // Unknown admin path → no min role.
         assert_eq!(min_role(&Method::GET, "/admin/nope"), None);

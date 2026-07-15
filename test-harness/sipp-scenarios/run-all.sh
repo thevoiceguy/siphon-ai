@@ -2047,6 +2047,105 @@ fi
 bi_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: registration admin ────────────────
+# Exercises the 0.33.0 registration write actions end-to-end
+# (DESIGN_REGISTRATION_ADMIN.md §6) with SIPp as the REGISTRAR — the
+# suite's first registrar-side scenario. The [[register]] block is
+# parked (register_on_startup = false):
+#   * POST …/refresh starts the parked binding (its FIRST REGISTER —
+#     the "tell to register" RPC), and the status flips to registered;
+#   * POST …/restart drives REGISTER Expires:0 then a fresh REGISTER
+#     (the scenario asserts the Expires:0 on the wire);
+#   * an unknown name 404s;
+#   * siphon_ai_register_admin_triggers_total ticks for both actions.
+echo
+echo "─── auxiliary phase: registration_admin ───────────────"
+RA_OBS_PORT=9091
+RA_DAEMON_LOG=$(mktemp -t siphon-ai-ra.XXXXXX.log)
+RA_CONFIG=$(mktemp -t siphon-ai-ra.XXXXXX.toml)
+cat >"$RA_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-ra"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:8765/"
+[[register]]
+name = "pbx-a"
+server = "127.0.0.1"
+port = $SIPP_PORT
+transport = "udp"
+username = "siphon"
+password = "harness"
+expires_secs = 3600
+register_on_startup = false
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$RA_OBS_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$RA_CONFIG" \
+    >"$RA_DAEMON_LOG" 2>&1 &
+RA_DAEMON_PID=$!
+# SIPp is the registrar; no remote target (it only answers).
+sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/register_admin_uas.xml" \
+    -m 1 -timeout 20s -trace_err -p "$SIPP_PORT" >/dev/null 2>&1 &
+RA_SIPP_PID=$!
+ra_cleanup() {
+    kill "$RA_DAEMON_PID" "$RA_SIPP_PID" 2>/dev/null || true
+    wait "$RA_DAEMON_PID" "$RA_SIPP_PID" 2>/dev/null || true
+}
+trap ra_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── register_admin ───────────────────────────────────"
+ra_ok=0
+ra_auth=(-H "Authorization: Bearer $ADMIN_TOKEN")
+ra_base="http://127.0.0.1:$ADMIN_API_PORT/admin/v1/registrations"
+# Parked: no REGISTER yet, status disabled.
+ra_status=$(curl -s "${ra_auth[@]}" "http://127.0.0.1:$ADMIN_API_PORT/admin/registrations" \
+    | grep -o '"status":"[a-z]*"' | head -1)
+# Unknown name → 404.
+ra_404=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${ra_auth[@]}" "$ra_base/nope/refresh")
+# Refresh starts the parked binding.
+ra_refresh=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${ra_auth[@]}" "$ra_base/pbx-a/refresh")
+sleep 1.5
+ra_registered=$(curl -s "${ra_auth[@]}" "http://127.0.0.1:$ADMIN_API_PORT/admin/registrations" \
+    | grep -c '"status":"registered"')
+# Restart drives Expires:0 + fresh REGISTER (asserted inside the
+# SIPp scenario).
+ra_restart=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${ra_auth[@]}" "$ra_base/pbx-a/restart")
+if [[ "$ra_status" == '"status":"disabled"' && "$ra_404" == "404" \
+      && "$ra_refresh" == "202" && "$ra_registered" == "1" \
+      && "$ra_restart" == "202" ]] && wait "$RA_SIPP_PID"; then
+    if curl -s "http://127.0.0.1:$RA_OBS_PORT/metrics" \
+        | grep -q 'siphon_ai_register_admin_triggers_total{name="pbx-a",action="restart"} 1'; then
+        ra_ok=1
+    fi
+fi
+if (( ra_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (status=$ra_status 404=$ra_404 refresh=$ra_refresh registered=$ra_registered restart=$ra_restart; daemon: $RA_DAEMON_LOG)"
+    failures=$((failures + 1))
+fi
+
+ra_cleanup
+trap - EXIT
+
 # ─── Always-on auxiliary phase: graceful drain ────────────────────
 # Exercises the 0.17.0 SIGTERM drain end-to-end (DESIGN_GRACEFUL_SHUTDOWN
 # §5):

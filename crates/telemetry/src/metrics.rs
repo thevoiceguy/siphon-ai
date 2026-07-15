@@ -113,6 +113,15 @@ pub const OUTBOUND_SRTP_TOTAL: &str = "siphon_ai_outbound_srtp_total";
 /// `siphon-ai-telemetry::http`.
 pub const ADMIN_REQUESTS_TOTAL: &str = "siphon_ai_admin_requests_total";
 
+/// Operator-triggered registration actions accepted by the admin API
+/// (0.33.0): `POST /admin/v1/registrations/{name}/refresh|restart`.
+/// Labeled by `name` (the `[[register]].name` — operator-chosen,
+/// bounded like `register_attempts_total`) and `action`
+/// (`refresh` | `restart`). Counts *accepted* triggers; the resulting
+/// REGISTER's outcome lands on `siphon_ai_register_attempts_total`.
+/// Literal must match the call site in `siphon-ai-telemetry::admin`.
+pub const REGISTER_ADMIN_TRIGGERS_TOTAL: &str = "siphon_ai_register_admin_triggers_total";
+
 /// Inbound delayed-offer (offerless INVITE) outcomes (0.9.0). Labeled by
 /// `result`: `answered` (peer's ACK answer negotiated and the call
 /// bridged), `ack_timeout` (no ACK before Timer H), `missing_sdp_answer`
@@ -551,6 +560,10 @@ pub fn register_descriptions() {
     describe_counter!(
         "siphon_ai_barge_in_decisions_total",
         "Pause-mode barge-in arbitration resolutions by outcome (confirmed, rejected, timeout)."
+    );
+    describe_counter!(
+        REGISTER_ADMIN_TRIGGERS_TOTAL,
+        "Operator registration triggers accepted by the admin API, by name and action (refresh, restart)."
     );
     describe_counter!(
         CONFIG_RELOADS_TOTAL,

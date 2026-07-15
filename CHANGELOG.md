@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-07-15
+
+### Added
+
+- **WS-failure prompt playback** — `[bridge].on_ws_failure =
+  "play_prompt"` + `ws_failure_prompt_file`, both per-route
+  overridable (`docs/design/DESIGN_WS_FAILURE_PROMPT.md`; #292).
+  Finishes the switch reserved since v1: when the WS becomes
+  **unusable** — unexpected drop, connect failure at answer, keepalive
+  timeout, `protocol_error`, `server_too_slow`, or an exhausted
+  0.7.3 reconnect window — the caller hears a configurable WAV
+  (*"we're experiencing difficulties…"*) before the normal BYE,
+  instead of an unexplained disconnect. Details:
+  - Never fires when the ending was intended (server `hangup` / clean
+    `stop`), on caller actions, on `rtp_timeout`, or during drain.
+  - **Fail-open**: an unusable prompt (rate mismatch, file vanished)
+    degrades to today's immediate teardown; playback is capped at a
+    fixed 30 s. CDR termination causes are unchanged (`duration_ms`
+    grows by the prompt).
+  - **Announce-over-park**: a prompt started while the call is parked
+    on MOH now plays (MOH → prompt → BYE after a failed reconnect);
+    a park arriving mid-announcement still cuts it short, so the
+    0.26.0 consent semantics are unchanged.
+  - Prompt file is required + existence-checked at load when any
+    effective policy is `play_prompt`; WAVs longer than the 30 s cap
+    warn at load.
+- **Metric**: `siphon_ai_ws_failure_prompts_total{result}` with
+  `played | cut_short | unusable | timeout`.
+- **SIPp harness**: `ws_failure_prompt` phase (echo server drops the
+  WS mid-call; asserts the prompt played on a real call). Suite is
+  now 38 scenarios.
+
+### Changed
+
+- `MediaTap::with_ws_reconnect` renamed to `with_survive_ws_drop`
+  (internal API) — the tap's survive-WS-drop mode now serves both
+  reconnect and prompt calls.
+
+No WS-protocol, CDR, or webhook-schema changes.
+
 ## [0.33.0] - 2026-07-15
 
 ### Added

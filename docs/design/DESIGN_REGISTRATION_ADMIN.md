@@ -1,6 +1,7 @@
 # Design note — registration management (admin API)
 
-> **Status: PROPOSED — decisions to lock in §9.** Pins the admin
+> **Status: APPROVED — decisions LOCKED (§9, all per recommendation,
+> 2026-07-15).** Pins the admin
 > surface, the task-wiring mechanics, and the failure semantics before
 > implementation — the usual design-first pass. The build follows this;
 > deviations get noted back here. Target: **0.33.0**. No WS-protocol,

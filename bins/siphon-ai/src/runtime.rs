@@ -1430,7 +1430,7 @@ async fn build_observability(
     let listen = cfg
         .http_listen
         .ok_or_else(|| anyhow!("[observability].http_listen unexpectedly empty"))?;
-    let server = ObservabilityServer::start(listen, prometheus, readiness)
+    let server = ObservabilityServer::start(listen, prometheus, readiness, cfg.metrics_token)
         .await
         .with_context(|| format!("bind observability HTTP {listen}"))?;
     Ok(Some(server))

@@ -1,9 +1,11 @@
 //! Hyper-based HTTP servers for the daemon's HTTP surfaces:
 //!
 //! - [`ObservabilityServer`] — `/health`, `/ready`, `/metrics` on
-//!   `[observability].http_listen`. **Unauthenticated** by design: it's
-//!   the scrape/probe surface (Prometheus, k8s) and carries no power.
-//!   The probe routes are zero-allocation in the steady state.
+//!   `[observability].http_listen`. The probe routes are always open
+//!   (k8s/LB probes must not need secrets) and zero-allocation in the
+//!   steady state; `/metrics` optionally requires a bearer token
+//!   (`[observability].metrics_token`, 0.35.0 — recon-hardening for
+//!   widely-exposed observability ports).
 //! - [`AdminServer`] — the `/admin/*` operator surface (see
 //!   [`crate::admin`]) on its own `[admin].listen`, **gated by a bearer
 //!   token + RBAC** ([`crate::auth`]). `/admin/*` is **no longer served**
@@ -78,16 +80,25 @@ impl ObservabilityServer {
         addr: SocketAddr,
         prometheus: PrometheusHandle,
         readiness: ReadinessFlag,
+        metrics_token: Option<String>,
     ) -> Result<Self> {
         let listener = TcpListener::bind(addr)
             .await
             .with_context(|| format!("bind observability HTTP {}", addr))?;
         let bound_addr = listener.local_addr().unwrap_or(addr);
-        info!(addr = %bound_addr, "observability HTTP listener bound");
+        info!(
+            addr = %bound_addr,
+            metrics_auth = metrics_token.is_some(),
+            "observability HTTP listener bound"
+        );
 
         let state = Arc::new(SharedState {
             prometheus,
             readiness,
+            // Only the hash is retained (0.35.0, DESIGN_METRICS_AUTH.md)
+            // — the token itself never lives past this constructor.
+            metrics_token_sha256: metrics_token.as_deref().map(crate::auth::sha256),
+            last_metrics_reject_warn: std::sync::Mutex::new(None),
         });
 
         let listener = tokio::spawn(async move {
@@ -116,6 +127,13 @@ impl ObservabilityServer {
 struct SharedState {
     prometheus: PrometheusHandle,
     readiness: ReadinessFlag,
+    /// SHA-256 of `[observability].metrics_token` (0.35.0). `None` =
+    /// the `/metrics` endpoint is open (the default). Never gates
+    /// `/health` / `/ready`.
+    metrics_token_sha256: Option<[u8; 32]>,
+    /// Rate limit for the rejected-scrape warning: at most one per
+    /// minute. Control-plane only — never touched by call paths.
+    last_metrics_reject_warn: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 async fn run_accept_loop(listener: TcpListener, state: Arc<SharedState>) {
@@ -169,6 +187,52 @@ async fn handle_request(req: Request<Incoming>, state: Arc<SharedState>) -> Resp
             );
         }
         (&hyper::Method::GET, "/metrics") => {
+            // Optional bearer gate (0.35.0, DESIGN_METRICS_AUTH.md).
+            // `/health` and `/ready` above are never gated — probes
+            // must not need secrets. The counter only exists when the
+            // gate is configured (an open endpoint counts nothing).
+            if let Some(expected) = &state.metrics_token_sha256 {
+                use subtle::ConstantTimeEq;
+                let presented = req
+                    .headers()
+                    .get(hyper::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+                    .map(crate::auth::sha256);
+                let ok = presented
+                    .map(|hash| hash.ct_eq(expected).into())
+                    .unwrap_or(false);
+                if !ok {
+                    metrics::counter!(
+                        crate::metrics::METRICS_REQUESTS_TOTAL,
+                        "result" => "unauthenticated",
+                    )
+                    .increment(1);
+                    // At most one warning per minute — a broken scraper
+                    // retries every few seconds and would flood.
+                    let now = std::time::Instant::now();
+                    let mut last = state
+                        .last_metrics_reject_warn
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if last.is_none_or(|t| now.duration_since(t).as_secs() >= 60) {
+                        *last = Some(now);
+                        warn!("rejected unauthenticated /metrics scrape (further rejections logged at most once per minute)");
+                    }
+                    let mut resp =
+                        respond(StatusCode::UNAUTHORIZED, "text/plain", b"unauthorized\n");
+                    resp.headers_mut().insert(
+                        hyper::header::WWW_AUTHENTICATE,
+                        hyper::header::HeaderValue::from_static("Bearer"),
+                    );
+                    return resp;
+                }
+                metrics::counter!(
+                    crate::metrics::METRICS_REQUESTS_TOTAL,
+                    "result" => "ok",
+                )
+                .increment(1);
+            }
             let body = state.prometheus.render();
             return respond(
                 StatusCode::OK,
@@ -456,9 +520,10 @@ mod tests {
         // Tag a metric so /metrics has something interesting; we
         // can't install globally inside the test (other tests do
         // the same), so just reuse the handle without installing.
-        let server = ObservabilityServer::start("127.0.0.1:0".parse().unwrap(), handle, readiness)
-            .await
-            .expect("start");
+        let server =
+            ObservabilityServer::start("127.0.0.1:0".parse().unwrap(), handle, readiness, None)
+                .await
+                .expect("start");
         let url = format!("http://{}", server.bound_addr());
         (server, url)
     }
@@ -735,6 +800,99 @@ mod tests {
         server.shutdown().await;
     }
 
+    /// Like [`get`] but with an `Authorization` header value.
+    async fn get_with_auth(url: String, auth: &str) -> (StatusCode, String, Option<String>) {
+        let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(url)
+            .header(AUTHORIZATION, auth)
+            .body(Empty::new())
+            .unwrap();
+        let resp = tokio::time::timeout(Duration::from_secs(2), client.request(req))
+            .await
+            .expect("request returns")
+            .expect("ok");
+        let status = resp.status();
+        let www = resp
+            .headers()
+            .get(WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .map(|b| String::from_utf8_lossy(&b.to_bytes()).into_owned())
+            .unwrap_or_default();
+        (status, body, www)
+    }
+
+    #[tokio::test]
+    async fn metrics_gate_rejects_wrong_and_missing_tokens_probes_stay_open() {
+        // 0.35.0 (DESIGN_METRICS_AUTH.md): with metrics_token set,
+        // /metrics is 401 without the right bearer; /health and /ready
+        // never need it.
+        let recorder = crate::metrics::prometheus_builder()
+            .expect("builder")
+            .build_recorder();
+        let handle = recorder.handle();
+        let server = ObservabilityServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            handle,
+            ReadinessFlag::new(),
+            Some("scrape-secret".into()),
+        )
+        .await
+        .expect("start");
+        let url = format!("http://{}", server.bound_addr());
+
+        // Missing header → 401 + WWW-Authenticate: Bearer.
+        let (status, _body) = get(format!("{url}/metrics")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Wrong token → 401, and the challenge header is present.
+        let (status, _body, www) = get_with_auth(format!("{url}/metrics"), "Bearer nope").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(www.as_deref(), Some("Bearer"));
+
+        // Right token → 200. (The empty test recorder renders an empty
+        // exposition — the status is the contract here; body rendering
+        // is pinned by `metrics_renders_prometheus_text_with_help_lines`.)
+        let (status, _body, _www) =
+            get_with_auth(format!("{url}/metrics"), "Bearer scrape-secret").await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Probes stay open with the gate on.
+        let (status, _b) = get(format!("{url}/health")).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _b) = get(format!("{url}/ready")).await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn metrics_gate_off_stays_open() {
+        // Unset token = today's open endpoint, byte-for-byte.
+        let recorder = crate::metrics::prometheus_builder()
+            .expect("builder")
+            .build_recorder();
+        let handle = recorder.handle();
+        let server = ObservabilityServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            handle,
+            ReadinessFlag::new(),
+            None,
+        )
+        .await
+        .expect("start");
+        let url = format!("http://{}", server.bound_addr());
+        let (status, _body) = get(format!("{url}/metrics")).await;
+        assert_eq!(status, StatusCode::OK);
+        server.shutdown().await;
+    }
+
     #[tokio::test]
     async fn metrics_renders_prometheus_text_with_help_lines() {
         // Use a per-test recorder via with_local_recorder so the
@@ -751,6 +909,7 @@ mod tests {
             "127.0.0.1:0".parse().unwrap(),
             handle,
             ReadinessFlag::new(),
+            None,
         )
         .await
         .expect("start");

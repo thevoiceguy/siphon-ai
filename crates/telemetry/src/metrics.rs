@@ -113,6 +113,14 @@ pub const OUTBOUND_SRTP_TOTAL: &str = "siphon_ai_outbound_srtp_total";
 /// `siphon-ai-telemetry::http`.
 pub const ADMIN_REQUESTS_TOTAL: &str = "siphon_ai_admin_requests_total";
 
+/// `/metrics` scrape outcomes when — and only when — the optional
+/// bearer gate is configured (`[observability].metrics_token`,
+/// 0.35.0). Labeled by `result`: `ok` | `unauthenticated`. An open
+/// (default) endpoint counts nothing, so this series existing at all
+/// means the gate is on. Literal must match the call site in
+/// `siphon-ai-telemetry::http`.
+pub const METRICS_REQUESTS_TOTAL: &str = "siphon_ai_metrics_requests_total";
+
 /// WS-failure prompt playbacks (0.34.0,
 /// `[bridge].on_ws_failure = "play_prompt"`). Labeled by `result`:
 /// `played` (EOF reached), `cut_short` (caller hung up / teardown
@@ -577,6 +585,10 @@ pub fn register_descriptions() {
     describe_counter!(
         WS_FAILURE_PROMPTS_TOTAL,
         "WS-failure prompt playbacks by result (played, cut_short, unusable, timeout)."
+    );
+    describe_counter!(
+        METRICS_REQUESTS_TOTAL,
+        "/metrics scrape outcomes when the bearer gate is configured (ok, unauthenticated)."
     );
     describe_counter!(
         CONFIG_RELOADS_TOTAL,

@@ -2829,3 +2829,49 @@ timeut_secs = 60
 "#;
     assert!(load_from_str_with_env(toml, &env).is_err());
 }
+
+#[test]
+fn metrics_token_unset_set_and_empty() {
+    // 0.35.0 (DESIGN_METRICS_AUTH.md): unset = open endpoint (the
+    // default); set = gate configured; empty after expansion = load
+    // error (an accidentally-open gate, not a policy).
+    let env = MapEnv::new([("MT", "scrape-secret")]);
+    let base = r#"
+[sip]
+listen = "127.0.0.1:5060"
+[bridge]
+ws_url = "wss://x/y"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:9090"
+METRICS_TOKEN
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+
+    let cfg = load_from_str_with_env(&base.replace("METRICS_TOKEN\n", ""), &env).expect("open");
+    assert_eq!(cfg.observability.metrics_token, None);
+
+    let cfg = load_from_str_with_env(
+        &base.replace("METRICS_TOKEN", r#"metrics_token = "${MT}""#),
+        &env,
+    )
+    .expect("gated");
+    assert_eq!(
+        cfg.observability.metrics_token.as_deref(),
+        Some("scrape-secret")
+    );
+
+    let msg = load_from_str_with_env(
+        &base.replace("METRICS_TOKEN", r#"metrics_token = """#),
+        &env,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        msg.contains("metrics_token"),
+        "expected empty-token rejection, got: {msg}"
+    );
+}

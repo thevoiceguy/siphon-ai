@@ -179,7 +179,7 @@ fn bearer_token(header: &str) -> Option<&str> {
 }
 
 /// SHA-256 of a string, as a fixed 32-byte array.
-fn sha256(s: &str) -> [u8; 32] {
+pub(crate) fn sha256(s: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(s.as_bytes());
     hasher.finalize().into()

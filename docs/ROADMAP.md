@@ -220,11 +220,10 @@ demand shows up.
 
 ## P2 — Security & CDR (small, high-signal)
 
-- **Optional `/metrics` bearer auth** — token on `/metrics` only, off by
-  default; `/health`+`/ready` stay open. Defense-in-depth for deployments
-  that expose the observability port widely. (Confirmed `/metrics` carries no
-  PII — only aggregate counters + operator-chosen route/register names — so
-  this is recon-hardening, not a PII fix.)
+- **Optional `/metrics` bearer auth** — ✅ **delivered in v0.35.0**:
+  `[observability].metrics_token` gates `GET /metrics` (constant-time
+  bearer compare, `401` + `WWW-Authenticate`), off by default;
+  `/health`+`/ready` stay open. See `DESIGN_METRICS_AUTH.md`.
 - **CDR call-quality fields** — ✅ **delivered in v0.30.0**:
   `first_audio_out_ms` and `barge_in_count` shipped in the CDR `quality`
   block (CDR v4), closing the `docs/OPERATIONS.md` Q5/Q8 gaps; v0.32.0

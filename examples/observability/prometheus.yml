@@ -21,6 +21,11 @@ rule_files:
 scrape_configs:
   - job_name: siphon-ai
     metrics_path: /metrics
+    # If the daemon sets [observability].metrics_token (0.35.0), give
+    # Prometheus the same secret (never inline it here):
+    # authorization:
+    #   type: Bearer
+    #   credentials_file: /etc/prometheus/siphon-metrics.token
     static_configs:
       # One entry per daemon. In the bundled compose stack the daemon is
       # reachable as `siphon-ai:9091`; for a host-run daemon use

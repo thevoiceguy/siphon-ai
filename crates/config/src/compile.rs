@@ -437,6 +437,8 @@ pub struct WebhooksConfig {
 pub struct ObservabilityConfig {
     pub enabled: bool,
     pub http_listen: Option<SocketAddr>,
+    /// Bearer token gating `GET /metrics` (0.35.0). `None` = open.
+    pub metrics_token: Option<String>,
     /// `Some` when `[observability.otlp].enabled` — OTLP/gRPC trace export
     /// (0.22.0). Independent of `enabled`/`http_listen` (traces without
     /// metrics scraping is a valid setup). The daemon maps this to
@@ -760,6 +762,12 @@ pub enum CompileError {
 
     #[error("[bridge].on_ws_failure is {0:?}; expected \"hangup\" or \"play_prompt\"")]
     UnknownGlobalOnWsFailure(String),
+
+    #[error(
+        "[observability].metrics_token is empty after expansion — unset it for an \
+         open endpoint, or provide a real secret (${{file:…}} / ${{cred:…}})"
+    )]
+    EmptyMetricsToken,
 
     #[error(
         "{scope} resolves on_ws_failure = \"play_prompt\" but no \
@@ -2779,6 +2787,7 @@ fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, C
         return Ok(ObservabilityConfig {
             enabled: false,
             http_listen: None,
+            metrics_token: None,
             otlp,
         });
     }
@@ -2791,9 +2800,17 @@ fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, C
     let http_listen = listen_str
         .parse()
         .map_err(|e| CompileError::BadObservabilityListen(listen_str.clone(), e))?;
+    // 0.35.0: an empty-after-expansion token is a config mistake (an
+    // accidentally-open gate), not a policy — fail loud per §4.6.
+    let metrics_token = match raw.metrics_token {
+        None => None,
+        Some(t) if t.is_empty() => return Err(CompileError::EmptyMetricsToken),
+        Some(t) => Some(t),
+    };
     Ok(ObservabilityConfig {
         enabled: true,
         http_listen: Some(http_listen),
+        metrics_token,
         otlp,
     })
 }

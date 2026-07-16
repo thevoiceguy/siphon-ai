@@ -771,10 +771,11 @@ signing, idempotency, durability*.
 |---------------|-------------|----------------|-------|
 | `enabled`     | bool        | `false`        | Master switch for the HTTP server. |
 | `http_listen` | `host:port` | required if on | Exposes `/metrics`, `/health`, `/ready`. **Since 0.10.0 it no longer serves `/admin/*`** (returns `404`) — admin moved to the authenticated `[admin]` listener below. |
+| `metrics_token` | string    | unset (open)   | **Optional bearer gate on `GET /metrics`** (0.35.0). When set, scrapes need `Authorization: Bearer <token>` (constant-time compare; `401` + `WWW-Authenticate: Bearer` otherwise). `/health` and `/ready` are **never** gated — probes must not need secrets. Use `${file:…}` / `${cred:…}`, never inline the secret; empty-after-expansion fails at load. Recon-hardening for widely-exposed observability ports (`/metrics` carries no PII — aggregate counters + operator-chosen route/register names). Restart-required, like the rest of this block. Prometheus side: `authorization: { credentials_file: … }` — see `docs/DEPLOY.md`. |
 
-This listener is unauthenticated by design (metrics/health are safe to
-scrape). The privileged `/admin/*` surface lives on its own
-[`[admin]`](#admin) listener.
+The probe routes are always open; `/metrics` is open unless
+`metrics_token` is set. The privileged `/admin/*` surface lives on its
+own [`[admin]`](#admin) listener.
 
 ### `[observability.otlp]` — OpenTelemetry trace export (0.22.0)
 

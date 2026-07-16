@@ -1015,6 +1015,12 @@ pub struct RawObservability {
     /// Required when `enabled = true`.
     #[serde(default)]
     pub http_listen: Option<String>,
+    /// Optional bearer token gating `GET /metrics` (0.35.0,
+    /// DESIGN_METRICS_AUTH.md). Unset = the endpoint is open (the
+    /// default, unchanged). Use `${file:…}` / `${cred:…}` — never
+    /// inline the secret. `/health` and `/ready` are never gated.
+    #[serde(default)]
+    pub metrics_token: Option<String>,
     /// `[observability.otlp]` — OpenTelemetry OTLP trace export (0.22.0).
     /// Independent of the metrics HTTP server above — you can export traces
     /// without scraping metrics, and vice versa. Off by default.

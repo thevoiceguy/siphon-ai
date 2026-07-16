@@ -129,7 +129,8 @@ jobs:
       # `-target` its own generated wrapper would use (cargo-zigbuild
       # respects a pre-set CC_<target>, see its add_env_if_missing).
       # Identical codegen — same kernels, same feature bit. Drop once
-      # tract probes the spelling or cargo-zigbuild maps the alias.
+      # tract probes the spelling (sonos/tract#2483) or cargo-zigbuild
+      # maps the alias (rust-cross/cargo-zigbuild#456).
       - name: CC shim — spell +fp16 as +fullfp16 for zig (aarch64)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |

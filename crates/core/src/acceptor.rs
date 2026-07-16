@@ -902,15 +902,6 @@ pub fn resolve_rtp_stats_interval(
     }
 }
 
-/// Resolve the per-call SRTP mode by merging the daemon default
-/// (`[media].srtp`) with the per-route override
-/// (`[route.media].srtp: Option<String>`). The route override is
-/// stored unparsed; we parse it here strictly — unknown tokens are
-/// **not** treated as `Off`, they panic-equivalent by returning
-/// the default with a `warn!` (route validation should catch this
-/// at config compile, but the compiled-route struct can't currently
-/// carry the typed enum without an upstream refactor — track in a
-/// follow-up).
 /// Resolve the per-call VAD backend by merging the daemon default
 /// (`[media].vad`) with the per-route override (`[route.media].vad`).
 /// Strict replace, same semantics as [`resolve_srtp_mode`]. Route
@@ -936,6 +927,15 @@ pub fn resolve_vad(
     }
 }
 
+/// Resolve the per-call SRTP mode by merging the daemon default
+/// (`[media].srtp`) with the per-route override
+/// (`[route.media].srtp: Option<String>`). The route override is
+/// stored unparsed; we parse it here strictly — unknown tokens are
+/// **not** treated as `Off`, they panic-equivalent by returning
+/// the default with a `warn!` (route validation should catch this
+/// at config compile, but the compiled-route struct can't currently
+/// carry the typed enum without an upstream refactor — track in a
+/// follow-up).
 pub fn resolve_srtp_mode(defaults: &BridgeDefaults, route: &CompiledRoute) -> SrtpMode {
     match route.media.srtp.as_deref() {
         None => defaults.srtp_mode,

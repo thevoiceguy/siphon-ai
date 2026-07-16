@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-07-16
+
+### Added
+
+- **CSV CDR file output** — `[cdr.file].format = "jsonl" | "csv"`
+  (#297). Default `jsonl`, unchanged. `"csv"` writes a fixed 45-column
+  flat view of the CDR record: nested optional blocks (`audio`,
+  `termination`, `consent`, `park`, `hold`, `reconnect`, `quality`)
+  become prefixed columns; absent/unmeasured values are **empty
+  cells**, not zeros; enums use the same snake_case wire strings as
+  JSON; RFC 4180 quoting. A header row is written when the file starts
+  empty (never repeated on restart-append) and columns are append-only
+  across releases. The webhook sink is unaffected (always JSON). When
+  switching an existing file's format, point at a new `path`. See
+  `docs/DEPLOY.md` → *CDR consumers* → *CSV format*.
+- **`print-config --format json`** (#296). Renders the effective
+  compiled config as pretty-printed JSON for tooling (`jq`, deploy
+  diffing) — same sections and redaction semantics as the text output
+  (unset → `null`, hidden secrets → `"<redacted>"`, `--show-secrets`
+  reveals; per-route keys appear only when the route overrides them).
+  Default format stays `text`, byte-identical to before. An inspection
+  view, not a loadable config.
+
 ## [0.35.0] - 2026-07-15
 
 ### Added

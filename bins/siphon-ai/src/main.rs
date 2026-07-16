@@ -57,6 +57,10 @@ enum Command {
         /// passwords) instead of `<redacted>`.
         #[arg(long)]
         show_secrets: bool,
+        /// Output format: `text` (human-readable, the default) or
+        /// `json` (pretty-printed, for `jq` / deploy diffing).
+        #[arg(long, value_enum, default_value_t = PrintFormat::Text)]
+        format: PrintFormat,
     },
 
     /// Report which route a synthetic call matches (first-match-wins)
@@ -128,6 +132,14 @@ enum Command {
     },
 }
 
+/// `print-config` output format. JSON is an inspection view (nulls
+/// for unset, `"<redacted>"` strings), not a loadable config.
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum PrintFormat {
+    Text,
+    Json,
+}
+
 /// The config path, from `--config` or `$SIPHON_AI_CONFIG`. A clap
 /// `global` arg can't be `required`, so enforce presence here.
 fn config_path(cli: &Cli) -> Result<PathBuf> {
@@ -188,7 +200,10 @@ async fn main() -> Result<()> {
         let path = config_path(&cli)?;
         match command {
             Command::Check => run_check(&path),
-            Command::PrintConfig { show_secrets } => run_print_config(&path, *show_secrets),
+            Command::PrintConfig {
+                show_secrets,
+                format,
+            } => run_print_config(&path, *show_secrets, *format),
             Command::RouteTest {
                 ruri_user,
                 ruri_host,
@@ -272,9 +287,13 @@ fn run_check(path: &Path) -> ! {
 
 /// `siphon-ai print-config` — render the effective compiled config
 /// (secrets redacted unless `show_secrets`) and exit.
-fn run_print_config(path: &Path, show_secrets: bool) -> ! {
+fn run_print_config(path: &Path, show_secrets: bool, format: PrintFormat) -> ! {
     let config = load_or_exit(path);
-    print!("{}", inspect::render_config(&config, show_secrets));
+    let rendered = match format {
+        PrintFormat::Text => inspect::render_config(&config, show_secrets),
+        PrintFormat::Json => inspect::render_config_json(&config, show_secrets),
+    };
+    print!("{rendered}");
     std::process::exit(0);
 }
 

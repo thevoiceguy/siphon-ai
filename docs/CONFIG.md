@@ -1079,7 +1079,7 @@ siphon-ai check --config /etc/siphon-ai/config.toml || echo "bad config, not dep
 A missing default route (`any = true`) warns but still exits `0` (matches
 the daemon's startup behavior).
 
-### `siphon-ai print-config --config X [--show-secrets]`
+### `siphon-ai print-config --config X [--show-secrets] [--format text|json]`
 
 Print the **effective** compiled config (post-`${VAR}`, post per-route
 merge) so you can see what your file actually resolved to — which `${VAR}`
@@ -1087,6 +1087,17 @@ won, what each route inherits vs overrides. **Secrets are redacted** (auth
 headers, signing secrets, register/gateway passwords, admin token hashes,
 HEP password → `<redacted>`); `--show-secrets` reveals them for local
 debugging.
+
+`--format json` renders the same sections as pretty-printed JSON for
+tooling (`jq`, deploy diffing). It's an inspection view, not a config
+round-trip: unset optionals are `null`, redacted secrets are the literal
+string `"<redacted>"`, and the output is not loadable as a config file.
+Per-route keys appear only when the route actually overrides them —
+an absent key means "inherits the global".
+
+```sh
+siphon-ai print-config --config x.toml --format json | jq '.routes.list[].name'
+```
 
 ### `siphon-ai route-test --config X --to N [...]`
 

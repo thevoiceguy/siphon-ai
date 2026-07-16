@@ -14,6 +14,7 @@
 
 use std::fmt::Write as _;
 
+use serde_json::{json, Value};
 use siphon_ai_config::{Config, RecordingMode, SipTransport};
 use siphon_ai_routes::{CallInfo, Headers};
 
@@ -42,6 +43,26 @@ fn secret(opt: &Option<String>, show: bool) -> String {
 /// Present a plain optional string (no redaction).
 fn opt(o: &Option<String>) -> String {
     o.clone().unwrap_or_else(|| "<unset>".into())
+}
+
+/// JSON flavour of [`secret`]: `null` when unset, `"<redacted>"` when
+/// set but hidden, the value when `show`.
+fn secret_json(opt: &Option<String>, show: bool) -> Value {
+    match opt {
+        None => Value::Null,
+        Some(_) if !show => json!("<redacted>"),
+        Some(v) => json!(v),
+    }
+}
+
+/// A required (non-optional) secret string, e.g. a register/gateway
+/// password.
+fn secret_value(v: &str, show: bool) -> Value {
+    if show {
+        json!(v)
+    } else {
+        json!("<redacted>")
+    }
 }
 
 fn transport_str(t: &SipTransport) -> &'static str {
@@ -400,6 +421,221 @@ pub fn render_config(config: &Config, show_secrets: bool) -> String {
     }
 
     o
+}
+
+/// Render the effective compiled config as pretty-printed JSON — the
+/// same sections and redaction semantics as [`render_config`], shaped
+/// for tooling (`jq`, deploy diffing) instead of eyeballs.
+///
+/// This is an *inspection* view, not a config round-trip: enum-ish
+/// fields are rendered as strings, unset optionals are `null`, and
+/// redacted secrets are the literal string `"<redacted>"`. Feeding the
+/// output back into the daemon is not supported.
+pub fn render_config_json(config: &Config, show_secrets: bool) -> String {
+    let routes: Vec<Value> = config
+        .routes
+        .iter()
+        .map(|r| {
+            // Same rule as the text renderer: only overrides that are
+            // actually set appear (absent key = inherits the global).
+            let mut route = serde_json::Map::new();
+            route.insert("name".into(), json!(r.name));
+            if let Some(u) = &r.bridge.ws_url {
+                route.insert("ws_url".into(), json!(u));
+            }
+            if r.bridge.ws_auth_header.is_some() {
+                route.insert(
+                    "ws_auth_header".into(),
+                    secret_json(&r.bridge.ws_auth_header, show_secrets),
+                );
+            }
+            if let Some(c) = &r.media.codecs {
+                route.insert(
+                    "codecs".into(),
+                    json!(c.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>()),
+                );
+            }
+            if let Some(m) = &r.media.srtp {
+                route.insert("srtp".into(), json!(m.to_string()));
+            }
+            if let Some(m) = &r.recording.mode {
+                route.insert("recording".into(), json!(m.to_string()));
+            }
+            if let Some(a) = &r.security.min_attestation {
+                route.insert("min_attestation".into(), json!(a.to_string()));
+            }
+            if r.bridge_tls.is_some() {
+                route.insert("bridge_tls".into(), json!("set (overrides global)"));
+            }
+            Value::Object(route)
+        })
+        .collect();
+
+    let registrations: Vec<Value> = config
+        .registrations
+        .iter()
+        .map(|reg| {
+            json!({
+                "name": reg.name,
+                "server": reg.server_host,
+                "transport": transport_str(&reg.transport),
+                "username": reg.username,
+                "password": secret_value(&reg.password, show_secrets),
+                "expires_secs": reg.expires.as_secs(),
+                "register_on_startup": reg.register_on_startup,
+            })
+        })
+        .collect();
+
+    let trunks: Vec<Value> = config
+        .trunks
+        .iter()
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "peer_addrs": t.peer_addrs.len(),
+                "from_hosts": t.from_hosts,
+            })
+        })
+        .collect();
+
+    let gateways: Vec<Value> = config
+        .outbound
+        .gateways
+        .iter()
+        .map(|g| {
+            json!({
+                "name": g.name,
+                "proxy": format!("{}:{}", g.proxy_host, g.proxy_port),
+                "transport": transport_str(&g.transport),
+                "from": g.from,
+                "srtp": format!("{:?}", g.srtp),
+                "credentials": g.credentials.as_ref().map(|c| {
+                    json!({
+                        "username": c.username,
+                        "password": secret_value(&c.password, show_secrets),
+                    })
+                }),
+            })
+        })
+        .collect();
+
+    let b = &config.bridge_defaults;
+    let root = json!({
+        "node": {
+            "id": config.node.id,
+            "public_address": config.node.public_address.to_string(),
+        },
+        "sip": {
+            "listen": config.sip.listen_addr.to_string(),
+            "transports": config.sip.transports.iter().map(transport_str).collect::<Vec<_>>(),
+            "tls": config.sip.tls.is_some(),
+            "allow_delayed_offer": config.sip.allow_delayed_offer,
+        },
+        "media": {
+            "srtp": format!("{:?}", config.media.srtp),
+            "rtp_port_range": config.media.rtp_port_range.map(|(lo, hi)| format!("{lo}-{hi}")),
+            "moh_file": config.media.moh_file.as_ref().map(|p| p.display().to_string()),
+        },
+        "bridge": {
+            "ws_url": b.ws_url,
+            "auth_header": secret_json(&b.auth_header, show_secrets),
+            "codecs": b.codecs.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>(),
+            "barge_in": format!("{:?}", b.barge_in.mode),
+            "forward_headers": b.forward_headers,
+        },
+        "routes": {
+            "count": config.routes.len(),
+            "has_default": config.routes.has_default(),
+            "list": routes,
+        },
+        "registrations": registrations,
+        "trunks": trunks,
+        "security": {
+            "stir_shaken": config.security.stir_shaken.enabled,
+            "min_attestation": format!("{:?}", config.security.min_attestation),
+        },
+        "recording": {
+            "mode": format!("{:?}", config.recording.mode),
+            "dir": if matches!(config.recording.mode, RecordingMode::Off) {
+                Value::Null
+            } else {
+                json!(config.recording.dir.display().to_string())
+            },
+        },
+        "outbound": {
+            "max_concurrent": config.outbound.max_concurrent,
+            "rate_limit_per_sec": config.outbound.rate_limit_per_sec,
+            "gateways": gateways,
+        },
+        "conference": {
+            "enabled": config.conference.enabled,
+            "max_rooms": config.conference.max_rooms,
+            "max_participants_per_room": config.conference.max_participants_per_room,
+        },
+        "park": {
+            "enabled": config.park.enabled,
+            "max_parked": config.park.max_parked,
+            "timeout_secs": config.park.timeout.map(|d| d.as_secs()),
+            "timeout_action": format!("{:?}", config.park.timeout_action),
+        },
+        "cdr": {
+            "enabled": config.cdr.enabled,
+            "file": config.cdr.file.as_ref().map(|f| json!({
+                "path": f.path.display().to_string(),
+            })),
+            "webhook": config.cdr.webhook.as_ref().map(|w| json!({
+                "url": w.url,
+                "auth_header": secret_json(&w.auth_header, show_secrets),
+                "secret": secret_json(&w.secret, show_secrets),
+                "spool_dir": w.spool_dir,
+            })),
+        },
+        "webhooks": {
+            "enabled": config.webhooks.enabled,
+            "url": config.webhooks.url,
+            "auth_header": secret_json(&config.webhooks.auth_header, show_secrets),
+            "secret": secret_json(&config.webhooks.secret, show_secrets),
+            "spool_dir": config.webhooks.spool_dir,
+            "events": config.webhooks.events,
+        },
+        "audit": {
+            "enabled": config.audit.enabled,
+            "events": config.audit.events,
+            "file": config.audit.file.as_ref().map(|f| json!({
+                "path": f.path.display().to_string(),
+            })),
+            "webhook": config.audit.webhook.as_ref().map(|w| json!({
+                "url": w.url,
+                "auth_header": secret_json(&w.auth_header, show_secrets),
+                "secret": secret_json(&w.secret, show_secrets),
+                "spool_dir": w.spool_dir,
+            })),
+        },
+        "observability": {
+            "enabled": config.observability.enabled,
+            "http_listen": config.observability.http_listen.map(|a| a.to_string()),
+        },
+        "admin": config.admin.as_ref().map(|a| json!({
+            "listen": a.listen_addr.to_string(),
+            "tokens": a.auth.iter().map(|t| json!({
+                "name": t.name,
+                "role": t.role.as_str(),
+            })).collect::<Vec<_>>(),
+        })),
+        "hep": {
+            "enabled": config.hep.enabled,
+            "collector": config.hep.collector.map(|a| a.to_string()),
+            "capture_id": config.hep.capture_id,
+            "capture_password": secret_json(&config.hep.capture_password, show_secrets),
+        },
+    });
+
+    // `to_string_pretty` can only fail on non-string map keys / broken
+    // `Serialize` impls — `Value` has neither.
+    let mut s = serde_json::to_string_pretty(&root).expect("Value serializes");
+    s.push('\n');
+    s
 }
 
 /// Run the dialplan against synthetic call attributes and report the

@@ -200,6 +200,78 @@ fn print_config_show_secrets_reveals_them() {
 }
 
 #[test]
+fn print_config_json_parses_and_redacts() {
+    let cfg = write_cfg(WITH_SECRET_AND_ROUTES);
+    let out = Command::new(BIN)
+        .args(["print-config", "--format", "json", "--config"])
+        .arg(cfg.path())
+        .output()
+        .expect("run print-config --format json");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("output is valid JSON");
+
+    assert_eq!(v["node"]["id"], "cli-test");
+    assert_eq!(v["bridge"]["ws_url"], "wss://default/ws");
+    assert_eq!(v["bridge"]["auth_header"], "<redacted>");
+    assert!(
+        !stdout.contains("SUPERSECRET"),
+        "secret leaked into JSON print-config output"
+    );
+
+    // Route list: only overrides that are set appear on a route.
+    assert_eq!(v["routes"]["has_default"], true);
+    assert_eq!(v["routes"]["list"][0]["name"], "sales");
+    assert_eq!(v["routes"]["list"][0]["ws_url"], "wss://sales/ws");
+    assert_eq!(v["routes"]["list"][1]["name"], "default");
+    assert!(
+        v["routes"]["list"][1].get("ws_url").is_none(),
+        "inheriting route must not carry an override key"
+    );
+
+    // Unset optionals are null, not omitted (top-level sections are a
+    // stable shape for jq).
+    assert!(v["admin"].is_null());
+    assert!(v["media"]["moh_file"].is_null());
+}
+
+#[test]
+fn print_config_json_show_secrets_reveals_them() {
+    let cfg = write_cfg(WITH_SECRET_AND_ROUTES);
+    let out = Command::new(BIN)
+        .args([
+            "print-config",
+            "--format",
+            "json",
+            "--show-secrets",
+            "--config",
+        ])
+        .arg(cfg.path())
+        .output()
+        .expect("run print-config --format json --show-secrets");
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("output is valid JSON");
+    assert_eq!(v["bridge"]["auth_header"], "Bearer SUPERSECRET");
+}
+
+#[test]
+fn print_config_default_format_is_text() {
+    let cfg = write_cfg(WITH_SECRET_AND_ROUTES);
+    let out = Command::new(BIN)
+        .args(["print-config", "--config"])
+        .arg(cfg.path())
+        .output()
+        .expect("run print-config");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.starts_with("# Effective configuration"),
+        "default output must stay the text renderer; got: {}",
+        &stdout[..stdout.len().min(80)]
+    );
+}
+
+#[test]
 fn route_test_resolves_first_match_wins() {
     let cfg = write_cfg(WITH_SECRET_AND_ROUTES);
     // to=1000 matches the `sales` route and its ws_url override.

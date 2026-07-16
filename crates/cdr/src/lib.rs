@@ -23,13 +23,14 @@
 //! drop the record rather than blocking the per-call task or
 //! propagating panics.
 
+pub mod csv;
 pub mod file;
 pub mod hep;
 pub mod schema;
 pub mod sink;
 pub mod webhook;
 
-pub use file::{FileSink, FileSinkError};
+pub use file::{FileFormat, FileSink, FileSinkError};
 pub use hep::HepCdrSink;
 pub use schema::{
     AudioInfo, CdrRecord, ConsentInfo, Direction, HoldInfo, ParkInfo, QualityInfo, ReconnectInfo,

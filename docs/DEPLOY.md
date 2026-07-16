@@ -708,9 +708,11 @@ unparked. `retrieve` is `409` when the named call exists but isn't parked.
 
 ## CDR consumers
 
-When `[cdr.file]` is enabled, the daemon appends one JSON record per ended
-call to the configured path. Rotate the file with `logrotate`; the daemon
-re-opens on `SIGHUP` (in practice — restart is simpler).
+When `[cdr.file]` is enabled, the daemon appends one record per ended
+call to the configured path — a JSON object per line by default, or a
+fixed-column CSV row with `[cdr.file].format = "csv"` (0.36.0; see below).
+Rotate the file with `logrotate`; the daemon re-opens on `SIGHUP` (in
+practice — restart is simpler).
 
 ```json
 {
@@ -765,6 +767,25 @@ The `version` integer is **4** as of 0.30.0 (the optional `quality`
 block; 3 in 0.17.0 for `drain_forced`, 2 in 0.9.5 for the delayed-offer
 causes). It bumps on changes that could break a strict consumer. Adding
 a new optional *field* stays additive and does not bump.
+
+### CSV format (`[cdr.file].format = "csv"`, 0.36.0)
+
+The CSV layout is a flat view of the same record — 45 columns, one row
+per call, RFC 4180 quoting. A header row is written when the file starts
+empty (never repeated on restart). Semantics:
+
+- Nested blocks flatten to prefixed columns: `audio_codec`,
+  `termination_cause`, `consent_announced`, `park_count`, `hold_total_ms`,
+  `reconnect_count`, `quality_avg_jitter_ms`, `quality_mos_estimate_avg`, …
+- An absent block or unmeasured value is an **empty cell**, not a zero —
+  the same "clean vs unmeasured" distinction the JSON shape makes.
+- Enum values (`direction`, `termination_cause`) use the same snake_case
+  wire strings as JSON; timestamps are RFC 3339 UTC with milliseconds.
+- New columns are only ever **appended**, so position-keyed ingestors
+  survive additive schema changes. Prefer keying by header name anyway.
+- Switching an existing file's format mixes layouts in one file — point a
+  format change at a new `path`. The webhook sink is unaffected (always
+  JSON).
 
 Two optional STIR/SHAKEN fields appear when `[security.stir_shaken]` is
 enabled (added in 0.4.0; schema stays at version 1 — both are omitted

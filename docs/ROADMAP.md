@@ -257,7 +257,9 @@ demand shows up.
 - ~~`print-config --format json`~~ — ✅ done in v0.36.0: `--format text|json`
   on `print-config`, same sections/redaction as the text renderer, shaped
   for `jq` / deploy diffing.
-- CSV CDR output (alongside JSON/JSONL).
+- ~~CSV CDR output~~ — ✅ done in v0.36.0: `[cdr.file].format = "csv"` —
+  fixed-column flat view (header row, empty-cell = unmeasured, append-only
+  columns); webhook sink stays JSON.
 - ~~Marker-bit fix~~ — ✅ done: forge-media #68 (marker bit only on talkspurt start) merged 2026-06-04 and is included in the `3c59b5f` pin shipped with v0.31.1 (verified: the pin is 13 commits ahead of the merge commit).
 
 ---

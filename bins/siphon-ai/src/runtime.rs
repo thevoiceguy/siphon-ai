@@ -2109,10 +2109,14 @@ pub(crate) async fn build_quality_sink(
 }
 
 async fn build_file_sink(cfg: &CdrFileConfig) -> Result<CdrSinkHandle> {
-    let sink = FileSink::open(&cfg.path)
+    let format = match cfg.format {
+        siphon_ai_config::CdrFileFormat::Jsonl => siphon_ai_cdr::FileFormat::Jsonl,
+        siphon_ai_config::CdrFileFormat::Csv => siphon_ai_cdr::FileFormat::Csv,
+    };
+    let sink = FileSink::open_with_format(&cfg.path, format)
         .await
         .with_context(|| format!("open CDR file {}", cfg.path.display()))?;
-    info!(path = %cfg.path.display(), "CDR file sink active");
+    info!(path = %cfg.path.display(), ?format, "CDR file sink active");
     Ok(Arc::new(sink) as CdrSinkHandle)
 }
 

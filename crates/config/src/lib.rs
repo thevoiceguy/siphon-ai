@@ -35,9 +35,9 @@ use thiserror::Error;
 
 pub use compile::{
     compile, AdminConfig, AdminTlsConfig, AuditConfig, AuditFileConfig, AuditWebhookConfig,
-    CdrConfig, CdrFileConfig, CdrWebhookConfig, CompileError, ConferenceConfig, Config, Gateway,
-    GatewayCredentials, HepConfig, MediaConfig, NodeConfig, ObservabilityConfig, OtlpConfig,
-    OutboundConfig, ParkConfig, ParkTimeoutAction, QualityConfig, QualityFileConfig,
+    CdrConfig, CdrFileConfig, CdrFileFormat, CdrWebhookConfig, CompileError, ConferenceConfig,
+    Config, Gateway, GatewayCredentials, HepConfig, MediaConfig, NodeConfig, ObservabilityConfig,
+    OtlpConfig, OutboundConfig, ParkConfig, ParkTimeoutAction, QualityConfig, QualityFileConfig,
     QualityWebhookConfig, RegisterConfig, SecurityConfig, ShutdownConfig, SipAdmissionConfig,
     SipAuthConfig, SipAuthUser, SipConfig, SipTlsConfig, SipTransport, TrunkCidr,
     TrunkCidrParseError, TrunkConfig, WebhooksConfig,

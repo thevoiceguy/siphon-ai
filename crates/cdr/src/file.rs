@@ -1,7 +1,9 @@
-//! Append-only JSONL file sink.
+//! Append-only CDR file sink — JSONL (default) or CSV (0.36.0).
 //!
-//! One record = one JSON object on one line. Lines are terminated
-//! with a single `\n` (LF) regardless of platform — JSONL consumers
+//! One record = one line. JSONL writes one JSON object per line; CSV
+//! writes one fixed-column row per line (see [`crate::csv`]) and a
+//! header row when the file starts empty. Lines are terminated with a
+//! single `\n` (LF) regardless of platform — line-oriented consumers
 //! split on `\n`, and Windows operators reading the file in
 //! Notepad-modern handle LF fine.
 //!
@@ -51,8 +53,22 @@ pub enum FileSinkError {
     },
 }
 
+/// On-disk record layout for [`FileSink`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FileFormat {
+    /// One JSON object per line (the default since 0.1.0).
+    #[default]
+    Jsonl,
+    /// Fixed-column CSV with a header row written when the file
+    /// starts empty. Switching an existing JSONL file to CSV (or
+    /// vice versa) mixes formats in one file — point a format change
+    /// at a new path.
+    Csv,
+}
+
 pub struct FileSink {
     path: PathBuf,
+    format: FileFormat,
     writer: Arc<Mutex<BufWriter<File>>>,
 }
 
@@ -66,11 +82,22 @@ impl std::fmt::Debug for FileSink {
 }
 
 impl FileSink {
-    /// Open / create the file in append mode. Parent directory must
-    /// exist; we don't `mkdir -p` because deployments typically run
-    /// the daemon under a service account that lacks `~root` write
-    /// — failing loudly is the right behaviour.
+    /// Open / create the file in append mode (JSONL layout). Parent
+    /// directory must exist; we don't `mkdir -p` because deployments
+    /// typically run the daemon under a service account that lacks
+    /// `~root` write — failing loudly is the right behaviour.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, FileSinkError> {
+        Self::open_with_format(path, FileFormat::Jsonl).await
+    }
+
+    /// [`Self::open`] with an explicit record layout. For
+    /// [`FileFormat::Csv`], a header row is written immediately when
+    /// the file starts empty (a restart appending to an existing CSV
+    /// does not repeat it).
+    pub async fn open_with_format(
+        path: impl AsRef<Path>,
+        format: FileFormat,
+    ) -> Result<Self, FileSinkError> {
         let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new()
             .create(true)
@@ -81,10 +108,34 @@ impl FileSink {
                 path: path.clone(),
                 source,
             })?;
-        debug!(path = %path.display(), "opened CDR file");
+        let mut writer = BufWriter::new(file);
+        if format == FileFormat::Csv {
+            let is_empty = writer
+                .get_ref()
+                .metadata()
+                .await
+                .map(|m| m.len() == 0)
+                .map_err(|source| FileSinkError::Open {
+                    path: path.clone(),
+                    source,
+                })?;
+            if is_empty {
+                let header_write = async {
+                    writer.write_all(crate::csv::HEADER.as_bytes()).await?;
+                    writer.write_all(b"\n").await?;
+                    writer.flush().await
+                };
+                header_write.await.map_err(|source| FileSinkError::Open {
+                    path: path.clone(),
+                    source,
+                })?;
+            }
+        }
+        debug!(path = %path.display(), ?format, "opened CDR file");
         Ok(Self {
             path,
-            writer: Arc::new(Mutex::new(BufWriter::new(file))),
+            format,
+            writer: Arc::new(Mutex::new(writer)),
         })
     }
 
@@ -97,15 +148,18 @@ impl FileSink {
 impl CdrSink for FileSink {
     async fn emit(&self, record: CdrRecord) {
         // Serialize outside the lock — the lock only protects the
-        // file handle, not the JSON encoder.
-        let line = match serde_json::to_string(&record) {
-            Ok(s) => s,
-            Err(e) => {
-                // Should be unreachable for our schema; record it
-                // and keep going.
-                warn!(call_id = %record.call_id, error = %e, "CDR JSON serialize failed");
-                return;
-            }
+        // file handle, not the encoder.
+        let line = match self.format {
+            FileFormat::Jsonl => match serde_json::to_string(&record) {
+                Ok(s) => s,
+                Err(e) => {
+                    // Should be unreachable for our schema; record it
+                    // and keep going.
+                    warn!(call_id = %record.call_id, error = %e, "CDR JSON serialize failed");
+                    return;
+                }
+            },
+            FileFormat::Csv => crate::csv::record_to_row(&record),
         };
 
         let mut guard = self.writer.lock().await;
@@ -237,6 +291,54 @@ mod tests {
         assert_eq!(lines[0], "{\"prior\":true}");
         let v: Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(v["call_id"], serde_json::json!("c-after"));
+    }
+
+    #[tokio::test]
+    async fn csv_writes_header_once_and_one_row_per_emit() {
+        let tmp = NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+
+        let sink = FileSink::open_with_format(&path, FileFormat::Csv)
+            .await
+            .expect("open");
+        sink.emit(sample("c-1")).await;
+        drop(sink);
+
+        // Reopen (daemon restart) — the header must not repeat.
+        let sink = FileSink::open_with_format(&path, FileFormat::Csv)
+            .await
+            .expect("reopen");
+        sink.emit(sample("c-2")).await;
+        drop(sink);
+
+        let body = read_all(&path).await;
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 3, "header + 2 rows, got: {body:?}");
+        assert_eq!(lines[0], crate::csv::HEADER);
+        assert!(lines[1].starts_with(&format!("{CDR_VERSION},c-1,")));
+        assert!(lines[2].starts_with(&format!("{CDR_VERSION},c-2,")));
+        // Every row has the full column count.
+        for line in &lines[1..] {
+            assert_eq!(
+                line.split(',').count(),
+                crate::csv::HEADER.split(',').count(),
+                "row: {line}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn open_defaults_to_jsonl() {
+        let tmp = NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        let sink = FileSink::open(&path).await.expect("open");
+        sink.emit(sample("c-1")).await;
+        drop(sink);
+        let body = read_all(&path).await;
+        assert!(
+            body.starts_with('{'),
+            "plain open() must stay JSONL: {body:?}"
+        );
     }
 
     #[tokio::test]

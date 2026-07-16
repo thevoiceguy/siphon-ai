@@ -1564,7 +1564,45 @@ any = true
     assert!(cfg.cdr.enabled);
     let file = cfg.cdr.file.expect("file sink configured");
     assert_eq!(file.path.to_str(), Some("/var/log/siphon-ai/cdr.jsonl"));
+    // No `format` key → JSONL, the pre-0.36.0 behaviour.
+    assert_eq!(file.format, siphon_ai_config::CdrFileFormat::Jsonl);
     assert!(cfg.cdr.webhook.is_none());
+}
+
+#[test]
+fn cdr_file_format_csv_compiles_and_bad_value_errors() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[cdr]
+enabled = true
+[cdr.file]
+enabled = true
+path = "/var/log/siphon-ai/cdr.csv"
+format = "csv"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).unwrap();
+    let file = cfg.cdr.file.expect("file sink configured");
+    assert_eq!(file.format, siphon_ai_config::CdrFileFormat::Csv);
+
+    // Unknown format value fails at load time, naming the variants.
+    let bad = toml.replace("format = \"csv\"", "format = \"xml\"");
+    let err = load_from_str_with_env(&bad, &env).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unknown variant") && msg.contains("csv"),
+        "unhelpful error: {msg}"
+    );
 }
 
 #[test]

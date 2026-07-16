@@ -732,6 +732,20 @@ pub struct RawCdrFile {
     /// at startup; the daemon does NOT mkdir.
     #[serde(default)]
     pub path: Option<String>,
+    /// Record format: `"jsonl"` (default) or `"csv"`. CSV flattens
+    /// the record into a fixed column set with a header row written
+    /// when the file starts empty — point a format change at a new
+    /// `path`.
+    #[serde(default)]
+    pub format: Option<RawCdrFileFormat>,
+}
+
+/// `[cdr.file].format` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RawCdrFileFormat {
+    Jsonl,
+    Csv,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]

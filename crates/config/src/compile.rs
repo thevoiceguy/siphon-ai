@@ -35,9 +35,9 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::raw::{
-    RawBridge, RawCdr, RawConference, RawConfig, RawGateway, RawHep, RawMedia, RawNode,
-    RawObservability, RawOutbound, RawPark, RawRecording, RawRegister, RawSecurity, RawSip,
-    RawSipTls, RawWebhooks,
+    RawBridge, RawCdr, RawCdrFileFormat, RawConference, RawConfig, RawGateway, RawHep, RawMedia,
+    RawNode, RawObservability, RawOutbound, RawPark, RawRecording, RawRegister, RawSecurity,
+    RawSip, RawSipTls, RawWebhooks,
 };
 
 /// Compiled, ready-to-pass daemon config.
@@ -497,6 +497,19 @@ pub struct CdrConfig {
 #[derive(Debug, Clone)]
 pub struct CdrFileConfig {
     pub path: PathBuf,
+    pub format: CdrFileFormat,
+}
+
+/// `[cdr.file].format` — how records are laid out in the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CdrFileFormat {
+    /// One JSON object per line (the default since 0.1.0).
+    #[default]
+    Jsonl,
+    /// Fixed-column CSV with a header row (0.36.0). Nested optional
+    /// blocks are flattened to prefixed columns; unmeasured values
+    /// are empty cells.
+    Csv,
 }
 
 #[derive(Debug, Clone)]
@@ -3034,6 +3047,10 @@ fn compile_cdr(raw: RawCdr) -> Result<CdrConfig, CompileError> {
         }
         Some(CdrFileConfig {
             path: PathBuf::from(path),
+            format: match raw.file.format {
+                None | Some(RawCdrFileFormat::Jsonl) => CdrFileFormat::Jsonl,
+                Some(RawCdrFileFormat::Csv) => CdrFileFormat::Csv,
+            },
         })
     } else {
         None

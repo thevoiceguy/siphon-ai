@@ -739,9 +739,10 @@ recorded" announcement are the operator's responsibility (see
 [cdr]
 enabled = true
 
-[cdr.file]                    # JSONL, one record per ended call
+[cdr.file]                    # one record per ended call
 enabled = true
 path    = "/var/log/siphon-ai/cdr.jsonl"
+format  = "jsonl"             # "jsonl" (default) | "csv" (0.36.0)
 
 [cdr.webhook]                 # HTTP POST per record
 enabled    = true
@@ -756,6 +757,15 @@ timeout_ms = 5000
 Both sinks can run simultaneously. Master `enabled = false` silences both
 regardless of sub-block state. Adding fields to the CDR schema bumps the
 `version` field; consumers should treat new keys as additive.
+
+`[cdr.file].format = "csv"` (0.36.0) writes a fixed-column CSV instead of
+JSONL: nested optional blocks flatten to prefixed columns (`park_count`,
+`quality_avg_jitter_ms`, …), absent/unmeasured values are **empty cells**
+(not zeros), and a header row is written when the file starts empty. New
+columns are only ever appended. When switching an existing file's format,
+point at a new `path` — the daemon appends and won't rewrite history. The
+webhook sink is always JSON; `format` affects the file sink only. See
+`docs/DEPLOY.md` → *CDR consumers* for the column list.
 
 The CDR webhook shares the delivery transport with `[webhooks]`, so
 `secret` (HMAC `X-SiphonAI-Signature`), `spool_dir` (durable retry), the

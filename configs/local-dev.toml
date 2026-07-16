@@ -10,6 +10,7 @@ user_agent = "SiphonAI/local-dev"
 codecs = ["pcmu", "pcma"]
 dtmf = "rfc2833"
 rtp_port_range = [40000, 40100]
+# vad = "neural"   # Silero speech detection (default "energy"); see docs/CONFIG.md
 
 [bridge]
 ws_url = "ws://127.0.0.1:8765/"

@@ -28,6 +28,7 @@ forge-engine.workspace = true
 forge-codecs.workspace = true
 forge-sdp.workspace    = true
 forge-dtmf.workspace   = true
+forge-vad.workspace    = true
 # Conference rooms (0.7.0 chunk 1): mixer + tone generation.
 forge-mixer.workspace     = true
 forge-injection.workspace = true

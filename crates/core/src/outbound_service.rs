@@ -268,6 +268,7 @@ impl OutboundOriginateHandle for OutboundService {
             to_tag: None,
             // Offer SRTP per the gateway's policy.
             srtp: gw.srtp,
+            vad: self.defaults.vad,
         };
         let tap = TapOptions {
             barge_in_action: barge_in_to_tap_action(&self.defaults.barge_in),

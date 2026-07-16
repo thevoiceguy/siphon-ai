@@ -2913,3 +2913,86 @@ any = true
         "expected empty-token rejection, got: {msg}"
     );
 }
+
+#[test]
+fn media_vad_backend_loads_and_routes_override() {
+    let env = MapEnv::new([]);
+    let base = r#"
+[node]
+id = "n1"
+
+[sip]
+listen = "127.0.0.1:5060"
+
+[media]
+codecs = ["pcmu"]
+__VAD__
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+[route.media]
+__ROUTE_VAD__
+"#;
+
+    // Unset → Energy (pre-0.37 behaviour), route string carried for
+    // the acceptor's resolve_vad.
+    let cfg = load_from_str_with_env(
+        &base.replace("__VAD__\n", "").replace("__ROUTE_VAD__\n", ""),
+        &env,
+    )
+    .expect("defaults compile");
+    assert_eq!(cfg.media.vad, siphon_ai_media_glue::VadBackend::Energy);
+    assert_eq!(
+        cfg.bridge_defaults.vad,
+        siphon_ai_media_glue::VadBackend::Energy
+    );
+
+    // Global neural flows into both the media config and the
+    // acceptor's BridgeDefaults; a route override string survives
+    // compilation for resolve_vad.
+    let cfg = load_from_str_with_env(
+        &base
+            .replace("__VAD__", r#"vad = "neural""#)
+            .replace("__ROUTE_VAD__", r#"vad = "energy""#),
+        &env,
+    )
+    .expect("neural compiles");
+    assert_eq!(cfg.media.vad, siphon_ai_media_glue::VadBackend::Neural);
+    assert_eq!(
+        cfg.bridge_defaults.vad,
+        siphon_ai_media_glue::VadBackend::Neural
+    );
+    assert_eq!(
+        cfg.routes.iter().next().unwrap().media.vad.as_deref(),
+        Some("energy")
+    );
+
+    // Unknown global value fails loud.
+    let msg = load_from_str_with_env(
+        &base
+            .replace("__VAD__", r#"vad = "nueral""#)
+            .replace("__ROUTE_VAD__\n", ""),
+        &env,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(msg.contains("expected \"energy\" or \"neural\""), "{msg}");
+
+    // Unknown *route* value fails loud at load too (stricter than
+    // [route.media].srtp, which still warn-falls-back at resolve).
+    let msg = load_from_str_with_env(
+        &base
+            .replace("__VAD__\n", "")
+            .replace("__ROUTE_VAD__", r#"vad = "silero""#),
+        &env,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(msg.contains("route"), "{msg}");
+    assert!(msg.contains("silero"), "{msg}");
+}

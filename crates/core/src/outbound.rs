@@ -64,6 +64,10 @@ pub struct DelayedOfferPending {
     participant_a: ParticipantId,
     participant_b: ParticipantId,
     tap: TapOptions,
+    /// VAD backend for the call (from `[media].vad` via the gateway's
+    /// request); rides through so the deferred `accept_inbound` builds
+    /// the same detector an early-offer call would get.
+    vad: siphon_ai_media_glue::VadBackend,
     /// SRTP answer policy (from the gateway's `srtp` mode). We can't
     /// *offer* SRTP in an offerless INVITE, but if the peer offers SDES in
     /// its 2xx we answer it (Preferred) or require it (Required → a
@@ -146,6 +150,7 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
             participant_a,
             participant_b,
             tap,
+            vad,
             srtp_mode,
             result_tx,
         } = pending;
@@ -210,6 +215,7 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
                 silence_threshold: tap.silence_threshold,
                 dead_air_threshold: tap.dead_air_threshold,
                 rtp_stats_interval: tap.rtp_stats_interval,
+                vad,
             })
             .await;
 
@@ -519,6 +525,7 @@ impl OutboundOriginator {
                     participant_a: req.participant_a,
                     participant_b: req.participant_b,
                     tap,
+                    vad: req.vad,
                     srtp_mode,
                     result_tx,
                 },

@@ -169,6 +169,12 @@ pub struct MediaOverride {
     /// `"preferred"`, `"required"` overrides. Validated at config
     /// load via the same path as the global field.
     pub srtp: Option<String>,
+    /// `[route.media].vad` — per-route override of the global
+    /// `[media].vad` speech-detection backend. `None` means
+    /// "inherit"; `"energy"` / `"neural"` override (strict — fully
+    /// replaces the global). Validated at config load via the same
+    /// path as the global field.
+    pub vad: Option<String>,
 }
 
 /// `[route.security]` overrides. Same merge rules as the other override

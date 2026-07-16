@@ -58,6 +58,7 @@ fn pcmu_call(call_id: &str, offer: &'static str) -> InboundCall<'static> {
         silence_threshold: None,
         dead_air_threshold: None,
         rtp_stats_interval: None,
+        vad: ::siphon_ai_media_glue::VadBackend::default(),
     }
 }
 
@@ -228,6 +229,7 @@ async fn no_common_codec_rolls_back_session() {
             silence_threshold: None,
             dead_air_threshold: None,
             rtp_stats_interval: None,
+            vad: ::siphon_ai_media_glue::VadBackend::default(),
         })
         .await;
     assert!(matches!(
@@ -268,6 +270,7 @@ async fn malformed_offer_does_not_allocate_ports() {
             silence_threshold: None,
             dead_air_threshold: None,
             rtp_stats_interval: None,
+            vad: ::siphon_ai_media_glue::VadBackend::default(),
         })
         .await
         .unwrap_err();
@@ -294,4 +297,55 @@ async fn answer_port_matches_what_forge_allocated() {
     let parsed = SessionDescription::from_str(&accepted.answer.answer_text).expect("parse answer");
     let audio = parsed.find_media(MediaType::Audio).expect("audio");
     assert_eq!(audio.port, port);
+}
+
+#[tokio::test]
+async fn neural_vad_call_gets_a_rate_aligned_neural_detector() {
+    // `[media].vad = "neural"` end to end: the session is allocated
+    // before codec negotiation (default 16 kHz model), and the PCMU
+    // answer (8 kHz bridge rate) must leave the call holding an 8 kHz
+    // neural detector — re-aligned at setup, not first-packet.
+    let (setup, session_mgr, _bridge_mgr) = fresh_setup(40700, 40800);
+
+    let mut call = pcmu_call("c-neural", LINPHONE_PCMU_OFFER);
+    call.vad = ::siphon_ai_media_glue::VadBackend::Neural;
+    let accepted = setup.accept_inbound(call).await.expect("accepts");
+
+    {
+        let detector = accepted.session.vad_detector().lock().await;
+        assert_eq!(detector.backend_name(), "neural");
+        assert_eq!(
+            detector.required_sample_rate(),
+            Some(8000),
+            "detector must run at the negotiated bridge rate, not the 16 kHz default"
+        );
+    }
+
+    session_mgr
+        .stop_session(&CallId::new("c-neural"))
+        .await
+        .expect("teardown");
+}
+
+#[tokio::test]
+async fn energy_vad_call_keeps_engine_default_detector() {
+    // The default path must not grow a per-session config: same
+    // detector a pre-0.37 build would have (energy, rate-agnostic).
+    let (setup, session_mgr, _bridge_mgr) = fresh_setup(40900, 41000);
+
+    let accepted = setup
+        .accept_inbound(pcmu_call("c-energy", LINPHONE_PCMU_OFFER))
+        .await
+        .expect("accepts");
+
+    {
+        let detector = accepted.session.vad_detector().lock().await;
+        assert_eq!(detector.backend_name(), "energy_zcr");
+        assert_eq!(detector.required_sample_rate(), None);
+    }
+
+    session_mgr
+        .stop_session(&CallId::new("c-energy"))
+        .await
+        .expect("teardown");
 }

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-07-15
+
+### Added
+
+- **Optional `/metrics` bearer auth** —
+  `[observability].metrics_token`
+  (`docs/design/DESIGN_METRICS_AUTH.md`; #294). Recon-hardening for
+  deployments that expose the observability port beyond loopback:
+  when set, `GET /metrics` requires `Authorization: Bearer <token>`
+  (SHA-256 + constant-time compare, the admin listener's scheme; only
+  the hash is retained in memory). Failures answer `401` +
+  `WWW-Authenticate: Bearer`. **Unset = open**, the default —
+  existing deployments are unchanged. `/health` and `/ready` are
+  never gated (probes must not need secrets). Empty-after-expansion
+  tokens fail at load; use `${file:…}` / `${cred:…}`.
+  Prometheus-side `authorization.credentials_file` snippet documented
+  in `docs/DEPLOY.md` and `examples/observability/prometheus.yml`.
+- **Metric**: `siphon_ai_metrics_requests_total{result=ok|unauthenticated}`
+  — emitted only when the gate is configured (an open endpoint counts
+  nothing); rejected scrapes also log a rate-limited warning.
+
+This closes the last locally-buildable P2 roadmap item. No WS-protocol,
+CDR, or webhook changes.
+
 ## [0.34.0] - 2026-07-15
 
 ### Added

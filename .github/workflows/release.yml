@@ -120,6 +120,37 @@ jobs:
           python3 -m pip install --user ziglang
           cargo install cargo-zigbuild --locked
 
+      # tract-linalg (pulled in by forge-vad's neural backend since
+      # 0.37.0) compiles its aarch64 SVE f16 kernels with the GCC/clang
+      # feature spelling `-march=armv8.2-a+sve+fp16`; zig's feature
+      # parser only knows the LLVM name `fullfp16` and hard-errors on
+      # `fp16`. Shim the C compiler for the aarch64 leg: rewrite the
+      # spelling, then exec `cargo-zigbuild zig cc` with the same
+      # `-target` its own generated wrapper would use (cargo-zigbuild
+      # respects a pre-set CC_<target>, see its add_env_if_missing).
+      # Identical codegen — same kernels, same feature bit. Drop once
+      # tract probes the spelling or cargo-zigbuild maps the alias.
+      - name: CC shim — spell +fp16 as +fullfp16 for zig (aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          shim="$RUNNER_TEMP/zigcc-fp16-shim.sh"
+          cat > "$shim" <<'EOF'
+          #!/bin/sh
+          n=$#
+          i=0
+          while [ $i -lt $n ]; do
+            a=$1; shift
+            case "$a" in
+              -march=*) a=$(printf '%s' "$a" | sed 's/+fp16+/+fullfp16+/g; s/+fp16$/+fullfp16/');;
+            esac
+            set -- "$@" "$a"
+            i=$((i+1))
+          done
+          exec cargo-zigbuild zig cc -- -target aarch64-linux-musl "$@"
+          EOF
+          chmod +x "$shim"
+          echo "CC_aarch64_unknown_linux_musl=$shim" >> "$GITHUB_ENV"
+
       - name: Build (release, static musl)
         run: |
           cargo zigbuild --release --locked \

@@ -254,7 +254,9 @@ demand shows up.
 
 ## Small follow-ups (low effort, do opportunistically)
 
-- `print-config --format json` (config CLI nicety).
+- ~~`print-config --format json`~~ — ✅ done in v0.36.0: `--format text|json`
+  on `print-config`, same sections/redaction as the text renderer, shaped
+  for `jq` / deploy diffing.
 - CSV CDR output (alongside JSON/JSONL).
 - ~~Marker-bit fix~~ — ✅ done: forge-media #68 (marker bit only on talkspurt start) merged 2026-06-04 and is included in the `3c59b5f` pin shipped with v0.31.1 (verified: the pin is 13 commits ahead of the merge commit).
 

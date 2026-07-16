@@ -732,6 +732,11 @@ pub struct MediaConfig {
     /// `None` → generated comfort silence. Validated to exist at load
     /// time (same check as `[park].moh_file`).
     pub moh_file: Option<PathBuf>,
+    /// `[media].vad` resolved to its enum form. Default is
+    /// [`VadBackend::Energy`] — unchanged pre-0.37 detection. The
+    /// enum lives in media-glue (below core), same layering as
+    /// `OutboundSrtp`.
+    pub vad: siphon_ai_media_glue::VadBackend,
 }
 
 #[derive(Debug, Error)]
@@ -845,6 +850,14 @@ pub enum CompileError {
 
     #[error("[media].srtp_offer is {0:?}; expected \"sdes\" or \"dtls\"")]
     UnknownSrtpOffer(String),
+
+    #[error("[media].vad is {0:?}; expected \"energy\" or \"neural\"")]
+    UnknownVadBackend(String),
+
+    #[error(
+        "[route.media].vad on route {route:?} is {value:?}; expected \"energy\" or \"neural\""
+    )]
+    RouteBadVadBackend { route: String, value: String },
 
     #[error("[bridge.tls] is malformed: {0}")]
     BadBridgeTls(#[from] siphon_ai_bridge::tls::TlsConfigError),
@@ -1381,6 +1394,22 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         }
     }
 
+    // Route-level VAD override strings are validated here at load
+    // (fail loud, CLAUDE.md §4.6) — `resolve_vad` at accept time only
+    // re-parses already-validated values. (`[route.media].srtp`
+    // predates this pattern and still warn-falls-back at resolve
+    // time; tracked as a follow-up there.)
+    for route in routes.iter() {
+        if let Some(vad) = route.media.vad.as_deref() {
+            if compile_vad_backend(Some(vad)).is_err() {
+                return Err(CompileError::RouteBadVadBackend {
+                    route: route.name.clone(),
+                    value: vad.to_string(),
+                });
+            }
+        }
+    }
+
     // SRTP-without-SIP/TLS footgun warning (DEV_PLAN_0.3.0.md §11).
     // SDES exchanges the master key over the signalling plane; if
     // SIP is plaintext UDP, the key is in the clear and SRTP gives
@@ -1720,11 +1749,28 @@ fn compile_media(raw: &RawMedia) -> Result<MediaConfig, CompileError> {
             Some(path)
         }
     };
+    let vad = compile_vad_backend(raw.vad.as_deref())?;
     Ok(MediaConfig {
         rtp_port_range: raw.rtp_port_range,
         srtp,
         moh_file,
+        vad,
     })
+}
+
+/// Translate the raw `[media].vad` string into a typed
+/// [`VadBackend`][siphon_ai_media_glue::VadBackend]. `None` (unset) →
+/// `Energy`, the pre-0.37 behaviour. Unknown values fail loud per
+/// CLAUDE.md §4.6 — a typo must not silently downgrade speech
+/// detection.
+pub(crate) fn compile_vad_backend(
+    raw: Option<&str>,
+) -> Result<siphon_ai_media_glue::VadBackend, CompileError> {
+    match raw {
+        None | Some("energy") => Ok(siphon_ai_media_glue::VadBackend::Energy),
+        Some("neural") => Ok(siphon_ai_media_glue::VadBackend::Neural),
+        Some(other) => Err(CompileError::UnknownVadBackend(other.to_string())),
+    }
 }
 
 /// Translate the raw `[media].srtp` string into a typed
@@ -2312,6 +2358,7 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
     // strict-matching path the route-level override uses
     // (`compile_srtp_mode`). Default — and any unset value — is `Off`.
     let srtp_mode = compile_srtp_mode(media.srtp.as_deref())?;
+    let vad = compile_vad_backend(media.vad.as_deref())?;
 
     // `[media].srtp_offer` — which key-exchange to OFFER when we're the
     // offerer on a delayed offer. `"sdes"` (default) or `"dtls"`; unknown
@@ -2350,6 +2397,7 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         ws_pong_timeout,
         server_start_deadline,
         srtp_mode,
+        vad,
         offer_dtls_srtp,
         bridge_tls,
         ws_reconnect_enabled,
@@ -3557,6 +3605,42 @@ mod srtp_mode_tests {
         assert!(matches!(
             compile_srtp_mode(Some("PREFERRED")),
             Err(CompileError::UnknownSrtpMode(_))
+        ));
+    }
+}
+
+#[cfg(test)]
+mod vad_backend_tests {
+    use super::{compile_vad_backend, CompileError};
+    use siphon_ai_media_glue::VadBackend;
+
+    #[test]
+    fn known_backends_compile() {
+        // Unset → Energy: pre-0.37 behaviour unchanged.
+        assert_eq!(compile_vad_backend(None).unwrap(), VadBackend::Energy);
+        assert_eq!(
+            compile_vad_backend(Some("energy")).unwrap(),
+            VadBackend::Energy
+        );
+        assert_eq!(
+            compile_vad_backend(Some("neural")).unwrap(),
+            VadBackend::Neural
+        );
+    }
+
+    #[test]
+    fn unknown_backend_fails_loud() {
+        // A typo must not silently downgrade speech detection
+        // (CLAUDE.md §4.6) — the operator asked for neural quality.
+        let err = compile_vad_backend(Some("nueral")).unwrap_err();
+        match err {
+            CompileError::UnknownVadBackend(s) => assert_eq!(s, "nueral"),
+            other => panic!("expected UnknownVadBackend, got {other:?}"),
+        }
+        // Case is significant, same as [media].srtp.
+        assert!(matches!(
+            compile_vad_backend(Some("Neural")),
+            Err(CompileError::UnknownVadBackend(_))
         ));
     }
 }

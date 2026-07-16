@@ -347,18 +347,19 @@ impl Runtime {
         // BridgeOut events.
         let event_bus = Arc::new(ForgeEventBus::new());
 
+        let session_config = forge_engine::MediaSessionConfig {
+            // Local receive-side stats snapshots (0.30.0). Always on
+            // at the RTCP-conventional 5 s cadence: they feed the
+            // rtp_stats rx_* fields AND the CDR quality block, and
+            // the CDR needs them even when a route has WS rtp_stats
+            // emission disabled. Cost is one broadcast event per
+            // receiving leg per 5 s.
+            media_stats_interval: Some(std::time::Duration::from_secs(5)),
+            ..Default::default()
+        };
         let session_mgr_config = SessionManagerConfig {
             port_pool_config: rtp_port_pool(&media)?,
-            session_config: forge_engine::MediaSessionConfig {
-                // Local receive-side stats snapshots (0.30.0). Always on
-                // at the RTCP-conventional 5 s cadence: they feed the
-                // rtp_stats rx_* fields AND the CDR quality block, and
-                // the CDR needs them even when a route has WS rtp_stats
-                // emission disabled. Cost is one broadcast event per
-                // receiving leg per 5 s.
-                media_stats_interval: Some(std::time::Duration::from_secs(5)),
-                ..Default::default()
-            },
+            session_config: session_config.clone(),
             ..Default::default()
         };
         let session_mgr = SessionManager::new(session_mgr_config, Some(Arc::clone(&event_bus)));
@@ -368,12 +369,18 @@ impl Runtime {
         session_mgr.start_monitoring().await;
 
         let bridge_mgr = Arc::new(MediaBridgeManager::new());
-        let media_setup = Arc::new(MediaSetup::new(
-            Arc::clone(&session_mgr),
-            Arc::clone(&bridge_mgr),
-            Arc::clone(&event_bus),
-            node.public_address.clone(),
-        ));
+        let media_setup = Arc::new(
+            MediaSetup::new(
+                Arc::clone(&session_mgr),
+                Arc::clone(&bridge_mgr),
+                Arc::clone(&event_bus),
+                node.public_address.clone(),
+            )
+            // Calls that need a per-session config (a non-default VAD
+            // backend) must inherit the same base the manager applies
+            // to default sessions.
+            .with_session_config_template(session_config),
+        );
 
         // ─── Bridging acceptor + dialog registry ───────────────────
         // Built without the IntegratedUAS here because the routing

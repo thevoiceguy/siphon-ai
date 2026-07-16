@@ -428,6 +428,21 @@ pub struct RawMedia {
     /// → comfort silence. Validated to exist at load time.
     #[serde(default)]
     pub moh_file: Option<String>,
+    /// Which forge-vad backend detects caller speech (drives
+    /// `speech_started`/`speech_stopped`, barge-in, and the idle
+    /// detector — protocol and CDR are identical either way):
+    ///
+    ///   * `"energy"` (default) — energy + zero-crossing-rate
+    ///     heuristics; unchanged pre-0.37 behaviour.
+    ///   * `"neural"` — the Silero neural model (local inference),
+    ///     materially fewer acoustic false positives (coughs,
+    ///     keyboard clatter, music-on-hold bleed).
+    ///
+    /// Per-route override: `[route.media].vad`. Unknown strings are a
+    /// fail-loud error per CLAUDE.md §4.6, enforced via
+    /// [`compile::compile_vad_backend`].
+    #[serde(default)]
+    pub vad: Option<String>,
 }
 
 /// `[security]` — call-authentication policy (STIR/SHAKEN, 0.4.0).

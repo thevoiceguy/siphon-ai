@@ -28,6 +28,6 @@ pub use sdp::{
 };
 pub use setup::{
     InboundAccepted, InboundCall, MediaSetup, OutboundAccepted, OutboundOffer,
-    OutboundOfferRequest, OutboundSrtp, SetupError, TapOptions,
+    OutboundOfferRequest, OutboundSrtp, SetupError, TapOptions, VadBackend,
 };
 pub use tap::{BargeInAction, MediaTap, MediaTapError, TapCommand, TapDisconnect, TimeoutVerdict};

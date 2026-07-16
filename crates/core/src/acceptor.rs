@@ -172,6 +172,11 @@ pub struct BridgeDefaults {
     /// override via `[route.media].srtp` (see [`resolve_srtp_mode`]).
     /// Default [`SrtpMode::Off`] — plaintext-RTP only, matching v0.2.0.
     pub srtp_mode: SrtpMode,
+    /// Default VAD backend from `[media].vad`. Routes can override via
+    /// `[route.media].vad` (see [`resolve_vad`]). Default
+    /// [`VadBackend::Energy`][siphon_ai_media_glue::VadBackend::Energy]
+    /// — unchanged pre-0.37 speech detection.
+    pub vad: siphon_ai_media_glue::VadBackend,
     /// When SiphonAI is the *offerer* on a delayed offer and `srtp_mode`
     /// is `Preferred`/`Required`, offer DTLS-SRTP instead of SDES. From
     /// `[media].srtp_offer = "dtls"`. Default `false` (offer SDES, the
@@ -363,6 +368,7 @@ impl Default for BridgeDefaults {
             ws_pong_timeout: Duration::from_secs(10),
             server_start_deadline: Duration::from_secs(5),
             srtp_mode: SrtpMode::Off,
+            vad: siphon_ai_media_glue::VadBackend::Energy,
             offer_dtls_srtp: false,
             bridge_tls: None,
             ws_reconnect_enabled: false,
@@ -480,6 +486,9 @@ impl AcceptError {
             // SetupError::Srtp only arises on the outbound apply_answer
             // path (never inbound accept); map it defensively to 500.
             | AcceptError::Setup(SetupError::Srtp(_))
+            // A VAD backend that can't be built is a local config /
+            // resource problem, not the caller's offer.
+            | AcceptError::Setup(SetupError::Vad(_))
             | AcceptError::Controller(_) => (500, "Server Internal Error"),
             AcceptError::SrtpModeMismatch { .. } => (488, "Not Acceptable Here"),
             AcceptError::IdentityRequired => (428, "Use Identity Header"),
@@ -902,6 +911,31 @@ pub fn resolve_rtp_stats_interval(
 /// at config compile, but the compiled-route struct can't currently
 /// carry the typed enum without an upstream refactor — track in a
 /// follow-up).
+/// Resolve the per-call VAD backend by merging the daemon default
+/// (`[media].vad`) with the per-route override (`[route.media].vad`).
+/// Strict replace, same semantics as [`resolve_srtp_mode`]. Route
+/// values are validated at config load (`RouteBadVadBackend`), so the
+/// unknown-token arm here is a belt-and-braces fallback for callers
+/// that assemble `CompiledRoute`s outside the config loader.
+pub fn resolve_vad(
+    defaults: &BridgeDefaults,
+    route: &CompiledRoute,
+) -> siphon_ai_media_glue::VadBackend {
+    match route.media.vad.as_deref() {
+        None => defaults.vad,
+        Some("energy") => siphon_ai_media_glue::VadBackend::Energy,
+        Some("neural") => siphon_ai_media_glue::VadBackend::Neural,
+        Some(other) => {
+            tracing::warn!(
+                route = %route.name,
+                value = %other,
+                "[route.media].vad has an invalid value; falling back to the daemon default"
+            );
+            defaults.vad
+        }
+    }
+}
+
 pub fn resolve_srtp_mode(defaults: &BridgeDefaults, route: &CompiledRoute) -> SrtpMode {
     match route.media.srtp.as_deref() {
         None => defaults.srtp_mode,
@@ -3603,6 +3637,7 @@ impl BridgingAcceptor {
                 silence_threshold: resolve_silence_threshold(&self.defaults, route),
                 dead_air_threshold: resolve_dead_air_threshold(&self.defaults, route),
                 rtp_stats_interval: resolve_rtp_stats_interval(&self.defaults, route),
+                vad: resolve_vad(&self.defaults, route),
             })
             .await?;
 
@@ -3934,6 +3969,7 @@ impl BridgingAcceptor {
                 from_tag: None,
                 to_tag: None,
                 srtp,
+                vad: resolve_vad(&self.defaults, route),
             })
             .await
         {
@@ -4912,6 +4948,86 @@ a=sendrecv\r\n";
             ..BridgeDefaults::default()
         };
         assert_eq!(resolve_srtp_mode(&defaults, route), SrtpMode::Preferred);
+    }
+
+    // ─── resolve_vad ────────────────────────────────────────────────
+
+    fn route_with_vad_override(value: &str) -> siphon_ai_routes::RouteSet {
+        first_route(&format!(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            [route.media]
+            vad = "{value}"
+            "#
+        ))
+    }
+
+    #[test]
+    fn vad_inherits_default_when_route_unset() {
+        let routes = first_route(
+            r#"
+            [[route]]
+            name = "r"
+            [route.match]
+            any = true
+            [route.bridge]
+            ws_url = "wss://x/y"
+            "#,
+        );
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            vad: siphon_ai_media_glue::VadBackend::Neural,
+            ..BridgeDefaults::default()
+        };
+        assert_eq!(
+            resolve_vad(&defaults, route),
+            siphon_ai_media_glue::VadBackend::Neural
+        );
+    }
+
+    #[test]
+    fn vad_route_override_wins_both_directions() {
+        // Strict replace: a route can upgrade an energy default…
+        let routes = route_with_vad_override("neural");
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults::default();
+        assert_eq!(
+            resolve_vad(&defaults, route),
+            siphon_ai_media_glue::VadBackend::Neural
+        );
+        // …and downgrade a neural default back to energy.
+        let routes = route_with_vad_override("energy");
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            vad: siphon_ai_media_glue::VadBackend::Neural,
+            ..BridgeDefaults::default()
+        };
+        assert_eq!(
+            resolve_vad(&defaults, route),
+            siphon_ai_media_glue::VadBackend::Energy
+        );
+    }
+
+    #[test]
+    fn vad_invalid_route_value_falls_back_to_default() {
+        // The config loader rejects unknown values at load; this is
+        // the belt-and-braces runtime arm for CompiledRoutes built
+        // outside the loader.
+        let routes = route_with_vad_override("Neural"); // wrong case
+        let route = routes.find_match(&dummy_call_info()).unwrap();
+        let defaults = BridgeDefaults {
+            vad: siphon_ai_media_glue::VadBackend::Neural,
+            ..BridgeDefaults::default()
+        };
+        assert_eq!(
+            resolve_vad(&defaults, route),
+            siphon_ai_media_glue::VadBackend::Neural
+        );
     }
 
     #[test]

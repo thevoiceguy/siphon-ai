@@ -49,7 +49,7 @@ use std::sync::Arc;
 use forge_core::{CallId, EventBus, ForgeError, ParticipantId};
 use forge_engine::srtp_install::install_srtp_keys;
 use forge_engine::{
-    MediaBridgeManager, MediaSession, ParticipantCodecConfig, ParticipantLabel,
+    MediaBridgeManager, MediaSession, MediaSessionConfig, ParticipantCodecConfig, ParticipantLabel,
     ParticipantMediaUpdate, SessionManager,
 };
 use forge_sdp::sdes::{CryptoAttribute, CryptoSuite};
@@ -77,6 +77,13 @@ pub struct MediaSetup {
     /// address forge's RTP socket is bound to (or the public-facing
     /// address when behind 1:1 NAT — left to deployment config).
     local_ip: String,
+    /// Base `MediaSessionConfig` for sessions that need per-call
+    /// customisation (currently only a non-default VAD backend).
+    /// Must match what the daemon put into `SessionManagerConfig.
+    /// session_config`, or customised sessions silently diverge from
+    /// default ones — set via
+    /// [`with_session_config_template`](Self::with_session_config_template).
+    session_config_template: MediaSessionConfig,
 }
 
 /// Per-call inputs to [`MediaSetup::accept_inbound`].
@@ -126,6 +133,10 @@ pub struct InboundCall<'a> {
     /// Resolved by the acceptor from `[bridge].rtp_stats_interval_ms`
     /// plus any per-route override.
     pub rtp_stats_interval: Option<std::time::Duration>,
+    /// Which VAD backend detects caller speech. Resolved by the
+    /// acceptor from `[media].vad` plus the route's
+    /// `[route.media].vad` override.
+    pub vad: VadBackend,
 }
 
 /// What [`MediaSetup::accept_inbound`] hands back on success.
@@ -188,6 +199,8 @@ pub struct OutboundOfferRequest {
     /// `siphon-ai-core::SrtpMode` onto this (media-glue sits below core,
     /// so the enum lives here).
     pub srtp: OutboundSrtp,
+    /// Which VAD backend detects callee speech on this originated call.
+    pub vad: VadBackend,
 }
 
 /// SRTP policy for an **originated** call (RFC 4568 SDES on the offer).
@@ -205,6 +218,52 @@ pub enum OutboundSrtp {
     /// Offer SRTP and **require** it: a peer that answers plaintext fails
     /// the call.
     Required,
+}
+
+/// Which forge-vad backend drives speech detection (`SpeechStarted` /
+/// `SpeechStopped`, and through them barge-in and the idle detector)
+/// for a call. Resolved by the daemon from `[media].vad` plus the
+/// route's `[route.media].vad` override; like [`OutboundSrtp`] the
+/// enum lives here because media-glue sits below core.
+///
+/// The backend changes *detection quality only* — the WS protocol
+/// events and CDR are identical either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VadBackend {
+    /// forge-vad's energy + zero-crossing-rate heuristics (the
+    /// default — unchanged behaviour, ~200 ns per frame).
+    #[default]
+    Energy,
+    /// The Silero neural model (forge-vad `neural` feature, local
+    /// tract-onnx inference, ~60–80 µs per 32 ms window). Materially
+    /// fewer acoustic false positives: coughs, keyboard clatter,
+    /// music-on-hold bleed.
+    Neural,
+}
+
+impl VadBackend {
+    /// The forge session-level `VadConfig` this backend needs at
+    /// `sample_rate`, or `None` when engine defaults already apply
+    /// (energy — keeps default calls byte-identical to before this
+    /// knob existed).
+    fn vad_config(self, sample_rate: u32) -> Option<forge_engine::session::VadConfig> {
+        match self {
+            Self::Energy => None,
+            Self::Neural => Some(forge_engine::session::VadConfig {
+                enabled: true,
+                engine: forge_vad::VadEngineConfig::Neural(forge_vad::NeuralVadConfig {
+                    sample_rate,
+                    ..forge_vad::NeuralVadConfig::default()
+                }),
+            }),
+        }
+    }
+
+    /// Silero models are per-sample-rate; sessions are allocated
+    /// *before* codec negotiation (the port is needed to negotiate),
+    /// so they start at this rate and get re-aligned by
+    /// [`MediaSetup::align_vad_rate`] once the answer is known.
+    const PRE_NEGOTIATION_RATE: u32 = 16_000;
 }
 
 /// What [`MediaSetup::originate_offer`] hands back: the allocated session and
@@ -228,6 +287,10 @@ pub struct OutboundOffer {
     /// The SDES master key we offered, when `srtp` is a secure mode — our
     /// *send* key. `None` for a plaintext offer. Consumed at `apply_answer`.
     pub(crate) offer_crypto: Option<CryptoAttribute>,
+    /// VAD backend the session was created with; consumed at
+    /// `apply_answer` to re-align the detector's sample rate with the
+    /// negotiated codec.
+    pub(crate) vad: VadBackend,
 }
 
 impl std::fmt::Debug for OutboundOffer {
@@ -293,6 +356,13 @@ pub enum SetupError {
     /// peer refused SRTP under `[[gateway]].srtp = "required"`.
     #[error("outbound SRTP negotiation failed: {0}")]
     Srtp(String),
+
+    /// The configured VAD backend couldn't be built for this call
+    /// (e.g., the neural model can't run at the negotiated bridge
+    /// rate). Fail-loud at setup rather than running a wrong-rate or
+    /// silently-different detector.
+    #[error("VAD setup failed: {0}")]
+    Vad(String),
 }
 
 impl From<ForgeError> for SetupError {
@@ -313,7 +383,62 @@ impl MediaSetup {
             bridge_manager,
             event_bus,
             local_ip: local_ip.into(),
+            session_config_template: MediaSessionConfig::default(),
         }
+    }
+
+    /// Set the base `MediaSessionConfig` used when a call needs a
+    /// per-call config (a non-default VAD backend). Pass the same
+    /// value the daemon put into `SessionManagerConfig.session_config`
+    /// so customised sessions inherit every other knob unchanged.
+    #[must_use]
+    pub fn with_session_config_template(mut self, template: MediaSessionConfig) -> Self {
+        self.session_config_template = template;
+        self
+    }
+
+    /// `MediaSessionConfig` to create a session with, or `None` to
+    /// run the manager's defaults (energy VAD — the common case).
+    fn session_config_for(&self, vad: VadBackend) -> Option<MediaSessionConfig> {
+        vad.vad_config(VadBackend::PRE_NEGOTIATION_RATE)
+            .map(|vad_config| MediaSessionConfig {
+                vad_config,
+                ..self.session_config_template.clone()
+            })
+    }
+
+    /// Re-align a session's VAD detector with the *negotiated* bridge
+    /// sample rate. Sessions are allocated before codec negotiation
+    /// (the RTP port has to exist to write the SDP), so a neural
+    /// detector is built at 16 kHz and rebuilt here when the call
+    /// turns out to be 8 kHz (G.711/G.729) — before any RTP flows,
+    /// instead of forge's in-loop rate guard doing it on the first
+    /// packet with a `warn!`. No-op for the rate-agnostic energy
+    /// backend.
+    async fn align_vad_rate(
+        &self,
+        session: &Arc<MediaSession>,
+        vad: VadBackend,
+        sample_rate: u32,
+    ) -> Result<(), SetupError> {
+        let Some(config) = vad.vad_config(sample_rate) else {
+            return Ok(());
+        };
+        let mut detector = session.vad_detector().lock().await;
+        if detector.required_sample_rate() == Some(sample_rate) {
+            return Ok(());
+        }
+        *detector = config.engine.build().map_err(|e| {
+            SetupError::Vad(format!(
+                "cannot build {vad:?} VAD detector at negotiated rate {sample_rate} Hz: {e}"
+            ))
+        })?;
+        debug!(
+            sample_rate,
+            backend = detector.backend_name(),
+            "VAD detector re-aligned to negotiated bridge rate"
+        );
+        Ok(())
     }
 
     pub fn session_manager(&self) -> &Arc<SessionManager> {
@@ -348,15 +473,19 @@ impl MediaSetup {
         let offer = parse_offer(call.offer_sdp)?;
 
         // (2) Allocate the session. This is what gives us the port.
+        //     A non-default VAD backend rides in as a per-session
+        //     config (built at 16 kHz; step 3a re-aligns the rate once
+        //     the codec is negotiated).
         let session = self
             .session_manager
-            .create_session(
+            .create_session_with_config(
                 call.call_id.clone(),
                 call.participant_a.clone(),
                 call.participant_b.clone(),
                 Some(call.offer_sdp.to_string()),
                 call.from_tag.clone(),
                 call.to_tag.clone(),
+                self.session_config_for(call.vad),
             )
             .await?;
 
@@ -378,6 +507,11 @@ impl MediaSetup {
             dtmf_payload_type: call.dtmf_payload_type,
         };
         let answer = negotiate_answer(&offer, &caps)?;
+
+        // (3a) The negotiated codec fixes the bridge PCM rate; give a
+        //      rate-specific (neural) VAD detector the real one.
+        self.align_vad_rate(&session, call.vad, answer.negotiated_audio_sample_rate)
+            .await?;
 
         // (4) Apply the negotiated codec AND the peer's RTP endpoint
         //     to the SIP leg. Pushing `remote_addr` here means forge's
@@ -454,15 +588,18 @@ impl MediaSetup {
         req: OutboundOfferRequest,
     ) -> Result<OutboundOffer, SetupError> {
         // Allocate the session — no remote SDP yet, we're the offerer.
+        // As on the inbound path, a non-default VAD backend rides in
+        // as a per-session config; `apply_answer` re-aligns its rate.
         let session = self
             .session_manager
-            .create_session(
+            .create_session_with_config(
                 req.call_id.clone(),
                 req.participant_a.clone(),
                 req.participant_b.clone(),
                 None,
                 req.from_tag.clone(),
                 req.to_tag.clone(),
+                self.session_config_for(req.vad),
             )
             .await?;
 
@@ -501,6 +638,7 @@ impl MediaSetup {
             call_id: req.call_id,
             srtp: req.srtp,
             offer_crypto,
+            vad: req.vad,
         })
     }
 
@@ -522,6 +660,7 @@ impl MediaSetup {
             srtp,
             offer_crypto,
             offer_sdp,
+            vad,
             ..
         } = offer;
 
@@ -530,6 +669,11 @@ impl MediaSetup {
 
         // (1) Read the negotiated audio out of the peer's answer.
         let answer = negotiate_offer_answer(answer_sdp, &offered)?;
+
+        // (1b) The answer fixes the bridge PCM rate; give a
+        //      rate-specific (neural) VAD detector the real one.
+        self.align_vad_rate(&session, vad, answer.negotiated_audio_sample_rate)
+            .await?;
 
         // (1a) SRTP (SDES): if we offered it, bind keys onto leg A — our
         //      offered key for send, the peer's answered key for recv.
@@ -750,6 +894,7 @@ mod tests {
                 silence_threshold: None,
                 dead_air_threshold: None,
                 rtp_stats_interval: None,
+                vad: VadBackend::default(),
             })
             .await;
 
@@ -780,6 +925,7 @@ mod tests {
             from_tag: Some("ftag".into()),
             to_tag: None,
             srtp: OutboundSrtp::Off,
+            vad: VadBackend::default(),
         }
     }
 

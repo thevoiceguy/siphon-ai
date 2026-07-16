@@ -179,6 +179,12 @@ barrier and make the contract testable:
   false-positive class (coughs, keyboard noise, music) before pause-mode
   arbitration even arms. Complements — doesn't replace — the semantic
   layer. Gate on real-call false-positive rates under `pause` + `debounce_ms`.
+  **Upstream plan written 2026-07-16**: `NEURAL_VAD_PLAN.md` in the
+  forge-media repo (spike-first: tract-onnx + embedded Silero behind an
+  off-by-default `neural` feature, static-musl compatibility as a hard
+  gate). siphon-ai's half is Phase 2 there: `[media].vad = "energy" |
+  "neural"` (+ per-route override), pin bump with `features =
+  ["neural-vad"]`, protocol/CDR unchanged.
 - **"Duck" barge-in reaction** (*upstream-gated*) — attenuate instead of
   pause. Needs a forge-media per-leg playout-gain API: the queued TTS tail
   lives in forge's encoder queue, so tap-side gain can't touch it (the

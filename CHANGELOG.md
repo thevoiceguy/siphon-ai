@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-07-16
+
 ### Added
 
 - **Neural (Silero) VAD backend — `[media].vad = "energy" | "neural"`** with a per-route `[route.media].vad` override (strict replace, both directions, validated at config load). `"neural"` runs forge-vad's new Silero backend (forge-media #86: local tract-onnx inference, no network, ~60–80 µs per 32 ms window) for materially fewer acoustic false positives — coughs, keyboard clatter, music-on-hold bleed — before pause-mode barge-in arbitration even arms. Sessions are allocated before codec negotiation, so a neural detector is created at 16 kHz and re-aligned to the **negotiated** bridge rate at setup time (fixing the latent default-16 kHz-on-8 kHz mismatch; the delayed-offer and outbound paths re-align at `apply_answer`). The default `"energy"` keeps pre-0.37 detection byte-identical, including no per-session engine config. **WS protocol, `speech_started`/`speech_stopped` events, and CDR are unchanged** — the backend changes detection quality only. forge-media pin bumped to `1c996ae5fb4f` with `features = ["neural-vad"]` (tract is pure Rust; the static-musl multi-arch release build is the acceptance gate). Closes the siphon-ai half of the ROADMAP P2 "Neural VAD upgrade" item; rollout gate stays real-call false-barge-in rates under `mode = "pause"` + `debounce_ms` via the existing barge-in metrics. See `docs/CONFIG.md` `[media].vad`.

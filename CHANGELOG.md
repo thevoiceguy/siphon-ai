@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Idle TLS trunk disconnects no longer log at `ERROR`** (#306,
+  siphon-rs #63). Peers that drop an idle SIP/TLS connection without a
+  TLS `close_notify` — Twilio, and anything behind an AWS NLB — surface
+  in rustls as an `UnexpectedEof` read error. The TLS session loop had
+  logged every read error at `error!` and bumped the transport
+  Read-stage error metric, so a routine post-call disconnect produced a
+  spurious `tls read error … peer closed connection without sending TLS
+  close_notify` line after essentially every call on a TLS trunk —
+  noise that trains operators to ignore error-level logs and trips
+  log-based alerting. `UnexpectedEof` is now treated like a clean EOF
+  (`info!` "closed by peer", no error metric); genuine read failures
+  keep the `error!` log (now with the `peer` field) and the metric.
+  siphon-rs pin bumped `f3454c7` → `36c3ac4`; no API change, log quality
+  only.
+
 ## [0.37.0] - 2026-07-16
 
 ### Added
@@ -2378,7 +2395,7 @@ the WebSocket server's job.
 - Reference WebSocket servers in `examples/`: echo (Python / Node),
   an OpenAI Realtime bridge, and a Deepgram + LLM voice bot.
 
-[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.37.0...HEAD
 [0.14.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.12.2...v0.13.0

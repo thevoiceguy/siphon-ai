@@ -61,7 +61,9 @@ DTMF, and the WebSocket protocol:
 - **Codecs & media** — G.711 (µ-law/A-law) and **Opus** (negotiated at a
   16 kHz bridge rate); **SRTP both directions** — SDES (`a=crypto:`) and
   DTLS-SRTP, inbound and outbound; offerless / delayed-offer INVITEs (CUCM,
-  avoids a forced MTP).
+  avoids a forced MTP); selectable **speech detection backend** —
+  energy/ZCR (default) or the **Silero neural VAD** (local inference, no
+  network) for fewer acoustic false positives, per-route via `[media].vad`.
 - **Call control** — bot-initiated **hold/resume** (true SIP re-INVITE +
   hold music), blind and **attended transfer** (REFER / REFER-with-Replaces),
   **N-way conferencing** (mixed rooms, every leg keeps its WS), and media-only
@@ -75,7 +77,9 @@ DTMF, and the WebSocket protocol:
   announcement** ("this call may be recorded" prompt gates capture, consent
   stamped into the CDR). See [`docs/RECORDING.md`](docs/RECORDING.md).
 - **Reliability** — mid-call **WS reconnect**: an unexpected WS drop parks the
-  caller on hold music, re-dials, and resumes on a fresh session.
+  caller on hold music, re-dials, and resumes on a fresh session; or play a
+  configurable **failure prompt** to the caller before hanging up
+  (`on_ws_failure = "play_prompt"`).
 - **Security** — **STIR/SHAKEN** verification + policy gate; **native admin
   auth + RBAC** (bearer tokens, nested `readonly` ⊂ `operator` ⊂ `admin`
   roles) on a dedicated authenticated listener, with TLS and `SIGHUP` cert
@@ -89,14 +93,18 @@ DTMF, and the WebSocket protocol:
 - **Observability** — Prometheus metrics + **Grafana dashboards and alert
   rules as code** (`examples/observability/`), daemon-side **OTLP trace
   export** (one trace per call), and **W3C trace-context propagation** to
-  your WS server so its spans join the call's trace; HEP3 → Homer for
-  SIP/RTCP/CDR correlation.
+  your WS server so its spans join the call's trace; **per-call quality
+  telemetry** — receive-side jitter/loss/**MOS** in the CDR, live via
+  `GET /admin/v1/calls/{id}/stats`, and streamed to the WS server as
+  `rtp_stats` events; HEP3 → Homer for SIP/RTCP/CDR correlation.
 - **Operations** — a config CLI (`siphon-ai check` / `print-config` /
   `route-test`) and **`SIGHUP` hot-reload** of routes, webhook/CDR sinks, and
   outbound gateways (fail-safe — a bad config is rejected and the running one
   kept; socket-binding / concurrency changes warn restart-required);
   **graceful shutdown** for zero-drop deploys (`SIGTERM` flips `/ready`,
-  503s new INVITEs, drains active calls before exit).
+  503s new INVITEs, drains active calls before exit); **registration
+  management** over the admin API (force-refresh / restart a PBX
+  registration without touching the daemon).
 - **Developer surface** — the WS protocol as a machine-readable **JSON
   Schema** (`schemas/siphon-ai.v1.json`, drift-checked in CI), **server
   SDKs** for Python + TypeScript (`sdks/`) — typed events, paced 20 ms audio
@@ -261,15 +269,17 @@ cargo test --workspace
 | Surface | URL / location | Listener |
 |---|---|---|
 | Liveness / readiness | `GET /health`, `GET /ready` | `[observability]` (open) |
-| Prometheus metrics | `GET /metrics` | `[observability]` (open) |
+| Prometheus metrics | `GET /metrics` | `[observability]` (open; optional bearer token via `metrics_token`) |
 | Active calls | `GET /admin/calls` | `[admin]` (auth) |
+| Per-call live quality stats | `GET /admin/v1/calls/<id>/stats` | `[admin]` (auth) |
 | Per-call hangup | `POST /admin/calls/<id>/hangup` | `[admin]` (auth) |
 | Outbound origination | `POST /admin/v1/calls` | `[admin]` (auth) |
+| Registration refresh / restart | `POST /admin/v1/registrations/<name>/refresh\|restart` | `[admin]` (auth) |
 | Conference / park control | `/admin/v1/conferences`, `/admin/v1/parked` | `[admin]` (auth) |
 | Runtime log filter | `PUT /admin/log` | `[admin]` (auth) |
 | HEP test packet | `POST /admin/hep/test` | `[admin]` (auth) |
 | Drain status (during shutdown) | `GET /admin/v1/drain` | `[admin]` (auth) |
-| CDR (JSONL file) | `/var/log/siphon-ai/cdr.jsonl` | — |
+| CDR file (JSONL or CSV) | `/var/log/siphon-ai/cdr.jsonl` | — |
 | Lifecycle webhooks | `[webhooks]` block in the TOML | — |
 | OTLP trace export (one trace per call) | `[observability.otlp]` in the TOML | — |
 | Grafana dashboards + Prometheus alerts | `examples/observability/` | — |

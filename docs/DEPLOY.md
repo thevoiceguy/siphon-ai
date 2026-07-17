@@ -235,13 +235,17 @@ before any inbound INVITE is accepted.
 
 ### 4. File permissions for cert/key
 
-The systemd unit runs as the unprivileged `siphon` user; that user
-must be able to *read* the cert and key but should not own them.
+The systemd unit runs as the unprivileged `siphon-ai` user (created
+by the `.deb`). The cert chain is public — root-owned and
+group-readable is right. The **private key is different**: the daemon
+refuses to start if the key has any group- or world-readable bits
+("insecure permissions" error), so it must be `0600` — and therefore
+*owned by* `siphon-ai`, or the daemon can't read it at all.
 
 ```sh
-sudo install -d -m 0750 -o root -g siphon /etc/siphon-ai/tls
-sudo install -m 0640 -o root -g siphon fullchain.pem /etc/siphon-ai/tls/
-sudo install -m 0640 -o root -g siphon privkey.pem   /etc/siphon-ai/tls/
+sudo install -d -m 0750 -o root -g siphon-ai /etc/siphon-ai/tls
+sudo install -m 0640 -o root -g siphon-ai fullchain.pem /etc/siphon-ai/tls/
+sudo install -m 0600 -o siphon-ai -g siphon-ai privkey.pem /etc/siphon-ai/tls/
 ```
 
 `ProtectSystem=strict` in the unit blocks writes outside
@@ -264,9 +268,9 @@ reload](#config-file-reload-0120) below.
 # Let's Encrypt deploy-hook (/etc/letsencrypt/renewal-hooks/deploy/)
 #!/bin/sh
 set -e
-install -m 0640 -o root -g siphon \
+install -m 0640 -o root -g siphon-ai \
     "$RENEWED_LINEAGE/fullchain.pem" /etc/siphon-ai/tls/
-install -m 0640 -o root -g siphon \
+install -m 0600 -o siphon-ai -g siphon-ai \
     "$RENEWED_LINEAGE/privkey.pem"   /etc/siphon-ai/tls/
 systemctl reload siphon-ai
 ```
@@ -374,8 +378,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=siphon
-Group=siphon
+User=siphon-ai
+Group=siphon-ai
 EnvironmentFile=-/etc/siphon-ai/env
 ExecStart=/usr/local/bin/siphon-ai --config /etc/siphon-ai/siphon-ai.toml
 # SIGHUP triggers SIP/TLS cert hot-reload (0.3.0+). `systemctl

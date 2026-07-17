@@ -130,24 +130,24 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # main branch and replace the rev hashes here (see CLAUDE.md §7.5).
 
 # siphon-rs — RFC 3261 SIP stack
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "f3454c77c3d9" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "f3454c77c3d9" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "f3454c77c3d9", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "f3454c77c3d9" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "f3454c77c3d9" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "f3454c77c3d9" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "f3454c77c3d9" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "f3454c77c3d9" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "f3454c77c3d9" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
 # (distinct from forge-media's pinned sip-sdp). Used by the outbound
 # delayed-offer answer generator to hand the UAC a SessionDescription it
 # accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "f3454c77c3d9" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "f3454c77c3d9" }
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "f3454c77c3d9" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #
@@ -163,7 +163,7 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "f34
 # runtime (docs/CONFIG.md); tract-onnx is pure Rust, so the static-musl
 # release build is unaffected. Feature-enabled builds need rustc >= 1.91
 # (tract 0.23) — our pinned toolchain is 1.95. siphon-rs stays at
-# f3454c77c3d9. (Prior pins: forge 3c59b5f6e464 = #82-#85 dependency
+# 36c3ac4f3c0c. (Prior pins: forge 3c59b5f6e464 = #82-#85 dependency
 # migrations; forge 5fa76fb38675 = #81.)
 forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "1c996ae5fb4f" }
 forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1c996ae5fb4f" }

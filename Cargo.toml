@@ -129,25 +129,30 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # later if upstream moves. To bump, run `git ls-remote` for the upstream's
 # main branch and replace the rev hashes here (see CLAUDE.md §7.5).
 
-# siphon-rs — RFC 3261 SIP stack
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
+# siphon-rs — RFC 3261 SIP stack.
+# Bumped 2026-07-20 `36c3ac4f3c0c` → `3a4fc312ade3` = siphon-rs #64: outbound
+# TLS SNI now uses the URI hostname, not the resolved IP (RFC 5922 §4). Fixes
+# the glue-less side of siphon-ai #312 — Twilio Secure Trunking outbound (a
+# hostname trunk with no SRV) failed the TLS handshake because rustls sent the
+# resolved IP as SNI. sip-dns adds `DnsTarget::sni()`; no siphon-ai API change.
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3a4fc312ade3" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3a4fc312ade3" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3a4fc312ade3", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3a4fc312ade3" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3a4fc312ade3" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3a4fc312ade3" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3a4fc312ade3" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3a4fc312ade3" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3a4fc312ade3" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
 # (distinct from forge-media's pinned sip-sdp). Used by the outbound
 # delayed-offer answer generator to hand the UAC a SessionDescription it
 # accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3a4fc312ade3" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3a4fc312ade3" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c3ac4f3c0c" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "3a4fc312ade3" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #
@@ -162,9 +167,10 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "36c
 # `neural-vad` feature here so `[media].vad = "neural"` is selectable at
 # runtime (docs/CONFIG.md); tract-onnx is pure Rust, so the static-musl
 # release build is unaffected. Feature-enabled builds need rustc >= 1.91
-# (tract 0.23) — our pinned toolchain is 1.95. siphon-rs stays at
-# 36c3ac4f3c0c. (Prior pins: forge 3c59b5f6e464 = #82-#85 dependency
-# migrations; forge 5fa76fb38675 = #81.)
+# (tract 0.23) — our pinned toolchain is 1.95. (siphon-rs is pinned
+# separately above; see its own comment for the current rev.) Prior forge
+# pins: forge 3c59b5f6e464 = #82-#85 dependency migrations; forge
+# 5fa76fb38675 = #81.
 forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "1c996ae5fb4f" }
 forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1c996ae5fb4f" }
 forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "1c996ae5fb4f", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }

@@ -76,6 +76,7 @@ use siphon_ai_audit::{
     FilteredSink as AuditFilteredSink, HttpSink as AuditHttpSink,
     HttpSinkConfig as AuditHttpSinkConfig,
 };
+use siphon_ai_bridge::Direction;
 use siphon_ai_cdr::{
     CdrSinkHandle, FileSink, HepCdrSink, MultiSink, NullSink, WebhookSink, WebhookSinkConfig,
 };
@@ -101,7 +102,7 @@ use siphon_ai_sip_glue::{
 };
 use siphon_ai_telemetry::{
     admin::{
-        AdminCallRegistry, AdminConference, AdminOutbound, AdminPark, AdminState,
+        AdminCallRegistry, AdminCallRow, AdminConference, AdminOutbound, AdminPark, AdminState,
         CallRegistryHandle, DrainStatus, DrainStatusFn, RegistrationRow,
     },
     install_recorder, AdminServer, AdminTlsConfigFn, HepTelemetry, HepTelemetryBuild,
@@ -1025,6 +1026,7 @@ impl Runtime {
         let admin_state = AdminState {
             call_registry: Some(Arc::new(RuntimeCallRegistry {
                 inner: call_registry_for_admin,
+                control: control_registry.clone(),
             }) as AdminCallRegistry),
             registration_snapshot: Some(Arc::new(move || {
                 registration_mgr_for_admin
@@ -1482,15 +1484,33 @@ async fn build_admin(
     Ok(Some(server))
 }
 
-/// Adapter that exposes `CallRegistry` through the `admin` trait
+/// Adapter that exposes the call registries through the `admin` trait
 /// surface without forcing telemetry to depend on `siphon-ai-core`.
+///
+/// The listing (`GET /admin/calls`) is sourced from the bridge-id-keyed
+/// `control` registry so it covers both inbound and outbound calls and
+/// reports the bridge `call_id` the conference/park/stats endpoints
+/// need (issue #311). `hangup` still resolves the SIP-Call-ID-keyed
+/// inbound `inner` registry — the id namespace that endpoint documents.
 struct RuntimeCallRegistry {
     inner: CallRegistry,
+    control: CallControlRegistry,
 }
 
 impl CallRegistryHandle for RuntimeCallRegistry {
-    fn snapshot_ids(&self) -> Vec<String> {
-        self.inner.snapshot_call_ids()
+    fn snapshot_calls(&self) -> Vec<AdminCallRow> {
+        self.control
+            .snapshot()
+            .into_iter()
+            .map(|c| AdminCallRow {
+                call_id: c.call_id,
+                sip_call_id: c.sip_call_id,
+                direction: match c.direction {
+                    Direction::Inbound => "inbound",
+                    Direction::Outbound => "outbound",
+                },
+            })
+            .collect()
     }
     fn hangup(&self, sip_call_id: &str) -> bool {
         match self.inner.lookup(sip_call_id) {

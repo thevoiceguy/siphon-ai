@@ -23,7 +23,7 @@ use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use forge_core::{CallId, ParticipantId};
 use sip_core::SipUri;
-use siphon_ai_bridge::{BridgeConfig, CallId as BridgeCallId};
+use siphon_ai_bridge::{BridgeConfig, CallId as BridgeCallId, Direction};
 use siphon_ai_cdr::{
     AudioInfo as CdrAudioInfo, CdrRecord, CdrSinkHandle, Direction as CdrDirection,
     TerminationInfo as CdrTerminationInfo, CDR_VERSION,
@@ -590,7 +590,10 @@ async fn run_call(
     };
     let (controller, handle) = CallController::new(cfg);
     // Reachable by the admin conference API for this leg's lifetime.
-    ctx.control_registry.insert(handle);
+    // Carries the SIP Call-ID + direction for the `GET /admin/calls`
+    // listing (issue #311).
+    ctx.control_registry
+        .insert(handle, sip_call_id.clone(), Direction::Outbound);
     let run_result = controller.run().await;
     ctx.control_registry.remove(ctx.bridge_id.as_str());
     match &run_result {

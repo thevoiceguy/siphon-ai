@@ -502,8 +502,8 @@ no/invalid token → `401`.
 
 | Method | Path                          | Body            | Min role | Purpose |
 |--------|-------------------------------|-----------------|----------|---------|
-| GET    | `/admin/calls`                | —               | readonly | List active per-call SIP Call-IDs. |
-| POST   | `/admin/calls/:id/hangup`     | —               | operator | Force-shutdown a specific call by Call-ID. |
+| GET    | `/admin/calls`                | —               | readonly | List active calls (inbound **and** outbound). Each element is `{call_id, sip_call_id, direction}` — the **bridge** `call_id` (what conference / park / `stats` take, and the value on the WS `start` message / CDR), the **SIP** Call-ID (what `hangup` takes), and `"inbound"`/`"outbound"`. Since 0.37.1; before that it returned a bare array of SIP Call-ID strings and exposed no way to obtain the bridge id (issue #311). |
+| POST   | `/admin/calls/:id/hangup`     | —               | operator | Force-shutdown a specific call by its **SIP** `Call-ID` (the `sip_call_id` field from `GET /admin/calls`), inbound calls only. |
 | GET    | `/admin/registrations`        | —               | readonly | Snapshot of every `[[register]]` row and its current state. |
 | POST   | `/admin/v1/registrations/:name/refresh` | —     | operator | **Fire an immediate off-cycle REGISTER** for one binding (0.33.0) — no restart needed when a registrar drops or stales the binding. Also **starts a parked binding** (`register_on_startup = false`). Returns `202` with the accept-time row; the outcome is asynchronous (watch the GET, `siphon_ai_register_attempts_total`, or the `registration_state_changed` webhook). `404` unknown name, `409` while draining. |
 | POST   | `/admin/v1/registrations/:name/restart` | —     | operator | **Full re-registration cycle** (0.33.0): REGISTER `Expires: 0` to clear the registrar-side binding, then a fresh REGISTER — for stale server-side state or contact rebinding after an IP change. A failed unregister is logged and the fresh REGISTER proceeds; only the final attempt drives status. Same responses as `refresh`. |
@@ -572,7 +572,11 @@ Roles, lowest to highest (each inherits everything below it):
 Every request is audited: a structured log line (actor = token **name**,
 role, endpoint template, result, peer address — never the secret) and the
 `siphon_ai_admin_requests_total{endpoint, role, result}` counter
-(`result` ∈ `ok` | `unauthenticated` | `forbidden` | `not_found`).
+(`result` ∈ `ok` | `unauthenticated` | `forbidden` | `not_found` | `error`).
+`result` reflects the **response status**, not just the auth outcome: a
+matched, authorized handler that returns `404` (a stale call/room id) counts
+`not_found`, and any other handler failure (400 / 409 / 429 / 501 / 503)
+counts `error` — so `result != "ok"` is a faithful failure signal.
 
 A bearer token goes on every call:
 
@@ -1134,7 +1138,7 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_parked_calls_active`         | gauge     | —                                     | Currently-parked calls (0.7.0). Incremented on park, decremented on retrieve or teardown. |
 | `siphon_ai_holds_total`                 | counter   | `result=ok\|failed`                   | Bot-initiated hold/resume re-INVITEs (0.7.2 — the WS server sends `hold`/`resume`). Covers both directions. `failed` = the re-INVITE was rejected / timed out / glared, or hold was rejected (already held by the far end, tap unavailable, not configured); the call stays in its prior media state. Does **not** count far-end (peer-initiated) holds. |
 | `siphon_ai_ws_reconnects_total`         | counter   | `result=recovered\|exhausted`         | WS reconnect episodes mid-call (0.7.3 — `[bridge].ws_reconnect_enabled`). One increment per unexpected drop that entered the reconnect path. `recovered` = re-dialed the same `ws_url` within `ws_reconnect_max_secs`; `exhausted` = the window elapsed (or the call ended mid-gap) and the call tore down (`ws_disconnect`). |
-| `siphon_ai_admin_requests_total`        | counter   | `endpoint`, `role`, `result=ok\|unauthenticated\|forbidden\|not_found` | Admin API requests on the `[admin]` listener (0.10.0). `endpoint` is the bounded route template (e.g. `POST /admin/v1/calls`, ids collapsed to `:id`), `role` is the authenticated token's role (`none` for `unauthenticated`). `unauthenticated` = 401 (missing/bad token); `forbidden` = 403 (role below the endpoint minimum). Pair with the structured audit log (actor = token name) for per-request detail. |
+| `siphon_ai_admin_requests_total`        | counter   | `endpoint`, `role`, `result=ok\|unauthenticated\|forbidden\|not_found\|error` | Admin API requests on the `[admin]` listener (0.10.0). `endpoint` is the bounded route template (e.g. `POST /admin/v1/calls`, ids collapsed to `:id`), `role` is the authenticated token's role (`none` for `unauthenticated`). `unauthenticated` = 401 (missing/bad token); `forbidden` = 403 (role below the endpoint minimum); `not_found` = 404 (unknown route **or** a handler acting on a stale call/room/binding id); `error` = any other handler failure (400 / 409 / 429 / 501 / 503). `result` follows the response status, so `result != "ok"` is a true failure count (fixed in 0.37.1 — it previously flattened all authorized responses to `ok`). Pair with the structured audit log (actor = token name) for per-request detail. |
 | `siphon_ai_webhook_deliveries_total`    | counter   | `sink=lifecycle\|cdr\|audit\|quality`, `result=delivered\|spooled\|rejected\|dropped` | Terminal webhook/CDR/audit/quality delivery outcomes (0.11.0; `audit` added 0.20.0, `quality` 0.31.0). One increment per logical delivery. `delivered` = 2xx; `spooled` = persisted to the durable spool after the in-memory budget; `rejected` = non-retryable 4xx; `dropped` = budget (or spool) exhausted, or payload not serializable. |
 | `siphon_ai_quality_records_total`       | counter   | `kind=interval\|final`               | Quality history records emitted through the `[quality]` sinks (0.31.0). Skipped-empty records don't count. |
 | `siphon_ai_webhook_delivery_attempts_total` | counter | `sink`, `outcome=ok\|transient\|error\|rejected` | Individual HTTP delivery attempts (0.11.0) — a retried delivery ticks several times. `transient` = retryable 5xx/408/429; `error` = connect/timeout; `rejected` = non-retryable 4xx. Divide by `siphon_ai_webhook_deliveries_total` for attempts-per-delivery. |

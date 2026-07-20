@@ -3256,8 +3256,14 @@ impl BridgingAcceptor {
             .with_forge_call_id(prepared.forge_call_id.clone()),
         );
         // Bridge-id handle table for the admin conference API — every
-        // accepted call is reachable by the id operators see.
-        self.control_registry.insert(cleanup_handle.clone());
+        // accepted call is reachable by the id operators see. Carries the
+        // SIP Call-ID + direction so `GET /admin/calls` can report both
+        // id namespaces (issue #311).
+        self.control_registry.insert(
+            cleanup_handle.clone(),
+            prepared.sip_call_id.clone(),
+            Direction::Inbound,
+        );
 
         // Per-route counter is owned-by-route — bounded cardinality
         // by config (operators have tens of routes, not millions).

@@ -458,8 +458,14 @@ async fn handle_admin_request(
             match admin::dispatch(&method, &path, body, &state.admin).await {
                 Some(resp) => {
                     let status = resp.status().as_u16();
+                    // A matched route can still fail at the handler (404 stale
+                    // call_id, 409 conflict, 503 at a cap, …). Classify by the
+                    // response status so `result` reflects the real outcome —
+                    // hardcoding "ok" here flattened every handler-level
+                    // failure to success (issue #310).
+                    let result = admin_result_label(status);
                     info!(peer = %peer, actor = %actor, role, endpoint, status, "admin request");
-                    metrics::counter!(ADMIN_REQUESTS_TOTAL, "endpoint" => endpoint, "role" => role, "result" => "ok").increment(1);
+                    metrics::counter!(ADMIN_REQUESTS_TOTAL, "endpoint" => endpoint, "role" => role, "result" => result).increment(1);
                     siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::admin_request(
                         peer.to_string(),
                         Some(actor.clone()),
@@ -467,7 +473,7 @@ async fn handle_admin_request(
                         method.as_str(),
                         endpoint,
                         status,
-                        "ok",
+                        result,
                         None,
                     ));
                     resp
@@ -490,6 +496,24 @@ async fn handle_admin_request(
                 }
             }
         }
+    }
+}
+
+/// Classify an admin handler's response status into the bounded `result`
+/// label for `siphon_ai_admin_requests_total` (and the audit stream).
+///
+/// The auth layer owns `unauthenticated` (401) and `forbidden` (403); this
+/// covers the statuses a matched-and-authorized handler can return. `404`
+/// is its own value (a normal race — operating on a call/room/binding that
+/// has since gone), and every other non-2xx failure (400/409/429/501/503/
+/// 5xx) collapses to `error` rather than being labelled per raw status —
+/// bounded cardinality (CLAUDE.md §4.5); per-request detail lives in the
+/// audit log and the `status` span field.
+fn admin_result_label(status: u16) -> &'static str {
+    match status {
+        200..=299 => "ok",
+        404 => "not_found",
+        _ => "error",
     }
 }
 
@@ -565,6 +589,24 @@ mod tests {
         .expect("request returns")
         .expect("ok");
         resp.status()
+    }
+
+    #[test]
+    fn admin_result_label_classifies_by_status() {
+        // 2xx successes.
+        assert_eq!(admin_result_label(200), "ok");
+        assert_eq!(admin_result_label(201), "ok");
+        assert_eq!(admin_result_label(202), "ok");
+        // 404 is its own bucket — the case in issue #310 (a matched
+        // handler returning "no active call") must NOT read as ok.
+        assert_eq!(admin_result_label(404), "not_found");
+        // Every other handler-level failure collapses to `error`,
+        // not `ok`, so `result != "ok"` alerting catches them.
+        assert_eq!(admin_result_label(400), "error");
+        assert_eq!(admin_result_label(409), "error");
+        assert_eq!(admin_result_label(429), "error");
+        assert_eq!(admin_result_label(501), "error");
+        assert_eq!(admin_result_label(503), "error");
     }
 
     #[tokio::test]

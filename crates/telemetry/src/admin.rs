@@ -132,10 +132,30 @@ pub type DrainStatusFn = Arc<dyn Fn() -> DrainStatus + Send + Sync>;
 /// runtime adapter passes a closure-wrapping object that delegates
 /// to `CallRegistry`.
 pub trait CallRegistryHandle: Send + Sync + 'static {
-    fn snapshot_ids(&self) -> Vec<String>;
+    /// Snapshot every active call for `GET /admin/calls`. Each row
+    /// carries both id namespaces so an operator can drive every admin
+    /// endpoint: the bridge `call_id` (conference / park / stats) and
+    /// the SIP Call-ID (`hangup`). See [`AdminCallRow`].
+    fn snapshot_calls(&self) -> Vec<AdminCallRow>;
     /// Best-effort: returns `true` iff a call with that SIP Call-ID
     /// existed and was signalled to shut down.
     fn hangup(&self, sip_call_id: &str) -> bool;
+}
+
+/// One active call in the `GET /admin/calls` response.
+///
+/// `call_id` is the **bridge** id — the value on the WS `start` message
+/// and the CDR, and the id `/admin/v1/conferences/*`, `/park`,
+/// `/retrieve`, and `/stats` all take. `sip_call_id` is the **SIP**
+/// Call-ID, the id `POST /admin/calls/:id/hangup` takes. Exposing both
+/// (with `direction`) is the fix for issue #311, where the listing gave
+/// only the SIP Call-ID and the bridge id had no admin source.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AdminCallRow {
+    pub call_id: String,
+    pub sip_call_id: String,
+    /// `"inbound"` | `"outbound"`.
+    pub direction: &'static str,
 }
 
 /// Boxed clone-friendly handle the runtime constructs.
@@ -535,8 +555,11 @@ fn list_calls(state: &AdminState) -> Response<Full<Bytes>> {
     let Some(reg) = state.call_registry.as_ref() else {
         return service_unavailable("call registry not installed");
     };
-    let ids = reg.snapshot_ids();
-    json_response(StatusCode::OK, &json!({ "count": ids.len(), "calls": ids }))
+    let calls = reg.snapshot_calls();
+    json_response(
+        StatusCode::OK,
+        &json!({ "count": calls.len(), "calls": calls }),
+    )
 }
 
 fn drain_status(state: &AdminState) -> Response<Full<Bytes>> {
@@ -841,9 +864,10 @@ fn conference_error_response(e: ConferenceAdminError) -> Response<Full<Bytes>> {
         ConferenceAdminError::RoomNotFound => {
             (StatusCode::NOT_FOUND, "no such conference room".to_string())
         }
-        ConferenceAdminError::UnknownCall(c) => {
-            (StatusCode::NOT_FOUND, format!("no active call: {c}"))
-        }
+        ConferenceAdminError::UnknownCall(c) => (
+            StatusCode::NOT_FOUND,
+            format!("no active call with bridge call_id {c:?} (this is the `call_id` field of GET /admin/calls, not sip_call_id)"),
+        ),
     };
     json_response(status, &json!({ "error": msg }))
 }
@@ -980,7 +1004,10 @@ fn park_disabled() -> Response<Full<Bytes>> {
 fn park_error_response(e: ParkAdminError) -> Response<Full<Bytes>> {
     let (status, msg) = match e {
         ParkAdminError::Disabled => return park_disabled(),
-        ParkAdminError::UnknownCall(c) => (StatusCode::NOT_FOUND, format!("no active call: {c}")),
+        ParkAdminError::UnknownCall(c) => (
+            StatusCode::NOT_FOUND,
+            format!("no active call with bridge call_id {c:?} (this is the `call_id` field of GET /admin/calls, not sip_call_id)"),
+        ),
         ParkAdminError::NotParked(c) => (StatusCode::CONFLICT, format!("call is not parked: {c}")),
     };
     json_response(status, &json!({ "error": msg }))
@@ -1021,8 +1048,20 @@ mod tests {
     }
 
     impl CallRegistryHandle for StubRegistry {
-        fn snapshot_ids(&self) -> Vec<String> {
-            self.ids.lock().unwrap().clone()
+        fn snapshot_calls(&self) -> Vec<AdminCallRow> {
+            // The stub tracks SIP Call-IDs (what `hangup` matches on);
+            // synthesize a bridge id for each so the listing shape can
+            // be asserted.
+            self.ids
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|sip| AdminCallRow {
+                    call_id: format!("siphon-{sip}"),
+                    sip_call_id: sip.clone(),
+                    direction: "inbound",
+                })
+                .collect()
         }
         fn hangup(&self, sip_call_id: &str) -> bool {
             let mut ids = self.ids.lock().unwrap();
@@ -1214,6 +1253,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+
+        // Each call is an object carrying BOTH id namespaces + direction
+        // (issue #311) — not a bare SIP Call-ID string.
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["count"], 2);
+        let first = &v["calls"][0];
+        assert_eq!(first["sip_call_id"], "abc@host");
+        assert_eq!(first["call_id"], "siphon-abc@host");
+        assert_eq!(first["direction"], "inbound");
     }
 
     #[tokio::test]

@@ -492,7 +492,7 @@ register = "pbx"            # name of a [[register]] block
 
 | Field | Block | Notes |
 |---|---|---|
-| `max_concurrent` | `[outbound]` | Max simultaneous outbound calls. `0` (default) disables outbound entirely. This + `rate_limit_per_sec` are the **native guardrails** — the originate API itself has no built-in auth (it's fronted by a reverse proxy / trusted network), so **you must restrict access to that endpoint and set a sane cap** to avoid toll fraud. |
+| `max_concurrent` | `[outbound]` | Max simultaneous outbound calls. `0` (default) disables outbound entirely. This + `rate_limit_per_sec` are the **native guardrails**. The originate endpoint requires an `admin`-role bearer token on the `[admin]` listener (0.10.0), but auth alone doesn't cap spend — **set a sane cap too** so a leaked token or a dialer bug can't run up the trunk. See `docs/OUTBOUND.md` §3. |
 | `rate_limit_per_sec` | `[outbound]` | Optional ceiling on *new* outbound calls per second (token bucket, burst = the rate). `0`/unset = no rate limit. |
 | `name` | `[[gateway]]` | Unique gateway name; the originate request names one. |
 | `proxy` | `[[gateway]]` | `host` or `host:port` of the trunk (resolved per RFC 3263 at INVITE time). Required unless `register` is set. Default port: 5060, or 5061 when `transport = "tls"`. |

@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Feature guides no longer document the pre-0.10.0 admin API.**
+  `docs/OUTBOUND.md`, `docs/CONFERENCE.md`, `docs/PARK.md`,
+  `docs/OPERATIONS.md`, `docs/INSTALL_DEBIAN13.md`, and one
+  `docs/CONFIG.md` entry still told operators to call
+  `http://localhost:9091/admin/v1/…` unauthenticated, and OUTBOUND §3 +
+  CONFIG's `[outbound].max_concurrent` entry both stated that the
+  originate API "has no built-in authentication." That has been wrong
+  since **0.10.0**, which moved `/admin/*` off `[observability]
+  .http_listen` (it returns `404` there) onto the dedicated `[admin]`
+  listener behind a bearer token + RBAC. Following those guides on
+  0.37.0 produced `404`s and read as a broken feature; `docs/DEPLOY.md`
+  and the README were already correct, so the docs contradicted each
+  other. Every example now targets the `[admin]` listener with an
+  `Authorization: Bearer …` header and names the **minimum role** —
+  verified against `crates/telemetry/src/auth.rs`: origination is
+  `admin` (billable), conference create/end/add/remove and park/retrieve
+  are `operator`, and the list/`GET` routes are `readonly`. OUTBOUND §3
+  is rewritten around the token as the primary control (separate
+  `admin`-role token for dialing, `[admin.tls]` on a routable bind,
+  rotation needs a restart — SIGHUP doesn't reload the token table) with
+  the superseded 0.6.0 reverse-proxy posture marked as history.
+  Additionally, `INSTALL_DEBIAN13.md`'s sample config had **no `[admin]`
+  block at all**, so its admin commands pointed at a closed port even
+  with the URL corrected — it now ships a loopback `[admin]` listener
+  with `readonly` + `operator` tokens drawn from the existing
+  `/etc/siphon-ai/env` `EnvironmentFile`, plus a note on why the admin
+  port needs no firewall rule while it stays on loopback. Docs only — no
+  code, config-schema, protocol, or CDR change.
+
 - **Idle TLS trunk disconnects no longer log at `ERROR`** (#306,
   siphon-rs #63). Peers that drop an idle SIP/TLS connection without a
   TLS `close_notify` — Twilio, and anything behind an AWS NLB — surface

@@ -56,10 +56,16 @@ were parked, not hung up." On failure (park disabled, or `max_parked`
 reached) it gets `error { code: "park_failed" }` and the call continues
 unparked on the current session.
 
-**Operator parks any call** (admin API, `docs/DEPLOY.md`):
+**Operator parks any call** (admin API, `docs/DEPLOY.md`). These routes are
+on the dedicated **`[admin]` listener** (0.10.0) with a bearer token — not on
+`[observability].http_listen`, which `404`s for `/admin/*`. Park and retrieve
+need **`operator`**; `GET /admin/v1/parked` needs **`readonly`**.
 
 ```sh
-curl -X POST http://localhost:9091/admin/v1/calls/siphon-a/park \
+ADMIN=http://127.0.0.1:9092          # https://… when [admin.tls] is set
+
+curl -X POST $ADMIN/admin/v1/calls/siphon-a/park \
+    -H "Authorization: Bearer $SIPHON_ADMIN_OP" \
     -d '{"slot":"lot-3"}'        # → 202 (dispatched); 404 unknown call
 ```
 
@@ -77,7 +83,8 @@ operator and not by a peer:
 
 ```sh
 # ws_url is optional — defaults to the call's original bridge ws_url
-curl -X POST http://localhost:9091/admin/v1/calls/siphon-a/retrieve \
+curl -X POST $ADMIN/admin/v1/calls/siphon-a/retrieve \
+    -H "Authorization: Bearer $SIPHON_ADMIN_OP" \
     -d '{"ws_url":"wss://my-bot.example/retrieve"}'   # → 202
 ```
 
@@ -88,7 +95,7 @@ dispatched, `404` unknown call, `409` if the named call exists but isn't
 parked, `501` when park is off. Inspect what's parked with:
 
 ```sh
-curl -s http://localhost:9091/admin/v1/parked
+curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/v1/parked
 # → {"count":1,"parked":[{"call_id":"siphon-a","slot":"lot-3","parked_secs":42}]}
 ```
 

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.2] - 2026-07-20
+
 ### Changed
 
 - **`GET /admin/calls` now returns an object per call, not a bare SIP
@@ -28,6 +30,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the conference/park handlers now name the expected id namespace.
 
 ### Fixed
+
+- **Outbound TLS to a hostname trunk now completes — SNI is the URI
+  hostname, not the resolved IP** (issue #312; siphon-rs #64, pin
+  `36c3ac4f3c0c` → `3a4fc312ade3`). On a hostname trunk with no SRV
+  records (Twilio Secure Trunking, `*.pstn.twilio.com`), RFC 3263
+  resolution replaced the URI host with the resolved A-record IP, and the
+  UAC then handed *that IP* to rustls as the TLS `ServerName` — so the
+  handshake presented `sni=<ip>` and cert-verified against the IP. Any
+  trunk serving a hostname-scoped certificate and keying on SNI rejected
+  it, so outbound TLS calls never connected (`result="unreachable"`);
+  combined with a secure trunk rejecting UDP (`488`), there was **no
+  working outbound transport**. Fixed upstream in siphon-rs `sip-dns` /
+  `sip-uac`: a `DnsTarget` now carries the pre-resolution hostname as its
+  TLS reference identity (RFC 5922 §4) and TLS uses it for SNI and
+  certificate-name verification, while the connection still targets the
+  resolved IP — so RFC 3263 address selection is unchanged. This bump is
+  the only siphon-ai change; no siphon-ai API, config, protocol, or CDR
+  change. IP-literal and SRV-addressed trunks are unaffected.
 
 - **`siphon_ai_admin_requests_total` no longer labels failed admin
   requests `result="ok"`** (issue #310). The counter derived `result`

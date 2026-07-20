@@ -74,15 +74,27 @@ role → `403`. Configure the listener and tokens per `docs/DEPLOY.md` →
 Admin auth & RBAC, and keep it on loopback or a private interface
 (`[admin.tls]` if it must bind somewhere routable).
 
+**`call_id` here is the *bridge* call_id** — the `siphon-…` value on the bot's
+WS `start` message and the CDR, **not** the SIP `Call-ID`. Get it from
+`GET /admin/calls`, whose `call_id` field is exactly this id (its `sip_call_id`
+field is the other namespace, which the conference API rejects):
+
 ```sh
 ADMIN=http://127.0.0.1:9092          # https://… when [admin.tls] is set
+
+# Discover active calls and their bridge call_ids (readonly)
+curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/calls
+# → {"count":2,"calls":[
+#     {"call_id":"siphon-c","sip_call_id":"5924dbcb…@0.0.0.0","direction":"inbound"},
+#     {"call_id":"siphon-d","sip_call_id":"…","direction":"outbound"}]}
 
 # Who's in which room (readonly)
 curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/v1/conferences
 # → {"count":1,"conferences":[{"room_id":"support-7","sample_rate":8000,
 #     "participants":["siphon-a","siphon-b"]}]}
 
-# Pull any active call (inbound or outbound) into a room — creates it if absent
+# Pull any active call (inbound or outbound) into a room — creates it if absent.
+# call_id is the bridge id from /admin/calls above (NOT the sip_call_id).
 curl -X POST $ADMIN/admin/v1/conferences/support-7/participants \
     -H "Authorization: Bearer $SIPHON_ADMIN_OP" \
     -d '{"call_id":"siphon-c"}'        # → 202

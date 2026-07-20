@@ -61,6 +61,10 @@ on the dedicated **`[admin]` listener** (0.10.0) with a bearer token — not on
 `[observability].http_listen`, which `404`s for `/admin/*`. Park and retrieve
 need **`operator`**; `GET /admin/v1/parked` needs **`readonly`**.
 
+`:id` in `/admin/v1/calls/:id/park` is the **bridge** `call_id` (the `siphon-…`
+value on the WS `start` message / CDR), not the SIP Call-ID. List active calls
+and their bridge ids with `GET /admin/calls` — its `call_id` field is this id.
+
 ```sh
 ADMIN=http://127.0.0.1:9092          # https://… when [admin.tls] is set
 

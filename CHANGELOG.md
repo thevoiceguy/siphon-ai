@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`GET /admin/calls` now returns an object per call, not a bare SIP
+  Call-ID string** (issue #311). Each element is
+  `{call_id, sip_call_id, direction}`: the **bridge** `call_id` (the id
+  `/admin/v1/conferences/*`, `/park`, `/retrieve`, and `/stats` all take,
+  and the value on the WS `start` message + CDR), the **SIP** Call-ID
+  (what `POST /admin/calls/:id/hangup` takes), and `"inbound"` /
+  `"outbound"`. Before this, the only endpoint that enumerated calls
+  returned SIP Call-IDs while every conference endpoint required the
+  bridge id, and **no admin endpoint exposed the mapping** — operator
+  conferencing was undriveable without correlating daemon logs, and the
+  resulting `404 "no active call"` (while `GET /admin/calls` listed the
+  call) read as a liveness bug. The listing is now sourced from the
+  bridge-id-keyed control registry, so it also covers **outbound** calls,
+  which the old inbound-only listing omitted. **This is a breaking
+  response-shape change** to `GET /admin/calls` (array of strings → array
+  of objects); scripts parsing it must be updated. The `404` bodies from
+  the conference/park handlers now name the expected id namespace.
+
+### Fixed
+
+- **`siphon_ai_admin_requests_total` no longer labels failed admin
+  requests `result="ok"`** (issue #310). The counter derived `result`
+  from the auth outcome only, so any authorized request whose handler
+  then returned a non-2xx status was still counted `ok` — a `404` from
+  operating on a stale `call_id`, a `409`, a `503` at a cap. `result` now
+  follows the response status: `not_found` for `404` (a normal
+  conference/park race), `error` for every other handler failure (400 /
+  409 / 429 / 501 / 503), `ok` only for 2xx. The auth layer's
+  `unauthenticated` / `forbidden` are unchanged. Alerting on
+  `result != "ok"` is now a faithful failure signal. `# HELP` text,
+  `docs/DEPLOY.md`, and the audit-stream `result` field updated to match.
+
 ## [0.37.1] - 2026-07-20
 
 ### Fixed

@@ -45,6 +45,7 @@ use tracing::{debug, warn};
 
 use crate::call::CallHandle;
 use forge_core::CallId as ForgeCallId;
+use siphon_ai_bridge::Direction;
 use siphon_ai_media_glue::MediaDirection;
 
 /// Per-call session state the registry tracks. Beyond the shutdown
@@ -255,9 +256,37 @@ impl ConsultRegistry {
 /// path only *signals* a call — the controller mutates its own state.
 /// Insert at call setup, remove at teardown (not the hot path); lookup
 /// once per admin request.
+///
+/// Alongside the handle it caches the call's SIP `Call-ID` and
+/// [`Direction`] — both fixed for the call's life — so the admin
+/// active-calls listing can report every identifier an operator needs:
+/// the bridge `call_id` (this map's key; what conference / park / stats
+/// consume) *and* the SIP Call-ID (what `POST /admin/calls/:id/hangup`
+/// consumes). Before this the listing exposed only the SIP Call-ID, with
+/// no way to obtain the bridge id the conference API requires (issue
+/// #311).
 #[derive(Debug, Clone, Default)]
 pub struct CallControlRegistry {
-    inner: Arc<RwLock<HashMap<String, CallHandle>>>,
+    inner: Arc<RwLock<HashMap<String, ControlEntry>>>,
+}
+
+/// What [`CallControlRegistry`] stores per call: the command handle plus
+/// the identifiers/direction the admin listing reports.
+#[derive(Debug, Clone)]
+struct ControlEntry {
+    handle: CallHandle,
+    sip_call_id: String,
+    direction: Direction,
+}
+
+/// One active call in the admin `GET /admin/calls` snapshot. `call_id`
+/// is the bridge id (the registry key); `sip_call_id` is the SIP
+/// Call-ID; `direction` is inbound/outbound.
+#[derive(Debug, Clone)]
+pub struct CallSnapshot {
+    pub call_id: String,
+    pub sip_call_id: String,
+    pub direction: Direction,
 }
 
 impl CallControlRegistry {
@@ -273,12 +302,18 @@ impl CallControlRegistry {
         self.inner.read().is_empty()
     }
 
-    /// Register a call's handle under its bridge `call_id`. A
-    /// collision means the id factory produced a duplicate (a bug);
+    /// Register a call's handle under its bridge `call_id`, together
+    /// with its SIP `Call-ID` and [`Direction`] for the admin listing.
+    /// A collision means the id factory produced a duplicate (a bug);
     /// last insert wins with a warning, matching [`CallRegistry`].
-    pub fn insert(&self, handle: CallHandle) {
+    pub fn insert(&self, handle: CallHandle, sip_call_id: impl Into<String>, direction: Direction) {
         let key = handle.call_id().as_str().to_string();
-        if self.inner.write().insert(key.clone(), handle).is_some() {
+        let entry = ControlEntry {
+            handle,
+            sip_call_id: sip_call_id.into(),
+            direction,
+        };
+        if self.inner.write().insert(key.clone(), entry).is_some() {
             warn!(call_id = %key, "control registry insert collided; previous handle dropped");
         } else {
             debug!(call_id = %key, "registered call handle for admin control");
@@ -287,7 +322,25 @@ impl CallControlRegistry {
 
     /// Look up a call's handle by bridge `call_id`.
     pub fn lookup(&self, bridge_call_id: &str) -> Option<CallHandle> {
-        self.inner.read().get(bridge_call_id).cloned()
+        self.inner
+            .read()
+            .get(bridge_call_id)
+            .map(|e| e.handle.clone())
+    }
+
+    /// Snapshot every active call — bridge `call_id`, SIP Call-ID, and
+    /// direction — for the admin `GET /admin/calls` listing. Order is
+    /// unspecified. Covers both inbound and outbound calls.
+    pub fn snapshot(&self) -> Vec<CallSnapshot> {
+        self.inner
+            .read()
+            .iter()
+            .map(|(call_id, e)| CallSnapshot {
+                call_id: call_id.clone(),
+                sip_call_id: e.sip_call_id.clone(),
+                direction: e.direction,
+            })
+            .collect()
     }
 
     /// Drop the entry on the call's way out. Unknown id is a harmless
@@ -510,6 +563,30 @@ mod tests {
         let mut ids = reg.snapshot_call_ids();
         ids.sort();
         assert_eq!(ids, vec!["a@pbx".to_string(), "b@pbx".to_string()]);
+    }
+
+    #[test]
+    fn control_registry_snapshot_reports_both_ids_and_direction() {
+        let reg = CallControlRegistry::new();
+        reg.insert(fresh_handle("siphon-in"), "in@pbx", Direction::Inbound);
+        reg.insert(fresh_handle("siphon-out"), "out@pbx", Direction::Outbound);
+
+        let mut rows = reg.snapshot();
+        rows.sort_by(|a, b| a.call_id.cmp(&b.call_id));
+        assert_eq!(rows.len(), 2);
+
+        // Bridge call_id is the key; SIP Call-ID and direction ride
+        // alongside — the trio the admin listing needs (issue #311).
+        assert_eq!(rows[0].call_id, "siphon-in");
+        assert_eq!(rows[0].sip_call_id, "in@pbx");
+        assert_eq!(rows[0].direction, Direction::Inbound);
+        assert_eq!(rows[1].call_id, "siphon-out");
+        assert_eq!(rows[1].sip_call_id, "out@pbx");
+        assert_eq!(rows[1].direction, Direction::Outbound);
+
+        // lookup still returns the handle by bridge id.
+        assert!(reg.lookup("siphon-out").is_some());
+        assert!(reg.lookup("out@pbx").is_none());
     }
 
     #[test]

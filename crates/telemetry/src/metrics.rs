@@ -107,7 +107,10 @@ pub const OUTBOUND_SRTP_TOTAL: &str = "siphon_ai_outbound_srtp_total";
 /// Authenticated admin API requests (0.10.0). Labeled by `endpoint`
 /// (the route template, ids collapsed — bounded), `role` (the
 /// authenticated token's role, or `none` when auth failed), and
-/// `result` (`ok`, `unauthenticated`, `forbidden`, `not_found`). One
+/// `result` (`ok`, `unauthenticated`, `forbidden`, `not_found`, `error`).
+/// `not_found` covers both an unknown route and a handler `404` (stale
+/// call/room id); `error` covers every other handler failure (400 / 409 /
+/// 429 / 501 / 503 / 5xx). One
 /// counter per admin call on the `[admin]` listener; pairs with the
 /// structured audit log. Literal must match the call site in
 /// `siphon-ai-telemetry::http`.
@@ -471,7 +474,7 @@ pub fn register_descriptions() {
     );
     describe_counter!(
         ADMIN_REQUESTS_TOTAL,
-        "Authenticated admin API requests, by endpoint (route template), role, and result (ok, unauthenticated, forbidden, not_found)."
+        "Authenticated admin API requests, by endpoint (route template), role, and result (ok, unauthenticated, forbidden, not_found, error)."
     );
     describe_counter!(
         DELAYED_OFFER_TOTAL,

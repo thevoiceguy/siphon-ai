@@ -64,24 +64,36 @@ participant — that's the operator control plane's job ([§3](#3-operator-contr
 
 Operators compose and inspect rooms over the admin HTTP API
 (`docs/DEPLOY.md`). Requires `[conference].enabled = true` (all routes `501`
-otherwise). Same posture as the originate API — **no built-in auth**, keep
-the listener on a private network.
+otherwise).
+
+These routes live on the dedicated **`[admin]` listener** (0.10.0), gated by
+a bearer token + RBAC — they are *not* on `[observability].http_listen`,
+which returns `404` for `/admin/*`. Listing a room needs **`readonly`**;
+create / end / add / remove need **`operator`**. No token → `401`, too low a
+role → `403`. Configure the listener and tokens per `docs/DEPLOY.md` →
+Admin auth & RBAC, and keep it on loopback or a private interface
+(`[admin.tls]` if it must bind somewhere routable).
 
 ```sh
-# Who's in which room
-curl -s http://localhost:9091/admin/v1/conferences
+ADMIN=http://127.0.0.1:9092          # https://… when [admin.tls] is set
+
+# Who's in which room (readonly)
+curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/v1/conferences
 # → {"count":1,"conferences":[{"room_id":"support-7","sample_rate":8000,
 #     "participants":["siphon-a","siphon-b"]}]}
 
 # Pull any active call (inbound or outbound) into a room — creates it if absent
-curl -X POST http://localhost:9091/admin/v1/conferences/support-7/participants \
+curl -X POST $ADMIN/admin/v1/conferences/support-7/participants \
+    -H "Authorization: Bearer $SIPHON_ADMIN_OP" \
     -d '{"call_id":"siphon-c"}'        # → 202
 
 # Drop one call back to its private bot
-curl -X DELETE http://localhost:9091/admin/v1/conferences/support-7/participants/siphon-c  # → 202
+curl -X DELETE -H "Authorization: Bearer $SIPHON_ADMIN_OP" \
+    $ADMIN/admin/v1/conferences/support-7/participants/siphon-c   # → 202
 
 # End the whole room (every member reverts to its direct pair)
-curl -X DELETE http://localhost:9091/admin/v1/conferences/support-7   # → 200
+curl -X DELETE -H "Authorization: Bearer $SIPHON_ADMIN_OP" \
+    $ADMIN/admin/v1/conferences/support-7   # → 200
 ```
 
 `add`/`remove` return **`202` (dispatched)**: the daemon signals the target

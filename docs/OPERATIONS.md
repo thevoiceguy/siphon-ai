@@ -268,8 +268,11 @@ The bridge logs every parsed `BridgeIn` control message at
 at default INFO; flip them at runtime via:
 
 ```sh
+# /admin/* is on the [admin] listener (0.10.0), not the metrics port;
+# PUT /admin/log needs an `admin`-role bearer token.
 curl -X PUT --data 'siphon_ai=info,siphon_ai_bridge=debug' \
-   http://127.0.0.1:9091/admin/log
+   -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" \
+   http://127.0.0.1:9092/admin/log
 ```
 
 The admin endpoint replies with the previous filter so an

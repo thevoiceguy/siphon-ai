@@ -132,8 +132,9 @@ sudo install -m 0755 target/release/siphon-ai /usr/local/bin/siphon-ai
 ## 5. Configure
 
 A working trunk-mode config — accept inbound INVITEs on UDP 5060,
-bridge every call to a WebSocket server, expose Prometheus +
-admin on 127.0.0.1:9091. Adjust IPs and the WS URL.
+bridge every call to a WebSocket server, expose Prometheus on
+127.0.0.1:9091 and the token-gated admin API on 127.0.0.1:9092.
+Adjust IPs and the WS URL.
 
 > **Replace `<YOUR_PUBLIC_IP>` below with this server's actual
 > reachable address.** It's pasted into `c=IN IP4 …` in every SDP
@@ -173,7 +174,30 @@ ws_connect_timeout_ms = 3000
 
 [observability]
 enabled     = true
-http_listen = "127.0.0.1:9091"
+http_listen = "127.0.0.1:9091"   # /metrics, /health, /ready ONLY
+
+# ─── Admin control plane ─────────────────────────────────────
+# Since 0.10.0 /admin/* is served here, NOT on http_listen above
+# (which 404s for /admin/*). Omit this block and /admin/* isn't
+# served at all — a fine default if you don't need it. Roles nest:
+# readonly ⊂ operator ⊂ admin. Put the referenced secrets in
+# /etc/siphon-ai/env (the EnvironmentFile in §6), one KEY=VALUE per
+# line — generate them with `openssl rand -hex 32`. Startup fails
+# loud if a referenced var is unset. On a routable bind add
+# [admin.tls] —
+# the token is plaintext otherwise. Full reference: docs/DEPLOY.md.
+[admin]
+listen = "127.0.0.1:9092"
+
+[[admin.token]]
+name  = "ops-readonly"
+token = "${SIPHON_ADMIN_RO}"
+role  = "readonly"
+
+[[admin.token]]
+name  = "ops-oncall"
+token = "${SIPHON_ADMIN_OP}"
+role  = "operator"
 
 # ─── Trunk allowlist ─────────────────────────────────────────
 # Required for production. Identifies inbound peers by source IP
@@ -282,6 +306,10 @@ sudo nft add chain inet siphon_ai input '{ type filter hook input priority 0; }'
 sudo nft add rule inet siphon_ai input udp dport 5060           ip saddr 10.0.0.10 accept
 sudo nft add rule inet siphon_ai input udp dport 40000-40500    ip saddr 10.0.0.10 accept
 sudo nft add rule inet siphon_ai input tcp dport 9091           ip saddr 10.0.0.0/24 accept
+# No rule for the admin port (9092): the config above binds it to
+# 127.0.0.1, so it's reachable only on-box (ssh in, or tunnel). If you
+# ever move it to a routable bind, add [admin.tls] and a source-scoped
+# rule — a bearer token on plain HTTP across the network is not enough.
 ```
 
 (`ufw` / `iptables` / cloud SG equivalents work too; the
@@ -319,7 +347,11 @@ walkthrough. ~5 minutes; recommended for any public IP.
 ```bash
 curl -s http://127.0.0.1:9091/health     # → "ok"
 curl -s http://127.0.0.1:9091/ready      # → "ready"
-curl -s http://127.0.0.1:9091/admin/calls
+
+# /admin/* is NOT on the metrics port (it 404s there since 0.10.0) — it's
+# on the [admin] listener, behind a bearer token. Skip if [admin] is unset.
+curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" \
+    http://127.0.0.1:9092/admin/calls
 # → {"calls":[],"count":0}
 ```
 
@@ -355,16 +387,21 @@ and `siphon_ai_calls_total{cause="…"}` after teardown.
 # Tail logs
 sudo journalctl -u siphon-ai -f
 
-# Bump bridge debug for an incident
-prev=$(curl -s http://127.0.0.1:9091/admin/log)
-curl -X PUT --data 'siphon_ai=info,siphon_ai_bridge=debug' \
-    http://127.0.0.1:9091/admin/log
-# (… reproduce, then revert …)
-curl -X PUT --data "$prev" http://127.0.0.1:9091/admin/log
+# /admin/* lives on the [admin] listener (0.10.0) + bearer token.
+ADMIN=http://127.0.0.1:9092
 
-# Force-hangup a specific call
-curl -s http://127.0.0.1:9091/admin/calls
-curl -X POST http://127.0.0.1:9091/admin/calls/<sip-call-id>/hangup
+# Bump bridge debug for an incident (PUT /admin/log needs `admin` role)
+prev=$(curl -s -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" $ADMIN/admin/log)
+curl -X PUT --data 'siphon_ai=info,siphon_ai_bridge=debug' \
+    -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" $ADMIN/admin/log
+# (… reproduce, then revert …)
+curl -X PUT --data "$prev" \
+    -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" $ADMIN/admin/log
+
+# Force-hangup a specific call (list = readonly, hangup = operator)
+curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/calls
+curl -X POST -H "Authorization: Bearer $SIPHON_ADMIN_OP" \
+    $ADMIN/admin/calls/<sip-call-id>/hangup
 
 # Restart cleanly
 sudo systemctl restart siphon-ai

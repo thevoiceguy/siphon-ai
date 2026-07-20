@@ -42,25 +42,43 @@ auth_password = "${TWILIO_TRUNK_SECRET}"
 name     = "pbx-out"
 register = "pbx"
 
-[observability]
-enabled     = true
-http_listen = "127.0.0.1:9091"   # the originate endpoint lives here
+# The originate endpoint lives on the dedicated [admin] listener (0.10.0),
+# NOT on [observability].http_listen — that port returns 404 for /admin/*.
+[admin]
+listen = "127.0.0.1:9092"
+
+# Origination is billable, so it requires an `admin`-role token.
+[[admin.token]]
+name  = "automation"
+token = "${SIPHON_ADMIN_ADMIN}"
+role  = "admin"
 ```
 
-The originate endpoint is part of the admin API, so `[observability]` must
-be on. Gateway config is validated at startup — bad `proxy`, unknown
-`register` reference, or half-set credentials fail loud.
+The originate endpoint is part of the admin API, so **`[admin]` must be
+configured with at least one `admin`-role token** — omit `[admin]` entirely
+and `/admin/*` isn't served at all. `[observability]` is unrelated to
+origination. See `docs/DEPLOY.md` → Admin auth & RBAC for the full listener,
+role, and `[admin.tls]` reference. Gateway config is validated at startup —
+bad `proxy`, unknown `register` reference, or half-set credentials fail loud.
 
 ## 2. Placing a call
 
 ```sh
-curl -X POST http://localhost:9091/admin/v1/calls -d '{
+ADMIN=http://127.0.0.1:9092          # https://… when [admin.tls] is set
+
+curl -X POST $ADMIN/admin/v1/calls \
+    -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" \
+    -d '{
   "to": "+15558675309",
   "gateway": "twilio",
   "ws_url": "wss://my-bot.example/outbound"
 }'
 # → 202 {"call_id":"siphon-…"}
 ```
+
+Origination needs an **`admin`**-role token (the highest role — it's the
+billable endpoint). A missing or invalid token is `401`; a `readonly` or
+`operator` token is `403`.
 
 | Field | Required | Notes |
 |---|---|---|
@@ -73,9 +91,9 @@ curl -X POST http://localhost:9091/admin/v1/calls -d '{
 
 `202` means *admitted and dialing*, not answered — the HTTP exchange ends
 there, and everything after arrives out-of-band (see [§4](#4-call-lifecycle)).
-Other responses: `404` unknown gateway, `400` bad target / no ws_url /
-invalid JSON, `503` at `max_concurrent`, `429` rate-limited, `501` outbound
-disabled.
+Other responses: `401` missing/invalid token, `403` token below `admin`
+role, `404` unknown gateway, `400` bad target / no ws_url / invalid JSON,
+`503` at `max_concurrent`, `429` rate-limited, `501` outbound disabled.
 
 Digest auth (401/407 challenges from the trunk) is answered automatically
 with the gateway's credentials; there's nothing per-call to do.
@@ -87,23 +105,35 @@ deployment **directly costs money**: anyone who can reach the originate
 endpoint can place calls billed to your trunk. Premium-rate fraud burns
 thousands of dollars in hours, so treat the endpoint like a payment API.
 
-**The originate API has no built-in authentication** (a deliberate 0.6.0
-decision — see `docs/design/DEV_PLAN_0.6.0.md` §9.5). The intended posture:
+**The originate API requires an `admin`-role bearer token** (0.10.0; the
+0.6.0 posture of "no built-in auth, front it with a proxy" is obsolete —
+see `docs/design/DEV_PLAN_0.6.0.md` §9.5 for the original decision and
+`docs/DEPLOY.md` → Admin auth & RBAC for what replaced it). The posture:
 
-1. **Bind the admin API to localhost or a private network**
-   (`http_listen = "127.0.0.1:9091"`, the documented default posture) and
-   front it with an authenticating reverse proxy (nginx + OIDC/mTLS/basic
-   auth) if anything non-local needs it. Never expose :9091 raw to the
-   internet.
-2. **Set a realistic `max_concurrent`.** It's the blast-radius cap; 20
+1. **Give origination its own `admin`-role token**, separate from the
+   `readonly` / `operator` tokens used for dashboards and routine ops. It's
+   the highest role precisely because it spends money; nothing that only
+   needs to *read* state should hold a token that can dial.
+2. **Keep `[admin].listen` on loopback or a private interface**
+   (`127.0.0.1:9092`), and set `[admin.tls]` if it must bind somewhere
+   routable — the bearer token is plaintext on the wire otherwise. Never
+   expose the admin port raw to the internet; the token is a credential,
+   not a substitute for network placement.
+3. **Rotate by editing `[admin.token]` and restarting.** Token changes are
+   *not* picked up by SIGHUP reload — a revoked token keeps working until
+   restart (`docs/DEPLOY.md`).
+4. **Set a realistic `max_concurrent`.** It's the blast-radius cap; 20
    concurrent premium-rate calls is a very different incident than 2000.
-3. **Set `rate_limit_per_sec`.** A dialer bug or a stolen `curl` loop hits
+5. **Set `rate_limit_per_sec`.** A dialer bug or a stolen `curl` loop hits
    the token bucket instead of your trunk.
-4. **Use trunk-side allowlists too.** Most providers can restrict
+6. **Use trunk-side allowlists too.** Most providers can restrict
    destinations (countries, premium ranges) per trunk — defense in depth
    that survives a SiphonAI misconfiguration.
-5. **Watch `siphon_ai_outbound_calls_total`.** An unexpected slope on that
-   counter is the earliest fraud signal you'll get; alert on it.
+7. **Watch `siphon_ai_outbound_calls_total`.** An unexpected slope on that
+   counter is the earliest fraud signal you'll get; alert on it. Pair it
+   with `siphon_ai_admin_requests_total{endpoint,role,result}` — a rising
+   `unauthenticated` / `forbidden` count on the originate endpoint is
+   someone probing it.
 
 ### Encrypting the media — SRTP (0.7.x)
 

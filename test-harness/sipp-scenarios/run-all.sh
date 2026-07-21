@@ -5,7 +5,8 @@
 # the script starts a fresh daemon on an ephemeral port, runs each
 # scenario in series, captures failures, and tears the daemon down.
 #
-# Prerequisites:
+# Prerequisites (all three are checked up front; a missing one exits 2
+# with instructions rather than failing scenarios mid-run):
 #   * sip-tester (sipp) on PATH        (apt install sip-tester)
 #   * SiphonAI binary built             (cargo build -p siphon-ai)
 #   * An echo WS server on :8765       (examples/echo-ws-server-python/)
@@ -39,6 +40,12 @@ DAEMON_PORT=5070     # SiphonAI's listen port (matches local-dev.toml)
 # sequentially so one fixed port/token is reused.
 ADMIN_API_PORT=9191
 ADMIN_TOKEN="sipp-harness-admin"
+# Port of the caller-supplied echo WS server (see the header). Not freely
+# changeable: the main phase runs against configs/local-dev.toml, whose
+# `[bridge] ws_url` pins 8765 independently of this script. The auxiliary
+# phases that generate their own config interpolate this value below;
+# those that spawn a private echo server use their own ports instead.
+ECHO_WS_PORT=8765
 DAEMON_BIN="${DAEMON_BIN:-$REPO_ROOT/target/debug/siphon-ai}"
 DAEMON_CONFIG="${SIPHON_AI_CONFIG:-$REPO_ROOT/configs/local-dev.toml}"
 
@@ -64,6 +71,39 @@ if [[ ! -x "$DAEMON_BIN" ]]; then
 fi
 if [[ ! -f "$DAEMON_CONFIG" ]]; then
     echo "config not found at $DAEMON_CONFIG — set SIPHON_AI_CONFIG or create configs/local-dev.toml" >&2
+    exit 2
+fi
+
+# The echo WS server is a prerequisite, not something we start (see the
+# header). Its absence used to go undetected until mid-run, then show up
+# as eight failures scattered across five phases: every scenario whose
+# call must reach ACTIVE aborts on an unexpected BYE, because the daemon
+# tears the call down when the bridge can't connect, while scenarios that
+# reject before bridging (488 / 428 / 403 / 503, CANCEL) still pass. That
+# split reads like a signalling regression rather than "you forgot to
+# start a server" — and the baseline-vs-branch comparison you'd reach for
+# next reproduces it identically on both sides, which makes the wrong
+# conclusion look confirmed.
+#
+# CI already guards this (.github/workflows/test.yml starts the server and
+# waits for the bind before invoking us), so the check is a no-op there —
+# it exists for local runs, which had no such protection.
+if ! (exec 3<>"/dev/tcp/127.0.0.1/$ECHO_WS_PORT") 2>/dev/null; then
+    cat >&2 <<MSG
+no echo WS server listening on 127.0.0.1:$ECHO_WS_PORT
+
+The scenarios that bridge audio need one. From the repo root:
+
+  python3 -m venv examples/echo-ws-server-python/.venv
+  examples/echo-ws-server-python/.venv/bin/pip install -r \\
+      examples/echo-ws-server-python/requirements.txt
+  examples/echo-ws-server-python/.venv/bin/python \\
+      examples/echo-ws-server-python/server.py \\
+      --bind 127.0.0.1:$ECHO_WS_PORT &
+
+Auxiliary phases that spawn a private echo server are unaffected; only
+the phases pointed at 127.0.0.1:$ECHO_WS_PORT depend on this one.
+MSG
     exit 2
 fi
 
@@ -150,7 +190,7 @@ mode = "session_progress"
 [media]
 codecs = ["pcmu"]
 [bridge]
-ws_url = "ws://127.0.0.1:8765/"
+ws_url = "ws://127.0.0.1:$ECHO_WS_PORT/"
 [[route]]
 name = "default"
 [route.match]
@@ -225,7 +265,7 @@ listen = "127.0.0.1:$DAEMON_PORT"
 [media]
 codecs = ["pcmu"]
 [bridge]
-ws_url = "ws://127.0.0.1:8765/"
+ws_url = "ws://127.0.0.1:$ECHO_WS_PORT/"
 [security]
 min_attestation = "A"
 [security.stir_shaken]
@@ -298,7 +338,7 @@ password = "s3cret-sipp"
 [media]
 codecs = ["pcmu"]
 [bridge]
-ws_url = "ws://127.0.0.1:8765/"
+ws_url = "ws://127.0.0.1:$ECHO_WS_PORT/"
 [[route]]
 name = "default"
 [route.match]
@@ -343,7 +383,7 @@ burst = 1
 [media]
 codecs = ["pcmu"]
 [bridge]
-ws_url = "ws://127.0.0.1:8765/"
+ws_url = "ws://127.0.0.1:$ECHO_WS_PORT/"
 [[route]]
 name = "default"
 [route.match]
@@ -387,7 +427,7 @@ listen = "127.0.0.1:$DAEMON_PORT"
 [media]
 codecs = ["pcmu"]
 [bridge]
-ws_url = "ws://127.0.0.1:8765/"
+ws_url = "ws://127.0.0.1:$ECHO_WS_PORT/"
 [recording]
 mode = "always"
 dir = "$REC_DIR"
@@ -2158,7 +2198,7 @@ listen = "127.0.0.1:$DAEMON_PORT"
 [media]
 codecs = ["pcmu"]
 [bridge]
-ws_url = "ws://127.0.0.1:8765/"
+ws_url = "ws://127.0.0.1:$ECHO_WS_PORT/"
 [[register]]
 name = "pbx-a"
 server = "127.0.0.1"

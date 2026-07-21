@@ -112,6 +112,11 @@ export interface RtpStats extends Base {
   type: "rtp_stats";
   /** Remote-reported (RTCP RR): how the far end receives SiphonAI's stream. */
   jitter_ms?: number | null;
+  /**
+   * Loss ratio over the *interval* since the previous RR (RFC 3550
+   * `fraction_lost`) — averaging this across a call does NOT yield the
+   * cumulative loss ratio. Use `tx_packets_lost_reported / tx_packets_sent`.
+   */
   packet_loss_ratio?: number | null;
   rtcp_rtt_ms?: number | null;
   /** Locally measured on the caller→SiphonAI stream (0.30.0). */
@@ -121,7 +126,24 @@ export interface RtpStats extends Base {
   rx_packets_lost?: number | null;
   rx_packets_out_of_order?: number | null;
   rx_packets_duplicate?: number | null;
-  /** Transport-only MOS-CQE estimate in [1.0, 5.0] (0.30.0). */
+  /**
+   * Locally measured on the SiphonAI→caller stream (0.38.0), cumulative
+   * since call start. `tx_octets_sent` counts RTP payload octets only —
+   * no headers, no SRTP overhead.
+   */
+  tx_packets_sent?: number | null;
+  tx_octets_sent?: number | null;
+  /**
+   * The far end's own absolute count of packets it lost on the stream
+   * SiphonAI sends, from the latest RR (0.38.0). **Signed** — RFC 3550
+   * allows a negative total when duplicates push the peer's
+   * packets-received past packets-expected, so don't clamp it.
+   */
+  tx_packets_lost_reported?: number | null;
+  /**
+   * Transport-only MOS-CQE estimate in [1.0, 5.0] (0.30.0). RX-only by
+   * construction — the `tx_*` counters don't feed it.
+   */
   mos_estimate?: number | null;
 }
 

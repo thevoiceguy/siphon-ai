@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **TX-side packet counters across the quality telemetry** (issue #320;
+  requires the forge-media pin bump to `f6151edf2724` =
+  [forge-media#93](https://github.com/thevoiceguy/forge-media/pull/93),
+  which publishes the underlying numbers on the `ForgeEvent` bus). Every
+  quality surface was `rx_*` only, so an operator could see what SiphonAI
+  *received* but never what it *sent* — "the outbound leg was clean" was a
+  ratio with no denominator behind it. Three fields close the gap:
+  `tx_packets_sent` and `tx_octets_sent` (locally measured on the
+  SiphonAI→caller stream, cumulative since call start; octets are RTP
+  payload only, the same basis as an RTCP SR's sender octet count), and
+  `tx_packets_lost_reported` (the far end's own **absolute** count of
+  packets it lost on that stream, from the latest RR's cumulative-lost
+  field). Together they express the sentence operators actually ask for
+  after a bad call: *"we sent 1,914 packets; the far end reported 12
+  lost."* `tx_packets_lost_reported` is **signed** — RFC 3550 §6.4.1
+  defines it that way because duplicates can push the peer's
+  packets-received past packets-expected, so consumers must parse it as a
+  signed integer and not clamp; a negative value is real information (a
+  duplicating path). Surfaces: the `rtp_stats` WS event (additive optional
+  fields, **protocol stays v1** as with the 0.30.0 `rx_*` addition), the
+  CDR `quality` block, `/admin/v1/calls/:id/stats`, and the `[quality]`
+  history records. CDR schema **stays at version 4** — additive optional
+  fields within an existing block, per CLAUDE.md §7.7 and the
+  `verstat_attest` / `recording_id` precedent (the v4 bump was for
+  introducing the block itself). CSV gains three append-only columns
+  (`quality_tx_packets_sent`, `quality_tx_octets_sent`,
+  `quality_tx_packets_lost_reported`) at the end of the header, so
+  position-keyed ingestors are unaffected. Motivated by a real 0.37.3
+  outbound call over a Twilio Secure trunk where `rx_packets_lost` 115 /
+  `rx_packets_received` 1914 was visible but the clean TX direction could
+  not be quantified in packets. Docs: `PROTOCOL.md` §3.8, `DEPLOY.md`;
+  schema regenerated; both server SDKs updated in lockstep.
+
+### Fixed
+
+- **`packet_loss_ratio` is documented correctly: it is a per-interval
+  figure, not a cumulative one** (issue #320, secondary item). The CDR
+  `quality` block's `avg/max_packet_loss_ratio` (`crates/cdr/src/schema.rs`),
+  `PROTOCOL.md` §3.8, and `DEPLOY.md` all described these as the
+  "RR-reported **cumulative**-loss ratio". They are derived from the RR's
+  `fraction_lost` field, which measures loss over the interval since the
+  *previous* report (RFC 3550 §6.4.1) — so `avg_packet_loss_ratio` is a
+  mean of interval fractions, and an operator reconciling it against a
+  carrier's cumulative figure would never get matching numbers. **The
+  emitted values are unchanged**; only the descriptions were wrong. The
+  field was deliberately *not* recomputed from the newly available
+  cumulative counter — that would silently change a published number for
+  existing consumers. Use `tx_packets_lost_reported / tx_packets_sent`
+  for a true whole-call loss rate.
+
 ## [0.37.3] - 2026-07-21
 
 ### Fixed

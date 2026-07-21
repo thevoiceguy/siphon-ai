@@ -35,12 +35,14 @@ quality_avg_packet_loss_ratio,quality_max_packet_loss_ratio,\
 quality_avg_rtcp_rtt_ms,\
 quality_rx_packets_received,quality_rx_packets_lost,\
 quality_rx_packets_out_of_order,quality_rx_packets_duplicate,\
-quality_mos_estimate_min,quality_mos_estimate_avg";
+quality_mos_estimate_min,quality_mos_estimate_avg,\
+quality_tx_packets_sent,quality_tx_octets_sent,\
+quality_tx_packets_lost_reported";
 
 /// Number of columns in [`HEADER`] (and every row). Only asserted in
 /// tests — production code appends by name, not position.
 #[cfg(test)]
-pub(crate) const COLUMNS: usize = 45;
+pub(crate) const COLUMNS: usize = 48;
 
 /// RFC 4180 field escaping: quote when the value contains a comma,
 /// quote, or line break; double embedded quotes.
@@ -163,8 +165,14 @@ pub fn record_to_row(r: &CdrRecord) -> String {
     cell!(opt o, q.and_then(|q| q.rx_packets_out_of_order));
     cell!(opt o, q.and_then(|q| q.rx_packets_duplicate));
     cell!(opt o, q.and_then(|q| q.mos_estimate_min));
+    // 0.38.0 TX columns append after the 0.30.0 quality block rather
+    // than sitting next to their rx_* counterparts: HEADER order is
+    // append-only so position-keyed ingestors survive the addition.
+    cell!(opt o, q.and_then(|q| q.mos_estimate_avg));
+    cell!(opt o, q.and_then(|q| q.tx_packets_sent));
+    cell!(opt o, q.and_then(|q| q.tx_octets_sent));
     // Last column: no trailing comma.
-    if let Some(v) = q.and_then(|q| q.mos_estimate_avg) {
+    if let Some(v) = q.and_then(|q| q.tx_packets_lost_reported) {
         let _ = write!(o, "{v}");
     }
 
@@ -307,6 +315,9 @@ mod tests {
             rx_packets_lost: Some(12),
             rx_packets_out_of_order: Some(3),
             rx_packets_duplicate: Some(0),
+            tx_packets_sent: Some(14_900),
+            tx_octets_sent: Some(2_384_000),
+            tx_packets_lost_reported: Some(12),
             mos_estimate_min: Some(3.9),
             mos_estimate_avg: Some(4.3),
         });

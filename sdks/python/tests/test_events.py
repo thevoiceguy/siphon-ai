@@ -24,6 +24,7 @@ sys.path.insert(0, str(REPO / "sdks" / "python" / "src"))
 from siphon_ai_server import events  # noqa: E402
 from siphon_ai_server.events import (  # noqa: E402
     BargeInResolved,
+    RtpStats,
     SpeechStarted,
     Start,
     UnknownEvent,
@@ -194,6 +195,35 @@ class ToleranceTest(unittest.TestCase):
         )
         self.assertTrue(armed.decision_pending)
         self.assertEqual(armed.decision_deadline_ms, 500)
+
+    def test_rtp_stats_tx_fields(self) -> None:
+        # Pre-0.38.0 shape: no tx_* fields on the wire.
+        plain = parse_event(
+            '{"type": "rtp_stats", "call_id": "c", "seq": 4,'
+            ' "packet_loss_ratio": 0.004}'
+        )
+        self.assertIsInstance(plain, RtpStats)
+        self.assertIsNone(plain.tx_packets_sent)
+        self.assertIsNone(plain.tx_packets_lost_reported)
+        # 0.38.0: the transmit direction has counts, not just ratios.
+        full = parse_event(
+            '{"type": "rtp_stats", "call_id": "c", "seq": 5,'
+            ' "tx_packets_sent": 1914, "tx_octets_sent": 306240,'
+            ' "tx_packets_lost_reported": 12}'
+        )
+        self.assertEqual(full.tx_packets_sent, 1914)
+        self.assertEqual(full.tx_octets_sent, 306240)
+        self.assertEqual(full.tx_packets_lost_reported, 12)
+
+    def test_rtp_stats_cumulative_lost_may_be_negative(self) -> None:
+        # RFC 3550 6.4.1 signs the field: duplicates can push the peer's
+        # packets-received past packets-expected. Parsing it as unsigned
+        # would turn -3 into ~16.7M, so pin the sign.
+        event = parse_event(
+            '{"type": "rtp_stats", "call_id": "c", "seq": 6,'
+            ' "tx_packets_lost_reported": -3}'
+        )
+        self.assertEqual(event.tx_packets_lost_reported, -3)
 
     def test_barge_in_resolved_parses_every_outcome(self) -> None:
         for outcome in ("confirmed", "rejected", "timeout"):

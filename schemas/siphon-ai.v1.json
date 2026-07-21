@@ -687,7 +687,7 @@
           "type": "object"
         },
         {
-          "description": "Periodic snapshot of RTP / RTCP quality, emitted every\n`[bridge].rtp_stats_interval_ms` (default 5 s, configurable\nper-route; `0` disables). Fields are JSON `null` until forge\nhas reported its first quality assessment for the call.\nCodec / sample rate are constant for the call — consumers\nshould correlate to the `start` message.\n\nTwo viewpoints ride together (0.30.0): the original three fields\nare **remote-reported** (RTCP RRs: how the far end receives the\nstream SiphonAI sends), while the `rx_*` fields are **locally\nmeasured** on the stream SiphonAI receives from the caller. A\ncongested path is often asymmetric — compare the two sides.",
+          "description": "Periodic snapshot of RTP / RTCP quality, emitted every\n`[bridge].rtp_stats_interval_ms` (default 5 s, configurable\nper-route; `0` disables). Fields are JSON `null` until forge\nhas reported its first quality assessment for the call.\nCodec / sample rate are constant for the call — consumers\nshould correlate to the `start` message.\n\nTwo viewpoints ride together (0.30.0): the original three fields\nare **remote-reported** (RTCP RRs: how the far end receives the\nstream SiphonAI sends), while the `rx_*` fields are **locally\nmeasured** on the stream SiphonAI receives from the caller. A\ncongested path is often asymmetric — compare the two sides.\n\nThe `tx_*` fields (0.38.0) complete the picture: `tx_packets_sent`\n/ `tx_octets_sent` are locally measured on what SiphonAI put on\nthe wire, and `tx_packets_lost_reported` is the far end's own\nabsolute loss total for that stream. Before these existed the\ntransmit direction had only ratios, so \"the outbound leg was\nclean\" could never be backed by a packet count.",
           "properties": {
             "call_id": {
               "$ref": "#/$defs/CallId"
@@ -772,6 +772,32 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "tx_octets_sent": {
+              "description": "RTP *payload* octets transmitted toward the caller, excluding\nRTP headers and SRTP overhead (RFC 3550 §6.4.1\nsender-octet-count basis). Cumulative, or `null` (0.38.0).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "tx_packets_lost_reported": {
+              "description": "The far end's own **absolute** count of packets it lost on the\nSiphonAI→caller stream, taken from the latest RTCP RR's\ncumulative-lost field (RFC 3550 §6.4.1). `null` until the\nfirst RR arrives (0.38.0).\n\nMay be **negative** — RFC 3550 defines the field as signed\nbecause duplicates can push the far end's packets-received\npast packets-expected. Consumers should parse it as a signed\ninteger and not clamp: a negative value is real information\n(a duplicating path), not an error.\n\nContrast `packet_loss_ratio`, which comes from the RR's\n`fraction_lost` and covers only the interval since the\nprevious report. Pair this field with `tx_packets_sent` for a\nwhole-call loss rate that reconciles against a carrier's own\ncumulative figure.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "tx_packets_sent": {
+              "description": "RTP packets SiphonAI transmitted toward the caller (WS-server\naudio played out, plus injected RFC 2833 DTMF), **cumulative\nsince call start**. `null` until the first local media-stats\nsnapshot (0.38.0).\n\nThis is the denominator `packet_loss_ratio` never had: the\nremote-reported loss fields describe *this* stream.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "type": {
               "const": "rtp_stats",

@@ -77,6 +77,9 @@ mod tests {
             rx_packets_lost: Some(12),
             rx_packets_out_of_order: Some(3),
             rx_packets_duplicate: Some(0),
+            tx_packets_sent: Some(14_900),
+            tx_octets_sent: Some(2_384_000),
+            tx_packets_lost_reported: Some(12),
             mos_estimate_min: Some(3.9),
             mos_estimate_avg: Some(4.3),
         }

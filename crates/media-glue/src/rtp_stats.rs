@@ -36,6 +36,28 @@
 //! two viewpoints ride the same `rtp_stats` wire event so consumers
 //! can spot asymmetric paths. A transport-only MOS-CQE estimate is
 //! derived from the RX side + RTCP RTT (see [`mos_estimate`]).
+//!
+//! ## TX side (0.38.0)
+//!
+//! Until 0.38.0 the transmit direction had ratios but no counts: an
+//! operator could see `packet_loss_ratio` but never answer "how many
+//! packets did we actually put on the wire?" — a ratio with no
+//! denominator behind it. Two numbers close that gap, both riding
+//! events forge already emits (upstream forge-media #93):
+//!
+//! - [`TxStats`] — `packets_sent` / `octets_sent` from the same
+//!   `MediaStatsSnapshot` that carries the RX counters, measured
+//!   locally on what we transmitted.
+//! - [`RtpStatsSnapshot::tx_packets_lost_reported`] — the RR's
+//!   *cumulative* lost count, i.e. the far end's own absolute total for
+//!   the stream we sent.
+//!
+//! Together they express the sentence operators actually ask for after
+//! a bad call: "we sent 1,914 packets; the far end reported 12 lost."
+//! Note that `packet_loss_ratio` is **not** that number — it comes from
+//! the RR's `fraction_lost`, which is loss over the interval since the
+//! previous report, so averaging it across a call yields a mean of
+//! interval fractions rather than a cumulative figure.
 
 use std::time::Duration;
 
@@ -48,6 +70,21 @@ pub struct RxStats {
     pub packets_lost: u64,
     pub packets_out_of_order: u64,
     pub packets_duplicate: u64,
+}
+
+/// Locally-measured transmit-side counters, cached verbatim from the
+/// latest `MediaStatsSnapshot` (0.38.0). Cumulative since call start.
+///
+/// Counts what SiphonAI put on the wire toward the caller: WS-server
+/// audio played out, plus any injected RFC 2833 DTMF. This is the
+/// denominator the RR-reported loss figures were always missing — see
+/// [`RtpStatsSnapshot::tx_packets_lost_reported`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TxStats {
+    pub packets_sent: u64,
+    /// RTP *payload* octets, excluding RTP headers and SRTP overhead
+    /// (RFC 3550 §6.4.1 sender-octet-count basis).
+    pub octets_sent: u64,
 }
 
 impl RxStats {
@@ -100,6 +137,22 @@ pub struct RtpStatsSnapshot {
     /// Latest locally-measured RX counters; `None` until the first
     /// `MediaStatsSnapshot` arrives (0.30.0).
     pub rx: Option<RxStats>,
+    /// Latest locally-measured TX counters; `None` until the first
+    /// `MediaStatsSnapshot` arrives (0.38.0).
+    pub tx: Option<TxStats>,
+    /// The far end's own *absolute* count of packets it lost on the
+    /// stream we sent, from the latest RR's cumulative-lost field
+    /// (RFC 3550 §6.4.1). `None` until the first RR arrives (0.38.0).
+    ///
+    /// Signed, and not a mistake: RFC 3550 defines the field as a
+    /// signed 24-bit quantity because duplicates can push the far
+    /// end's packets-received past packets-expected, so a healthy
+    /// stream can legitimately report a small negative total.
+    ///
+    /// Distinct from [`Self::packet_loss_ratio`], which is derived from
+    /// the RR's `fraction_lost` — an *interval* measure. Pair this with
+    /// [`Self::tx`]'s `packets_sent` for a whole-call loss rate.
+    pub tx_packets_lost_reported: Option<i64>,
     /// Transport-only MOS-CQE estimate; populated whenever `rx` is
     /// (RTT contributes when known, else 0 — see [`mos_estimate`]).
     pub mos_estimate: Option<f32>,
@@ -113,13 +166,24 @@ pub struct QualitySummary {
     /// Mean / max RR-reported jitter across the call's RTCP reports.
     pub avg_jitter_ms: Option<f32>,
     pub max_jitter_ms: Option<f32>,
-    /// Mean / max RR-reported cumulative-loss ratio.
+    /// Mean / max of the RR-reported *per-interval* loss ratio (each
+    /// sample is one RR's `fraction_lost`, i.e. loss since the previous
+    /// report). A mean of interval fractions — **not** the call's
+    /// cumulative loss ratio; for that use
+    /// [`Self::tx_packets_lost_reported`] over [`Self::tx`]'s
+    /// `packets_sent`.
     pub avg_packet_loss_ratio: Option<f32>,
     pub max_packet_loss_ratio: Option<f32>,
     /// Mean RTCP RTT across reports that carried one.
     pub avg_rtcp_rtt_ms: Option<f32>,
     /// Latest (cumulative) local receive-side counters.
     pub rx: Option<RxStats>,
+    /// Latest (cumulative) local transmit-side counters (0.38.0).
+    pub tx: Option<TxStats>,
+    /// Far end's absolute cumulative-lost count for the stream we sent,
+    /// from the last RR of the call (0.38.0). Signed per RFC 3550
+    /// §6.4.1 — see [`RtpStatsSnapshot::tx_packets_lost_reported`].
+    pub tx_packets_lost_reported: Option<i64>,
     /// Worst / mean transport-only MOS estimate, sampled once per
     /// local media-stats snapshot.
     pub mos_min: Option<f32>,
@@ -130,7 +194,10 @@ impl QualitySummary {
     /// True when no signal ever produced a sample — the CDR omits the
     /// whole block then.
     pub fn is_empty(&self) -> bool {
-        self.avg_jitter_ms.is_none() && self.rx.is_none() && self.avg_rtcp_rtt_ms.is_none()
+        self.avg_jitter_ms.is_none()
+            && self.rx.is_none()
+            && self.tx.is_none()
+            && self.avg_rtcp_rtt_ms.is_none()
     }
 }
 
@@ -175,6 +242,8 @@ pub struct RtpStatsTracker {
     last_packet_loss_ratio: Option<f32>,
     last_rtt_ms: Option<f32>,
     last_rx: Option<RxStats>,
+    last_tx: Option<TxStats>,
+    last_tx_packets_lost_reported: Option<i64>,
     agg: QualityAggregates,
 }
 
@@ -187,6 +256,8 @@ impl RtpStatsTracker {
             last_packet_loss_ratio: None,
             last_rtt_ms: None,
             last_rx: None,
+            last_tx: None,
+            last_tx_packets_lost_reported: None,
             agg: QualityAggregates::default(),
         }
     }
@@ -201,18 +272,25 @@ impl RtpStatsTracker {
         self.interval
     }
 
-    /// forge reported a `RtcpReportReceived` — cache the three RR-derived
+    /// forge reported a `RtcpReportReceived` — cache the RR-derived
     /// fields. `rtt_ms = None` is preserved as-is (we don't want the
     /// snapshot's `rtt_ms` to flip to `Some(0.0)` when forge can't yet
     /// compute RTT).
+    ///
+    /// `cumulative_lost` is the RR's whole-stream loss total, cached
+    /// verbatim (newest RR supersedes — it's cumulative, not a delta).
+    /// Unlike `rtt_ms` it is always present on an RR, so no
+    /// preserve-the-old-value dance is needed.
     pub fn note_rtcp_report(
         &mut self,
         jitter_ms: f32,
         packet_loss_ratio: f32,
+        cumulative_lost: i64,
         rtt_ms: Option<f32>,
     ) {
         self.last_jitter_ms = Some(jitter_ms);
         self.last_packet_loss_ratio = Some(packet_loss_ratio);
+        self.last_tx_packets_lost_reported = Some(cumulative_lost);
         if rtt_ms.is_some() {
             self.last_rtt_ms = rtt_ms;
         }
@@ -251,11 +329,16 @@ impl RtpStatsTracker {
     }
 
     /// forge published a `MediaStatsSnapshot` — cache the locally-
-    /// measured RX counters verbatim (they're cumulative; the newest
-    /// snapshot supersedes the previous one), and take one MOS sample
-    /// for the whole-call aggregates.
-    pub fn note_media_stats(&mut self, rx: RxStats) {
+    /// measured RX and TX counters verbatim (they're cumulative; the
+    /// newest snapshot supersedes the previous one), and take one MOS
+    /// sample for the whole-call aggregates.
+    ///
+    /// MOS is RX-only by construction: it scores what *we* heard, and
+    /// the TX counters carry no jitter/loss of their own (the far end's
+    /// view of our stream arrives via RRs instead).
+    pub fn note_media_stats(&mut self, rx: RxStats, tx: TxStats) {
         self.last_rx = Some(rx);
+        self.last_tx = Some(tx);
         let mos = mos_estimate(
             rx.jitter_ms,
             rx.loss_percent(),
@@ -281,6 +364,8 @@ impl RtpStatsTracker {
             avg_rtcp_rtt_ms: (self.agg.rtt_n > 0)
                 .then(|| (self.agg.rtt_sum / self.agg.rtt_n as f64) as f32),
             rx: self.last_rx,
+            tx: self.last_tx,
+            tx_packets_lost_reported: self.last_tx_packets_lost_reported,
             mos_min: (self.agg.mos_n > 0).then_some(self.agg.mos_min),
             mos_avg: (self.agg.mos_n > 0)
                 .then(|| (self.agg.mos_sum / self.agg.mos_n as f64) as f32),
@@ -303,6 +388,8 @@ impl RtpStatsTracker {
             packet_loss_ratio: self.last_packet_loss_ratio,
             rtt_ms: self.last_rtt_ms,
             rx: self.last_rx,
+            tx: self.last_tx,
+            tx_packets_lost_reported: self.last_tx_packets_lost_reported,
             mos_estimate: mos,
         }
     }
@@ -327,6 +414,7 @@ mod tests {
         t.note_rtcp_report(
             17.2,  /* jitter ms */
             0.025, /* 2.5% loss */
+            12,    /* cumulative lost */
             Some(42.0),
         );
         let snap = t.snapshot();
@@ -341,8 +429,8 @@ mod tests {
         // (e.g., a window with no matching SR) shouldn't wipe it.
         // This matches the §A.7 reality: RTT is sparse.
         let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
-        t.note_rtcp_report(10.0, 0.01, Some(35.0));
-        t.note_rtcp_report(11.0, 0.02, None);
+        t.note_rtcp_report(10.0, 0.01, 4, Some(35.0));
+        t.note_rtcp_report(11.0, 0.02, 9, None);
         let snap = t.snapshot();
         assert_eq!(snap.rtt_ms, Some(35.0));
         // …but jitter and loss DO update on every RR.
@@ -354,7 +442,7 @@ mod tests {
         // QualityRestored is a threshold event for jitter/loss only.
         // rtt_ms is an absolute measurement and shouldn't be reset.
         let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
-        t.note_rtcp_report(50.0, 0.1, Some(80.0));
+        t.note_rtcp_report(50.0, 0.1, 120, Some(80.0));
         t.note_quality_restored();
         let snap = t.snapshot();
         assert_eq!(snap.jitter_ms, Some(0.0));
@@ -428,6 +516,13 @@ mod tests {
         }
     }
 
+    fn tx(packets_sent: u64, octets_sent: u64) -> TxStats {
+        TxStats {
+            packets_sent,
+            octets_sent,
+        }
+    }
+
     #[test]
     fn fresh_tracker_has_no_rx_or_mos() {
         let t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
@@ -439,7 +534,7 @@ mod tests {
     #[test]
     fn media_stats_populates_rx_and_mos() {
         let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
-        t.note_media_stats(rx(3.5, 1500, 6));
+        t.note_media_stats(rx(3.5, 1500, 6), tx(1914, 306_240));
         let snap = t.snapshot();
         assert_eq!(snap.rx, Some(rx(3.5, 1500, 6)));
         let mos = snap.mos_estimate.expect("MOS once RX data exists");
@@ -450,17 +545,85 @@ mod tests {
     fn newer_media_stats_supersede_older() {
         // Counters are cumulative — latest snapshot wins outright.
         let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
-        t.note_media_stats(rx(3.5, 500, 2));
-        t.note_media_stats(rx(4.0, 1500, 6));
+        t.note_media_stats(rx(3.5, 500, 2), tx(500, 80_000));
+        t.note_media_stats(rx(4.0, 1500, 6), tx(1914, 306_240));
         assert_eq!(t.snapshot().rx, Some(rx(4.0, 1500, 6)));
+    }
+
+    #[test]
+    fn fresh_tracker_has_no_tx_data() {
+        let t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        let snap = t.snapshot();
+        assert!(snap.tx.is_none());
+        assert!(snap.tx_packets_lost_reported.is_none());
+    }
+
+    #[test]
+    fn media_stats_populates_tx_counters() {
+        let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        t.note_media_stats(rx(3.5, 1500, 6), tx(1914, 306_240));
+        assert_eq!(t.snapshot().tx, Some(tx(1914, 306_240)));
+    }
+
+    #[test]
+    fn newer_tx_counters_supersede_older() {
+        // Cumulative, like the RX side — latest snapshot wins outright.
+        let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        t.note_media_stats(rx(3.5, 500, 2), tx(500, 80_000));
+        t.note_media_stats(rx(4.0, 1500, 6), tx(1914, 306_240));
+        assert_eq!(t.snapshot().tx, Some(tx(1914, 306_240)));
+    }
+
+    #[test]
+    fn rr_populates_cumulative_lost_and_newest_wins() {
+        // Unlike rtt_ms (sparse, preserve-on-None), cumulative_lost
+        // rides every RR, so the newest value simply replaces.
+        let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        t.note_rtcp_report(10.0, 0.01, 4, Some(35.0));
+        assert_eq!(t.snapshot().tx_packets_lost_reported, Some(4));
+        t.note_rtcp_report(11.0, 0.02, 9, None);
+        assert_eq!(t.snapshot().tx_packets_lost_reported, Some(9));
+    }
+
+    #[test]
+    fn negative_cumulative_lost_survives() {
+        // RFC 3550 §6.4.1 permits a negative total when duplicates push
+        // the far end's packets-received past packets-expected. Clamping
+        // it to zero would hide a genuinely duplicating path, so the
+        // sign rides through to the wire.
+        let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        t.note_rtcp_report(10.0, 0.0, -3, None);
+        assert_eq!(t.snapshot().tx_packets_lost_reported, Some(-3));
+    }
+
+    #[test]
+    fn tx_counters_reach_the_quality_summary() {
+        // The CDR / quality-history path reads the summary, not the
+        // snapshot — both halves have to be wired.
+        let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        t.note_rtcp_report(10.0, 0.01, 12, None);
+        t.note_media_stats(rx(3.5, 1500, 6), tx(1914, 306_240));
+        let s = t.quality_summary();
+        assert_eq!(s.tx, Some(tx(1914, 306_240)));
+        assert_eq!(s.tx_packets_lost_reported, Some(12));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn tx_alone_is_not_an_empty_summary() {
+        // A send-only stretch (we transmitted, nothing came back yet)
+        // still has something worth putting in the CDR.
+        let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
+        t.note_media_stats(rx(0.0, 0, 0), tx(500, 80_000));
+        assert!(!t.quality_summary().is_empty());
     }
 
     #[test]
     fn rx_does_not_disturb_remote_reported_fields() {
         // The two viewpoints are independent halves of the same event.
         let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
-        t.note_rtcp_report(17.2, 0.025, Some(42.0));
-        t.note_media_stats(rx(3.5, 1500, 6));
+        t.note_rtcp_report(17.2, 0.025, 12, Some(42.0));
+        t.note_media_stats(rx(3.5, 1500, 6), tx(1914, 306_240));
         let snap = t.snapshot();
         assert_eq!(snap.jitter_ms, Some(17.2));
         assert_eq!(snap.rtt_ms, Some(42.0));
@@ -509,7 +672,7 @@ mod tests {
         // Degenerate: snapshot before any packet counted. No panic,
         // 0% loss.
         let mut t = RtpStatsTracker::new(Some(Duration::from_secs(5)));
-        t.note_media_stats(rx(0.0, 0, 0));
+        t.note_media_stats(rx(0.0, 0, 0), tx(0, 0));
         let mos = t.snapshot().mos_estimate.expect("computable");
         assert!(mos > 4.0);
     }

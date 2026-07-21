@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`GET /admin/v1/drain` is now labelled in `siphon_ai_admin_requests_total`** (issue #319). The route is dispatched and served correctly but had no arm in `route_label()`, so it fell through to `endpoint="unknown"` — the only served admin route missing from the table. Two consequences: successful drain polls were indistinguishable from unrecognised paths (both `endpoint="unknown"`, separated only by `result`), polluting the reasonable "someone is probing the admin API" signal a dashboard keys on `endpoint="unknown"`; and drain — the endpoint a deploy script polls hardest during a rollout, likely the highest-rate admin request on the box — was the one route with no per-endpoint visibility. Metric-label only; no functional, auth, RBAC, or response-body change.
+
+  While fixing it, `min_role()` turned out to be missing the same route. That table's doc requires it to mirror `admin::dispatch`, and without an arm the drain path only reached `ReadOnly` by falling through to `authorize`'s unknown-path default — the right answer (and the one `docs/DEPLOY.md` already documents) for the wrong reason, and silently wrong had that default ever been tightened. Both tables now carry the route, so behaviour is unchanged and no longer accidental.
+
+  New `every_served_route_has_a_bounded_label` test walks all ten static dispatcher routes plus the nine dynamic templates and asserts each has a non-`"unknown"` label, that a static route's label is exactly `"METHOD /path"` (catching a copy-pasted arm pointing at the wrong template), that a dynamic route's label is a template rather than a concrete path and leaks no id into the metric label, and that every served route has an explicit `min_role` arm. The prior `route_label` coverage was only the two `:name` registration templates.
+
 ## [0.38.0] - 2026-07-21
 
 ### Added

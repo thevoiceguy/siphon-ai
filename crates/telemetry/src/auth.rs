@@ -201,7 +201,13 @@ pub fn min_role(method: &hyper::Method, path: &str) -> Option<Role> {
         | (&Method::GET, "/admin/registrations")
         | (&Method::GET, "/admin/log")
         | (&Method::GET, "/admin/v1/conferences")
-        | (&Method::GET, "/admin/v1/parked") => Some(Role::ReadOnly),
+        | (&Method::GET, "/admin/v1/parked")
+        // Drain status is a plain GET snapshot, same as the list routes
+        // above. It resolved to ReadOnly before this arm existed, but
+        // only by falling through to `authorize`'s unknown-path default —
+        // i.e. the right answer for the wrong reason, and silently wrong
+        // had the default ever been tightened.
+        | (&Method::GET, "/admin/v1/drain") => Some(Role::ReadOnly),
 
         // ── Admin (billable / config / observability-blinding) ──
         (&Method::PUT, "/admin/log")
@@ -261,6 +267,7 @@ pub fn route_label(method: &hyper::Method, path: &str) -> &'static str {
         (&Method::GET, "/admin/v1/conferences") => "GET /admin/v1/conferences",
         (&Method::POST, "/admin/v1/conferences") => "POST /admin/v1/conferences",
         (&Method::GET, "/admin/v1/parked") => "GET /admin/v1/parked",
+        (&Method::GET, "/admin/v1/drain") => "GET /admin/v1/drain",
         (m, p)
             if *m == Method::POST && p.starts_with("/admin/calls/") && p.ends_with("/hangup") =>
         {
@@ -483,5 +490,81 @@ mod tests {
         );
         // Unknown admin path → no min role.
         assert_eq!(min_role(&Method::GET, "/admin/nope"), None);
+    }
+
+    /// Every route the admin dispatcher serves must produce a real
+    /// `endpoint` label. `docs/DEPLOY.md` documents the label as "the
+    /// bounded route template", and dashboards key on
+    /// `endpoint="unknown"` as a probing signal — so a served route
+    /// falling through to `"unknown"` both loses its own visibility and
+    /// pollutes that signal. `GET /admin/v1/drain` did exactly this, and
+    /// it's the route a deploy script polls hardest during a rollout.
+    ///
+    /// This list must mirror the static arms of `admin::dispatch`. It is
+    /// spelled out rather than derived because the dispatcher's arms
+    /// aren't introspectable — but a new route added there without a
+    /// label here now fails a test instead of silently degrading a
+    /// metric.
+    #[test]
+    fn every_served_route_has_a_bounded_label() {
+        let statics = [
+            (Method::GET, "/admin/calls"),
+            (Method::GET, "/admin/registrations"),
+            (Method::GET, "/admin/log"),
+            (Method::PUT, "/admin/log"),
+            (Method::POST, "/admin/hep/test"),
+            (Method::POST, "/admin/v1/calls"),
+            (Method::GET, "/admin/v1/conferences"),
+            (Method::POST, "/admin/v1/conferences"),
+            (Method::GET, "/admin/v1/parked"),
+            (Method::GET, "/admin/v1/drain"),
+        ];
+        for (method, path) in &statics {
+            let label = route_label(method, path);
+            assert_ne!(label, "unknown", "{method} {path} is served but unlabelled");
+            // A static route's label is exactly "METHOD /path" — catches a
+            // copy-pasted arm pointing at the wrong template.
+            assert_eq!(label, format!("{method} {path}"), "label mismatch");
+            // `min_role`'s doc requires it to mirror dispatch too. Without
+            // an explicit arm a served route still *works* — `authorize`
+            // defaults an unknown path to ReadOnly — so the omission is
+            // invisible until someone tightens that default.
+            assert!(
+                min_role(method, path).is_some(),
+                "{method} {path} is served but has no explicit min_role arm"
+            );
+        }
+
+        // Dynamic routes collapse to a template, so they're checked for
+        // non-"unknown" and for carrying a placeholder rather than the
+        // concrete id (an unbounded label would blow up cardinality).
+        let dynamics = [
+            (Method::POST, "/admin/calls/abc123/hangup"),
+            (Method::POST, "/admin/v1/registrations/pbx-a/refresh"),
+            (Method::POST, "/admin/v1/registrations/pbx-a/restart"),
+            (Method::GET, "/admin/v1/calls/abc123/stats"),
+            (Method::POST, "/admin/v1/calls/abc123/park"),
+            (Method::POST, "/admin/v1/calls/abc123/retrieve"),
+            (Method::POST, "/admin/v1/conferences/room1/participants"),
+            (
+                Method::DELETE,
+                "/admin/v1/conferences/room1/participants/c1",
+            ),
+            (Method::DELETE, "/admin/v1/conferences/room1"),
+        ];
+        for (method, path) in &dynamics {
+            let label = route_label(method, path);
+            assert_ne!(label, "unknown", "{method} {path} is served but unlabelled");
+            assert!(
+                label.contains(':'),
+                "{method} {path} → {label:?} must be a template, not a concrete path"
+            );
+            for concrete in ["abc123", "pbx-a", "room1", "c1"] {
+                assert!(
+                    !label.contains(concrete),
+                    "{label:?} leaks the concrete id {concrete:?} into a metric label"
+                );
+            }
+        }
     }
 }

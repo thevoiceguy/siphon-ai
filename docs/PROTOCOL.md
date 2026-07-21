@@ -361,6 +361,8 @@ hung call or connectivity issue; typical reaction is to hang up.
   "jitter_ms": 12.5, "packet_loss_ratio": 0.004, "rtcp_rtt_ms": 42.0,
   "rx_jitter_ms": 3.75, "rx_packets_received": 1500, "rx_packets_lost": 6,
   "rx_packets_out_of_order": 2, "rx_packets_duplicate": 1,
+  "tx_packets_sent": 1914, "tx_octets_sent": 306240,
+  "tx_packets_lost_reported": 12,
   "mos_estimate": 4.2 }
 ```
 
@@ -369,8 +371,8 @@ per-route override; `0` disables). The cadence mirrors RTCP's compound-
 report interval (RFC 3550 §6.2) so values track the underlying RTCP
 arrivals.
 
-Two viewpoints ride together (the `rx_*` fields and `mos_estimate` are
-additive in 0.30.0; protocol stays v1):
+Three viewpoints ride together (the `rx_*` fields and `mos_estimate` are
+additive in 0.30.0, the `tx_*` fields in 0.38.0; protocol stays v1):
 
 - `jitter_ms` / `packet_loss_ratio` / `rtcp_rtt_ms` are
   **remote-reported** — derived from the far end's RTCP Receiver
@@ -379,6 +381,21 @@ additive in 0.30.0; protocol stays v1):
   *receives* from the caller. A congested path is often asymmetric;
   compare the two sides to tell "they hear us badly" from "we hear
   them badly."
+- `tx_*` fields describe the stream SiphonAI *sends*:
+  `tx_packets_sent` / `tx_octets_sent` are locally measured, and
+  `tx_packets_lost_reported` is the far end's own absolute loss total
+  for that stream. Together they answer the question the remote-reported
+  ratios alone never could: **"we sent 1,914 packets; the far end
+  reported 12 lost."**
+
+> **`packet_loss_ratio` is a per-interval figure, not a cumulative one.**
+> It comes from the RR's `fraction_lost` field, which measures loss since
+> the *previous* report (RFC 3550 §6.4.1). Averaging it over a call gives
+> a mean of interval fractions, which will not reconcile against a
+> carrier's cumulative loss count. For a whole-call loss rate, divide
+> `tx_packets_lost_reported` by `tx_packets_sent`. (Through 0.37.x this
+> field was mis-documented as cumulative; the values never changed, only
+> the description was wrong.)
 
 Fields are JSON `null` (omitted) until the corresponding source has
 produced its first data for the call:
@@ -386,19 +403,29 @@ produced its first data for the call:
 | Field                | Type            | Notes |
 |----------------------|-----------------|-------|
 | `jitter_ms`          | float \| null   | Estimated inter-arrival jitter (remote-reported). `null` if no RTCP RR has arrived yet. After a `QualityRestored` event in forge, this resets to `0.0` — distinct from `null`. |
-| `packet_loss_ratio`  | float \| null   | Loss as a ratio in `[0.0, 1.0]` (NOT a percent), remote-reported. Same `null` / `0.0` distinction. |
+| `packet_loss_ratio`  | float \| null   | Loss as a ratio in `[0.0, 1.0]` (NOT a percent), remote-reported, covering **only the interval since the previous RR** (RFC 3550 `fraction_lost`). Same `null` / `0.0` distinction. Not cumulative — see the note above. |
 | `rtcp_rtt_ms`        | float \| null   | Mean round-trip time over the reporting window. `null` until forge originates its own RTCP SRs (deferred to 0.3.1). Distinct from `0.0`, which is degenerate; once populated, the field is sticky — a window with no fresh RTT sample preserves the last measurement rather than reverting to `null`. |
 | `rx_jitter_ms`       | float \| null   | Locally-computed interarrival jitter (RFC 3550 §6.4.1) on the caller→SiphonAI stream. `null` until the first local media-stats snapshot (~5 s in). |
 | `rx_packets_received`| int \| null     | Unique RTP packets received from the caller, **cumulative since call start** (duplicates excluded). |
 | `rx_packets_lost`    | int \| null     | Sequence-gap loss on the receive side, cumulative. Late arrivals repair the count retroactively, so it may decrease between snapshots. |
 | `rx_packets_out_of_order` | int \| null | Packets that arrived after a newer sequence number had been seen, cumulative. |
 | `rx_packets_duplicate` | int \| null   | Re-receives of a recently seen sequence number, cumulative. |
-| `mos_estimate`       | float \| null   | Transport-only MOS-CQE estimate in `[1.0, 5.0]`: simplified E-model over local RX jitter/loss plus RTCP RTT — the same math heplify-server applies to SiphonAI's HEP QoS chunks, so Homer-side and WS-side scores agree. Transport impairment only (no codec/content scoring). `null` until RX data exists; slightly optimistic while `rtcp_rtt_ms` is still `null`. |
+| `tx_packets_sent`    | int \| null     | RTP packets SiphonAI transmitted toward the caller — WS-server audio played out plus injected RFC 2833 DTMF — **cumulative since call start**. `null` until the first local media-stats snapshot (~5 s in). |
+| `tx_octets_sent`     | int \| null     | RTP **payload** octets transmitted, cumulative. Excludes RTP headers and SRTP overhead (same basis as an RTCP SR's sender octet count), so this is smaller than the bytes seen on the wire. |
+| `tx_packets_lost_reported` | int \| null | The far end's own **absolute** count of packets it lost on the SiphonAI→caller stream, from the latest RR's cumulative-lost field. `null` until the first RR arrives. **May be negative** — RFC 3550 defines it as signed because duplicates can push the peer's packets-received past packets-expected. Parse as a signed integer and don't clamp: a negative value means a duplicating path, not an error. |
+| `mos_estimate`       | float \| null   | Transport-only MOS-CQE estimate in `[1.0, 5.0]`: simplified E-model over local RX jitter/loss plus RTCP RTT — the same math heplify-server applies to SiphonAI's HEP QoS chunks, so Homer-side and WS-side scores agree. Transport impairment only (no codec/content scoring). `null` until RX data exists; slightly optimistic while `rtcp_rtt_ms` is still `null`. MOS is RX-only by construction — it scores what SiphonAI heard, so the `tx_*` counters do not feed it. |
 
-The `rx_packets_*` counters are cumulative — diff successive snapshots
-for rates. Codec and sample-rate are constant for a call — consumers
-should correlate to the `start` message (§3.1) rather than expecting
-them on every snapshot.
+The `rx_packets_*` and `tx_*` counters are cumulative — diff successive
+snapshots for rates. Codec and sample-rate are constant for a call —
+consumers should correlate to the `start` message (§3.1) rather than
+expecting them on every snapshot.
+
+Note that `tx_packets_sent` and `tx_packets_lost_reported` refresh on
+different clocks: the former on SiphonAI's local media-stats cadence, the
+latter only when an RR arrives (typically every 5 s, but entirely at the
+peer's discretion). A loss rate computed from one snapshot is therefore
+approximate mid-call; at end of call both have settled and the CDR
+`quality` block carries the final pair.
 
 ### 3.9 `stop` — call ended
 

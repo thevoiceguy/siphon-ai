@@ -2315,6 +2315,9 @@ pub(crate) fn quality_info(q: crate::call::QualityOutcome) -> siphon_ai_cdr::Qua
         rx_packets_lost: q.stats.rx.map(|rx| rx.packets_lost),
         rx_packets_out_of_order: q.stats.rx.map(|rx| rx.packets_out_of_order),
         rx_packets_duplicate: q.stats.rx.map(|rx| rx.packets_duplicate),
+        tx_packets_sent: q.stats.tx.map(|tx| tx.packets_sent),
+        tx_octets_sent: q.stats.tx.map(|tx| tx.octets_sent),
+        tx_packets_lost_reported: q.stats.tx_packets_lost_reported,
         mos_estimate_min: q.stats.mos_min,
         mos_estimate_avg: q.stats.mos_avg,
     }

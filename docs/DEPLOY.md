@@ -753,6 +753,9 @@ practice — restart is simpler).
     "rx_packets_lost": 12,
     "rx_packets_out_of_order": 3,
     "rx_packets_duplicate": 0,
+    "tx_packets_sent": 14900,
+    "tx_octets_sent": 2384000,
+    "tx_packets_lost_reported": 12,
     "mos_estimate_min": 3.9,
     "mos_estimate_avg": 4.3
   }
@@ -861,10 +864,30 @@ that never produced data is omitted, not zeroed, so `"clean"` and
 - `quality.avg/max_jitter_ms`, `avg/max_packet_loss_ratio`,
   `avg_rtcp_rtt_ms` — aggregates over the call's RTCP Receiver Reports
   (remote-reported: how the far end received SiphonAI's stream).
+  **`avg/max_packet_loss_ratio` are means/maxima of per-interval
+  fractions**, each sample being one RR's `fraction_lost` (loss since the
+  previous report, RFC 3550 §6.4.1) — *not* the call's cumulative loss
+  ratio, and they will not reconcile against a carrier's cumulative
+  figure. Through 0.37.x these were documented as cumulative; the values
+  never changed, only the description was wrong. For a whole-call loss
+  rate use `tx_packets_lost_reported / tx_packets_sent`.
 - `quality.rx_packets_*` — end-of-call totals measured locally on the
   caller→SiphonAI stream (received / lost / out-of-order / duplicate).
+- `quality.tx_packets_sent` / `tx_octets_sent` (0.38.0) — end-of-call
+  totals measured locally on the SiphonAI→caller stream. `tx_octets_sent`
+  counts RTP **payload** octets only (no headers, no SRTP overhead), the
+  same basis as an RTCP SR's sender octet count.
+- `quality.tx_packets_lost_reported` (0.38.0) — the far end's own
+  absolute count of packets it lost on that stream, from the call's last
+  RR. With `tx_packets_sent` this gives operators the sentence they
+  actually ask for after a bad call: *"we sent 14,900 packets; the far
+  end reported 12 lost."* **Signed** — a negative value is legitimate
+  (duplicates pushing the peer's received count past expected), so don't
+  clamp it.
 - `quality.mos_estimate_min/avg` — worst / mean transport-only MOS-CQE
-  estimate (1.0–5.0; see PROTOCOL.md §3.8 `mos_estimate`).
+  estimate (1.0–5.0; see PROTOCOL.md §3.8 `mos_estimate`). RX-only by
+  construction: it scores what SiphonAI heard, so the `tx_*` counters
+  don't feed it.
 
 Outbound originated calls (0.6.0, `POST /admin/v1/calls`) produce the same
 record with `direction: "outbound"` — the schema stays at version 1 (the
@@ -911,6 +934,9 @@ the top level, with framing fields:
   "rx_packets_lost": 4,
   "rx_packets_out_of_order": 1,
   "rx_packets_duplicate": 0,
+  "tx_packets_sent": 4850,
+  "tx_octets_sent": 776000,
+  "tx_packets_lost_reported": 2,
   "mos_estimate_min": 4.1,
   "mos_estimate_avg": 4.3
 }

@@ -156,6 +156,32 @@ test("pause-mode barge-in shapes parse typed (0.32.0)", () => {
   }
 });
 
+test("rtp_stats tx counters parse typed (0.38.0)", () => {
+  // Pre-0.38.0 shape: tx_* fields simply absent.
+  const plain = parseEvent(
+    '{"type":"rtp_stats","call_id":"c","seq":4,"packet_loss_ratio":0.004}',
+  );
+  assert.ok(plain.type === "rtp_stats");
+  assert.equal(plain.tx_packets_sent, undefined);
+
+  const full = parseEvent(
+    '{"type":"rtp_stats","call_id":"c","seq":5,"tx_packets_sent":1914,"tx_octets_sent":306240,"tx_packets_lost_reported":12}',
+  );
+  assert.ok(full.type === "rtp_stats");
+  assert.equal(full.tx_packets_sent, 1914);
+  assert.equal(full.tx_octets_sent, 306240);
+  assert.equal(full.tx_packets_lost_reported, 12);
+
+  // RFC 3550 §6.4.1 signs cumulative-lost: duplicates can push the
+  // peer's packets-received past packets-expected. Reading it as
+  // unsigned would turn -3 into ~16.7M.
+  const dup = parseEvent(
+    '{"type":"rtp_stats","call_id":"c","seq":6,"tx_packets_lost_reported":-3}',
+  );
+  assert.ok(dup.type === "rtp_stats");
+  assert.equal(dup.tx_packets_lost_reported, -3);
+});
+
 test("unknown type wraps, unknown fields pass through, malformed throws", () => {
   const unknown = parseEvent('{"type": "yodel", "call_id": "c"}');
   assert.equal(unknown.type, "unknown");

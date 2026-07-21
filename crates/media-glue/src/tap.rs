@@ -62,7 +62,7 @@ use std::time::{Duration, Instant};
 
 use crate::idle::{IdleDetector, IdleEvent};
 use crate::room::{RoomEvent, RoomMembership, RoomSender};
-use crate::rtp_stats::{QualityReport, RtpStatsTracker, RxStats};
+use crate::rtp_stats::{QualityReport, RtpStatsTracker, RxStats, TxStats};
 
 use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, EventBus, ForgeError, ForgeEvent};
 use forge_dtmf::DtmfDigit;
@@ -1223,37 +1223,57 @@ impl MediaTap {
                                     call_id: cid,
                                     jitter_ms,
                                     packet_loss_ratio,
+                                    cumulative_lost,
                                     rtt_ms,
                                     ..
                                 } if cid == &self.call_id => {
                                     self.rtp_stats.note_rtcp_report(
                                         *jitter_ms,
                                         *packet_loss_ratio,
+                                        i64::from(*cumulative_lost),
                                         *rtt_ms,
                                     );
                                     self.publish_quality();
                                 }
-                                // Locally-measured RX-side counters
-                                // (0.30.0). No leg filter beyond the
-                                // call_id: in bridge mode exactly one
-                                // leg (the SIP peer) receives RTP, so
-                                // only that leg publishes snapshots.
+                                // Locally-measured RX- and TX-side
+                                // counters (0.30.0 / 0.38.0).
+                                //
+                                // Filtered to leg A, the SIP peer: per
+                                // the "Single-leg model" note above, B
+                                // is synthetic and never carries RTP,
+                                // so A is the only leg that describes
+                                // this call. forge publishes per leg
+                                // and its own emit guard widened in
+                                // forge-media #93 (send-only legs now
+                                // qualify), so pinning the leg here
+                                // keeps a future two-leg forge from
+                                // interleaving two cumulative series
+                                // into one tracker.
                                 ForgeEvent::MediaStatsSnapshot {
                                     call_id: cid,
+                                    leg: forge_core::MediaLeg::A,
                                     rx_packets_received,
                                     rx_packets_lost,
                                     rx_packets_out_of_order,
                                     rx_packets_duplicate,
                                     rx_jitter_ms,
+                                    tx_packets_sent,
+                                    tx_octets_sent,
                                     ..
                                 } if cid == &self.call_id => {
-                                    self.rtp_stats.note_media_stats(RxStats {
-                                        jitter_ms: *rx_jitter_ms,
-                                        packets_received: *rx_packets_received,
-                                        packets_lost: *rx_packets_lost,
-                                        packets_out_of_order: *rx_packets_out_of_order,
-                                        packets_duplicate: *rx_packets_duplicate,
-                                    });
+                                    self.rtp_stats.note_media_stats(
+                                        RxStats {
+                                            jitter_ms: *rx_jitter_ms,
+                                            packets_received: *rx_packets_received,
+                                            packets_lost: *rx_packets_lost,
+                                            packets_out_of_order: *rx_packets_out_of_order,
+                                            packets_duplicate: *rx_packets_duplicate,
+                                        },
+                                        TxStats {
+                                            packets_sent: *tx_packets_sent,
+                                            octets_sent: *tx_octets_sent,
+                                        },
+                                    );
                                     self.publish_quality();
                                 }
                                 ForgeEvent::QualityDegraded {
@@ -1934,6 +1954,9 @@ impl MediaTap {
                         rx_packets_lost: snap.rx.map(|rx| rx.packets_lost),
                         rx_packets_out_of_order: snap.rx.map(|rx| rx.packets_out_of_order),
                         rx_packets_duplicate: snap.rx.map(|rx| rx.packets_duplicate),
+                        tx_packets_sent: snap.tx.map(|tx| tx.packets_sent),
+                        tx_octets_sent: snap.tx.map(|tx| tx.octets_sent),
+                        tx_packets_lost_reported: snap.tx_packets_lost_reported,
                         mos_estimate: snap.mos_estimate,
                     };
                     if let Err(e) = events_tx.try_send(out) {

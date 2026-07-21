@@ -218,7 +218,17 @@ pub struct QualityInfo {
     pub avg_jitter_ms: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_jitter_ms: Option<f32>,
-    /// Mean / max of the RR-reported cumulative-loss ratio `[0.0, 1.0]`.
+    /// Mean / max of the RR-reported **per-interval** loss ratio
+    /// `[0.0, 1.0]`. Each sample is one RR's `fraction_lost` — loss over
+    /// the interval since the previous report (RFC 3550 §6.4.1) — so
+    /// this is a mean of interval fractions, **not** the call's
+    /// cumulative loss ratio. Reconciling against a carrier's cumulative
+    /// figure needs [`Self::tx_packets_lost_reported`] over
+    /// [`Self::tx_packets_sent`] instead.
+    ///
+    /// (Corrected in 0.38.0 — through 0.37.x these were documented as
+    /// the "RR-reported cumulative-loss ratio", which they never were.
+    /// The values are unchanged; only the description was wrong.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avg_packet_loss_ratio: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -235,6 +245,24 @@ pub struct QualityInfo {
     pub rx_packets_out_of_order: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rx_packets_duplicate: Option<u64>,
+    /// End-of-call totals from the local transmit side
+    /// (SiphonAI→caller): RTP packets and *payload* octets we put on the
+    /// wire (0.38.0). `tx_octets_sent` excludes RTP headers and SRTP
+    /// overhead (RFC 3550 §6.4.1 sender-octet-count basis).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_packets_sent: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_octets_sent: Option<u64>,
+    /// The far end's own **absolute** count of packets lost on the
+    /// stream SiphonAI sent, from the call's last RTCP RR (RFC 3550
+    /// §6.4.1 cumulative-lost). Signed — a negative value is legitimate
+    /// when duplicates push the far end's packets-received past
+    /// packets-expected, so consumers should not clamp it (0.38.0).
+    ///
+    /// With [`Self::tx_packets_sent`] this answers the question the
+    /// block could not before: "we sent N, the far end lost M."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_packets_lost_reported: Option<i64>,
     /// Worst / mean transport-only MOS-CQE estimate over the call
     /// (`[1.0, 5.0]`; see PROTOCOL.md §3.8 `mos_estimate`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -460,6 +488,9 @@ mod tests {
             rx_packets_lost: Some(12),
             rx_packets_out_of_order: Some(3),
             rx_packets_duplicate: Some(0),
+            tx_packets_sent: Some(14_900),
+            tx_octets_sent: Some(2_384_000),
+            tx_packets_lost_reported: Some(12),
             mos_estimate_min: Some(3.9),
             mos_estimate_avg: Some(4.3),
         });

@@ -150,6 +150,13 @@ pub enum BridgeOut {
     /// stream SiphonAI sends), while the `rx_*` fields are **locally
     /// measured** on the stream SiphonAI receives from the caller. A
     /// congested path is often asymmetric — compare the two sides.
+    ///
+    /// The `tx_*` fields (0.38.0) complete the picture: `tx_packets_sent`
+    /// / `tx_octets_sent` are locally measured on what SiphonAI put on
+    /// the wire, and `tx_packets_lost_reported` is the far end's own
+    /// absolute loss total for that stream. Before these existed the
+    /// transmit direction had only ratios, so "the outbound leg was
+    /// clean" could never be backed by a packet count.
     RtpStats {
         call_id: CallId,
         seq: Seq,
@@ -188,6 +195,38 @@ pub enum BridgeOut {
         /// or `null` (0.30.0).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         rx_packets_duplicate: Option<u64>,
+        /// RTP packets SiphonAI transmitted toward the caller (WS-server
+        /// audio played out, plus injected RFC 2833 DTMF), **cumulative
+        /// since call start**. `null` until the first local media-stats
+        /// snapshot (0.38.0).
+        ///
+        /// This is the denominator `packet_loss_ratio` never had: the
+        /// remote-reported loss fields describe *this* stream.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        tx_packets_sent: Option<u64>,
+        /// RTP *payload* octets transmitted toward the caller, excluding
+        /// RTP headers and SRTP overhead (RFC 3550 §6.4.1
+        /// sender-octet-count basis). Cumulative, or `null` (0.38.0).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        tx_octets_sent: Option<u64>,
+        /// The far end's own **absolute** count of packets it lost on the
+        /// SiphonAI→caller stream, taken from the latest RTCP RR's
+        /// cumulative-lost field (RFC 3550 §6.4.1). `null` until the
+        /// first RR arrives (0.38.0).
+        ///
+        /// May be **negative** — RFC 3550 defines the field as signed
+        /// because duplicates can push the far end's packets-received
+        /// past packets-expected. Consumers should parse it as a signed
+        /// integer and not clamp: a negative value is real information
+        /// (a duplicating path), not an error.
+        ///
+        /// Contrast `packet_loss_ratio`, which comes from the RR's
+        /// `fraction_lost` and covers only the interval since the
+        /// previous report. Pair this field with `tx_packets_sent` for a
+        /// whole-call loss rate that reconciles against a carrier's own
+        /// cumulative figure.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        tx_packets_lost_reported: Option<i64>,
         /// Transport-only MOS-CQE estimate in `[1.0, 5.0]` (simplified
         /// E-model from local RX jitter/loss plus RTCP RTT — the same
         /// math heplify-server applies to HEP QoS chunks, so Homer-side
@@ -1109,6 +1148,9 @@ mod tests {
             rx_packets_lost: None,
             rx_packets_out_of_order: None,
             rx_packets_duplicate: None,
+            tx_packets_sent: None,
+            tx_octets_sent: None,
+            tx_packets_lost_reported: None,
             mos_estimate: None,
         };
         let v: serde_json::Value =
@@ -1127,6 +1169,9 @@ mod tests {
             "rx_packets_lost",
             "rx_packets_out_of_order",
             "rx_packets_duplicate",
+            "tx_packets_sent",
+            "tx_octets_sent",
+            "tx_packets_lost_reported",
             "mos_estimate",
         ] {
             assert!(!obj.contains_key(k), "{k} must be absent when None");
@@ -1157,6 +1202,45 @@ mod tests {
         assert_eq!(rx_packets_out_of_order, Some(2));
         assert_eq!(rx_packets_duplicate, Some(1));
         assert_eq!(mos_estimate, Some(4.2));
+    }
+
+    #[test]
+    fn bridge_out_rtp_stats_with_tx_fields() {
+        // 0.38.0: the transmit direction finally has counts, not just
+        // ratios — "we sent 1,914 packets; the far end reported 12 lost."
+        let raw = r#"{ "type": "rtp_stats", "call_id": "c", "seq": 51, "jitter_ms": 12.5, "packet_loss_ratio": 0.004, "rtcp_rtt_ms": 42.0, "tx_packets_sent": 1914, "tx_octets_sent": 306240, "tx_packets_lost_reported": 12, "mos_estimate": 4.2 }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        let BridgeOut::RtpStats {
+            tx_packets_sent,
+            tx_octets_sent,
+            tx_packets_lost_reported,
+            ..
+        } = msg
+        else {
+            panic!("expected RtpStats");
+        };
+        assert_eq!(tx_packets_sent, Some(1914));
+        assert_eq!(tx_octets_sent, Some(306_240));
+        assert_eq!(tx_packets_lost_reported, Some(12));
+    }
+
+    #[test]
+    fn bridge_out_rtp_stats_negative_cumulative_lost_round_trips() {
+        // RFC 3550 §6.4.1 makes cumulative-lost signed: duplicates can
+        // push the far end's packets-received past packets-expected. A
+        // consumer parsing this as unsigned would read -3 as ~16.7M, so
+        // pin the sign through a full serialize/deserialize cycle.
+        let raw =
+            r#"{ "type": "rtp_stats", "call_id": "c", "seq": 9, "tx_packets_lost_reported": -3 }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        let BridgeOut::RtpStats {
+            tx_packets_lost_reported,
+            ..
+        } = msg
+        else {
+            panic!("expected RtpStats");
+        };
+        assert_eq!(tx_packets_lost_reported, Some(-3));
     }
 
     #[test]

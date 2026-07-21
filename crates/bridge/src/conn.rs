@@ -235,6 +235,13 @@ pub enum OutgoingEvent {
         rx_packets_out_of_order: Option<u64>,
         /// Cumulative duplicate receives.
         rx_packets_duplicate: Option<u64>,
+        /// Cumulative RTP packets sent toward the caller (0.38.0).
+        tx_packets_sent: Option<u64>,
+        /// Cumulative RTP payload octets sent toward the caller (0.38.0).
+        tx_octets_sent: Option<u64>,
+        /// Far end's own absolute count of packets lost on the stream we
+        /// sent, from the latest RR (RFC 3550 §6.4.1). Signed (0.38.0).
+        tx_packets_lost_reported: Option<i64>,
         /// Transport-only MOS-CQE estimate in `[1.0, 5.0]`.
         mos_estimate: Option<f32>,
     },
@@ -917,6 +924,9 @@ fn build_bridge_out(event: OutgoingEvent, call_id: CallId, seq: Seq) -> BridgeOu
             rx_packets_lost,
             rx_packets_out_of_order,
             rx_packets_duplicate,
+            tx_packets_sent,
+            tx_octets_sent,
+            tx_packets_lost_reported,
             mos_estimate,
         } => BridgeOut::RtpStats {
             call_id,
@@ -929,6 +939,9 @@ fn build_bridge_out(event: OutgoingEvent, call_id: CallId, seq: Seq) -> BridgeOu
             rx_packets_lost,
             rx_packets_out_of_order,
             rx_packets_duplicate,
+            tx_packets_sent,
+            tx_octets_sent,
+            tx_packets_lost_reported,
             mos_estimate,
         },
         OutgoingEvent::Stop { reason } => BridgeOut::Stop {

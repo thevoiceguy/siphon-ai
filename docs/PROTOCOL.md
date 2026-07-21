@@ -450,14 +450,14 @@ then closes the WebSocket cleanly (close code 1000).
 ### 3.10 `error` — fatal error
 
 ```json
-{ "type": "error", "call_id": "...", "seq": 201, "code": "rtp_timeout", "message": "no RTP for 30s on leg A" }
+{ "type": "error", "call_id": "...", "seq": 201, "code": "rtp_timeout", "message": "no inbound RTP within the inactivity timeout" }
 ```
 
 `code` is one of:
 
 | Code | Meaning |
 |---|---|
-| `rtp_timeout` | No incoming RTP for the configured idle period (`media.rtp_idle_timeout_ms`). |
+| `rtp_timeout` | No **inbound** RTP for the configured idle period — `[media].inactivity_timeout_secs`, default `60` s, per-route overridable via `[route.media].inactivity_timeout_secs`; `0` disables the watchdog entirely. **Fatal:** the call is torn down and `stop` (`reason: "error"`) follows. |
 | `audio_format` | Server sent an audio frame of an unexpected **size** — not the negotiated 20 ms frame (320 bytes @ 8 kHz, 640 @ 16 kHz). Only the byte length is checkable: a binary audio frame carries no sample-rate or channel metadata, so the daemon assumes the negotiated rate + mono. **Non-fatal:** the frame is dropped, the call continues, and the error is rate-limited (§2.2) — no `stop` follows. |
 | `protocol_error` | A WS message was malformed JSON, used an unknown `type`, or had a `call_id` that doesn't match the connection. **Fatal** and definitive — the call is torn down and (with `ws_reconnect_enabled`) **not** reconnected, since a buggy server would just repeat it. |
 | `server_too_slow` | Server didn't send its first audio frame (or a `hangup`) within the start-deadline of `start` — `[bridge].server_start_deadline_secs`, default 5 s (§3.1). |

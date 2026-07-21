@@ -85,7 +85,7 @@ billable endpoint). A missing or invalid token is `401`; a `readonly` or
 | `to` | yes | Destination (E.164 / SIP user). Becomes the Request-URI user at the gateway's proxy. |
 | `gateway` | yes | A `[[gateway]]` name. `404` if unknown. |
 | `ws_url` | no | WS server for this call. Falls back to `[bridge].ws_url`; `400` if neither is set. |
-| `from` | no | Caller-ID override (full `sip:` URI). Falls back to the gateway's `from`. |
+| `from` | no | Caller-ID override (full `sip:` URI) — becomes the INVITE **From** header the trunk validates, so it must be a number your provider accepts (an owned/verified caller-ID). Falls back to the gateway's `from`. A malformed value is rejected `400`. |
 | `delayed_offer` | no | Place the call as a delayed offer (RFC 3264, 0.9.0): INVITE without SDP, answer the peer's offer in the ACK. Default `false`. |
 | `recording` | no | Recording override for this leg (0.26.0): `"off"` / `"always"` / `"on_demand"`. Falls back to the gateway's `recording` default (itself `"off"`). `400` for other values or when recording is requested with no `[recording].dir` configured. Recorded outbound legs behave exactly like inbound: same dir/encryption/format/upload, `recording_*` on the CDR, on-demand WS controls. |
 

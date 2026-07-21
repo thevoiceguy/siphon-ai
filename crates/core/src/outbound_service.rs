@@ -227,6 +227,16 @@ impl OutboundOriginateHandle for OutboundService {
         let target = SipUri::parse(&target_str)
             .map_err(|e| OriginateRejection::BadTarget(format!("{target_str}: {e}")))?;
 
+        // Caller-ID for the INVITE From header (issue #316). Per-request
+        // `from` overrides the gateway default; the gateway's `from` is
+        // validated at config load, so only a bad per-request override
+        // reaches `BadFrom` here. Validated before a permit is consumed.
+        // The parsed URI drives the SIP From; the string still feeds the
+        // WS `start` message + CDR via `ctx.from`.
+        let from = req.from.clone().unwrap_or_else(|| gw.from.clone());
+        let from_uri = SipUri::parse(&from)
+            .map_err(|e| OriginateRejection::BadFrom(format!("{from}: {e}")))?;
+
         // Recording for this leg (0.26.0): per-request override beats the
         // gateway default. Same vocabulary as [recording].mode; anything
         // else — or recording without a configured [recording].dir — is a
@@ -290,7 +300,6 @@ impl OutboundOriginateHandle for OutboundService {
             pong_timeout: self.defaults.ws_pong_timeout,
             start_deadline: self.defaults.server_start_deadline,
         };
-        let from = req.from.clone().unwrap_or_else(|| gw.from.clone());
         let to = req.to.clone();
         let gateway = req.gateway.clone();
         let delayed_offer = req.delayed_offer;
@@ -351,9 +360,11 @@ impl OutboundOriginateHandle for OutboundService {
                 }))
                 .await;
             let result = if delayed_offer {
-                originator.place_delayed(target, offer_req, tap).await
+                originator
+                    .place_delayed(target, from_uri, offer_req, tap)
+                    .await
             } else {
-                originator.place(target, offer_req, tap).await
+                originator.place(target, from_uri, offer_req, tap).await
             };
             let result_label = outbound_result_label(&result);
             metrics::counter!(OUTBOUND_CALLS_TOTAL, "result" => result_label).increment(1);

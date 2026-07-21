@@ -209,6 +209,10 @@ pub enum OriginateRejection {
     /// Bad `recording` value, or recording requested with no
     /// `[recording].dir` configured → 400 (0.26.0).
     BadRecording(String),
+    /// The per-request `from` caller-ID didn't form a valid SIP URI → 400
+    /// (0.37.x). The gateway `from` is validated at config load, so this
+    /// only fires for a bad override in the originate request.
+    BadFrom(String),
 }
 
 /// The outbound-origination entry point the admin endpoint calls. Defined
@@ -743,6 +747,9 @@ fn originate_call(state: &AdminState, body: &Bytes) -> Response<Full<Bytes>> {
                 ),
                 OriginateRejection::BadRecording(r) => {
                     (StatusCode::BAD_REQUEST, format!("bad recording: {r}"))
+                }
+                OriginateRejection::BadFrom(f) => {
+                    (StatusCode::BAD_REQUEST, format!("bad from: {f}"))
                 }
             };
             json_response(status, &json!({ "error": msg }))
@@ -1405,6 +1412,10 @@ mod tests {
             (
                 OriginateRejection::RateLimited,
                 StatusCode::TOO_MANY_REQUESTS,
+            ),
+            (
+                OriginateRejection::BadFrom("x".into()),
+                StatusCode::BAD_REQUEST,
             ),
         ] {
             let state = outbound_state(Err(rej.clone()));

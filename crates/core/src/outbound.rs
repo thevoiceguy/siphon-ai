@@ -407,24 +407,30 @@ impl OutboundOriginator {
     ///
     /// ACK is sent automatically by the UAC on a 2xx; the returned
     /// [`OutboundCall`] carries the confirmed dialog to BYE at teardown.
-    #[instrument(skip(self, target, req, tap), fields(call_id = %req.call_id))]
+    #[instrument(skip(self, target, from, req, tap), fields(call_id = %req.call_id))]
     pub async fn place(
         &self,
         target: SipUri,
+        from: SipUri,
         req: OutboundOfferRequest,
         tap: TapOptions,
     ) -> Result<OutboundCall, OutboundError> {
         let call_id = req.call_id.clone();
-        debug!(target = %target.as_str(), "placing outbound call");
+        debug!(target = %target.as_str(), from = %from.as_str(), "placing outbound call");
 
         // (1) Allocate the session + build the offer (media-glue). A failure
         //     here never created a session, or media-glue rolled it back.
         let offer = self.media.originate_offer(req).await?;
 
-        // (2) Send the INVITE with our offer in the body.
+        // (2) Send the INVITE with our offer in the body and the caller-ID
+        //     as the From header (issue #316) — the trunk validates it.
         let handle = match self
             .uac
-            .invite(RequestTarget::Uri(target), Some(&offer.offer_sdp))
+            .invite_with_from(
+                RequestTarget::Uri(target),
+                Some(&offer.offer_sdp),
+                Some(from),
+            )
             .await
         {
             Ok(h) => h,
@@ -476,18 +482,23 @@ impl OutboundOriginator {
     /// offerless INVITE): `Preferred` answers the peer's SDES offer when
     /// present, `Required` fails the call on a plaintext peer offer.
     /// DTLS-SRTP offers aren't answered here (a follow-up).
-    #[instrument(skip(self, target, req, tap), fields(call_id = %req.call_id))]
+    #[instrument(skip(self, target, from, req, tap), fields(call_id = %req.call_id))]
     pub async fn place_delayed(
         &self,
         target: SipUri,
+        from: SipUri,
         req: OutboundOfferRequest,
         tap: TapOptions,
     ) -> Result<OutboundCall, OutboundError> {
         let call_id = req.call_id.clone();
-        debug!(target = %target.as_str(), "placing outbound delayed-offer call");
+        debug!(target = %target.as_str(), from = %from.as_str(), "placing outbound delayed-offer call");
 
-        // (1) Send the offerless INVITE.
-        let handle = match self.uac.invite(RequestTarget::Uri(target), None).await {
+        // (1) Send the offerless INVITE with the caller-ID as From (#316).
+        let handle = match self
+            .uac
+            .invite_with_from(RequestTarget::Uri(target), None, Some(from))
+            .await
+        {
             Ok(h) => h,
             Err(e) => {
                 self.stop_session(&call_id).await;

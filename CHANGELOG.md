@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Outbound INVITE now carries the configured caller-ID in its From
+  header** (issue #316; siphon-rs pin bump for `IntegratedUAC::
+  invite_with_from`). Both `[[gateway]].from` and the per-originate
+  `from` were honored for the WS `start` message and the CDR but **never
+  reached the INVITE** — the UAC stamped its own local identity, so every
+  outbound INVITE went out as `sip:siphon@<public_address>`. Any trunk
+  that validates caller-ID (Twilio Secure Trunking, essentially every
+  commercial provider) declined the call. The resolved caller-ID is now
+  parsed and threaded through `OutboundOriginator::place` /
+  `place_delayed` into a new per-call UAC From override, for both early
+  and delayed offer. A malformed per-request `from` is rejected `400`
+  (`BadFrom`) before a concurrency permit is taken; the gateway `from`
+  stays validated at config load. This bug was **masked by #312** — before
+  0.37.2 outbound TLS never completed the handshake, so the provider never
+  parsed the From; with TLS fixed, this was the next wall. No protocol,
+  config-schema, or CDR change (the WS/CDR `from` was already correct).
+
 ## [0.37.2] - 2026-07-20
 
 ### Changed

@@ -42,6 +42,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not be quantified in packets. Docs: `PROTOCOL.md` §3.8, `DEPLOY.md`;
   schema regenerated; both server SDKs updated in lockstep.
 
+### Changed
+
+- **SIPp harness**: `run-all.sh` now preflights the echo WS server the
+  same way it already preflights `sipp` and the daemon binary, exiting
+  `2` with start-up instructions instead of running the suite without
+  it. Previously a missing server produced eight scenario failures
+  scattered across five phases (`basic_call_then_bye`,
+  `session_timer_echo`, `reinvite_hold_resume`,
+  `reinvite_unsupported_codec_488`, `session_progress_then_answer`,
+  `stir_shaken_attestation_pass`, `digest_auth_caller`,
+  `recording_writes_valid_wav`) — every scenario whose call must reach
+  ACTIVE aborts on an unexpected BYE when the daemon tears the call down
+  after the bridge can't connect, while scenarios that reject before
+  bridging (488 / 428 / 403 / 503, CANCEL) still pass. The split reads
+  like a signalling regression rather than a missing prerequisite, and a
+  baseline-vs-branch comparison reproduces it identically on both sides,
+  which makes the wrong conclusion look confirmed. CI was already
+  immune — `.github/workflows/test.yml` starts the server and waits for
+  the bind before invoking the script — so this closes the gap for local
+  runs only; the check is a no-op in CI. The shared echo-server port is
+  now a single `ECHO_WS_PORT` constant interpolated into the six
+  generated configs that use it, matching the `*_WS_PORT` convention the
+  private-echo-server phases already follow (it stays pinned to 8765 by
+  `configs/local-dev.toml`, which the main phase runs against).
+
 ### Fixed
 
 - **`packet_loss_ratio` is documented correctly: it is a per-interval

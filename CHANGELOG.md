@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`rx_packets_lost` no longer reports the ring duration as packet loss** (issue #330; fixed upstream by [forge-media#94](https://github.com/thevoiceguy/forge-media/pull/94), pin bumped `f6151edf2724` → `24e20ae1e8ac`). On a trunk that sends ringback as early media, `rx_packets_lost` was set once at answer to `ring_seconds × 50` and never moved again — 621 on a 12.42 s ring, 127 on a 2.5 s ring — which pinned the transport `mos_estimate` to **1.0, the floor of the scale**, for the whole call. The effect was inverted from reality (the longer a call rang, the worse its reported quality, so the calls that rang longest looked worst to anyone triaging complaints) and it propagated into the CDR `quality` block and Homer's HEP QoS, contaminating historical quality data and any MOS-based alerting at the source. `avg/max_packet_loss_ratio` stayed correctly at `0.0` throughout, so the two loss signals in the same record actively disagreed.
+
+  Root cause was in forge's `RxStreamStats`, which carried a single sequence baseline with no SSRC field at all. The trunk switches SSRC at the answer while keeping the sequence counter continuous, so a baseline anchored in the ringback era survived into the answered stream and charged the whole ring against it. Diagnosed from a production capture (4 SSRCs on one 5-tuple, seq 773→3333, 2561 packets, zero wire loss) and pinned upstream by a regression test that replays those real sequence numbers — 748 phantom lost with the fix disabled, matching the capture's 14.96 s ring × 50, and 0 with it. No siphon-ai code change; the counters this daemon already reads simply stop being wrong.
+
+  Still open upstream as [forge-media#95](https://github.com/thevoiceguy/forge-media/issues/95): the early-media packets are received but never counted at all, so `rx_packets_received` continues to undercount by the ringback burst, and a trunk that keeps one SSRC across the answer would still mis-report loss.
+
 ## [0.39.0] - 2026-07-22
 
 ### Fixed

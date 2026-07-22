@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-07-22
+
 ### Added
 
 - **CDR `answered_at` — connected duration is now derivable** (issue #331; **CDR schema v4 → v5**). A record carried `started_at`, `ended_at` and `duration_ms` but no answer timestamp, and for outbound calls `started_at` is stamped when the origination request is accepted — *before the INVITE goes out*. So `duration_ms` silently measured INVITE-to-end including ring time, and connected duration was not derivable from a v4 record in any form. The overstatement is exactly the ring duration, so it is unbounded and varies per call: ~1.4 s on an instant pickup, ~12.4 s on a call that rang that long — more than half again on a 21 s conversation. Carriers bill from answer, so anyone rating or reconciling against an invoice was systematically over by an amount correlated with how long each call rang, with nothing in the record signalling it. Unanswered calls were also indistinguishable from very short answered ones on duration alone.

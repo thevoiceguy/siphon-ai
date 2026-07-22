@@ -101,6 +101,7 @@ mod tests {
             started_at: chrono::Utc.with_ymd_and_hms(2026, 5, 5, 14, 30, 0).unwrap(),
             ended_at: chrono::Utc.with_ymd_and_hms(2026, 5, 5, 14, 30, 1).unwrap(),
             duration_ms: 1000,
+            answered_at: None,
             from: "+1".into(),
             to: "5000".into(),
             direction: Direction::Inbound,

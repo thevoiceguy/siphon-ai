@@ -31,6 +31,16 @@
 //! but bumped per the 0.9.5 precedent for new blocks so consumers can
 //! gate on `version >= 4` instead of probing for the field.
 //!
+//! **v5 (0.40.0):** added the optional `answered_at` timestamp — connected
+//! duration was previously not derivable from a record at all, because
+//! `duration_ms` silently includes ring/setup time — and a `caller_hangup`
+//! [`TerminationCause`] variant, splitting the far end hanging up (the most
+//! common ending) out of `local_shutdown`, which had been conflating it with
+//! admin force-hangup, CANCEL and session-timer expiry. `answered_at` alone
+//! would be additive-optional; the new cause value is what a strict
+//! exhaustive matcher can choke on, so the version moves (same rationale as
+//! v2 / v3).
+//!
 //! ## What we record vs. what we don't
 //!
 //! - **From / To** users only — full SIP URIs are recorded as the
@@ -48,9 +58,12 @@ use serde::{Deserialize, Serialize};
 /// Schema version of the CDR record. Bump per CLAUDE.md §7.7
 /// whenever a change could break consumer parsers.
 ///
-/// v4 (0.30.0): adds the optional `quality` block (see [`QualityInfo`]).
-/// Additive-optional; bumped per the 0.9.5 new-block precedent.
-pub const CDR_VERSION: u32 = 4;
+/// v5 (0.40.0): adds the optional `answered_at` timestamp and the
+/// `caller_hangup` [`TerminationCause`] variant. The variant is why this
+/// bumps rather than riding as a silent addition — a strict consumer that
+/// exhaustively matches the v4 cause set will not recognise it, the same
+/// reasoning that drove v2 and v3.
+pub const CDR_VERSION: u32 = 5;
 
 /// One call's complete record. Always serialised as a single JSON
 /// object on a single line for JSONL file sinks.
@@ -67,9 +80,35 @@ pub struct CdrRecord {
     pub call_id: String,
     pub sip_call_id: String,
 
+    /// When the call record began.
+    ///
+    /// For **outbound** this is **not** when it connected — it is stamped
+    /// as the origination request is accepted, before the INVITE is even
+    /// sent, so it precedes the answer by the ring duration. For
+    /// **inbound** it is stamped once the INVITE has been accepted, so it
+    /// and [`Self::answered_at`] coincide. Derive connected time from
+    /// `answered_at` rather than assuming either shape.
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
+    /// `ended_at - started_at` — **wall-clock including setup/ring time**,
+    /// not connected time. Use [`Self::answered_at`] to derive the
+    /// billable span; carriers bill from answer.
     pub duration_ms: u64,
+    /// When the call was answered — the 200 OK, for either direction
+    /// (v5, 0.40.0). `None` when the call never connected, which is also
+    /// what distinguishes an unanswered call from a very short one.
+    ///
+    /// Added because connected duration was previously *not derivable
+    /// from the record in any form*: `duration_ms` silently included ring
+    /// time, so every consumer doing rating or carrier reconciliation was
+    /// systematically over by an amount that varied per call with how
+    /// long it rang — ~1.4 s on an instant pickup, ~12.4 s on a call that
+    /// rang that long, which on a 21 s conversation is more than half
+    /// again. Nothing in the record signalled it (issue #331).
+    ///
+    /// Billable duration is `ended_at - answered_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_at: Option<DateTime<Utc>>,
 
     pub from: String,
     pub to: String,
@@ -332,8 +371,19 @@ pub struct TerminationInfo {
 pub enum TerminationCause {
     /// WS server sent a `hangup` over the bridge.
     ServerHangup,
-    /// Local control path (BYE/CANCEL/admin) asked the controller
-    /// to shut down.
+    /// The far end hung up — a SIP BYE arrived for this dialog (v5,
+    /// 0.40.0). By far the most common way a call ends.
+    ///
+    /// Serialises as `caller_hangup`, matching the WS `stop` message's
+    /// existing `reason` value for the same event. Through 0.39.x this
+    /// collapsed into [`Self::LocalShutdown`], so the CDR and the WS
+    /// protocol disagreed about who ended the call and the CDR — the
+    /// billing-grade, durable side — was the lossy one.
+    CallerHangup,
+    /// Local control path asked the controller to shut down and it was
+    /// *not* a remote BYE: admin force-hangup, CANCEL, or RFC 4028
+    /// session expiry. Before v5 this also covered remote hangups; see
+    /// [`Self::CallerHangup`].
     LocalShutdown,
     /// The daemon force-terminated this call at the graceful-shutdown
     /// drain deadline (0.17.0): it was still active when
@@ -380,6 +430,7 @@ mod tests {
             started_at: Utc.with_ymd_and_hms(2026, 5, 5, 14, 30, 0).unwrap(),
             ended_at: Utc.with_ymd_and_hms(2026, 5, 5, 14, 30, 42).unwrap(),
             duration_ms: 42_000,
+            answered_at: None,
             from: "+13125551234".into(),
             to: "5000".into(),
             direction: Direction::Inbound,
@@ -457,13 +508,57 @@ mod tests {
     }
 
     #[test]
-    fn version_field_is_present_and_is_4() {
-        // Bumped to 4 in 0.30.0 (new optional `quality` block — see the
-        // module versioning note). Was 3 in 0.17.0 (`drain_forced`) and
-        // 2 in 0.9.5 (delayed-offer failure causes).
-        assert_eq!(CDR_VERSION, 4);
+    fn version_field_is_present_and_is_5() {
+        // Bumped to 5 in 0.40.0 (`answered_at` + the `caller_hangup`
+        // cause — see the module versioning note). Was 4 in 0.30.0 (the
+        // `quality` block), 3 in 0.17.0 (`drain_forced`) and 2 in 0.9.5
+        // (delayed-offer failure causes).
+        assert_eq!(CDR_VERSION, 5);
         let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
-        assert_eq!(v["version"], serde_json::json!(4));
+        assert_eq!(v["version"], serde_json::json!(5));
+    }
+
+    /// `answered_at` is what makes connected duration derivable; absent
+    /// when the call never connected, and omitted from JSON entirely
+    /// rather than serialised as null (issue #331).
+    #[test]
+    fn answered_at_round_trips_and_omits_when_absent() {
+        let mut r = sample();
+        let answered = r.started_at + chrono::Duration::seconds(12);
+        r.answered_at = Some(answered);
+        let v: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert!(v.get("answered_at").is_some());
+        let back: CdrRecord = serde_json::from_value(v).unwrap();
+        assert_eq!(back.answered_at, Some(answered));
+        // Billable span is ended_at - answered_at, and on a call that
+        // rang it is strictly shorter than duration_ms.
+        let billable = (back.ended_at - answered).num_milliseconds();
+        assert!(
+            billable < back.duration_ms as i64,
+            "ring time must not be inside the billable span"
+        );
+
+        r.answered_at = None;
+        let v: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert!(
+            v.get("answered_at").is_none(),
+            "unanswered calls omit the field, not null it"
+        );
+    }
+
+    /// `caller_hangup` is a distinct wire value, and matches the WS
+    /// `stop` message's `reason` for the same event (issue #332).
+    #[test]
+    fn caller_hangup_cause_serialises_distinctly() {
+        let v = serde_json::to_value(TerminationCause::CallerHangup).unwrap();
+        assert_eq!(v, serde_json::json!("caller_hangup"));
+        assert_ne!(
+            v,
+            serde_json::to_value(TerminationCause::LocalShutdown).unwrap(),
+            "the far end hanging up must not read as a local teardown"
+        );
+        let back: TerminationCause = serde_json::from_value(v).unwrap();
+        assert_eq!(back, TerminationCause::CallerHangup);
     }
 
     #[test]

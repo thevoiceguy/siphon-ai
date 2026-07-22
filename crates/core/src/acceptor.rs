@@ -2242,6 +2242,12 @@ impl CallStart {
             started_at: self.started_at,
             ended_at,
             duration_ms,
+            // Inbound: `started_at` is stamped in `run_call`, which is
+            // only reached once the INVITE has been accepted (both call
+            // sites pass `Some(AcceptedSession)`), so the record's start
+            // and the answer are the same instant. Unlike outbound, there
+            // is no ring window for `duration_ms` to absorb.
+            answered_at: Some(self.started_at),
             from: self.from,
             to: self.to,
             direction: CdrDirection::Inbound,
@@ -2398,6 +2404,7 @@ fn record_prepare_outcome(elapsed: std::time::Duration, ok: bool) {
 pub(crate) fn termination_label(cause: CdrTerminationCause) -> &'static str {
     match cause {
         CdrTerminationCause::ServerHangup => "server_hangup",
+        CdrTerminationCause::CallerHangup => "caller_hangup",
         CdrTerminationCause::LocalShutdown => "local_shutdown",
         CdrTerminationCause::DrainForced => "drain_forced",
         CdrTerminationCause::BridgeEnded => "bridge_ended",
@@ -2438,6 +2445,9 @@ fn build_delayed_failure_cdr(
         started_at,
         ended_at,
         duration_ms,
+        // Pre-active failure: the call never connected, which is exactly
+        // what `None` distinguishes from a very short answered call.
+        answered_at: None,
         from: from.to_string(),
         to: to.to_string(),
         direction: CdrDirection::Inbound,
@@ -2471,6 +2481,7 @@ fn build_delayed_failure_cdr(
 fn map_cause(t: CallTermination) -> CdrTerminationCause {
     match t {
         CallTermination::ServerHangup => CdrTerminationCause::ServerHangup,
+        CallTermination::CallerHangup => CdrTerminationCause::CallerHangup,
         CallTermination::LocalShutdown => CdrTerminationCause::LocalShutdown,
         CallTermination::DrainForced => CdrTerminationCause::DrainForced,
         CallTermination::BridgeEnded => CdrTerminationCause::BridgeEnded,

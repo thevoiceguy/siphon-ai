@@ -37,12 +37,13 @@ quality_rx_packets_received,quality_rx_packets_lost,\
 quality_rx_packets_out_of_order,quality_rx_packets_duplicate,\
 quality_mos_estimate_min,quality_mos_estimate_avg,\
 quality_tx_packets_sent,quality_tx_octets_sent,\
-quality_tx_packets_lost_reported";
+quality_tx_packets_lost_reported,\
+answered_at";
 
 /// Number of columns in [`HEADER`] (and every row). Only asserted in
 /// tests — production code appends by name, not position.
 #[cfg(test)]
-pub(crate) const COLUMNS: usize = 48;
+pub(crate) const COLUMNS: usize = 49;
 
 /// RFC 4180 field escaping: quote when the value contains a comma,
 /// quote, or line break; double embedded quotes.
@@ -171,9 +172,15 @@ pub fn record_to_row(r: &CdrRecord) -> String {
     cell!(opt o, q.and_then(|q| q.mos_estimate_avg));
     cell!(opt o, q.and_then(|q| q.tx_packets_sent));
     cell!(opt o, q.and_then(|q| q.tx_octets_sent));
-    // Last column: no trailing comma.
-    if let Some(v) = q.and_then(|q| q.tx_packets_lost_reported) {
-        let _ = write!(o, "{v}");
+    cell!(opt o, q.and_then(|q| q.tx_packets_lost_reported));
+    // Last column: no trailing comma. Appended at the end rather than
+    // beside `ended_at` because HEADER order is append-only (v5, #331).
+    if let Some(v) = r.answered_at {
+        let _ = write!(
+            o,
+            "{}",
+            v.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        );
     }
 
     o
@@ -198,6 +205,7 @@ mod tests {
                 .with_ymd_and_hms(2026, 5, 5, 14, 30, 42)
                 .unwrap(),
             duration_ms: 42_000,
+            answered_at: None,
             from: "+13125551234".into(),
             to: "5000".into(),
             direction: Direction::Inbound,

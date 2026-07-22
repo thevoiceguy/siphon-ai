@@ -213,7 +213,18 @@ pub enum CallState {
 pub enum CallTermination {
     /// Server sent [`BridgeIn::Hangup`].
     ServerHangup,
-    /// External signal via [`CallHandle::shutdown`].
+    /// The far end hung up: a SIP BYE arrived and
+    /// [`CallRegistry::terminate_from_bye`](crate::registry::CallRegistry)
+    /// marked the handle before signalling shutdown.
+    ///
+    /// Split out of [`Self::LocalShutdown`] in 0.40.0 (issue #332). This
+    /// is by far the most common way a call ends, and the WS `stop`
+    /// message has always reported it correctly as `caller_hangup` — the
+    /// CDR was the lossy side, collapsing it together with admin
+    /// force-hangup, CANCEL and session-timer expiry.
+    CallerHangup,
+    /// External signal via [`CallHandle::shutdown`] that was *not* a
+    /// remote BYE: admin force-hangup, CANCEL, RFC 4028 session expiry.
     LocalShutdown,
     /// Force-terminated at the graceful-shutdown drain deadline
     /// (0.17.0) — a [`CallHandle::shutdown`] preceded by
@@ -1151,12 +1162,17 @@ impl CallController {
                         StopReason::ServerHangup
                     };
                     info!(call_id = %call_id, ?reason, "controller shutdown requested");
-                    // A drain-forced shutdown (deploy deadline) is
-                    // attributed distinctly from a generic local
-                    // shutdown (admin force-hangup, session expiry);
-                    // both send the same clean BYE + WS stop.
+                    // Mirror the same three-way split onto the CDR that
+                    // `reason` just made for the WS server. Until 0.40.0
+                    // this branch distinguished only drain-forced, so a
+                    // remote hangup — the most common ending there is —
+                    // was recorded as `local_shutdown`, and the CDR
+                    // disagreed with the `stop` message about the same
+                    // event (issue #332).
                     termination = if handle.drain_forced() {
                         CallTermination::DrainForced
+                    } else if handle.remote_bye_received() {
+                        CallTermination::CallerHangup
                     } else {
                         CallTermination::LocalShutdown
                     };

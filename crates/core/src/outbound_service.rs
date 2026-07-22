@@ -397,9 +397,16 @@ impl OutboundOriginateHandle for OutboundService {
             metrics::counter!(OUTBOUND_CALLS_TOTAL, "result" => result_label).increment(1);
             match result {
                 Ok(call) => {
+                    // `place`/`place_delayed` return on the 2xx, so this is
+                    // the answer instant — the only point on the outbound
+                    // path where connected time starts. `started_at` above
+                    // was stamped when the originate request was accepted,
+                    // before the INVITE went out (issue #331).
+                    let answered_at = Utc::now();
                     let ctx = OutboundCallContext {
                         bridge_id,
                         started_at,
+                        answered_at,
                         from,
                         to,
                         gateway,
@@ -463,6 +470,9 @@ fn outbound_result_label(result: &Result<OutboundCall, OutboundError>) -> &'stat
 /// `CallStart` snapshot.
 struct OutboundCallContext {
     bridge_id: BridgeCallId,
+    /// When the 2xx arrived — connected time starts here, not at
+    /// `started_at`. Feeds the CDR's `answered_at` (issue #331).
+    answered_at: DateTime<Utc>,
     /// When `place()` started (= the `outbound_initiated` timestamp), so
     /// the CDR's `duration_ms` covers ring time too; answer time is on
     /// the `outbound_answered` webhook.
@@ -747,6 +757,7 @@ fn build_outbound_record(
         started_at: ctx.started_at,
         ended_at,
         duration_ms,
+        answered_at: Some(ctx.answered_at),
         from: ctx.from.clone(),
         to: ctx.to.clone(),
         direction: CdrDirection::Outbound,
@@ -813,6 +824,9 @@ mod tests {
         let ctx = OutboundCallContext {
             bridge_id: BridgeCallId::new("siphon-9b2c"),
             started_at: Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap(),
+            // Rang for 12 s before the callee picked up — the gap this
+            // field exists to make visible (#331).
+            answered_at: Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 12).unwrap(),
             from: "sip:bot@siphon.example.com".into(),
             to: "+13125550000".into(),
             gateway: "twilio_main".into(),

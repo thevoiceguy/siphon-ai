@@ -122,6 +122,7 @@ mod tests {
             started_at: chrono::Utc.with_ymd_and_hms(2026, 5, 5, 14, 30, 0).unwrap(),
             ended_at: chrono::Utc.with_ymd_and_hms(2026, 5, 5, 14, 30, 5).unwrap(),
             duration_ms: 5000,
+            answered_at: None,
             from: "+13125551212".into(),
             to: "5000".into(),
             direction: Direction::Inbound,

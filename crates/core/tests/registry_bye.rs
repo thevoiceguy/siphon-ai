@@ -166,13 +166,15 @@ async fn dispatch_bye_wakes_running_controller_via_registry() {
         }
     }
 
-    // 5. The controller must wake and end with LocalShutdown.
+    // 5. The controller must wake and end attributed to the far end.
+    //    Was `LocalShutdown` until 0.40.0, which conflated a remote
+    //    hangup with admin force-hangup / CANCEL / session expiry (#332).
     let outcome = tokio::time::timeout(Duration::from_secs(3), run)
         .await
         .expect("controller exits after BYE")
         .expect("task didn't panic")
         .expect("controller returns Ok");
-    assert_eq!(outcome.termination, CallTermination::LocalShutdown);
+    assert_eq!(outcome.termination, CallTermination::CallerHangup);
 }
 
 #[tokio::test]
@@ -259,7 +261,7 @@ async fn bye_drives_wire_stop_with_caller_hangup_reason() {
         .expect("controller exits after BYE")
         .expect("task didn't panic")
         .expect("controller returns Ok");
-    assert_eq!(outcome.termination, CallTermination::LocalShutdown);
+    assert_eq!(outcome.termination, CallTermination::CallerHangup);
 
     let reason = tokio::time::timeout(Duration::from_secs(2), reason_rx)
         .await

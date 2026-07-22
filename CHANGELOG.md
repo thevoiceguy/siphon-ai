@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-07-22
+
 ### Fixed
 
 - **`GET /admin/v1/drain` is now labelled in `siphon_ai_admin_requests_total`** (issue #319). The route is dispatched and served correctly but had no arm in `route_label()`, so it fell through to `endpoint="unknown"` — the only served admin route missing from the table. Two consequences: successful drain polls were indistinguishable from unrecognised paths (both `endpoint="unknown"`, separated only by `result`), polluting the reasonable "someone is probing the admin API" signal a dashboard keys on `endpoint="unknown"`; and drain — the endpoint a deploy script polls hardest during a rollout, likely the highest-rate admin request on the box — was the one route with no per-endpoint visibility. Metric-label only; no functional, auth, RBAC, or response-body change.

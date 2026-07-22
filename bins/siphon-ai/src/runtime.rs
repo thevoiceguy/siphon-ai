@@ -910,6 +910,10 @@ impl Runtime {
                 transaction_mgr: Arc::clone(&transaction_mgr),
                 dispatcher: Arc::clone(&dispatcher),
                 sip_resolver: Arc::clone(&sip_resolver),
+                // Same store the UAS dispatches against — see
+                // `build_outbound_uac` for why this is required and not
+                // merely tidy.
+                dialog_manager: uas.dialog_manager(),
             };
             let gateways = build_gateways(&outbound, &gateway_deps)?;
             let guard = OutboundGuard::new(outbound.max_concurrent, outbound.rate_limit_per_sec);
@@ -925,6 +929,13 @@ impl Runtime {
             // Outbound bots can join conferences too (§9.1 — a room is
             // composed of any active calls). Share the same registries.
             service = service.with_control_registry(control_registry.clone());
+            // The SIP-Call-ID registry UAS dispatch resolves a far-end
+            // BYE against — the same instance the acceptor registers
+            // inbound calls in. Outbound legs joining it is what lets a
+            // callee hangup tear the call down (#324); it also means a
+            // graceful drain now counts and waits for outbound calls,
+            // which it previously walked straight past.
+            service = service.with_call_registry(acceptor.registry().clone());
             // Hold music for the WS-reconnect gap on outbound legs (0.7.3) —
             // the same [media].moh_file the inbound acceptor uses.
             service = service.with_moh_file(media.moh_file.clone());
@@ -2213,6 +2224,11 @@ pub struct GatewayBuildDeps {
     pub transaction_mgr: Arc<TransactionManager>,
     pub dispatcher: Arc<dyn TransportDispatcher>,
     pub sip_resolver: Arc<sip_dns::SipResolver>,
+    /// The **UAS's** dialog store, shared into every gateway UAC so an
+    /// outbound call's confirmed dialog is visible to `IntegratedUAS::
+    /// dispatch`. Without this the far end's in-dialog BYE is answered
+    /// `481` and the call lingers to the media watchdog (#324).
+    pub dialog_manager: Arc<sip_dialog::DialogManager>,
 }
 
 /// Build the `name → OutboundGateway` table from `[outbound]` config.
@@ -2249,6 +2265,7 @@ pub(crate) fn build_gateways(
             },
             gw.credentials.as_ref(),
             Some(answerer),
+            Arc::clone(&deps.dialog_manager),
         )?;
         let originator = Arc::new(OutboundOriginator::with_delayed_registry(
             (*deps.outbound_media).clone(),
@@ -2288,10 +2305,22 @@ pub(crate) fn build_gateways(
 /// INVITE may be challenged (401/407) by the trunk, so when the gateway has
 /// credentials we install a [`StaticCredentials`] provider for the UAC's
 /// auto-retry. One UAC per gateway keeps each trunk's credentials isolated.
+///
+/// `dialog_manager` is the UAS's store (`uas.dialog_manager()`), and sharing
+/// it is load-bearing rather than tidy-minded. `IntegratedUAS::dispatch`
+/// resolves an inbound in-dialog request through *its* manager's
+/// `find_by_request`; a UAC with a private store registers the outbound
+/// call's confirmed dialog somewhere dispatch cannot see, so the far end's
+/// BYE is answered `481 Call/Transaction Does Not Exist`, `on_bye` never
+/// runs, and the call survives to the media-inactivity watchdog — inflating
+/// the CDR duration and mislabelling a normal hangup as a media failure
+/// (#324). The inbound path has always shared this store (see
+/// `install_uas`); this is the outbound path catching up.
 fn build_outbound_uac(
     args: TransferUacBuild<'_>,
     credentials: Option<&siphon_ai_config::GatewayCredentials>,
     sdp_answer_generator: Option<Arc<dyn sip_uac::integrated::SdpAnswerGenerator>>,
+    dialog_manager: Arc<sip_dialog::DialogManager>,
 ) -> Result<IntegratedUAC> {
     let mut builder = IntegratedUAC::builder()
         .local_uri(args.local_uri)
@@ -2299,6 +2328,7 @@ fn build_outbound_uac(
         .transaction_manager(args.transaction_mgr)
         .dispatcher(args.dispatcher)
         .resolver(args.sip_resolver)
+        .dialog_manager(dialog_manager)
         .local_addr(args.listen_addr.to_string())
         .map_err(|e| anyhow!("outbound UAC local_addr: {e}"))?;
     if let Some(public) = args.public_addr {

@@ -3080,12 +3080,51 @@ fn compile_park(raw: RawPark) -> Result<ParkConfig, CompileError> {
     })
 }
 
+/// Warn when a sink sub-block is explicitly switched **on** beneath a
+/// master switch that is **off**, so the contradiction is visible at
+/// startup instead of surfacing as missing data days later.
+///
+/// A `warn!` and not a hard error: silencing a whole subsystem with one
+/// flag while leaving the sub-blocks configured is a legitimate thing to
+/// do, and CLAUDE.md §4.6's fail-loud rule is about config that cannot
+/// work, not config that deliberately does nothing. But the operator who
+/// wrote `enabled = true` and a valid `path` stated an intent, and
+/// nothing contradicted them: the failure mode is pure silence, which for
+/// a records pipeline means the absence is noticed only when someone goes
+/// looking for a record that should exist — potentially long after the
+/// calls are gone (issue #333).
+fn warn_sinks_under_disabled_master(block: &str, sinks: &[(&str, bool)]) {
+    for sink in inert_sinks(sinks) {
+        warn!(
+            "[{block}.{sink}].enabled = true but [{block}].enabled = false \
+             — this sink is inert and nothing will be written"
+        );
+    }
+}
+
+/// The sub-sinks that are switched on while their master switch is off.
+/// Split out from the `warn!` so the decision is unit-testable without a
+/// log-capturing subscriber — the part that can regress is *which* sinks
+/// get reported, not the formatting.
+fn inert_sinks<'a>(sinks: &[(&'a str, bool)]) -> Vec<&'a str> {
+    sinks
+        .iter()
+        .filter(|(_, on)| *on)
+        .map(|(name, _)| *name)
+        .collect()
+}
+
 fn compile_cdr(raw: RawCdr) -> Result<CdrConfig, CompileError> {
     if !raw.enabled {
         // Whole CDR pipeline off; sub-block config is parsed but
         // ignored. Validating disabled sub-blocks would surprise
         // operators who flip `enabled = false` to silence a
-        // misconfig while they investigate.
+        // misconfig while they investigate — but an explicitly enabled
+        // sub-sink is a contradiction worth surfacing (#333).
+        warn_sinks_under_disabled_master(
+            "cdr",
+            &[("file", raw.file.enabled), ("webhook", raw.webhook.enabled)],
+        );
         return Ok(CdrConfig::default());
     }
     let file = if raw.file.enabled {
@@ -3131,6 +3170,10 @@ fn compile_audit(raw: crate::raw::RawAudit) -> Result<AuditConfig, CompileError>
         // Master switch off; sub-block config parsed but ignored,
         // matching the [cdr] pattern (flip `enabled = false` to
         // silence a misconfig while investigating).
+        warn_sinks_under_disabled_master(
+            "audit",
+            &[("file", raw.file.enabled), ("webhook", raw.webhook.enabled)],
+        );
         return Ok(AuditConfig::default());
     }
     let file = if raw.file.enabled {
@@ -3181,6 +3224,10 @@ fn compile_quality(raw: crate::raw::RawQuality) -> Result<QualityConfig, Compile
     if !raw.enabled {
         // Master switch off; sub-block config parsed but ignored,
         // matching the [cdr] / [audit] pattern.
+        warn_sinks_under_disabled_master(
+            "quality",
+            &[("file", raw.file.enabled), ("webhook", raw.webhook.enabled)],
+        );
         return Ok(QualityConfig::default());
     }
     let interval_secs = raw.interval_secs.unwrap_or(30);
@@ -4467,5 +4514,64 @@ mod parse_register_server_tests {
     #[test]
     fn unparseable_port_errors() {
         assert!(parse_register_server("10.0.0.10:nope", None, SIP_PORT).is_err());
+    }
+}
+
+#[cfg(test)]
+mod disabled_master_tests {
+    use super::*;
+    use crate::raw::{RawCdr, RawCdrFile, RawCdrWebhook};
+
+    #[test]
+    fn inert_sinks_reports_only_the_enabled_ones() {
+        assert!(inert_sinks(&[("file", false), ("webhook", false)]).is_empty());
+        assert_eq!(inert_sinks(&[("file", true), ("webhook", false)]), ["file"]);
+        assert_eq!(
+            inert_sinks(&[("file", false), ("webhook", true)]),
+            ["webhook"]
+        );
+        assert_eq!(
+            inert_sinks(&[("file", true), ("webhook", true)]),
+            ["file", "webhook"],
+            "both contradictions are named, not just the first"
+        );
+    }
+
+    /// The behaviour being warned about is real and unchanged: a sub-sink
+    /// enabled under a disabled master still compiles to nothing. The fix
+    /// makes it audible, not fatal — silencing a whole subsystem with one
+    /// flag stays legitimate (#333).
+    #[test]
+    fn cdr_file_enabled_under_disabled_master_still_compiles_to_no_sinks() {
+        let raw = RawCdr {
+            enabled: false,
+            file: RawCdrFile {
+                enabled: true,
+                path: Some("/var/log/siphon-ai/cdr.jsonl".into()),
+                format: None,
+            },
+            webhook: RawCdrWebhook::default(),
+        };
+        let cfg = compile_cdr(raw).expect("a disabled master is not an error");
+        assert!(!cfg.enabled, "master off wins");
+        assert!(cfg.file.is_none(), "the explicitly-enabled sink is inert");
+    }
+
+    /// …and with the master on, the same sub-block is honoured — so the
+    /// warning can't be mistaken for the sink being broken.
+    #[test]
+    fn cdr_file_enabled_under_enabled_master_is_honoured() {
+        let raw = RawCdr {
+            enabled: true,
+            file: RawCdrFile {
+                enabled: true,
+                path: Some("/var/log/siphon-ai/cdr.jsonl".into()),
+                format: None,
+            },
+            webhook: RawCdrWebhook::default(),
+        };
+        let cfg = compile_cdr(raw).expect("valid");
+        assert!(cfg.enabled);
+        assert!(cfg.file.is_some());
     }
 }

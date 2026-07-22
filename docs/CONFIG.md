@@ -757,7 +757,12 @@ timeout_ms = 5000
 ```
 
 Both sinks can run simultaneously. Master `enabled = false` silences both
-regardless of sub-block state. Adding fields to the CDR schema bumps the
+regardless of sub-block state — **`[cdr]` has no `enabled` default of
+`true`, so omitting the `[cdr]` block entirely leaves the master off and
+a `[cdr.file]` block alone writes nothing.** Since 0.40.0 that
+contradiction logs a startup warning naming the affected sink rather than
+failing silently; the same applies to `[audit]` and `[quality]`, which
+have the same master/sub-block shape. Adding fields to the CDR schema bumps the
 `version` field; consumers should treat new keys as additive.
 
 `[cdr.file].format = "csv"` (0.36.0) writes a fixed-column CSV instead of

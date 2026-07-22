@@ -169,36 +169,40 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "6fd
 # AI logic belongs in the WS server, never here. See CLAUDE.md §4.1 and the
 # upstream gate at https://github.com/thevoiceguy/forge-media/pull/39.
 #
-# forge-media is pinned to a `main` rev. Bumped 2026-07-21 to f6151edf2724
-# = forge-media #93: TX packet/octet counters and RR cumulative-lost on the
-# event bus. `MediaStatsSnapshot` gains `tx_packets_sent` / `tx_octets_sent`
-# and `RtcpReportReceived` gains `cumulative_lost` / `extended_highest_seq`,
-# which is what makes siphon-ai #320's TX-side quality telemetry possible —
-# neither number was previously reachable from glue. Note two behaviour
-# changes that ride along: `MediaStatsSnapshot` now also publishes for a leg
-# that only *sends* (harmless here — our leg B is synthetic and carries no
-# RTP either way, see tap.rs "Single-leg model"), and forge's
-# `ParticipantStats::bytes_sent` now counts RTP payload octets uniformly
-# rather than mixing payload and wire lengths across send paths.
+# forge-media is pinned to a `main` rev. Bumped 2026-07-22 to 24e20ae1e8ac
+# = forge-media #94: per-SSRC receive-side stream stats. `RxStreamStats` had
+# no SSRC field and compared sequence numbers across sources that RFC 3550
+# §8 gives independent sequence spaces; it now re-baselines when the SSRC
+# changes, carrying prior streams' real loss forward. Fixes siphon-ai #330:
+# a trunk that sends ringback as early media and switches SSRC at the answer
+# left the baseline anchored in the ringback era, so `rx_packets_lost` came
+# out as `ring_seconds x 50`, frozen for the call, pinning the transport MOS
+# estimate to 1.0 on every call with a normal ring time — and feeding that
+# into the CDR `quality` block and Homer's HEP QoS. No API change here; the
+# counters this daemon already reads simply stop being wrong.
+# Not fixed upstream and tracked as forge-media #95: the early-media packets
+# are received but never counted at all, so `rx_packets_received` still
+# undercounts by the ringback burst, and a trunk that keeps one SSRC across
+# the answer would still mis-report loss.
 # Feature-enabled builds need rustc >= 1.91 (tract 0.23) — our pinned
 # toolchain is 1.95. (siphon-rs is pinned separately above; see its own
 # comment for the current rev.) Prior forge pins: forge 1c996ae5fb4f = #86
 # neural VAD; forge 3c59b5f6e464 = #82-#85 dependency migrations; forge
 # 5fa76fb38675 = #81.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "f6151edf2724" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "f6151edf2724" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "f6151edf2724", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "f6151edf2724" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "f6151edf2724" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "f6151edf2724" }
-forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "f6151edf2724" }
-forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "f6151edf2724" }
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "24e20ae1e8ac" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "24e20ae1e8ac" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "24e20ae1e8ac", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "24e20ae1e8ac" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "24e20ae1e8ac" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "24e20ae1e8ac" }
+forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "24e20ae1e8ac" }
+forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "24e20ae1e8ac" }
 # Conference rooms (0.7.0): forge-mixer is the per-room AudioMixer;
 # forge-injection provides ToneGenerator (join/leave tones now, MOH
 # for park later). Deliberately NOT forge-conference — its DTMF
 # IVR/PIN/host-control layer is unused per DEV_PLAN_0.7.0.md §9.4.
-forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "f6151edf2724" }
-forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "f6151edf2724" }
+forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "24e20ae1e8ac" }
+forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "24e20ae1e8ac" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.

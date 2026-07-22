@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  outbound_remote_bye — the far end hangs up an OUTBOUND call.
+
+  Roles inverted as in `outbound_uas_answer`: SIPp is the CALLEE (UAS),
+  SiphonAI the UAC placing the call via `POST /admin/v1/calls`. The
+  difference is who tears down. Here SIPp sends the BYE, which is the
+  common real-world case (the human hangs up) and the one that was
+  broken: every gateway UAC owned a private DialogManager, so
+  `IntegratedUAS::dispatch` missed on the in-dialog lookup and answered
+  `481 Call/Transaction Does Not Exist`. The call then survived to the
+  60 s media-inactivity watchdog — inflating the CDR duration, labelling
+  a normal hangup as a media failure, and holding the trunk channel
+  (siphon-ai #324, siphon-rs #66).
+
+  The load-bearing assertion is `<recv response="200"/>` after our BYE:
+  a regressed daemon answers 481 there and the scenario fails. The
+  runner additionally asserts the call leaves the registry promptly,
+  which is what distinguishes "torn down on the BYE" from "torn down
+  60 s later by the watchdog".
+
+  This is the suite's first UAS-side in-dialog request, so the header
+  construction is spelled out rather than inherited from a helper:
+  as the UAS our From is the INVITE's To (plus our tag) and our To is
+  the INVITE's From (which already carries the caller's tag). The
+  Request-URI is SiphonAI's Contact, captured from the INVITE.
+
+  Run via run-all.sh's outbound_remote_bye auxiliary phase — the
+  scenario alone does nothing until the runner POSTs the originate.
+-->
+<scenario name="outbound_remote_bye">
+  <recv request="INVITE" rtd="true">
+    <action>
+      <!-- SiphonAI's Contact becomes our in-dialog Request-URI.
+           check_it fails the scenario loudly if the INVITE somehow
+           carries no Contact, rather than sending a BYE to an empty
+           URI and failing later with a confusing parse error. -->
+      <ereg regexp="sip:[^;&gt;]*"
+            search_in="hdr" header="Contact:"
+            check_it="true"
+            assign_to="remote_contact"/>
+      <!-- Header *values*, not whole lines. The `[last_From:]` /
+           `[last_To:]` macros expand to the complete header including
+           its field name, which is fine when echoing a header back
+           verbatim (the responses above) but wrong here: as the UAS our
+           From is built from the INVITE's To and vice versa, so echoing
+           the macro would emit `From: To: <...>`. Capture the values
+           and place them under the right field names instead. -->
+      <ereg regexp="&lt;sip:[^&gt;]*&gt;.*"
+            search_in="hdr" header="From:"
+            check_it="true"
+            assign_to="caller_from"/>
+      <ereg regexp="&lt;sip:[^&gt;]*&gt;"
+            search_in="hdr" header="To:"
+            check_it="true"
+            assign_to="callee_to"/>
+    </action>
+  </recv>
+
+  <send>
+<![CDATA[
+SIP/2.0 180 Ringing
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <send retrans="500">
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv request="ACK" rtd="true"/>
+
+  <!-- Let the call settle so the teardown is unambiguously mid-call
+       (bridge up, RTP flowing) rather than racing establishment. -->
+  <pause milliseconds="1500"/>
+
+  <!-- The callee hangs up. As the UAS, From/To are the mirror of the
+       INVITE's — our From carries the tag we generated in the 180/200,
+       our To carries the caller's own tag as it arrived. CSeq runs in
+       our own sequence space, independent of the caller's. -->
+  <send retrans="500">
+<![CDATA[
+BYE [$remote_contact] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+From: [$callee_to];tag=[pid]SIPpTag01[call_number]
+To: [$caller_from]
+[last_Call-ID:]
+CSeq: 1 BYE
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Max-Forwards: 70
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- THE assertion. 481 here is the #324 regression. -->
+  <recv response="200" rtd="true"/>
+</scenario>

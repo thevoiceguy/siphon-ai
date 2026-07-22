@@ -130,31 +130,36 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # main branch and replace the rev hashes here (see CLAUDE.md §7.5).
 
 # siphon-rs — RFC 3261 SIP stack.
-# Bumped 2026-07-20 `3a4fc312ade3` → `fcaff011f9c6` = siphon-rs #65:
-# `IntegratedUAC::invite_with_from` — a per-call From override for outbound
-# INVITE. Fixes the glue-less side of siphon-ai #316 — outbound origination
-# stamped the daemon's local identity as From, so caller-ID-validating trunks
-# (Twilio Secure Trunking) declined the call. Additive UAC API; the outbound
-# service now threads the resolved gateway/request caller-ID into the INVITE.
-# (Prior: `3a4fc312ade3` = #64 TLS-SNI-is-hostname, siphon-ai #312.)
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "fcaff011f9c6" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "fcaff011f9c6" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "fcaff011f9c6", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "fcaff011f9c6" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "fcaff011f9c6" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "fcaff011f9c6" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "fcaff011f9c6" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "fcaff011f9c6" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "fcaff011f9c6" }
+# Bumped 2026-07-21 `fcaff011f9c6` → `6fd432270bb8` = siphon-rs #67:
+# `IntegratedUACBuilder::dialog_manager` — lets an embedder give the UAC and
+# the UAS one shared dialog store. Required for siphon-ai #324: without it
+# every outbound UAC owned a private store, so UAS dispatch answered the far
+# end's in-dialog BYE with 481 and the outbound call never tore down. The
+# setter is additive and optional (unset keeps the private store), so nothing
+# else in the tree changes behaviour on this bump. Note the injection lands on
+# the inner UserAgentClient helper as well as the handle — the confirmed
+# dialog is registered by `process_invite_response` on the helper's manager,
+# so a handle-only share would not have fixed anything.
+# (Prior: `fcaff011f9c6` = #65 invite_with_from, siphon-ai #316;
+#  `3a4fc312ade3` = #64 TLS-SNI-is-hostname, siphon-ai #312.)
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "6fd432270bb8" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "6fd432270bb8" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "6fd432270bb8", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "6fd432270bb8" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "6fd432270bb8" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "6fd432270bb8" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "6fd432270bb8" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "6fd432270bb8" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "6fd432270bb8" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
 # (distinct from forge-media's pinned sip-sdp). Used by the outbound
 # delayed-offer answer generator to hand the UAC a SessionDescription it
 # accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "fcaff011f9c6" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "fcaff011f9c6" }
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "6fd432270bb8" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "6fd432270bb8" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "fcaff011f9c6" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "6fd432270bb8" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #

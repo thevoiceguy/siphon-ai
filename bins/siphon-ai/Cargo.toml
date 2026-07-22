@@ -52,6 +52,10 @@ sip-transport.workspace   = true
 sip-uas.workspace         = true
 sip-uac.workspace         = true
 sip-dns.workspace         = true
+# Names `DialogManager` in `GatewayBuildDeps` — the UAS's dialog store is
+# threaded into every gateway UAC so outbound dialogs are visible to UAS
+# dispatch (#324). Already in the tree via siphon-ai-core.
+sip-dialog.workspace      = true
 
 # tokio-rustls: name the ServerConfig type returned by
 # sip_transport::load_rustls_server_config.

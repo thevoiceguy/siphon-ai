@@ -577,6 +577,127 @@ fi
 ob_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: outbound remote BYE ───────────────
+# The far end hangs up an outbound call. Same roles-inverted setup as
+# `outbound`, but SIPp sends the BYE instead of receiving one, and the
+# echo-ws is the plain one (no auto-hangup) so the teardown is
+# unambiguously remote-initiated.
+#
+# Regression cover for #324: gateway UACs owned a private DialogManager,
+# so UAS dispatch missed the in-dialog lookup and answered 481. The
+# scenario's `recv response="200"` catches that directly; the registry
+# poll below catches the consequence, since a 481'd call is not torn
+# down by the BYE but by the 60 s media watchdog. The poll deadline is
+# deliberately far below that 60 s so the two outcomes can't be
+# confused.
+echo
+echo "─── auxiliary phase: outbound_remote_bye ──────────────"
+ORB_WS_PORT=8791
+ORB_ADMIN_PORT=9099
+ORB_WS_LOG=$(mktemp -t echo-ws-orb.XXXXXX.log)
+ORB_DAEMON_LOG=$(mktemp -t siphon-ai-orb.XXXXXX.log)
+ORB_CONFIG=$(mktemp -t siphon-ai-orb.XXXXXX.toml)
+cat >"$ORB_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-orb"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$ORB_WS_PORT/"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$ORB_ADMIN_PORT"
+[admin]
+listen = "127.0.0.1:$ADMIN_API_PORT"
+[[admin.token]]
+name = "harness"
+token = "$ADMIN_TOKEN"
+role = "admin"
+[outbound]
+max_concurrent = 2
+[[gateway]]
+name = "sipp"
+proxy = "127.0.0.1:$SIPP_PORT"
+from = "sip:harness@127.0.0.1"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+# Plain echo-ws: this phase's hangup must come from SIPp, not the WS.
+ORB_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$ORB_PYTHON" ]] || ORB_PYTHON=python3
+"$ORB_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$ORB_WS_PORT" \
+    >"$ORB_WS_LOG" 2>&1 &
+ORB_WS_PID=$!
+
+# The assertions below read this log. `siphon_ai=info` alone would not
+# emit them: EnvFilter matches targets on `::` boundaries, so it covers
+# `siphon_ai` and `siphon_ai::*` but not the sibling crates
+# `siphon_ai_sip_glue` (which logs the BYE→shutdown line) or
+# `siphon_ai_core` (which logs the teardown BYE failure).
+RUST_LOG=siphon_ai=info,siphon_ai_sip_glue=info,siphon_ai_core=info \
+    "$DAEMON_BIN" --config "$ORB_CONFIG" \
+    >"$ORB_DAEMON_LOG" 2>&1 &
+ORB_DAEMON_PID=$!
+orb_cleanup() {
+    kill "$ORB_WS_PID" "$ORB_DAEMON_PID" 2>/dev/null || true
+    wait "$ORB_WS_PID" "$ORB_DAEMON_PID" 2>/dev/null || true
+}
+trap orb_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── outbound_remote_bye ──────────────────────────────"
+orb_ok=0
+sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/outbound_remote_bye.xml" \
+    -m 1 -timeout 20s -trace_err -p "$SIPP_PORT" >/dev/null 2>&1 &
+ORB_SIPP_PID=$!
+sleep 0.3
+
+orb_resp=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$ADMIN_API_PORT/admin/v1/calls" \
+    -d '{"to": "7001", "gateway": "sipp"}')
+if [[ "$orb_resp" == "202" ]] && wait "$ORB_SIPP_PID"; then
+    # SIPp's BYE was answered 200 (not 481) — the dispatch half. Now the
+    # termination half: the BYE must be what ended the call.
+    #
+    # Checking only that the registry empties is too weak. The bridge
+    # notices the peer is gone shortly after SIPp exits and ends the call
+    # anyway, so the registry drains within seconds even when the BYE
+    # terminated nothing — which is exactly how the second half of #324
+    # hid behind the first. Assert the daemon's own account instead:
+    # `BYE → controller shutdown` means the lookup resolved, and the
+    # absence of a Timer-F failure means we didn't BYE a dialog the peer
+    # had already torn down.
+    for _ in $(seq 1 20); do
+        grep -q "BYE → controller shutdown" "$ORB_DAEMON_LOG" && break
+        sleep 0.5
+    done
+    if grep -q "BYE → controller shutdown" "$ORB_DAEMON_LOG"; then
+        # Timer F is ~32 s; wait past it so its absence means something.
+        sleep 3
+        if ! grep -q "outbound BYE failed" "$ORB_DAEMON_LOG"; then
+            orb_ok=1
+        fi
+    fi
+fi
+if (( orb_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (originate=$orb_resp; the far-end BYE did not cleanly tear the call down"
+    echo "        — a 481 from dispatch, a registry miss in terminate_from_bye, or we"
+    echo "        BYE'd back into a dead dialog. daemon: $ORB_DAEMON_LOG; ws: $ORB_WS_LOG)"
+    failures=$((failures + 1))
+fi
+
+orb_cleanup
+trap - EXIT
+
 # ─── Always-on auxiliary phase: outbound delayed offer ────────────
 # (0.9.0 chunk 2) Same roles-inverted setup as `outbound`, but the
 # runner POSTs with `delayed_offer: true`: SiphonAI sends an offerless

@@ -53,7 +53,7 @@ use crate::outbound::{
     OutboundRejection,
 };
 use crate::park::ParkContext;
-use crate::registry::{CallControlRegistry, ConsultRegistry};
+use crate::registry::{CallControlRegistry, CallEntry, CallRegistry, ConsultRegistry};
 use crate::transfer::{DialogControl, DialogSource, TransferContext};
 use siphon_ai_recording::{RecordingConfig, RecordingMode, RecordingSetup};
 
@@ -101,6 +101,13 @@ pub struct OutboundService {
     /// Bridge-id → handle table so the admin conference API can reach
     /// answered outbound calls too (§9.1). Shared with the acceptor.
     control_registry: CallControlRegistry,
+    /// SIP-Call-ID keyed registry that UAS dispatch consults for an
+    /// inbound in-dialog BYE/CANCEL. Outbound legs join it for their
+    /// lifetime so a far-end hangup reaches this leg's controller —
+    /// without it `terminate_from_bye` misses and the call runs on to
+    /// the media watchdog (#324). Distinct from `control_registry`,
+    /// which is keyed by *bridge* id and serves the admin API.
+    call_registry: CallRegistry,
     /// Park context (0.7.0). `Some` when `[park].enabled`; outbound
     /// bots can park/retrieve just like inbound calls.
     park: Option<ParkContext>,
@@ -137,6 +144,7 @@ impl OutboundService {
             consult_registry,
             conference: None,
             control_registry: CallControlRegistry::new(),
+            call_registry: CallRegistry::new(),
             park: None,
             moh_file: None,
             recording: RecordingConfig::default(),
@@ -173,6 +181,24 @@ impl OutboundService {
     /// conference API can reach answered outbound calls.
     pub fn with_control_registry(mut self, control_registry: CallControlRegistry) -> Self {
         self.control_registry = control_registry;
+        self
+    }
+
+    /// Share the daemon's SIP-Call-ID call registry — the one
+    /// `dispatch_bye` / `dispatch_cancel` resolve against — so a far-end
+    /// BYE on an outbound call reaches its controller (#324).
+    ///
+    /// Without this an answered outbound leg exists only in the
+    /// bridge-id `control_registry`, so `terminate_from_bye` misses, the
+    /// peer's BYE is answered `200` but changes nothing, and the call
+    /// survives to the 60 s media-inactivity watchdog.
+    ///
+    /// Note this registry is also the daemon's active-call count for
+    /// graceful shutdown (`/admin/v1/drain`'s `active_calls`, and what
+    /// `drain_wait` blocks on), so joining it means a drain now waits
+    /// for in-flight outbound calls as it always has for inbound.
+    pub fn with_call_registry(mut self, call_registry: CallRegistry) -> Self {
+        self.call_registry = call_registry;
         self
     }
 
@@ -314,6 +340,7 @@ impl OutboundOriginateHandle for OutboundService {
         let consult_registry = self.consult_registry.clone();
         let conference = self.conference.clone();
         let control_registry = self.control_registry.clone();
+        let call_registry = self.call_registry.clone();
         let park = self.park.clone();
         // WS reconnect (0.7.3) — outbound legs reconnect on the same daemon
         // defaults as inbound; extracted before the spawn (no `self` inside).
@@ -381,6 +408,7 @@ impl OutboundOriginateHandle for OutboundService {
                         consult_registry,
                         conference,
                         control_registry,
+                        call_registry,
                         park,
                         srtp_requested,
                         ws_reconnect_enabled,
@@ -454,6 +482,9 @@ struct OutboundCallContext {
     /// Bridge-id handle table — this leg registers in it for its
     /// lifetime so the admin conference API can reach it.
     control_registry: CallControlRegistry,
+    /// SIP-Call-ID registry the UAS dispatch resolves a far-end BYE
+    /// against. This leg joins for its lifetime (#324).
+    call_registry: CallRegistry,
     /// Park context, shared with the controller so an outbound bot can
     /// park/retrieve. `None` when park is off.
     park: Option<ParkContext>,
@@ -600,11 +631,34 @@ async fn run_call(
         ws_failure_prompt: ctx.ws_failure_prompt.clone(),
     };
     let (controller, handle) = CallController::new(cfg);
+    // Clone BEFORE the registry takes it — teardown below consults
+    // `remote_bye_received()` to decide whether we still owe the peer a
+    // BYE. Same reason and same shape as the inbound acceptor's
+    // `cleanup_handle`; `CallHandle` is cheap (Arc-of-Notify +
+    // Arc-of-AtomicBool).
+    let cleanup_handle = handle.clone();
     // Reachable by the admin conference API for this leg's lifetime.
     // Carries the SIP Call-ID + direction for the `GET /admin/calls`
     // listing (issue #311).
     ctx.control_registry
         .insert(handle, sip_call_id.clone(), Direction::Outbound);
+    // …and by SIP Call-ID, which is what UAS dispatch resolves an
+    // inbound in-dialog BYE/CANCEL against. The two registries are
+    // separate namespaces (bridge id vs SIP Call-ID) and outbound legs
+    // previously joined only the first, so a far-end BYE reached
+    // `on_bye`, missed the lookup, and terminated nothing (#324).
+    //
+    // `answer_text` is `None`: it holds the SDP *we* answered an inbound
+    // INVITE with, which has no outbound analogue — we sent the offer.
+    // A peer re-INVITE on this leg is therefore refused `501` (the
+    // documented "no stored answer" path) rather than the `481` an
+    // unregistered dialog used to produce. Renegotiating an outbound leg
+    // is genuinely unimplemented, so 501 is the honest answer.
+    ctx.call_registry.insert(
+        sip_call_id.clone(),
+        CallEntry::new(cleanup_handle.clone(), None),
+    );
+
     let run_result = controller.run().await;
     ctx.control_registry.remove(ctx.bridge_id.as_str());
     match &run_result {
@@ -616,7 +670,22 @@ async fn run_call(
     // The controller's done — this leg is no longer a consult target;
     // then BYE the dialog and release the media session.
     ctx.consult_registry.remove(ctx.bridge_id.as_str());
-    originator.hangup(&dialog).await;
+    // Only BYE if the far end didn't already. When the callee hangs up,
+    // `terminate_from_bye` has marked the handle and we've answered
+    // their BYE with 200 — the dialog is over, and a BYE of our own
+    // goes to a dialog the peer has discarded, dying on Timer F ~32 s
+    // later (issue #324's last impact row). The inbound acceptor has
+    // always gated its teardown BYE this way; the outbound path never
+    // did. It went unnoticed because until the dialog-store fix above,
+    // a far-end BYE was answered 481 and never reached the controller
+    // at all, so this branch was unreachable in the case that needs it.
+    if !cleanup_handle.remote_bye_received() {
+        originator.hangup(&dialog).await;
+    }
+    // Order mirrors the inbound acceptor: BYE first, deregister second,
+    // so a BYE retransmit racing our teardown still finds the entry and
+    // gets a 200 rather than falling through to the unknown-dialog path.
+    ctx.call_registry.remove(&sip_call_id);
     originator.stop_session(&call_id).await;
     drop(call_handle); // stop keepalives / session-timer tasks
 
@@ -752,6 +821,7 @@ mod tests {
             consult_registry: ConsultRegistry::new(),
             conference: None,
             control_registry: CallControlRegistry::new(),
+            call_registry: CallRegistry::new(),
             park: None,
             srtp_requested: false,
             ws_reconnect_enabled: false,

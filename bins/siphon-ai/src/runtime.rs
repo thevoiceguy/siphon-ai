@@ -936,6 +936,9 @@ impl Runtime {
             // graceful drain now counts and waits for outbound calls,
             // which it previously walked straight past.
             service = service.with_call_registry(acceptor.registry().clone());
+            // Refuse origination while draining, same DrainFlag the
+            // inbound routing handler uses to 503 new INVITEs (#343).
+            service = service.with_drain(drain.clone());
             // Hold music for the WS-reconnect gap on outbound legs (0.7.3) —
             // the same [media].moh_file the inbound acceptor uses.
             service = service.with_moh_file(media.moh_file.clone());

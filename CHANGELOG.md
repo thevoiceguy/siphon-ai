@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Graceful drain now refuses outbound origination** (issue #343). During drain (SIGTERM → draining), `POST /admin/v1/calls` was not gated: it returned `202` and actually placed an INVITE, dialing the PSTN even late in the drain window. The new call wasn't tracked by the drain and was orphaned when the process exited — no clean teardown, no CDR — and since origination is the one admin action that spends money, a deploy overlapping an operator- or automation-driven originate would strand a real call. New inbound INVITEs were already 503'd during drain; outbound was the gap. `originate` now consults the same `DrainFlag` the inbound routing handler uses and refuses with `503 Service Unavailable` (new `OriginateRejection::Draining`), checked first — before gateway validation or a concurrency permit — so a draining daemon returns `Draining`, not `UnknownGateway`, and sends no INVITE.
+
 ## [0.40.0] - 2026-07-22
 
 ### Added

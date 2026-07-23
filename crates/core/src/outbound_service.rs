@@ -121,6 +121,12 @@ pub struct OutboundService {
     /// `[recording.storage]` upload settings, shared with the acceptor's
     /// teardown enqueue.
     recording_upload: Option<std::sync::Arc<siphon_ai_http::upload::UploadSettings>>,
+    /// The daemon-wide graceful-shutdown flag (0.41.0). While draining,
+    /// `originate` refuses new calls with [`OriginateRejection::Draining`]
+    /// — the same `DrainFlag` the inbound acceptor consults to 503 new
+    /// INVITEs. `None` in tests / when the runtime never installs one, in
+    /// which case origination is never gated (issue #343).
+    drain: Option<siphon_ai_sip_glue::DrainFlag>,
 }
 
 impl OutboundService {
@@ -149,7 +155,15 @@ impl OutboundService {
             moh_file: None,
             recording: RecordingConfig::default(),
             recording_upload: None,
+            drain: None,
         }
+    }
+
+    /// Share the daemon's graceful-shutdown flag so origination is
+    /// refused while draining (issue #343). Unset → never gated.
+    pub fn with_drain(mut self, drain: siphon_ai_sip_glue::DrainFlag) -> Self {
+        self.drain = Some(drain);
+        self
     }
 
     /// Install the `[recording]` config so outbound legs can record
@@ -229,6 +243,16 @@ impl OutboundService {
 
 impl OutboundOriginateHandle for OutboundService {
     fn originate(&self, req: OriginateRequest) -> Result<String, OriginateRejection> {
+        // Refuse new origination while draining — first, before any
+        // validation or a permit is consumed. Origination is the one
+        // admin action that dials the PSTN, and a call started now would
+        // be orphaned when the process exits (no clean teardown, no CDR);
+        // the drain wait doesn't even track it. This mirrors the inbound
+        // acceptor 503'ing new INVITEs during drain (issue #343).
+        if self.drain.as_ref().is_some_and(|d| d.is_draining()) {
+            return Err(OriginateRejection::Draining);
+        }
+
         // Snapshot the gateway table for this origination. The guard
         // lives to the end of this (synchronous) method, past every
         // `gw` read; the spawned call captures only the cloned
@@ -906,5 +930,64 @@ mod tests {
             outbound_result_label(&Err(OutboundError::Transport("dns".into()))),
             "unreachable"
         );
+    }
+
+    fn bare_service() -> OutboundService {
+        OutboundService::new(
+            HashMap::new(),
+            OutboundGuard::new(2, None),
+            BridgeDefaults::default(),
+            crate::acceptor::default_call_id_factory(),
+            Arc::new(siphon_ai_cdr::NullSink),
+            Arc::new(siphon_ai_webhooks::NullSink),
+            ConsultRegistry::new(),
+        )
+    }
+
+    fn originate_req() -> OriginateRequest {
+        OriginateRequest {
+            to: "+13125550000".into(),
+            gateway: "g".into(),
+            ws_url: Some("ws://127.0.0.1:9/".into()),
+            from: None,
+            delayed_offer: false,
+            recording: None,
+        }
+    }
+
+    /// Origination is refused while draining, and the check fires *before*
+    /// the unknown-gateway lookup — a draining daemon says `Draining`, not
+    /// `UnknownGateway`, even with no gateways configured (issue #343).
+    #[test]
+    fn originate_refused_while_draining() {
+        let drain = siphon_ai_sip_glue::DrainFlag::new();
+        let svc = bare_service().with_drain(drain.clone());
+
+        // Not draining yet: falls through to the real validation, which
+        // here rejects the (absent) gateway — proving the gate is open.
+        assert!(matches!(
+            svc.originate(originate_req()),
+            Err(OriginateRejection::UnknownGateway(_))
+        ));
+
+        drain.begin();
+        assert!(
+            matches!(
+                svc.originate(originate_req()),
+                Err(OriginateRejection::Draining)
+            ),
+            "draining must refuse before gateway validation"
+        );
+    }
+
+    /// With no DrainFlag installed, origination is never gated on drain —
+    /// existing single-purpose embedders and tests are unaffected.
+    #[test]
+    fn originate_not_gated_without_drain_flag() {
+        let svc = bare_service();
+        assert!(matches!(
+            svc.originate(originate_req()),
+            Err(OriginateRejection::UnknownGateway(_))
+        ));
     }
 }

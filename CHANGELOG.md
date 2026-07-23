@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Graceful drain now waits for a call's CDR to be durably written before considering it torn down** (issue #344, file-sink half). The post-controller cleanup task deregistered the call from the registry *before* emitting its CDR — but `drain_wait` polls that registry's length to decide the drain is complete. So a drain-forced call's slot could empty while its `FileSink` write was still in flight, letting teardown proceed and cancel the detached cleanup task mid-write, silently losing the billing-grade record. Deregistration now happens **last**, after `cdr_sink.emit(...)` has awaited the file flush, in both the inbound acceptor and the outbound service; the drain therefore blocks until the CDR is on disk (within the force-grace window). A BYE retransmit racing this window still finds the entry and gets a 200 — the slot just lives a few milliseconds longer. The HEP CDR chunk (a separate loss the issue also reports — the HEP worker is aborted on shutdown rather than drained) is a coordinated follow-up in `hep-rs`; this change covers the durable file record.
+
 ## [0.40.0] - 2026-07-22
 
 ### Added

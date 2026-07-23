@@ -692,10 +692,6 @@ async fn run_call(
     if !cleanup_handle.remote_bye_received() {
         originator.hangup(&dialog).await;
     }
-    // Order mirrors the inbound acceptor: BYE first, deregister second,
-    // so a BYE retransmit racing our teardown still finds the entry and
-    // gets a 200 rather than falling through to the unknown-dialog path.
-    ctx.call_registry.remove(&sip_call_id);
     originator.stop_session(&call_id).await;
     drop(call_handle); // stop keepalives / session-timer tasks
 
@@ -724,7 +720,7 @@ async fn run_call(
     let end_event = WebhookEvent::CallEnd(CallEndEvent {
         version: WEBHOOK_VERSION,
         call_id: ctx.bridge_id.as_str().to_string(),
-        sip_call_id,
+        sip_call_id: sip_call_id.clone(),
         timestamp: ended_at,
         from: ctx.from.clone(),
         to: ctx.to.clone(),
@@ -735,6 +731,19 @@ async fn run_call(
     });
     ctx.cdr_sink.emit(record).await;
     ctx.webhook_sink.emit(end_event).await;
+
+    // Deregister LAST — after the CDR is durably written, not before.
+    // `drain_wait` polls this registry's length to decide the graceful
+    // shutdown is done; removing the entry earlier (as this used to,
+    // right after the BYE) let a drain-forced call's slot empty while
+    // its CDR emit was still in flight, so teardown proceeded and the
+    // detached cleanup task was cancelled mid-write — the call's
+    // billing-grade record silently lost (issue #344). Holding the
+    // entry until the `FileSink::emit` above has flushed makes the drain
+    // wait for it. A BYE retransmit racing this window still finds the
+    // entry and gets a 200, same as before — the slot just lives a few
+    // milliseconds longer.
+    ctx.call_registry.remove(&sip_call_id);
 }
 
 /// Assemble the CDR for an answered outbound call — the outbound

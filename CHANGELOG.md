@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-07-24
+
 ### Fixed
 
 - **Force-hangup on a call answered through a record-routing trunk now releases the caller** (issue #342; fixed upstream by [siphon-rs#69](https://github.com/thevoiceguy/siphon-rs/pull/69), pin bumped `50866b1599a7` → `fbdf132a11d6`). A local teardown — `POST /admin/calls/:id/hangup`, a WS `hangup` (`server_hangup`), or a bridge-ended stop — tore down siphon's media and wrote the CDR but left the caller in **dead air** until the carrier's session timer fired (~60 s on Twilio). Only a far-end-initiated BYE (`caller_hangup`) was unaffected. Root cause was in siphon-rs: `IntegratedUAC::bye` and `bye_via_flow` were the only in-dialog senders that skipped `prepare_in_dialog_request`, so the closing BYE went out with **no `Route` headers** and the carrier's private media-gateway address as Request-URI. A record-routing edge can't correlate that and answers `481 Call/Transaction Does Not Exist`, so the BYE never reached the PSTN. Measured live on the Twilio trunk: the daemon's real BYE drew a 481, while a hand-crafted BYE carrying the two `Record-Route` hops + the dialog local URI drew a 200 and released the stranded leg immediately. This looked TLS-specific only because the local TCP test peer doesn't Record-Route — the real condition is a record-routing peer. No siphon-ai code change; the fix routes both BYE methods through the dialog route set exactly as `reinvite`/`send_update`/`send_refer_via_flow` already do (empty route set → byte-identical, so direct peers are unaffected), and sources the BYE `From` from the dialog's local URI (RFC 3261 §12.2.1.1). Load-bearing regression test upstream (`bye_via_flow_carries_route_set_and_dialog_local_uri`), CI-proven red without the fix.
@@ -2652,7 +2654,8 @@ the WebSocket server's job.
 - Reference WebSocket servers in `examples/`: echo (Python / Node),
   an OpenAI Realtime bridge, and a Deepgram + LLM voice bot.
 
-[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.37.0...HEAD
+[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.41.0...HEAD
+[0.41.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.40.0...v0.41.0
 [0.14.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.12.2...v0.13.0

@@ -213,6 +213,12 @@ pub enum OriginateRejection {
     /// (0.37.x). The gateway `from` is validated at config load, so this
     /// only fires for a bad override in the originate request.
     BadFrom(String),
+    /// The daemon is draining for graceful shutdown → 503 (0.41.0,
+    /// issue #343). Origination is the one admin action that dials the
+    /// PSTN, so it is refused during drain the same way new inbound
+    /// INVITEs are 503'd — a call started now would be orphaned when the
+    /// process exits.
+    Draining,
 }
 
 /// The outbound-origination entry point the admin endpoint calls. Defined
@@ -751,6 +757,10 @@ fn originate_call(state: &AdminState, body: &Bytes) -> Response<Full<Bytes>> {
                 OriginateRejection::BadFrom(f) => {
                     (StatusCode::BAD_REQUEST, format!("bad from: {f}"))
                 }
+                OriginateRejection::Draining => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "draining for shutdown; not accepting new calls".to_string(),
+                ),
             };
             json_response(status, &json!({ "error": msg }))
         }

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.2] - 2026-07-24
+
 ### Fixed
 
 - **Outbound in-dialog requests now carry monotonically increasing CSeqs (hold → resume → BYE no longer collide)** (issue #353). On an **outbound** call, every in-dialog request after the initial INVITE — a bot `hold`, then `resume`, and the closing BYE on local teardown — went out with the **same `CSeq: 2`** instead of `2, 3, 4, …`. The carrier rejected the malformed sequence: the duplicate-CSeq **BYE drew `408 Request Timeout`** (callee stranded in dead air until the carrier's ~60 s session timer — the #342 symptom, resurfacing for the re-INVITEd-call case), and the duplicate-CSeq **resume re-INVITE** was indistinguishable from a retransmission of the hold, so a resume could never apply `a=sendrecv` and the call stayed one-way/held. Only observable **after** 0.41.1, because before it none of these outbound in-dialog requests reached the wire (#342). Root cause: the outbound leg resolved each in-dialog request's dialog from a **frozen snapshot taken at answer** (`DialogSource::Direct(Box<Dialog>)`) — so `send_reinvite` advanced the CSeq on a throwaway per-request clone (and re-inserted into the gateway UAC's *private* `DialogManager`, which the snapshot never reads), and every `resolve()` restarted from `local_cseq == 1`. Inbound legs were immune: they resolve from the shared `DialogManager` the UAC re-inserts into. The fix holds the outbound leg's confirmed dialog behind a single shared, advancing handle (`Arc<Mutex<Dialog>>`) that the transfer REFER, hold/resume re-INVITE, and teardown BYE all resolve from and **commit back to**, so the local CSeq increases monotonically across the call. No siphon-rs change. Load-bearing regression test (`direct_source_commit_advances_the_shared_cseq`), CI-proven red without the fix (it reproduces the `2, 2, 2` collision).
@@ -2664,7 +2666,8 @@ the WebSocket server's job.
 - Reference WebSocket servers in `examples/`: echo (Python / Node),
   an OpenAI Realtime bridge, and a Deepgram + LLM voice bot.
 
-[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.41.1...HEAD
+[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.41.2...HEAD
+[0.41.2]: https://github.com/thevoiceguy/siphon-ai/compare/v0.41.1...v0.41.2
 [0.41.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.41.0...v0.41.1
 [0.41.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.40.0...v0.41.0
 [0.14.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.14.0...v0.14.1

@@ -30,6 +30,7 @@ use hep_rs::{
 };
 use thiserror::Error;
 use tokio::task::JoinHandle;
+use tracing::warn;
 
 /// Telemetry-owned HEP plumbing. Holds the shared `Arc<dyn HepSink>`
 /// for both the sip-hep / forge-hep emitters and SiphonAI's own
@@ -48,21 +49,55 @@ pub struct HepTelemetry {
 }
 
 /// Owner of the spawned UDP worker. The runtime stashes this on
-/// `Runtime` and aborts it on shutdown — see
+/// `Runtime` and drains it on shutdown — see
 /// `bins/siphon-ai/src/runtime.rs::Runtime::run`. Keeping it
 /// separate from [`HepTelemetry`] is what makes the latter
 /// Arc-friendly.
 pub struct HepWorkerHandle {
+    /// A typed clone of the sink, kept solely to signal the worker's
+    /// graceful drain. The share-by-Arc `HepSinkHandle` on
+    /// [`HepTelemetry`] erases the concrete type, and `shutdown()` is a
+    /// `UdpHepSink` method, so the worker owner holds its own clone.
+    sink: UdpHepSink,
     worker: Option<JoinHandle<()>>,
 }
 
+/// How long to wait for the HEP worker to flush its queue on shutdown
+/// before giving up and aborting. Generous enough for a realistic
+/// end-of-drain backlog (a handful of CDR/QoS chunks) to reach a
+/// responsive collector, bounded so a wedged or unreachable collector
+/// can't hold up daemon exit.
+const HEP_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl HepWorkerHandle {
-    /// Abort the worker. Bounded wait so a wedged collector socket
-    /// can't block daemon shutdown.
+    /// Drain the worker gracefully: signal it to stop accepting new
+    /// packets and flush whatever is already queued, then await it
+    /// within [`HEP_DRAIN_GRACE`]. Falls back to `abort()` only if the
+    /// grace elapses (unreachable collector).
+    ///
+    /// Previously this aborted outright, discarding the queue — so a
+    /// CDR/QoS chunk emitted right at shutdown (a drain-forced call's
+    /// record) was lost even though the file CDR landed (siphon-ai
+    /// #344). The global SIP/forge emitters hold `tx` clones forever, so
+    /// the channel never closes on its own; `UdpHepSink::shutdown`
+    /// closes the *receiver* instead, which drains regardless.
     pub async fn shutdown(mut self) {
-        if let Some(worker) = self.worker.take() {
-            worker.abort();
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(250), worker).await;
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        self.sink.shutdown();
+        match tokio::time::timeout(HEP_DRAIN_GRACE, worker).await {
+            Ok(_) => {}
+            Err(_) => {
+                // The worker didn't finish flushing in time — almost
+                // always a collector that isn't reading. Nothing more to
+                // wait on; the JoinHandle is dropped, which detaches the
+                // (now-closing) task rather than leaking it.
+                warn!(
+                    grace_ms = HEP_DRAIN_GRACE.as_millis(),
+                    "HEP worker did not drain within grace; some queued chunks may be undelivered"
+                );
+            }
         }
     }
 }
@@ -99,6 +134,9 @@ impl HepTelemetry {
         udp_cfg.queue_capacity = queue_capacity;
         let (sink, worker) = UdpHepSink::start(udp_cfg).await?;
 
+        // A typed clone for the worker handle's graceful-drain signal,
+        // taken before the sink is erased into the share-by-Arc handle.
+        let shutdown_sink = sink.clone();
         let arc_sink: HepSinkHandle = Arc::new(sink);
 
         // Install the per-protocol emitters globally. siphon-rs's
@@ -127,6 +165,7 @@ impl HepTelemetry {
             node_id,
         };
         let worker_handle = HepWorkerHandle {
+            sink: shutdown_sink,
             worker: Some(worker),
         };
         Ok((telemetry, worker_handle))

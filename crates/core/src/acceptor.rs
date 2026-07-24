@@ -3363,7 +3363,11 @@ impl BridgingAcceptor {
                     send_outbound_bye(teardown.as_ref(), &sip_call_id, bridge_call_id.as_str())
                         .await;
                 }
-                registry.remove(&sip_call_id);
+                // `registry` deregistration is deferred to the very end,
+                // after the CDR is durably written — see the note at that
+                // `registry.remove` below (#344). `control_registry` (the
+                // bridge-id table the admin API reads) is not what
+                // `drain_wait` polls, so it deregisters here.
                 control_registry.remove(bridge_call_id.as_str());
                 if let Err(e) = media.session_manager().stop_session(&forge_call_id).await {
                     warn!(
@@ -3432,6 +3436,17 @@ impl BridgingAcceptor {
                 }
                 cdr_sink.emit(record).await;
                 webhook_sink.emit(end_event).await;
+
+                // Deregister LAST — after the CDR is durably written.
+                // `drain_wait` polls this registry's length to decide the
+                // graceful shutdown is complete; removing the entry
+                // before the CDR emit (as this used to) let a
+                // drain-forced call's slot empty while its `FileSink`
+                // write was still in flight, so teardown proceeded and
+                // this detached task was cancelled mid-write, silently
+                // losing the record (issue #344). Holding the entry until
+                // the flush above completes makes the drain wait for it.
+                registry.remove(&sip_call_id);
             },
             tracing::Span::current(),
         ))

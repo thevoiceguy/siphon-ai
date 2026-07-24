@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.1] - 2026-07-24
+
 ### Fixed
 
 - **Locally terminated *outbound* calls now BYE the carrier; hold works on outbound legs** (completes issue #342 — the outbound half; fixed upstream by [siphon-rs#70](https://github.com/thevoiceguy/siphon-rs/pull/70), pin bumped `fbdf132a11d6` → `5c7cf20beb50`). #342/0.41.0 fixed the *inbound* teardown BYE (route set), but the same stranding persisted on **outbound** calls: hanging one up locally (admin hangup, WS `server_hangup`, drain, controller exit) sent **no BYE**, leaving the callee in dead air until the carrier's ~60 s session timer, and a bot-initiated `hold`/transfer re-INVITE silently failed. Found black-box testing 0.41.0 on the live Twilio trunk. Root cause was in siphon-rs: `TlsPool::send_tls` keyed connection reuse by `(peer_addr, SNI)`. An outbound call's INVITE opens its connection with the request-URI **hostname** SNI, but an in-dialog request (BYE / re-INVITE / REFER) derives its SNI from the peer's `Record-Route` — an **IP literal** for a carrier edge — so it missed the hostname-keyed connection and dialed a **fresh** connect, which the edge refuses and whose IP-SNI handshake fails the edge's hostname cert (`outbound TLS connect … transport error`); the request never reached the wire. Inbound legs were unaffected because they reuse their inbound connection explicitly via a `flow`. The fix makes `send_tls` fall back to reusing any live connection to the same peer `addr` on an exact-key miss (RFC 5923 connection reuse); the TCP pool already keyed by `addr` alone. No siphon-ai code change. Load-bearing regression test upstream (`send_tls_reuses_connection_to_same_addr_across_sni`), CI-proven red without the fix.
@@ -2658,7 +2660,8 @@ the WebSocket server's job.
 - Reference WebSocket servers in `examples/`: echo (Python / Node),
   an OpenAI Realtime bridge, and a Deepgram + LLM voice bot.
 
-[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.41.0...HEAD
+[Unreleased]: https://github.com/thevoiceguy/siphon-ai/compare/v0.41.1...HEAD
+[0.41.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.41.0...v0.41.1
 [0.41.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.40.0...v0.41.0
 [0.14.1]: https://github.com/thevoiceguy/siphon-ai/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/thevoiceguy/siphon-ai/compare/v0.13.0...v0.14.0

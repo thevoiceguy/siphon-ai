@@ -30,6 +30,7 @@
 
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use sip_core::SipUri;
 use sip_dialog::{Dialog, DialogManager};
 use sip_uac::integrated::IntegratedUAC;
@@ -49,10 +50,20 @@ pub enum DialogSource {
         dialog_manager: Arc<DialogManager>,
     },
     /// Outbound leg: the originate path holds the confirmed dialog
-    /// directly (each gateway UAC has its own private DialogManager,
-    /// so the shared one can't resolve it). Snapshot taken at answer;
-    /// the CSeq-divergence note below applies the same way.
-    Direct(Box<Dialog>),
+    /// directly (each gateway UAC has its own private DialogManager, so
+    /// the shared one can't resolve it). Held behind a shared, advancing
+    /// handle rather than a frozen snapshot: every in-dialog request on
+    /// this leg — hold, resume, REFER, and the teardown BYE — resolves
+    /// from and commits back to the *same* `Dialog`, so its local CSeq
+    /// increases monotonically (2, 3, 4, …). A frozen per-request clone
+    /// left `local_cseq` stuck at 1, so every request reused `CSeq 2`
+    /// and the carrier 408'd the duplicate-CSeq BYE (issue #353). The
+    /// call-id is carried alongside so `sip_call_id()` needn't take the
+    /// lock just to log.
+    Direct {
+        sip_call_id: String,
+        dialog: Arc<Mutex<Dialog>>,
+    },
 }
 
 impl DialogSource {
@@ -64,7 +75,22 @@ impl DialogSource {
                 sip_call_id,
                 dialog_manager,
             } => dialog_manager.find_by_call_id(sip_call_id),
-            DialogSource::Direct(dialog) => Some(*dialog.clone()),
+            DialogSource::Direct { dialog, .. } => Some(dialog.lock().clone()),
+        }
+    }
+
+    /// Persist a dialog whose local CSeq was just consumed by an
+    /// in-dialog request, so the next request on this leg continues the
+    /// sequence instead of restarting from the answer-time snapshot.
+    ///
+    /// `Managed` legs already persist through the UAC's shared
+    /// `DialogManager` (each in-dialog send re-inserts the advanced
+    /// dialog), so this is a no-op there. `Direct` (outbound) legs hold
+    /// the dialog here and must be written back — without it every
+    /// hold/resume/BYE reused `CSeq 2` (issue #353).
+    pub(crate) fn commit(&self, dialog: &Dialog) {
+        if let DialogSource::Direct { dialog: shared, .. } = self {
+            *shared.lock() = dialog.clone();
         }
     }
 
@@ -81,7 +107,7 @@ impl DialogSource {
     fn sip_call_id(&self) -> &str {
         match self {
             DialogSource::Managed { sip_call_id, .. } => sip_call_id,
-            DialogSource::Direct(dialog) => dialog.id().call_id(),
+            DialogSource::Direct { sip_call_id, .. } => sip_call_id,
         }
     }
 }
@@ -108,6 +134,13 @@ pub struct DialogControl {
 }
 
 impl DialogControl {
+    /// Persist a dialog whose local CSeq an in-dialog request just
+    /// advanced, so the next request on this leg continues the sequence
+    /// (issue #353). No-op for inbound legs. See [`DialogSource::commit`].
+    pub(crate) fn commit(&self, dialog: &sip_dialog::Dialog) {
+        self.source.commit(dialog)
+    }
+
     /// Per-task dialog clone, or `None` if the dialog is gone.
     pub(crate) fn resolve(&self) -> Option<sip_dialog::Dialog> {
         self.source.resolve()
@@ -320,10 +353,44 @@ mod tests {
         // Outbound legs: the dialog is held directly; run_call's
         // teardown owns the BYE, so the transfer task must not send
         // a second one.
-        let src = DialogSource::Direct(Box::new(consult_dialog("out@siphon", "l", "r")));
+        let src = DialogSource::Direct {
+            sip_call_id: "out@siphon".into(),
+            dialog: Arc::new(Mutex::new(consult_dialog("out@siphon", "l", "r"))),
+        };
         let dialog = src.resolve().expect("direct always resolves");
         assert_eq!(dialog.id().call_id(), "out@siphon");
         assert!(!src.bye_after_refer());
+    }
+
+    #[test]
+    fn direct_source_commit_advances_the_shared_cseq() {
+        // Regression for #353: a Direct leg must persist an advanced
+        // dialog so successive in-dialog requests (hold, resume, BYE)
+        // carry strictly increasing CSeqs instead of all reusing 2.
+        let src = DialogSource::Direct {
+            sip_call_id: "out@siphon".into(),
+            dialog: Arc::new(Mutex::new(consult_dialog("out@siphon", "l", "r"))),
+        };
+        let base = src.resolve().unwrap().local_cseq();
+        // Model the real wiring: the transfer control, hold control, and
+        // teardown are *separate* `DialogSource`s (`#[derive(Clone)]`)
+        // over the SAME `Arc<Mutex<Dialog>>`. Each hold/resume/BYE
+        // resolves through its own clone, consumes one CSeq, and commits
+        // — and the advance must be visible through every other clone.
+        let hold_ctl = src.clone();
+        let resume_ctl = src.clone();
+        let teardown = src.clone();
+        let mut seen = Vec::new();
+        for ctl in [&hold_ctl, &resume_ctl, &teardown] {
+            let mut d = ctl.resolve().unwrap();
+            seen.push(d.next_local_cseq());
+            ctl.commit(&d);
+        }
+        assert_eq!(
+            seen,
+            vec![base + 1, base + 2, base + 3],
+            "a committed send on one clone must advance the CSeq the others see"
+        );
     }
 
     #[test]

@@ -2629,6 +2629,10 @@ async fn run_transfer_inner(
                 .await
         }
     };
+    // The REFER consumed a local CSeq; persist it so an outbound leg's
+    // teardown BYE continues the sequence (no-op for inbound, which
+    // persists through the shared DialogManager) (#353).
+    ctx.control.commit(&dialog);
     match sent {
         Ok((response, _subscription)) => {
             let status = response.code();
@@ -2693,7 +2697,13 @@ async fn drive_hold_reinvite(
     };
     let mut glare_retried = false;
     loop {
-        match ctx.control.send_reinvite(&mut dialog, offer_sdp).await {
+        let result = ctx.control.send_reinvite(&mut dialog, offer_sdp).await;
+        // The send consumed a local CSeq (advanced in `prepare_in_dialog_request`
+        // before the response, so it's spent whatever the outcome). Persist it
+        // to the shared dialog so the next request — resume, another hold, or
+        // the teardown BYE — continues the sequence instead of reusing it (#353).
+        ctx.control.commit(&dialog);
+        match result {
             Ok(response) => {
                 let status = response.code();
                 if (200..300).contains(&status) {

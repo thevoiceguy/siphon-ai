@@ -22,6 +22,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use forge_core::{CallId, ParticipantId};
+use parking_lot::Mutex;
 use sip_core::SipUri;
 use siphon_ai_bridge::{BridgeConfig, CallId as BridgeCallId, Direction};
 use siphon_ai_cdr::{
@@ -617,10 +618,20 @@ async fn run_call(
     // the dialog we hold directly — each gateway UAC keeps a private
     // DialogManager, so the shared lookup the inbound path uses
     // can't see this dialog.
+    // One shared, advancing dialog for every in-dialog request on this
+    // leg — transfer REFER, hold/resume re-INVITE, and the teardown BYE
+    // below all resolve from and commit back to it, so its local CSeq
+    // increases monotonically. A frozen per-request snapshot left the
+    // CSeq stuck at 1, so hold/resume/BYE all reused `CSeq 2` and the
+    // carrier 408'd the duplicate-CSeq BYE (issue #353).
+    let shared_dialog = Arc::new(Mutex::new(dialog));
     let transfer = TransferContext {
         control: DialogControl {
             uac: originator.uac(),
-            source: DialogSource::Direct(Box::new(dialog.clone())),
+            source: DialogSource::Direct {
+                sip_call_id: sip_call_id.clone(),
+                dialog: shared_dialog.clone(),
+            },
             // Outbound legs dialed out themselves, so the gateway UAC's
             // dispatcher can reach the peer without flow reuse.
             flow: None,
@@ -635,7 +646,10 @@ async fn run_call(
     let hold = Some(HoldContext {
         control: DialogControl {
             uac: originator.uac(),
-            source: DialogSource::Direct(Box::new(dialog.clone())),
+            source: DialogSource::Direct {
+                sip_call_id: sip_call_id.clone(),
+                dialog: shared_dialog.clone(),
+            },
             flow: None,
         },
         hold_offer_sdp: rewrite_sdp_direction(&accepted.offer_sdp, MediaDirection::SendOnly),
@@ -714,7 +728,13 @@ async fn run_call(
     // a far-end BYE was answered 481 and never reached the controller
     // at all, so this branch was unreachable in the case that needs it.
     if !cleanup_handle.remote_bye_received() {
-        originator.hangup(&dialog).await;
+        // Resolve the dialog as it stands now — any hold/resume re-INVITE
+        // has advanced its local CSeq, and the BYE must continue that
+        // sequence (not restart at 2) or a record-routing carrier 408s
+        // the duplicate (issue #353). Clone out from under the lock; the
+        // BYE itself must not hold it across the await.
+        let final_dialog = shared_dialog.lock().clone();
+        originator.hangup(&final_dialog).await;
     }
     originator.stop_session(&call_id).await;
     drop(call_handle); // stop keepalives / session-timer tasks

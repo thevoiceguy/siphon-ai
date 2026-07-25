@@ -724,7 +724,7 @@ practice — restart is simpler).
 
 ```json
 {
-  "version": 5,
+  "version": 6,
   "call_id": "siphon-6ce27797cc0a4997b90cbae2f46ce7a4",
   "sip_call_id": "1-2651348@127.0.0.1",
   "started_at":  "2026-05-12T18:10:32.481Z",
@@ -768,7 +768,10 @@ practice — restart is simpler).
 `version` 5), `"server_hangup"`, `"local_shutdown"` (admin force-hangup,
 CANCEL, or RFC 4028 session expiry — before 0.40.0 this also absorbed
 remote hangups), `"drain_forced"` (force-ended at the graceful-shutdown
-drain deadline, 0.17.0 — CDR `version` 3), `"bridge_ended"`, `"tap_ended"`.
+drain deadline, 0.17.0 — CDR `version` 3), `"bridge_ended"`, `"tap_ended"`,
+`"transfer"` (the server transferred the call away and the peer accepted
+the REFER — 0.41.x, CDR `version` 6; matches the WS `stop` reason, which
+had reported it correctly all along).
 `tap_disconnect` adds `"inactivity_timeout"` when the RTP watchdog fired.
 
 `duration_ms` is `ended_at - started_at` — **wall-clock including ring /
@@ -1136,7 +1139,7 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | Metric                                  | Type      | Labels                                | What it measures |
 |-----------------------------------------|-----------|---------------------------------------|------------------|
 | `siphon_ai_invites_total`               | counter   | `result=accepted\|rejected\|rejected_attestation\|no_match` | INVITEs by acceptance outcome. `rejected_attestation` is a STIR/SHAKEN policy reject (`min_attestation` gate or `require_identity`) — separately alertable from ordinary routing/media `rejected`. |
-| `siphon_ai_calls_total`                 | counter   | `cause=caller_hangup\|server_hangup\|local_shutdown\|drain_forced\|bridge_ended\|tap_ended` | Ended calls by termination cause. `caller_hangup` (0.40.0) = the far end sent BYE, split out of `local_shutdown`, which now means admin force-hangup / CANCEL / session expiry only. `drain_forced` (0.17.0) = force-ended at the graceful-shutdown drain deadline. |
+| `siphon_ai_calls_total`                 | counter   | `cause=caller_hangup\|server_hangup\|local_shutdown\|drain_forced\|bridge_ended\|tap_ended\|transfer` | Ended calls by termination cause. `caller_hangup` (0.40.0) = the far end sent BYE, split out of `local_shutdown`, which now means admin force-hangup / CANCEL / session expiry only. `drain_forced` (0.17.0) = force-ended at the graceful-shutdown drain deadline. `transfer` (0.41.x) = the call was handed off via REFER. |
 | `siphon_ai_calls_active`                | gauge     | —                                     | Currently-running calls. |
 | `siphon_ai_route_match_total`           | counter   | `route`                               | Calls per matched route. |
 | `siphon_ai_verstat_total`               | counter   | `result=passed\|failed\|unsigned`     | STIR/SHAKEN verification outcomes per inbound INVITE. Emitted only when `[security.stir_shaken].enabled = true`. `passed` = every check held; `failed` = `Identity` header present but verification didn't fully pass; `unsigned` = no `Identity` header. |

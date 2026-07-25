@@ -2409,6 +2409,7 @@ pub(crate) fn termination_label(cause: CdrTerminationCause) -> &'static str {
         CdrTerminationCause::DrainForced => "drain_forced",
         CdrTerminationCause::BridgeEnded => "bridge_ended",
         CdrTerminationCause::TapEnded => "tap_ended",
+        CdrTerminationCause::Transfer => "transfer",
         // Delayed-offer negotiation failures (v2). These don't reach the
         // active-call CDR path (they're emitted directly), but the match
         // must be exhaustive.
@@ -2486,6 +2487,7 @@ fn map_cause(t: CallTermination) -> CdrTerminationCause {
         CallTermination::DrainForced => CdrTerminationCause::DrainForced,
         CallTermination::BridgeEnded => CdrTerminationCause::BridgeEnded,
         CallTermination::TapEnded => CdrTerminationCause::TapEnded,
+        CallTermination::Transfer => CdrTerminationCause::Transfer,
     }
 }
 

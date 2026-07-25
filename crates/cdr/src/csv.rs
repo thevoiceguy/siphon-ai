@@ -372,6 +372,7 @@ mod tests {
             TerminationCause::DrainForced,
             TerminationCause::BridgeEnded,
             TerminationCause::TapEnded,
+            TerminationCause::Transfer,
             TerminationCause::AckTimeout,
             TerminationCause::MissingSdpAnswer,
             TerminationCause::InvalidSdpAnswer,

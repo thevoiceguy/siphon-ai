@@ -630,11 +630,15 @@ After a successful hangup, SiphonAI sends `stop` with
 `target` MUST be a SIP or SIPS URI. SiphonAI sends a blind REFER with
 that target. On a 2xx final response, SiphonAI sends BYE on the same
 dialog (the "REFER + BYE" pattern from RFC 5589 §6.1), then emits
-`stop` with `reason: "transfer"` and closes the WebSocket. NOTIFYs
-that the PBX sends after the REFER are accepted but not surfaced over
-the WS in v1. On a non-2xx response (or a local failure — bad target
-URI, dialog gone), SiphonAI emits `error { code: "transfer_failed" }`
-and the call continues.
+`stop` with `reason: "transfer"` and closes the WebSocket. Because that
+BYE tears the dialog down immediately, SiphonAI does **not** maintain
+the implicit refer subscription (RFC 3515): any NOTIFY the peer sends
+after the REFER lands on an already-terminated dialog and is answered
+`405 Method Not Allowed`. This is not surfaced over the WS and does not
+affect the transfer, which the referred-to peer completes on its own.
+On a non-2xx response (or a local failure — bad target URI, dialog
+gone), SiphonAI emits `error { code: "transfer_failed" }` and the call
+continues.
 
 **Attended transfer** (0.6.1, additive — version stays `"1"`): add
 `replaces_call_id` naming an **answered outbound call** (a consult leg

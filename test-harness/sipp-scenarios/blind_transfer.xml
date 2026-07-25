@@ -8,6 +8,10 @@
     * REFER arrives inside the established dialog
     * SiphonAI handles the 202 Accepted correctly
     * SiphonAI tears down with BYE (StopReason::Transfer)
+    * the refer-progress NOTIFY sent after the BYE (RFC 3515 implicit
+      subscription — Twilio does this) is answered 200 OK, not 405
+      (#357). Deliberately sent post-BYE: that is when a real peer's
+      NOTIFY lands, after SiphonAI's dialog is already gone.
 
   This scenario REQUIRES a WS test server that emits Transfer; the
   bare daemon with the echo example won't trigger it. The companion
@@ -90,4 +94,28 @@ Content-Length: 0
 
 ]]>
   </send>
+
+  <!-- Refer-progress NOTIFY on the (now torn-down) dialog, exactly as
+       a subscription-tracking trunk sends it. Must draw 200 OK, not
+       405 Method Not Allowed (#357). -->
+  <send>
+<![CDATA[
+NOTIFY sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-notify
+Max-Forwards: 70
+From: <sip:sipp@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 NOTIFY
+Contact: <sip:sipp@[local_ip]:[local_port]>
+Event: refer
+Subscription-State: terminated;reason=noresource
+Content-Type: message/sipfrag;version=2.0
+Content-Length: [len]
+
+SIP/2.0 200 OK
+]]>
+  </send>
+
+  <recv response="200" timeout="5000"/>
 </scenario>

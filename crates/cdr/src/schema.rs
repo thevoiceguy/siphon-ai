@@ -63,7 +63,7 @@ use serde::{Deserialize, Serialize};
 /// bumps rather than riding as a silent addition — a strict consumer that
 /// exhaustively matches the v4 cause set will not recognise it, the same
 /// reasoning that drove v2 and v3.
-pub const CDR_VERSION: u32 = 5;
+pub const CDR_VERSION: u32 = 6;
 
 /// One call's complete record. Always serialised as a single JSON
 /// object on a single line for JSONL file sinks.
@@ -397,6 +397,14 @@ pub enum TerminationCause {
     BridgeEnded,
     /// Media tap sub-task ended first (RTP ended, tap detached).
     TapEnded,
+    /// The call was transferred away: the server sent `transfer` and the
+    /// peer accepted the REFER (2xx), so SiphonAI released this leg (v6,
+    /// 0.41.x; issue #356). The WS `stop` message has always reported
+    /// this correctly as `transfer` — before v6 the CDR collapsed it into
+    /// [`Self::LocalShutdown`], so the durable/billing record couldn't
+    /// tell a hand-off from an admin force-hangup (same divergence #332
+    /// fixed for `caller_hangup`).
+    Transfer,
 
     // ─── Delayed-offer negotiation failures (v2, 0.9.5) ───────────
     // These end a call that was half-established (200 OK with our
@@ -484,6 +492,8 @@ mod tests {
         assert_eq!(v, serde_json::json!("local_shutdown"));
         let v = serde_json::to_value(TerminationCause::DrainForced).unwrap();
         assert_eq!(v, serde_json::json!("drain_forced"));
+        let v = serde_json::to_value(TerminationCause::Transfer).unwrap();
+        assert_eq!(v, serde_json::json!("transfer"));
     }
 
     #[test]
@@ -508,14 +518,14 @@ mod tests {
     }
 
     #[test]
-    fn version_field_is_present_and_is_5() {
-        // Bumped to 5 in 0.40.0 (`answered_at` + the `caller_hangup`
-        // cause — see the module versioning note). Was 4 in 0.30.0 (the
-        // `quality` block), 3 in 0.17.0 (`drain_forced`) and 2 in 0.9.5
-        // (delayed-offer failure causes).
-        assert_eq!(CDR_VERSION, 5);
+    fn version_field_is_present_and_is_6() {
+        // Bumped to 6 in 0.41.x (the `transfer` termination cause — issue
+        // #356). Was 5 in 0.40.0 (`answered_at` + `caller_hangup`), 4 in
+        // 0.30.0 (the `quality` block), 3 in 0.17.0 (`drain_forced`) and 2
+        // in 0.9.5 (delayed-offer failure causes).
+        assert_eq!(CDR_VERSION, 6);
         let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
-        assert_eq!(v["version"], serde_json::json!(5));
+        assert_eq!(v["version"], serde_json::json!(6));
     }
 
     /// `answered_at` is what makes connected duration derivable; absent

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **CDR now records a transfer as `termination.cause = "transfer"`** (issue #356; **CDR schema v5 → v6**). When the WS server transferred a call away (`transfer` → the peer accepted the REFER), the WS emitted `stop { reason: "transfer" }` but the CDR recorded `termination.cause = "local_shutdown"` — so the billing-grade, durable record couldn't tell a hand-off from an admin force-hangup, a CANCEL, or an RFC 4028 session-expiry. This is the same WS-vs-CDR divergence that #332 fixed for `caller_hangup`. New `Transfer` variant on `CallTermination` / the CDR `TerminationCause` (serialises `"transfer"`, matching the WS `stop` reason); the controller now sets it on a successful REFER instead of `LocalShutdown`. Additive for parsers that treat `termination.cause` as an open string, but the schema `version` bumps to 6 so a consumer that exhaustively matches the v5 cause set can gate on it. Verified live: the transfer that recorded `local_shutdown` before now records `transfer`.
+
+- **Docs: post-REFER NOTIFY behavior corrected** (issue #357). `docs/PROTOCOL.md` §4.4 claimed NOTIFYs the peer sends after a transfer REFER "are accepted but not surfaced over the WS." In fact, because SiphonAI uses the REFER + BYE pattern it tears the dialog down immediately and does not maintain the implicit refer subscription (RFC 3515), so such a NOTIFY lands on a terminated dialog and is answered `405 Method Not Allowed`. The doc now states this accurately. Behavior is unchanged and the transfer is unaffected (the referred-to peer completes it independently); full RFC 3515 subscription handling that would `200` the NOTIFY is a possible future enhancement, not shipped here.
+
 ## [0.41.2] - 2026-07-24
 
 ### Fixed

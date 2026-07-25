@@ -238,6 +238,12 @@ pub enum CallTermination {
     /// The media tap sub-task ended first (call media stopped, tap
     /// detached).
     TapEnded,
+    /// The call was transferred away: the server sent
+    /// [`BridgeIn::Transfer`] and the peer accepted the REFER, so this
+    /// leg is released. Reported to the WS as `stop { reason:
+    /// "transfer" }` and, since issue #356, distinctly on the CDR
+    /// (`transfer`) rather than collapsed into [`Self::LocalShutdown`].
+    Transfer,
 }
 
 /// Summary of one completed call.
@@ -1560,7 +1566,7 @@ impl CallController {
                             if transfer.as_ref().is_some_and(|t| t.control.source.bye_after_refer()) {
                                 handle.mark_remote_bye();
                             }
-                            termination = CallTermination::LocalShutdown;
+                            termination = CallTermination::Transfer;
                             let _ = control_out_tx
                                 .send(OutgoingEvent::Stop { reason: StopReason::Transfer })
                                 .await;

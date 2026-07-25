@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-07-25
+
 ### Fixed
 
 - **SRTP calls no longer log false "SRTCP replay attack detected" warnings when the peer's RTCP SSRC changes** (fixed upstream by [forge-media#98](https://github.com/thevoiceguy/forge-media/pull/98), pin bumped `6e3fcd2e7c6f` → `003b5e1be563`). The SRTP receive context kept a **single** SRTCP replay window keyed only by the SRTCP index, but RFC 3711 §3.4 replay protection is **per-SSRC** — each SSRC has its own index space. When the inbound RTCP SSRC changed mid-call (Twilio does this transitioning from ringback/early media to the answered stream), the new SSRC's fresh low indices were rejected by the shared window as replays until they climbed past the old SSRC's high-water mark: spurious `SRTCP unprotect failed … replay attack detected` WARNs on normal secure-trunk calls, false positives in `forge_srtcp_replay_attacks_blocked_total`, and dropped RTCP reports (feeding the RTT/quality stats) during the changeover. The SRTCP sibling of the per-SSRC RTP-stats fix (#94, shipped in 0.40.0's pin). Upstream replaces the shared window with a per-SSRC `ReplayWindow` map, creates/advances a window **only after successful authentication** (forged packets can't grow the map or advance any window), and keeps genuine per-SSRC replays blocked — regression-tested upstream (`test_srtcp_replay_window_is_per_ssrc`, red before the fix). No siphon-ai code change; no API change.

@@ -156,6 +156,54 @@ pub fn dispatch_invite<'a>(
     }
 }
 
+/// Methods this UAS answers for real, advertised in `Allow` (405 and
+/// OPTIONS responses). The upstream default plus NOTIFY, which
+/// [`dispatch_notify`] answers since #357. RFC 3261 §20.5 defines
+/// `Allow` as exactly the methods the UA supports — keep this in sync
+/// with the `on_*` overrides below.
+const SUPPORTED_METHODS: &[&str] = &["INVITE", "ACK", "BYE", "CANCEL", "OPTIONS", "NOTIFY"];
+
+/// Decide the response to an inbound NOTIFY (#357).
+///
+/// SiphonAI's only NOTIFY producer is the implicit refer subscription
+/// (RFC 3515 §2.4.4): after our outgoing REFER is accepted, the peer
+/// reports transfer progress via `NOTIFY Event: refer`. Those are
+/// accepted (`200 OK`) and dropped — v1 doesn't surface them over the
+/// WS (`docs/PROTOCOL.md` §4.4), and the REFER+BYE teardown (RFC 5589
+/// §6.1) means we never act on the progress they carry. Deliberately
+/// dialog-blind: the refer NOTIFY normally arrives *after* our BYE
+/// tore the dialog down, so a dialog-scoped responder would 481 the
+/// very message this exists to accept.
+///
+/// Anything else follows RFC 6665: an event package we don't support
+/// gets `489 Bad Event` (with `Allow-Events` naming what we do
+/// support, §4.4.1), and a NOTIFY with no `Event` header at all is
+/// malformed (§8.2.3) → `400`. Never 405 — NOTIFY is in our `Allow`
+/// set now.
+///
+/// Pure / synchronous, like [`dispatch_invite`], so unit tests can
+/// exercise the decision without a transaction manager.
+pub fn dispatch_notify(request: &Request) -> Response {
+    // "o" is the compact form of Event (RFC 6665 §8.1).
+    let event = request
+        .headers()
+        .get("Event")
+        .or_else(|| request.headers().get("o"));
+    match event {
+        Some(value) => {
+            let package = value.split(';').next().unwrap_or("").trim();
+            if package.eq_ignore_ascii_case("refer") {
+                UserAgentServer::create_response(request, 200, "OK")
+            } else {
+                let mut response = UserAgentServer::create_response(request, 489, "Bad Event");
+                let _ = response.headers_mut().set_or_push("Allow-Events", "refer");
+                response
+            }
+        }
+        None => UserAgentServer::create_response(request, 400, "Bad Request"),
+    }
+}
+
 /// One routed INVITE handed to the acceptor.
 ///
 /// `handle` is owned by-value so the acceptor can move it into a
@@ -237,10 +285,10 @@ pub trait CallAcceptor: Send + Sync {
     }
 }
 
-/// `UasRequestHandler` that does INVITE routing and mid-dialog
-/// teardown (BYE / CANCEL). Other methods fall through to the
-/// trait's default 405/501 responses; REFER (transfer) lands in a
-/// follow-up.
+/// `UasRequestHandler` that does INVITE routing, mid-dialog
+/// teardown (BYE / CANCEL), and the refer-NOTIFY responder (#357).
+/// Other methods fall through to the trait's default 405/501
+/// responses.
 pub struct RoutingHandler<A> {
     /// Hot-swappable route table. New INVITEs read the current value
     /// via [`ArcSwap::load`]; a SIGHUP config reload `store`s a fresh
@@ -398,6 +446,38 @@ fn default_resolver() -> RegisterSourceResolver {
 
 #[async_trait]
 impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
+    fn supported_methods(&self) -> &'static [&'static str] {
+        SUPPORTED_METHODS
+    }
+
+    /// Refer-progress NOTIFYs (post-REFER, RFC 3515 implicit
+    /// subscription) are accepted and dropped; see [`dispatch_notify`]
+    /// for the full decision table. No transport context on this hook,
+    /// so no `fill_response` — same as the upstream default it
+    /// replaces.
+    #[instrument(skip_all, fields(method = "NOTIFY"))]
+    async fn on_notify(
+        &self,
+        request: &Request,
+        handle: ServerTransactionHandle,
+    ) -> anyhow::Result<()> {
+        let response = dispatch_notify(request);
+        let result = match response.code() {
+            200 => "accepted",
+            489 => "bad_event",
+            _ => "bad_request",
+        };
+        metrics::counter!("siphon_ai_notify_total", "result" => result).increment(1);
+        debug!(
+            sip_call_id = request.headers().get("Call-ID").unwrap_or(""),
+            event = request.headers().get("Event").unwrap_or(""),
+            code = response.code(),
+            "NOTIFY answered"
+        );
+        handle.send_final(response).await;
+        Ok(())
+    }
+
     #[instrument(skip_all, fields(method = "INVITE", peer = %ctx.peer()))]
     async fn on_invite(
         &self,
@@ -717,5 +797,81 @@ mod tests {
         let resp = drain_reject_response(&drain, 30, &invite()).expect("drain → 503");
         assert_eq!(resp.code(), 503);
         assert_eq!(resp.headers().get("Retry-After"), Some("30"));
+    }
+
+    /// Build a NOTIFY as the post-REFER refer subscription sends it.
+    /// `event` is the raw `Event` header value; `None` omits it.
+    fn notify(event: Option<&str>) -> Request {
+        use sip_core::{Headers, Method, RequestLine, SipUri};
+        let uri = SipUri::parse("sip:siphon@10.0.0.2:5060").unwrap();
+        let mut h = Headers::new();
+        h.push("Via", "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-n1")
+            .unwrap();
+        h.push("From", "<sip:carrier@carrier.example.net>;tag=peer")
+            .unwrap();
+        h.push("To", "<sip:siphon@siphon.example.com>;tag=local")
+            .unwrap();
+        h.push("Call-ID", "refer-notify@example.net").unwrap();
+        h.push("CSeq", "1 NOTIFY").unwrap();
+        if let Some(event) = event {
+            h.push("Event", event).unwrap();
+        }
+        Request::new(
+            RequestLine::new(Method::Notify, uri),
+            h,
+            bytes::Bytes::new(),
+        )
+        .unwrap()
+    }
+
+    /// #357: the refer-progress NOTIFY the peer sends after our REFER
+    /// is accepted, not 405'd (PROTOCOL.md §4.4, RFC 3515 §2.4.4).
+    #[test]
+    fn refer_notify_is_accepted_with_200() {
+        assert_eq!(dispatch_notify(&notify(Some("refer"))).code(), 200);
+    }
+
+    /// The refer subscription may carry an `id` parameter (RFC 3515
+    /// §2.4.6) — only the event package token decides.
+    #[test]
+    fn refer_notify_with_id_param_is_accepted() {
+        assert_eq!(
+            dispatch_notify(&notify(Some("refer;id=93809824"))).code(),
+            200
+        );
+    }
+
+    /// An event package we don't support is a Bad Event, not a Method
+    /// Not Allowed — NOTIFY itself is in our Allow set now. The 489
+    /// names what we do support (RFC 6665 §4.4.1).
+    #[test]
+    fn non_refer_notify_is_489_bad_event_with_allow_events() {
+        let resp = dispatch_notify(&notify(Some("talk")));
+        assert_eq!(resp.code(), 489);
+        assert_eq!(resp.headers().get("Allow-Events"), Some("refer"));
+    }
+
+    /// A NOTIFY with no Event header is malformed (RFC 6665 §8.2.3).
+    #[test]
+    fn notify_without_event_is_400() {
+        assert_eq!(dispatch_notify(&notify(None)).code(), 400);
+    }
+
+    /// NOTIFY must be advertised in `Allow` now that we answer it —
+    /// RFC 3261 §20.5 says Allow is exactly what the UA supports.
+    #[test]
+    fn allow_header_advertises_notify() {
+        struct FakeAcceptor;
+
+        #[async_trait]
+        impl CallAcceptor for FakeAcceptor {
+            async fn on_matched(&self, _call: MatchedCall<'_>) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let routes = Arc::new(ArcSwap::from_pointee(siphon_ai_routes::RouteSet::default()));
+        let handler = RoutingHandler::new(routes, Arc::new(FakeAcceptor));
+        assert!(handler.allow_header().contains("NOTIFY"));
     }
 }

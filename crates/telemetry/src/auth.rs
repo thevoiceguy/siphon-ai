@@ -288,7 +288,9 @@ pub fn route_label(method: &hyper::Method, path: &str) -> &'static str {
             "POST /admin/calls/:id/hangup"
         }
         (m, p)
-            if *m == Method::POST && p.starts_with("/admin/v1/calls/") && p.ends_with("/hangup") =>
+            if *m == Method::POST
+                && p.starts_with("/admin/v1/calls/")
+                && p.ends_with("/hangup") =>
         {
             "POST /admin/v1/calls/:id/hangup"
         }

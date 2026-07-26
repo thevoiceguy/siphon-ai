@@ -903,10 +903,15 @@ The SiphonAI-internal ID. NOT the SIP `Call-ID` (which is in
 ### 5.5 Audio backpressure
 
 SiphonAI buffers up to **200 ms** of outbound audio (10 frames at
-50 fps). Beyond that, the **oldest** frames are dropped and a
-`siphon_ai_outbound_audio_frames_dropped_total` metric is incremented.
-This prevents a slow caller-side from causing unbounded growth when the
-server bursts audio.
+50 fps) ahead of realtime playout, plus at most 100 ms already in
+flight to the media engine. Beyond that, the **oldest** buffered frames
+are dropped and the `siphon_ai_outbound_audio_frames_dropped_total`
+metric is incremented. This bounds memory and audio staleness when a
+server streams faster than realtime: sustained over-rate streaming
+degrades to "the caller hears the newest audio", never "the caller
+falls minutes behind". Bursts up to the window (e.g. a 100–200 ms TTS
+chunk) are absorbed without loss; the server SDKs' paced senders never
+engage it.
 
 A server that needs precise timing should use `mark` to know when its
 audio has actually been played, rather than counting bytes sent.

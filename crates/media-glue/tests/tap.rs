@@ -2099,3 +2099,182 @@ async fn park_still_cuts_a_running_announcement() {
     drop(_playout_tx);
     let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
 }
+
+/// #366 (PROTOCOL §5.5): a faster-than-realtime server burst is
+/// bounded by the 200 ms outbound window instead of being forwarded
+/// into forge wholesale. 100 frames (2 s of audio) arrive back-to-back;
+/// the tap may hand forge the in-flight lead plus the 10-frame window,
+/// paced out as the playout clock advances — but nowhere near all 100
+/// (the pre-fix behaviour, where every frame reached forge within
+/// milliseconds).
+#[tokio::test]
+async fn outbound_burst_is_bounded_by_the_playout_window() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(64, 64));
+    let call = CallId::new("burst-bound");
+    let tap = MediaTap::attach(
+        &manager,
+        &Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, _events_rx) = mpsc::channel::<::siphon_ai_bridge::OutgoingEvent>(64);
+    let (_cmd_tx, cmd_rx) = mpsc::channel::<::siphon_ai_media_glue::TapCommand>(16);
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    // Forge-side drainer: counts Audio requests the tap forwards.
+    let audio_seen = Arc::new(AtomicUsize::new(0));
+    let drainer = {
+        let manager = manager.clone();
+        let call = call.clone();
+        let audio_seen = audio_seen.clone();
+        tokio::spawn(async move {
+            loop {
+                match manager.try_recv_outbound_request(&call).await {
+                    Some(OutboundMediaRequest::Audio(_)) => {
+                        audio_seen.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Some(_) => {}
+                    None => tokio::time::sleep(Duration::from_millis(2)).await,
+                }
+            }
+        })
+    };
+
+    let bytes = pack_pcm16_le(&vec![7i16; SAMPLES_PER_FRAME_8K]);
+    for _ in 0..100 {
+        playout_tx.send(bytes.clone()).await.expect("send frame");
+    }
+
+    // Let the queue settle: the held window drains at playout pace.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let seen = audio_seen.load(Ordering::SeqCst);
+    assert!(
+        seen < 40,
+        "§5.5 window must bound the burst: forge saw {seen}/100 frames",
+    );
+    assert!(
+        seen >= 10,
+        "playout must still flow (lead + held window): forge saw only {seen}",
+    );
+
+    drainer.abort();
+    drop(playout_tx);
+    drop(_cmd_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// #365 (PROTOCOL §4.1): `clear` drops marks queued behind the cleared
+/// audio without firing them, and rebases the playout clock so a mark
+/// sent right after the clear fires promptly instead of late by the
+/// flushed duration. Mirrors the issue's observed timeline: burst →
+/// mark → clear → mark; on 0.43.0 both marks fired seconds late.
+#[tokio::test]
+async fn clear_drops_pending_marks_and_post_clear_marks_fire_promptly() {
+    use std::time::Instant;
+
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::TapCommand;
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(64, 64));
+    let call = CallId::new("mark-clear");
+    let tap = MediaTap::attach(
+        &manager,
+        &Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(64);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(16);
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    // Swallow forge-side requests so the tap never blocks on the
+    // bridge channel.
+    let drainer = {
+        let manager = manager.clone();
+        let call = call.clone();
+        tokio::spawn(async move {
+            loop {
+                if manager.try_recv_outbound_request(&call).await.is_none() {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            }
+        })
+    };
+
+    // 1 s of audio faster than realtime, then a mark behind it.
+    let bytes = pack_pcm16_le(&vec![3i16; SAMPLES_PER_FRAME_8K]);
+    for _ in 0..50 {
+        playout_tx.send(bytes.clone()).await.expect("send frame");
+    }
+    cmd_tx
+        .send(TapCommand::Mark {
+            name: "m1-pending".into(),
+        })
+        .await
+        .expect("send mark");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let cleared_at = Instant::now();
+    cmd_tx.send(TapCommand::Clear).await.expect("send clear");
+    cmd_tx
+        .send(TapCommand::Mark {
+            name: "m2-postclear".into(),
+        })
+        .await
+        .expect("send mark");
+
+    // The first mark after the clear must be m2, promptly — not m1
+    // (dropped without firing, §4.1) and not delayed by the ~1 s of
+    // flushed audio (the 0.43.0 bug fired marks at the wall-clock
+    // estimate of the discarded queue).
+    let name = loop {
+        let ev = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+            .await
+            .expect("a mark fires within 1 s of the clear")
+            .expect("events channel open");
+        if let OutgoingEvent::Mark { name } = ev {
+            break name;
+        }
+    };
+    assert_eq!(
+        name, "m2-postclear",
+        "pending mark must not fire after clear"
+    );
+    assert!(
+        cleared_at.elapsed() < Duration::from_millis(600),
+        "post-clear mark must fire promptly, took {:?}",
+        cleared_at.elapsed(),
+    );
+
+    // And m1 stays dead: no further mark for the rest of the flushed
+    // burst's would-be window (it fired at ~+1 s pre-fix).
+    let extra = tokio::time::timeout(Duration::from_millis(1300), async {
+        loop {
+            match events_rx.recv().await {
+                Some(OutgoingEvent::Mark { name }) => break name,
+                Some(_) => continue,
+                None => break String::new(),
+            }
+        }
+    })
+    .await;
+    assert!(
+        extra.is_err() || extra.as_deref() == Ok(""),
+        "cleared mark fired anyway: {extra:?}",
+    );
+
+    drainer.abort();
+    drop(playout_tx);
+    drop(cmd_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}

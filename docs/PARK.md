@@ -63,7 +63,7 @@ need **`operator`**; `GET /admin/v1/parked` needs **`readonly`**.
 
 `:id` in `/admin/v1/calls/:id/park` is the **bridge** `call_id` (the `siphon-…`
 value on the WS `start` message / CDR), not the SIP Call-ID. List active calls
-and their bridge ids with `GET /admin/calls` — its `call_id` field is this id.
+and their bridge ids with `GET /admin/v1/calls` — its `call_id` field is this id.
 
 ```sh
 ADMIN=http://127.0.0.1:9092          # https://… when [admin.tls] is set

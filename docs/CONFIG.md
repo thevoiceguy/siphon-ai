@@ -870,7 +870,7 @@ key  = "${cred:admin_tls_key}"           # PEM private key
 | `token`          | table array | ≥ 1 required   | At least one `[[admin.token]]`; an `[admin]` block with no tokens is a fatal config error. |
 | `token[].name`   | string      | required       | Unique, non-empty label recorded as the audit-log actor. Duplicate names are a fatal error. |
 | `token[].token`  | string      | required       | The bearer secret (non-empty). Hashed (SHA-256) at load, compared in constant time, never logged. Use `${VAR}` / `${file:…}` / `${cred:…}` to keep it out of the file. |
-| `token[].role`   | enum        | required       | `readonly` (GET/list) ⊂ `operator` (hangup, park/retrieve, conference CRUD) ⊂ `admin` (origination, `PUT /admin/log`, `hep/test`). Unknown value → fatal error. |
+| `token[].role`   | enum        | required       | `readonly` (GET/list) ⊂ `operator` (hangup, park/retrieve, conference CRUD) ⊂ `admin` (origination, `PUT /admin/v1/log`, `hep/test`). Unknown value → fatal error. |
 | `tls.cert`       | path        | required if `[admin.tls]` | PEM certificate chain. Present `[admin.tls]` with a missing/empty `cert` → fatal error. |
 | `tls.key`        | path        | required if `[admin.tls]` | PEM private key. Loaded at startup (fail-loud) and **hot-reloaded on `SIGHUP`** alongside `[sip.tls]`, so cert rotation needs no restart. |
 

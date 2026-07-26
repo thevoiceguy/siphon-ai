@@ -269,10 +269,10 @@ at default INFO; flip them at runtime via:
 
 ```sh
 # /admin/* is on the [admin] listener (0.10.0), not the metrics port;
-# PUT /admin/log needs an `admin`-role bearer token.
+# PUT /admin/v1/log needs an `admin`-role bearer token.
 curl -X PUT --data 'siphon_ai=info,siphon_ai_bridge=debug' \
    -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" \
-   http://127.0.0.1:9092/admin/log
+   http://127.0.0.1:9092/admin/v1/log
 ```
 
 The admin endpoint replies with the previous filter so an
@@ -340,7 +340,7 @@ busy spans (`sip_uas`, `sip_transaction`, `sip_transport`,
 | `forge`              | Frame-by-frame RTP / VAD events (very chatty)                 |
 
 All of the above are reachable without restart via
-`PUT /admin/log`.
+`PUT /admin/v1/log`.
 
 ## Draining for a deploy / restart (0.17.0)
 

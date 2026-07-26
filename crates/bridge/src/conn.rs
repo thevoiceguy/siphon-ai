@@ -729,7 +729,7 @@ async fn run_loop(
                         // Debug-level: every received control message
                         // (Clear, Mark, Hangup, Transfer, SendDtmf).
                         // §11.8 Q9 in DEV_PLAN.md — operators bump
-                        // `siphon_ai_bridge=debug` via /admin/log to
+                        // `siphon_ai_bridge=debug` via /admin/v1/log to
                         // see exactly what the WS server sent. Audio
                         // frames live one notch lower (trace).
                         tracing::debug!(?parsed, "ws inbound control");

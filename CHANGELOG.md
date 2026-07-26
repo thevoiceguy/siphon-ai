@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **All admin endpoints are now served under `/admin/v1/` — the five pre-0.6.0 routes gained v1 forms, and their original unversioned paths remain as deprecated aliases** (issue #362). The admin API had grown in two generations: the original endpoints (`GET /admin/calls`, `POST /admin/calls/:id/hangup`, `GET /admin/registrations`, `GET|PUT /admin/log`, `POST /admin/hep/test`) were unversioned, while everything since 0.6.0 lived under `/admin/v1/`. Closely related verbs on the same collection sat in different namespaces — originate at `POST /admin/v1/calls`, then the obvious `GET /admin/v1/calls` 404'd because the list was at `GET /admin/calls`. The five legacy routes are now also served at `/admin/v1/calls`, `/admin/v1/registrations`, `/admin/v1/log`, and `/admin/v1/hep/test` (same handlers, same roles, same responses); the unversioned paths keep working indefinitely as deprecated aliases (earliest removal 1.0), and `siphon_ai_admin_requests_total{endpoint=…}` labels alias and v1 traffic separately so a dashboard can watch legacy usage drain before anyone retires them. The new **`POST /admin/v1/calls/:id/hangup`** takes the **bridge `call_id`** — the same id its `/park`, `/retrieve`, and `/stats` siblings take — so the rule is now uniform: everything under `/admin/v1/calls/:id/…` takes the bridge id. The legacy alias keeps its SIP Call-ID semantics unchanged; neither endpoint guesses namespaces (a wrong-namespace id is a plain 404), and `GET …/calls` returns both ids per row. Also fixed in the docs: `POST /admin/calls/:id/hangup` was described as "inbound calls only" — stale since the 0.41.x outbound-BYE fixes (#342/#353); it force-releases outbound calls too (live-verified on 0.42.0).
+
 ## [0.42.0] - 2026-07-25
 
 ### Fixed

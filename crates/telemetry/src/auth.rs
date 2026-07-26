@@ -197,9 +197,11 @@ pub fn min_role(method: &hyper::Method, path: &str) -> Option<Role> {
     use hyper::Method;
     match (method, path) {
         // ── ReadOnly ──
-        (&Method::GET, "/admin/calls")
-        | (&Method::GET, "/admin/registrations")
-        | (&Method::GET, "/admin/log")
+        // Unversioned paths are deprecated aliases of the /admin/v1/
+        // forms (#362) — each pair maps to the same role by definition.
+        (&Method::GET, "/admin/calls" | "/admin/v1/calls")
+        | (&Method::GET, "/admin/registrations" | "/admin/v1/registrations")
+        | (&Method::GET, "/admin/log" | "/admin/v1/log")
         | (&Method::GET, "/admin/v1/conferences")
         | (&Method::GET, "/admin/v1/parked")
         // Drain status is a plain GET snapshot, same as the list routes
@@ -210,8 +212,8 @@ pub fn min_role(method: &hyper::Method, path: &str) -> Option<Role> {
         | (&Method::GET, "/admin/v1/drain") => Some(Role::ReadOnly),
 
         // ── Admin (billable / config / observability-blinding) ──
-        (&Method::PUT, "/admin/log")
-        | (&Method::POST, "/admin/hep/test")
+        (&Method::PUT, "/admin/log" | "/admin/v1/log")
+        | (&Method::POST, "/admin/hep/test" | "/admin/v1/hep/test")
         | (&Method::POST, "/admin/v1/calls") => Some(Role::Admin),
 
         // ── Operator (live-call control) ──
@@ -231,8 +233,12 @@ pub fn min_role(method: &hyper::Method, path: &str) -> Option<Role> {
 /// match (ids in the path). Mirrors the tail of `admin::dispatch`.
 fn operator_pattern(method: &hyper::Method, path: &str) -> bool {
     use hyper::Method;
-    // /admin/calls/:id/hangup
+    // /admin/calls/:id/hangup (legacy alias, SIP Call-ID)
     (*method == Method::POST && path.starts_with("/admin/calls/") && path.ends_with("/hangup"))
+        // /admin/v1/calls/:id/hangup (bridge call_id, #362)
+        || (*method == Method::POST
+            && path.starts_with("/admin/v1/calls/")
+            && path.ends_with("/hangup"))
         // /admin/v1/registrations/:name/refresh|restart (0.33.0)
         || (*method == Method::POST
             && path.starts_with("/admin/v1/registrations/")
@@ -258,11 +264,19 @@ fn operator_pattern(method: &hyper::Method, path: &str) -> bool {
 pub fn route_label(method: &hyper::Method, path: &str) -> &'static str {
     use hyper::Method;
     match (method, path) {
+        // Legacy aliases and their /admin/v1/ forms (#362) get distinct
+        // labels on purpose — the split lets a dashboard watch legacy-path
+        // traffic drain to zero before the aliases are ever retired.
         (&Method::GET, "/admin/calls") => "GET /admin/calls",
+        (&Method::GET, "/admin/v1/calls") => "GET /admin/v1/calls",
         (&Method::GET, "/admin/registrations") => "GET /admin/registrations",
+        (&Method::GET, "/admin/v1/registrations") => "GET /admin/v1/registrations",
         (&Method::GET, "/admin/log") => "GET /admin/log",
+        (&Method::GET, "/admin/v1/log") => "GET /admin/v1/log",
         (&Method::PUT, "/admin/log") => "PUT /admin/log",
+        (&Method::PUT, "/admin/v1/log") => "PUT /admin/v1/log",
         (&Method::POST, "/admin/hep/test") => "POST /admin/hep/test",
+        (&Method::POST, "/admin/v1/hep/test") => "POST /admin/v1/hep/test",
         (&Method::POST, "/admin/v1/calls") => "POST /admin/v1/calls",
         (&Method::GET, "/admin/v1/conferences") => "GET /admin/v1/conferences",
         (&Method::POST, "/admin/v1/conferences") => "POST /admin/v1/conferences",
@@ -272,6 +286,13 @@ pub fn route_label(method: &hyper::Method, path: &str) -> &'static str {
             if *m == Method::POST && p.starts_with("/admin/calls/") && p.ends_with("/hangup") =>
         {
             "POST /admin/calls/:id/hangup"
+        }
+        (m, p)
+            if *m == Method::POST
+                && p.starts_with("/admin/v1/calls/")
+                && p.ends_with("/hangup") =>
+        {
+            "POST /admin/v1/calls/:id/hangup"
         }
         (m, p)
             if *m == Method::POST
@@ -470,6 +491,33 @@ mod tests {
             ),
             Some(Role::Operator)
         );
+        // v1 aliases (#362) carry the same role as their legacy forms,
+        // and the v1 hangup (bridge-id) is operator like the legacy one.
+        assert_eq!(
+            min_role(&Method::GET, "/admin/v1/calls"),
+            Some(Role::ReadOnly)
+        );
+        assert_eq!(
+            min_role(&Method::GET, "/admin/v1/registrations"),
+            Some(Role::ReadOnly)
+        );
+        assert_eq!(
+            min_role(&Method::GET, "/admin/v1/log"),
+            Some(Role::ReadOnly)
+        );
+        assert_eq!(min_role(&Method::PUT, "/admin/v1/log"), Some(Role::Admin));
+        assert_eq!(
+            min_role(&Method::POST, "/admin/v1/hep/test"),
+            Some(Role::Admin)
+        );
+        assert_eq!(
+            min_role(&Method::POST, "/admin/v1/calls/abc/hangup"),
+            Some(Role::Operator)
+        );
+        assert_eq!(
+            route_label(&Method::POST, "/admin/v1/calls/abc/hangup"),
+            "POST /admin/v1/calls/:id/hangup"
+        );
         // Registration write actions (0.33.0) are operator-tier, and
         // their labels are templated (bounded cardinality).
         assert_eq!(
@@ -509,10 +557,15 @@ mod tests {
     fn every_served_route_has_a_bounded_label() {
         let statics = [
             (Method::GET, "/admin/calls"),
+            (Method::GET, "/admin/v1/calls"),
             (Method::GET, "/admin/registrations"),
+            (Method::GET, "/admin/v1/registrations"),
             (Method::GET, "/admin/log"),
+            (Method::GET, "/admin/v1/log"),
             (Method::PUT, "/admin/log"),
+            (Method::PUT, "/admin/v1/log"),
             (Method::POST, "/admin/hep/test"),
+            (Method::POST, "/admin/v1/hep/test"),
             (Method::POST, "/admin/v1/calls"),
             (Method::GET, "/admin/v1/conferences"),
             (Method::POST, "/admin/v1/conferences"),
@@ -540,6 +593,7 @@ mod tests {
         // concrete id (an unbounded label would blow up cardinality).
         let dynamics = [
             (Method::POST, "/admin/calls/abc123/hangup"),
+            (Method::POST, "/admin/v1/calls/abc123/hangup"),
             (Method::POST, "/admin/v1/registrations/pbx-a/refresh"),
             (Method::POST, "/admin/v1/registrations/pbx-a/restart"),
             (Method::GET, "/admin/v1/calls/abc123/stats"),

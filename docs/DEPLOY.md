@@ -500,16 +500,21 @@ The **Min role** column is the lowest role a token needs to reach the
 endpoint (roles nest: `readonly` ⊂ `operator` ⊂ `admin`). Below it → `403`;
 no/invalid token → `401`.
 
+All endpoints live under `/admin/v1/` (canonical since 0.43.0, issue #362).
+The five routes that predate 0.6.0 are **also** served at their original
+unversioned paths as deprecated aliases — see
+[Deprecated unversioned aliases](#deprecated-unversioned-aliases) below.
+
 | Method | Path                          | Body            | Min role | Purpose |
 |--------|-------------------------------|-----------------|----------|---------|
-| GET    | `/admin/calls`                | —               | readonly | List active calls (inbound **and** outbound). Each element is `{call_id, sip_call_id, direction}` — the **bridge** `call_id` (what conference / park / `stats` take, and the value on the WS `start` message / CDR), the **SIP** Call-ID (what `hangup` takes), and `"inbound"`/`"outbound"`. Since 0.37.1; before that it returned a bare array of SIP Call-ID strings and exposed no way to obtain the bridge id (issue #311). |
-| POST   | `/admin/calls/:id/hangup`     | —               | operator | Force-shutdown a specific call by its **SIP** `Call-ID` (the `sip_call_id` field from `GET /admin/calls`), inbound calls only. |
-| GET    | `/admin/registrations`        | —               | readonly | Snapshot of every `[[register]]` row and its current state. |
+| GET    | `/admin/v1/calls`             | —               | readonly | List active calls (inbound **and** outbound). Each element is `{call_id, sip_call_id, direction}` — the **bridge** `call_id` (what every other `/admin/v1/calls/:id/…` route and the conference endpoints take, and the value on the WS `start` message / CDR), the **SIP** Call-ID (what the deprecated `hangup` alias takes), and `"inbound"`/`"outbound"`. Since 0.37.1; before that it returned a bare array of SIP Call-ID strings and exposed no way to obtain the bridge id (issue #311). |
+| POST   | `/admin/v1/calls/:id/hangup`  | —               | operator | Force-shutdown a specific call by its **bridge** `call_id` (0.43.0) — the same id `/park`, `/retrieve` and `/stats` take. Works for inbound and outbound calls; the daemon BYEs the peer and tears the call down. `200 {shutdown_signalled: true, call_id, sip_call_id}`; `404` when no active call has that id. |
+| GET    | `/admin/v1/registrations`     | —               | readonly | Snapshot of every `[[register]]` row and its current state. |
 | POST   | `/admin/v1/registrations/:name/refresh` | —     | operator | **Fire an immediate off-cycle REGISTER** for one binding (0.33.0) — no restart needed when a registrar drops or stales the binding. Also **starts a parked binding** (`register_on_startup = false`). Returns `202` with the accept-time row; the outcome is asynchronous (watch the GET, `siphon_ai_register_attempts_total`, or the `registration_state_changed` webhook). `404` unknown name, `409` while draining. |
 | POST   | `/admin/v1/registrations/:name/restart` | —     | operator | **Full re-registration cycle** (0.33.0): REGISTER `Expires: 0` to clear the registrar-side binding, then a fresh REGISTER — for stale server-side state or contact rebinding after an IP change. A failed unregister is logged and the fresh REGISTER proceeds; only the final attempt drives status. Same responses as `refresh`. |
-| GET    | `/admin/log`                  | —               | readonly | Current `tracing` filter directive. |
-| PUT    | `/admin/log`                  | text directive  | admin    | Replace the filter (e.g., `siphon_ai=info,siphon_ai_bridge=debug`). Returns the previous filter. |
-| POST   | `/admin/hep/test`             | —               | admin    | Emit a probe HEP log packet. |
+| GET    | `/admin/v1/log`               | —               | readonly | Current `tracing` filter directive. |
+| PUT    | `/admin/v1/log`               | text directive  | admin    | Replace the filter (e.g., `siphon_ai=info,siphon_ai_bridge=debug`). Returns the previous filter. |
+| POST   | `/admin/v1/hep/test`          | —               | admin    | Emit a probe HEP log packet. |
 | POST   | `/admin/v1/calls`             | JSON (below)    | admin    | **Originate an outbound call** (0.6.0). Returns `202 {"call_id": "..."}`; the call proceeds asynchronously. `501` when `[outbound]` is disabled. |
 | GET    | `/admin/v1/conferences`       | —               | readonly | **List conference rooms** + members (0.7.0). `501` when `[conference]` is disabled. |
 | POST   | `/admin/v1/conferences`       | JSON (opt.)     | operator | **Pre-create a room** (0.7.0). Body `{room_id?, sample_rate?}`; returns `201 {"room_id": "..."}`. |
@@ -521,6 +526,25 @@ no/invalid token → `401`.
 | POST   | `/admin/v1/calls/:id/retrieve`| JSON (opt.)     | operator | **Retrieve a parked call** (0.7.0). Body `{ws_url?}`; `202` (dispatched). `404` unknown call, `409` if the call isn't parked. `501` when `[park]` is disabled. |
 | GET    | `/admin/v1/calls/:id/stats`   | —               | readonly | **Live per-call quality snapshot** (0.31.0). `:id` is the bridge `call_id` (the one on the WS `start` message / CDR). Returns `{call_id, sampled_at, …}` with the CDR `quality` block's fields flattened in — whatever is measured *right now*, unmeasured fields omitted. `404` when no active call has that id (ended calls answer through the CDR / `[quality]` records). |
 | GET    | `/admin/v1/drain`             | —               | readonly | **Graceful-shutdown drain status** (0.17.0). Returns `{draining, active_calls, drain_timeout_secs, remaining_secs}` — `remaining_secs` is the countdown to the deadline (non-null only while draining). Lets a deploy script confirm a pod entered drain and watch it empty. |
+
+### Deprecated unversioned aliases
+
+The five routes that predate the `/admin/v1/` namespace (0.6.0) are still
+served at their original unversioned paths — same handlers, same roles, same
+responses. Existing scripts keep working; new tooling should use the v1
+forms. The aliases will not be removed before a 1.0.
+
+| Deprecated alias | Canonical route | Difference |
+|------------------|-----------------|------------|
+| `GET /admin/calls` | `GET /admin/v1/calls` | none |
+| `POST /admin/calls/:id/hangup` | `POST /admin/v1/calls/:id/hangup` | **id namespace**: the alias takes the **SIP** Call-ID (`sip_call_id` from the listing); the v1 route takes the **bridge** `call_id`. Neither accepts the other's id (a wrong-namespace id is a `404`) — the listing returns both, so use whichever endpoint matches the id you hold. |
+| `GET /admin/registrations` | `GET /admin/v1/registrations` | none |
+| `GET`/`PUT /admin/log` | `GET`/`PUT /admin/v1/log` | none |
+| `POST /admin/hep/test` | `POST /admin/v1/hep/test` | none |
+
+The `siphon_ai_admin_requests_total{endpoint=…}` metric labels the alias and
+the v1 form separately, so a dashboard can watch legacy-path traffic drain to
+zero before anyone considers retiring the aliases.
 
 ### Admin auth & RBAC
 
@@ -567,7 +591,7 @@ Roles, lowest to highest (each inherits everything below it):
 |------------|--------|
 | `readonly` | All `GET` / list endpoints (calls, registrations, log, conferences, parked). |
 | `operator` | Everything `readonly` can, plus hangup, park / retrieve, and conference create / end / add / remove. |
-| `admin`    | Everything `operator` can, plus **billable** origination (`POST /admin/v1/calls`), `PUT /admin/log`, and `POST /admin/hep/test`. |
+| `admin`    | Everything `operator` can, plus **billable** origination (`POST /admin/v1/calls`), `PUT /admin/v1/log`, and `POST /admin/v1/hep/test`. |
 
 Every request is audited: a structured log line (actor = token **name**,
 role, endpoint template, result, peer address — never the secret) and the
@@ -582,7 +606,7 @@ A bearer token goes on every call:
 
 ```sh
 ADMIN=http://127.0.0.1:9092          # https://… when [admin.tls] is set
-curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/calls
+curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/v1/calls
 # missing/invalid token → 401 + WWW-Authenticate: Bearer
 # token below the endpoint's min role → 403
 ```
@@ -672,12 +696,12 @@ Example: bump bridge logging to debug for an incident, then revert.
 ```sh
 ADMIN=http://127.0.0.1:9092
 # GET is readonly; PUT (mutates the running filter) is admin.
-prev=$(curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/log)
+prev=$(curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/v1/log)
 curl -X PUT -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" \
-    --data 'siphon_ai=info,siphon_ai_bridge=debug' $ADMIN/admin/log
+    --data 'siphon_ai=info,siphon_ai_bridge=debug' $ADMIN/admin/v1/log
 # … reproduce the issue …
 curl -X PUT -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" \
-    --data "$prev" $ADMIN/admin/log
+    --data "$prev" $ADMIN/admin/v1/log
 ```
 
 ### `/admin/v1/parked` — park admin (0.7.0)

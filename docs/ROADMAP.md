@@ -204,7 +204,7 @@ barrier and make the contract testable:
 
 ## P2 — Registration management (admin) — ✅ delivered in v0.33.0
 
-Extends the read-only `GET /admin/registrations` (0.10.0) with two
+Extends the read-only `GET /admin/v1/registrations` (0.10.0) with two
 per-binding write actions (operator role, audit-logged, no new config —
 design note `DESIGN_REGISTRATION_ADMIN.md`):
 

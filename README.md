@@ -270,14 +270,14 @@ cargo test --workspace
 |---|---|---|
 | Liveness / readiness | `GET /health`, `GET /ready` | `[observability]` (open) |
 | Prometheus metrics | `GET /metrics` | `[observability]` (open; optional bearer token via `metrics_token`) |
-| Active calls | `GET /admin/calls` | `[admin]` (auth) |
+| Active calls | `GET /admin/v1/calls` | `[admin]` (auth) |
 | Per-call live quality stats | `GET /admin/v1/calls/<id>/stats` | `[admin]` (auth) |
-| Per-call hangup | `POST /admin/calls/<id>/hangup` | `[admin]` (auth) |
+| Per-call hangup | `POST /admin/v1/calls/<id>/hangup` | `[admin]` (auth) |
 | Outbound origination | `POST /admin/v1/calls` | `[admin]` (auth) |
 | Registration refresh / restart | `POST /admin/v1/registrations/<name>/refresh\|restart` | `[admin]` (auth) |
 | Conference / park control | `/admin/v1/conferences`, `/admin/v1/parked` | `[admin]` (auth) |
-| Runtime log filter | `PUT /admin/log` | `[admin]` (auth) |
-| HEP test packet | `POST /admin/hep/test` | `[admin]` (auth) |
+| Runtime log filter | `PUT /admin/v1/log` | `[admin]` (auth) |
+| HEP test packet | `POST /admin/v1/hep/test` | `[admin]` (auth) |
 | Drain status (during shutdown) | `GET /admin/v1/drain` | `[admin]` (auth) |
 | CDR file (JSONL or CSV) | `/var/log/siphon-ai/cdr.jsonl` | — |
 | Lifecycle webhooks | `[webhooks]` block in the TOML | — |

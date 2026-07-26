@@ -3273,7 +3273,7 @@ impl BridgingAcceptor {
         );
         // Bridge-id handle table for the admin conference API — every
         // accepted call is reachable by the id operators see. Carries the
-        // SIP Call-ID + direction so `GET /admin/calls` can report both
+        // SIP Call-ID + direction so `GET /admin/v1/calls` can report both
         // id namespaces (issue #311).
         self.control_registry.insert(
             cleanup_handle.clone(),

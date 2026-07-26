@@ -1501,7 +1501,7 @@ async fn build_admin(
 /// Adapter that exposes the call registries through the `admin` trait
 /// surface without forcing telemetry to depend on `siphon-ai-core`.
 ///
-/// The listing (`GET /admin/calls`) is sourced from the bridge-id-keyed
+/// The listing (`GET /admin/v1/calls`) is sourced from the bridge-id-keyed
 /// `control` registry so it covers both inbound and outbound calls and
 /// reports the bridge `call_id` the conference/park/stats endpoints
 /// need (issue #311). `hangup` still resolves the SIP-Call-ID-keyed

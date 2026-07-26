@@ -351,7 +351,7 @@ curl -s http://127.0.0.1:9091/ready      # → "ready"
 # /admin/* is NOT on the metrics port (it 404s there since 0.10.0) — it's
 # on the [admin] listener, behind a bearer token. Skip if [admin] is unset.
 curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" \
-    http://127.0.0.1:9092/admin/calls
+    http://127.0.0.1:9092/admin/v1/calls
 # → {"calls":[],"count":0}
 ```
 
@@ -390,18 +390,19 @@ sudo journalctl -u siphon-ai -f
 # /admin/* lives on the [admin] listener (0.10.0) + bearer token.
 ADMIN=http://127.0.0.1:9092
 
-# Bump bridge debug for an incident (PUT /admin/log needs `admin` role)
-prev=$(curl -s -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" $ADMIN/admin/log)
+# Bump bridge debug for an incident (PUT /admin/v1/log needs `admin` role)
+prev=$(curl -s -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" $ADMIN/admin/v1/log)
 curl -X PUT --data 'siphon_ai=info,siphon_ai_bridge=debug' \
-    -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" $ADMIN/admin/log
+    -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" $ADMIN/admin/v1/log
 # (… reproduce, then revert …)
 curl -X PUT --data "$prev" \
-    -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" $ADMIN/admin/log
+    -H "Authorization: Bearer $SIPHON_ADMIN_ADMIN" $ADMIN/admin/v1/log
 
-# Force-hangup a specific call (list = readonly, hangup = operator)
-curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/calls
+# Force-hangup a specific call (list = readonly, hangup = operator).
+# <call-id> is the bridge `call_id` field from the listing.
+curl -s -H "Authorization: Bearer $SIPHON_ADMIN_RO" $ADMIN/admin/v1/calls
 curl -X POST -H "Authorization: Bearer $SIPHON_ADMIN_OP" \
-    $ADMIN/admin/calls/<sip-call-id>/hangup
+    $ADMIN/admin/v1/calls/<call-id>/hangup
 
 # Restart cleanly
 sudo systemctl restart siphon-ai

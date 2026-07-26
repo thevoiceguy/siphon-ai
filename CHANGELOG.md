@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-07-26
+
 ### Fixed
 
 - **`clear` now drops pending `mark`s and rebases the playout clock — post-clear marks fire on time** (issue #365; PROTOCOL.md §4.1 violation). Marks were detached wall-clock timers (`tokio::spawn` + `sleep_until(first_push + frames × 20 ms)`) that nothing could cancel or re-time: a mark pending at clear-time **fired anyway** (telling the server the caller heard audio that was discarded), and because `clear` never reset the frame-count anchor, every mark sent **after** a clear fired **late by the entire flushed duration** — cumulative across repeated clears, breaking turn-taking in exactly the barge-in-driven calls that use marks most. Marks are now **queue-riders owned by the tap** (PROTOCOL.md §4.1's model): they hold their position in the outbound queue, arm against the playout clock when the audio ahead of them has been handed to the media engine, and die with the queue on `clear` / `auto_clear` / mute / park — every flush path now also rebases the playout clock (`clear` previously skipped it; the pause-arbitration paths already did this). Integration tests mirror the issue's timeline (burst → mark → clear → mark) and are CI-proven red on the pre-fix tap.

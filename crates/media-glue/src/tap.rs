@@ -83,8 +83,8 @@ use tracing::{debug, info, instrument, warn};
 /// audio at 20 ms regardless of sample rate (CLAUDE.md §4.2 / docs/
 /// PROTOCOL.md §3) — the inbound tap reframes whatever forge gives us
 /// down to 20 ms before sending it on the WS, and the outbound side
-/// receives 20 ms frames from the WS server. Estimated play-out time
-/// of frame K is therefore `first_audio_pushed_at + K * 20ms`.
+/// receives 20 ms frames from the WS server. The [`PlayoutClock`]
+/// advances by this much per frame handed to forge.
 const PLAYOUT_FRAME_MS: u64 = 20;
 
 /// Grace margin on the barge-in playout clock (§`bot_is_playing`). The
@@ -94,6 +94,225 @@ const PLAYOUT_FRAME_MS: u64 = 20;
 /// fewer false barge-ins — which is the safe direction for an echo/noise
 /// gate.
 const BARGE_IN_PLAYOUT_GRACE: Duration = Duration::from_millis(60);
+
+/// PROTOCOL.md §5.5: outbound audio the tap holds ahead of the forge
+/// feed — 10 frames = 200 ms. Beyond this the **oldest** held frame is
+/// evicted (`siphon_ai_outbound_audio_frames_dropped_total`), so a
+/// server streaming faster than realtime is bounded instead of growing
+/// forge's playout queue without limit (#366).
+const OUTBOUND_BUFFER_FRAMES: usize = 10;
+
+/// Frames handed to forge ahead of the playout clock — the in-flight
+/// cushion between the [`OutboundQueue`] and forge's own playout. Five
+/// frames (100 ms) lets the common chunked-send servers (100 ms TTS
+/// chunks) bypass the holdback entirely and makes the 20 ms pace tick's
+/// scheduling jitter harmless, while keeping forge's queue shallow
+/// enough that `Clear`'s flush is the only stale audio a barging caller
+/// can hear.
+const FORGE_LEAD_FRAMES: usize = 5;
+
+/// One entry in the tap-owned outbound queue (#365/#366). Audio frames
+/// wait here for their just-in-time push into forge; `mark` riders and
+/// outbound DTMF keep their queued positions relative to the audio
+/// around them (PROTOCOL.md §4.1: a mark fires when everything queued
+/// before it has been sent — and §4.2's DTMF is queued playout too).
+enum OutboundItem {
+    /// A packed 20 ms PCM16 frame from the WS server.
+    Audio(Vec<u8>),
+    /// A `mark` rider. When it reaches the head, everything queued
+    /// before it has been handed to forge; it then fires at the playout
+    /// clock's estimate of when that audio finishes playing.
+    Mark(String),
+    /// An outbound DTMF request, holding its queue position so a
+    /// server that bursts audio and then a digit gets them in order.
+    Dtmf { digit: char, duration_ms: u32 },
+}
+
+/// The tap-owned outbound playout queue (#365/#366): the §5.5 bounded
+/// buffer and the §4.1 mark riders in one structure, owned by the run
+/// loop so `Clear` can actually drop what §4.1 says it drops.
+///
+/// `audio_len` counts only `Audio` items (the §5.5 window is an audio
+/// bound; marks and DTMF don't occupy playout time until forged).
+struct OutboundQueue {
+    items: VecDeque<OutboundItem>,
+    audio_len: usize,
+    /// One warn per call for §5.5 evictions (metric counts them all;
+    /// CLAUDE.md §4.7-style logging discipline).
+    dropped_warned: bool,
+}
+
+impl OutboundQueue {
+    fn new() -> Self {
+        Self {
+            // +2: transient mark/DTMF riders between audio evictions.
+            items: VecDeque::with_capacity(OUTBOUND_BUFFER_FRAMES + 2),
+            audio_len: 0,
+            dropped_warned: false,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Queue one audio frame, evicting the **oldest** held frame(s)
+    /// beyond the §5.5 window. Returns how many were evicted (already
+    /// counted on the metric).
+    fn push_audio(&mut self, bytes: Vec<u8>, call_id: &CallId) -> u64 {
+        self.items.push_back(OutboundItem::Audio(bytes));
+        self.audio_len += 1;
+        let mut dropped = 0u64;
+        while self.audio_len > OUTBOUND_BUFFER_FRAMES {
+            let oldest_audio = self
+                .items
+                .iter()
+                .position(|i| matches!(i, OutboundItem::Audio(_)));
+            match oldest_audio {
+                Some(idx) => {
+                    self.items.remove(idx);
+                    self.audio_len -= 1;
+                    dropped += 1;
+                }
+                // Unreachable (audio_len counts Audio items), but the
+                // audio path never panics — bail instead.
+                None => break,
+            }
+        }
+        if dropped > 0 {
+            metrics::counter!("siphon_ai_outbound_audio_frames_dropped_total").increment(dropped);
+            if !self.dropped_warned {
+                self.dropped_warned = true;
+                warn!(
+                    call_id = %call_id,
+                    window_frames = OUTBOUND_BUFFER_FRAMES,
+                    "server streaming outbound audio faster than realtime; \
+                     dropping oldest beyond the 200 ms buffer (PROTOCOL §5.5)",
+                );
+            }
+        }
+        dropped
+    }
+
+    fn push_mark(&mut self, name: String) {
+        self.items.push_back(OutboundItem::Mark(name));
+    }
+
+    fn push_dtmf(&mut self, digit: char, duration_ms: u32) {
+        self.items
+            .push_back(OutboundItem::Dtmf { digit, duration_ms });
+    }
+
+    /// Drop everything (a `Clear` / flush path). Returns
+    /// `(audio_frames, marks)` dropped, for the log line.
+    fn clear(&mut self) -> (usize, usize) {
+        let marks = self
+            .items
+            .iter()
+            .filter(|i| matches!(i, OutboundItem::Mark(_)))
+            .count();
+        let audio = self.audio_len;
+        self.items.clear();
+        self.audio_len = 0;
+        (audio, marks)
+    }
+
+    /// Fold the held audio into a pause-arbitration resume tail (in
+    /// queue order), dropping mark/DTMF riders — their anchoring audio
+    /// is now in limbo until the verdict, and §4.1's "dropped without
+    /// firing" is the honest resolution for both outcomes. Returns the
+    /// number of riders dropped, for the caller's debug line.
+    fn fold_audio_into(&mut self, resume: &mut Vec<Vec<u8>>) -> usize {
+        let mut riders = 0usize;
+        for item in self.items.drain(..) {
+            match item {
+                OutboundItem::Audio(bytes) => resume.push(bytes),
+                OutboundItem::Mark(_) | OutboundItem::Dtmf { .. } => riders += 1,
+            }
+        }
+        self.audio_len = 0;
+        riders
+    }
+}
+
+/// Drop the tap-owned outbound queue and any armed marks. Every
+/// forge-flush path goes through this so PROTOCOL.md §4.1's "marks
+/// queued behind the cleared audio are dropped without firing" holds
+/// (#365) — the audio they rode behind is gone, on whichever path
+/// flushed it.
+fn drop_outbound_queue(
+    outbound: &mut OutboundQueue,
+    armed_marks: &mut VecDeque<(String, Instant)>,
+    call_id: &CallId,
+    site: &'static str,
+) {
+    let (audio, marks) = outbound.clear();
+    let armed = armed_marks.len();
+    armed_marks.clear();
+    if audio + marks + armed > 0 {
+        debug!(
+            call_id = %call_id,
+            site,
+            audio,
+            marks = marks + armed,
+            "dropped queued outbound audio and unfired marks",
+        );
+    }
+}
+
+/// Playout bookkeeping: the `mark` estimation anchor and the barge-in
+/// gating clock, reset together on every flush (they describe the same
+/// queue). Extracted from three loose locals when #365 made every
+/// flush path responsible for resetting all of them.
+#[derive(Default)]
+struct PlayoutClock {
+    /// Frames handed to forge since the last reset.
+    frames_sent: u64,
+    /// Wallclock of the first post-reset push.
+    first_pushed_at: Option<Instant>,
+    /// Estimated wallclock at which the most recently queued playout
+    /// frame finishes. Advances 20 ms per pushed frame from
+    /// `max(now, cursor)` so it re-anchors after a silence gap between
+    /// bot phrases instead of drifting behind `now`. `None` = nothing
+    /// queued / just flushed.
+    until: Option<Instant>,
+}
+
+impl PlayoutClock {
+    /// Account one frame handed to forge at `now`.
+    fn note_push(&mut self, now: Instant) {
+        if self.frames_sent == 0 {
+            self.first_pushed_at = Some(now);
+        }
+        self.frames_sent += 1;
+        self.until =
+            Some(self.until.map_or(now, |c| c.max(now)) + Duration::from_millis(PLAYOUT_FRAME_MS));
+    }
+
+    /// Everything queued was flushed — rebase (#365: `clear` must do
+    /// this, or every later mark estimate carries the flushed frames).
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Re-anchor after re-queuing `frames` chunks at pause-arbitration
+    /// resolution. Zero frames leaves everything cleared — the pause's
+    /// flush already reset it.
+    fn restore(&mut self, frames: u64) {
+        if frames == 0 {
+            return;
+        }
+        let now = Instant::now();
+        self.frames_sent = frames;
+        self.first_pushed_at = Some(now);
+        self.until = Some(now + Duration::from_millis(frames * PLAYOUT_FRAME_MS));
+    }
+
+    /// Frames already in forge that the clock says haven't played yet.
+    fn unplayed(&self, now: Instant) -> usize {
+        unplayed_frames(self.until, now)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum MediaTapError {
@@ -604,7 +823,7 @@ impl MediaTap {
     /// recording must not carry it twice). Re-pushed chunks re-enter
     /// the shadow ring so an immediate second barge-in stays
     /// reversible; the caller re-anchors the playout clock afterwards
-    /// via [`restore_playout_clock`].
+    /// via [`PlayoutClock::restore`].
     async fn repush_chunks(
         &self,
         chunks: Vec<Vec<u8>>,
@@ -644,6 +863,157 @@ impl MediaTap {
             pushed += 1;
         }
         Ok(pushed)
+    }
+
+    /// Hand one WS playout frame to forge: recording fork, unpack,
+    /// `send_audio`, clock/bookkeeping, pause-mode shadow. This is the
+    /// single forge-push site for direct-pair playout — the arrival arm
+    /// and the pace tick both come through [`Self::drain_outbound`].
+    ///
+    /// The recording fork lives here (the forge push) rather than at
+    /// WS arrival on purpose: a frame evicted by the §5.5 window was
+    /// never heard, so it must not reach the "what the caller heard"
+    /// channel either.
+    #[allow(clippy::too_many_arguments)]
+    async fn forge_push_frame(
+        &mut self,
+        bytes: Vec<u8>,
+        clock: &mut PlayoutClock,
+        shadow: &mut VecDeque<Vec<u8>>,
+        shadow_cap: usize,
+        shadow_truncation_warned: &mut bool,
+    ) -> Result<(), MediaTapError> {
+        if let Some((rec, drops)) = &self.recording {
+            if let Err(mpsc::error::TrySendError::Full(_)) =
+                rec.try_send(RecFrame::Bot(bytes.clone()))
+            {
+                drops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let samples = unpack_pcm16_le(&bytes)?;
+        let frame = OutboundMediaFrame {
+            target: MediaTarget::A,
+            sample_rate: self.sample_rate,
+            samples,
+            playback_id: None,
+            mode: PlayoutMode::Append,
+        };
+        self.handle
+            .send_audio(frame)
+            .await
+            .map_err(|e| MediaTapError::PlayoutFailed(e.to_string()))?;
+        let push_now = Instant::now();
+        if self.first_audio_at.is_none() {
+            self.first_audio_at = Some(push_now);
+            self.publish_quality();
+        }
+        clock.note_push(push_now);
+        // Pause mode: shadow the pushed frame so a barge-in reject can
+        // re-queue it, then drop frames the playout clock says have
+        // already played — the ring only ever holds the unplayed tail
+        // plus one frame of early-bias slop (repeating ≤20 ms on resume
+        // beats skipping a syllable). Steady-state cost is moving the
+        // already-owned `bytes` Vec, no copy.
+        if shadow_cap > 0 {
+            if shadow.len() == shadow_cap {
+                shadow.pop_front();
+                if !*shadow_truncation_warned {
+                    *shadow_truncation_warned = true;
+                    warn!(
+                        call_id = %self.call_id,
+                        cap_frames = shadow_cap,
+                        "utterance exceeds barge-in resume_max; oldest unplayed audio won't survive a reject",
+                    );
+                }
+            }
+            shadow.push_back(bytes);
+            let keep = clock.unplayed(push_now).saturating_add(1);
+            while shadow.len() > keep {
+                shadow.pop_front();
+            }
+        }
+        Ok(())
+    }
+
+    /// Advance the outbound queue (#365/#366): fire due armed marks,
+    /// then feed forge from the queue while the playout clock is less
+    /// than `lead` frames ahead of realtime. Marks reaching the head
+    /// arm at the clock's completion estimate (or fire immediately when
+    /// nothing is playing); DTMF at the head is sent in its queued
+    /// position. Called on WS-frame arrival, on each mark/DTMF command,
+    /// and from the pace tick; a `lead` of `usize::MAX` drains
+    /// everything eagerly (the pre-#366 behaviour, used when a room
+    /// takes over playout).
+    #[allow(clippy::too_many_arguments)]
+    async fn drain_outbound(
+        &mut self,
+        outbound: &mut OutboundQueue,
+        armed_marks: &mut VecDeque<(String, Instant)>,
+        events_tx: &mpsc::Sender<OutgoingEvent>,
+        lead: usize,
+        clock: &mut PlayoutClock,
+        shadow: &mut VecDeque<Vec<u8>>,
+        shadow_cap: usize,
+        shadow_truncation_warned: &mut bool,
+    ) -> Result<(), MediaTapError> {
+        let now = Instant::now();
+        while armed_marks.front().is_some_and(|(_, due)| *due <= now) {
+            if let Some((name, _)) = armed_marks.pop_front() {
+                self.fire_mark(events_tx, name);
+            }
+        }
+        loop {
+            let item = match outbound.items.front() {
+                None => break,
+                Some(OutboundItem::Audio(_)) if clock.unplayed(Instant::now()) >= lead => {
+                    break;
+                }
+                _ => outbound.items.pop_front(),
+            };
+            match item {
+                Some(OutboundItem::Audio(bytes)) => {
+                    outbound.audio_len = outbound.audio_len.saturating_sub(1);
+                    self.forge_push_frame(
+                        bytes,
+                        clock,
+                        shadow,
+                        shadow_cap,
+                        shadow_truncation_warned,
+                    )
+                    .await?;
+                }
+                Some(OutboundItem::Mark(name)) => {
+                    // Everything queued before this mark is in forge.
+                    // Fire at the estimated playout completion of that
+                    // audio — immediately when nothing is playing.
+                    let fire_now = Instant::now();
+                    match clock.until.filter(|u| *u > fire_now) {
+                        Some(due) => armed_marks.push_back((name, due)),
+                        None => self.fire_mark(events_tx, name),
+                    }
+                }
+                Some(OutboundItem::Dtmf { digit, duration_ms }) => {
+                    handle_send_dtmf(&self.call_id, &self.handle, digit, duration_ms).await;
+                }
+                None => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// Best-effort `mark` emission, mirroring the other tap events:
+    /// `try_send` so a backed-up bridge channel can't stall the audio
+    /// arms.
+    fn fire_mark(&self, events_tx: &mpsc::Sender<OutgoingEvent>, name: String) {
+        if let Err(e) = events_tx.try_send(OutgoingEvent::Mark { name }) {
+            warn!(
+                call_id = %self.call_id,
+                error = %e,
+                "events_tx full or closed; dropping mark",
+            );
+        } else {
+            debug!(call_id = %self.call_id, "fired mark after estimated playout");
+        }
     }
 
     /// Install the playout-gated barge-in debounce from
@@ -746,17 +1116,28 @@ impl MediaTap {
         let mut ws_dropped = false;
 
         let mut reframer = Reframer::new(self.sample_rate)?;
-        // Play-out estimation state for `TapCommand::Mark`.
-        // Updated in the playout arm; read in the command arm.
-        let mut frames_sent_to_forge: u64 = 0;
-        let mut first_audio_pushed_at: Option<Instant> = None;
-        // Playout clock for barge-in gating (§`bot_is_playing`) — distinct
-        // from the Mark bookkeeping above. Estimated wallclock at which the
-        // most recently queued playout frame finishes. Advances 20 ms per
-        // pushed frame from `max(now, cursor)` so it re-anchors after a
-        // silence gap between bot phrases instead of drifting behind `now`.
-        // `None` = nothing queued / just flushed.
-        let mut playout_until: Option<Instant> = None;
+        // Playout bookkeeping (`mark` anchor + barge-in gating clock),
+        // updated on every forge push and reset on every flush.
+        let mut clock = PlayoutClock::default();
+        // Tap-owned outbound queue (#365/#366): the §5.5 bounded buffer
+        // with §4.1 mark riders. Fed just-in-time into forge by
+        // `drain_outbound` (arrival + the pace tick below).
+        let mut outbound = OutboundQueue::new();
+        // Marks whose preceding audio is fully handed to forge, waiting
+        // on the playout clock's completion estimate. Owned here — not
+        // detached timers — so Clear can drop them (#365). Deadlines are
+        // pushed in non-decreasing order (the clock only advances
+        // between resets, and resets clear this too), so front-pop
+        // firing is correct.
+        let mut armed_marks: VecDeque<(String, Instant)> = VecDeque::new();
+        // Pace tick for the outbound queue: drains held frames into
+        // forge as the playout clock advances and fires due marks.
+        // 20 ms cadence via a monotonic interval (CLAUDE.md §4.3); the
+        // select arm's guard keeps it un-polled while there is nothing
+        // to pace, so an idle call never pays for it.
+        let mut pace_tick = tokio::time::interval(Duration::from_millis(PLAYOUT_FRAME_MS));
+        pace_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        pace_tick.tick().await;
 
         // Conference-room routing (0.7.0 §2.1). `None` = the direct
         // caller↔WS pair. Three separate locals (not one struct) so
@@ -862,6 +1243,15 @@ impl MediaTap {
                         // flushed-and-quiet is the right state alongside
                         // the reconnect hold music.
                         self.abandon_arbitration(&mut pending_verdict, &events_tx, "ws_drop");
+                        // Reconnect resumes on a fresh session with no
+                        // replay (§5.7) — the dead session's held
+                        // frames and unfired marks die with it.
+                        drop_outbound_queue(
+                            &mut outbound,
+                            &mut armed_marks,
+                            &self.call_id,
+                            "ws_drop",
+                        );
                         ws_dropped = true;
                     } else {
                         debug!("caller_audio_tx receiver dropped; ending tap");
@@ -896,6 +1286,12 @@ impl MediaTap {
                             // Same as the caller_audio_tx arm: no arbiter,
                             // pending verdict resolves as confirm.
                             self.abandon_arbitration(&mut pending_verdict, &events_tx, "ws_drop");
+                            drop_outbound_queue(
+                                &mut outbound,
+                                &mut armed_marks,
+                                &self.call_id,
+                                "ws_drop",
+                            );
                             ws_dropped = true;
                             continue;
                         }
@@ -960,73 +1356,25 @@ impl MediaTap {
                         send.send_ws(samples);
                         continue;
                     }
-                    // Recording fork (right channel): only non-muted playout
-                    // is recorded, so a muted span shows as silence on the
-                    // bot side — what the caller actually heard.
-                    if let Some((rec, drops)) = &self.recording {
-                        if let Err(mpsc::error::TrySendError::Full(_)) =
-                            rec.try_send(RecFrame::Bot(bytes.clone()))
-                        {
-                            drops.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                    let samples = unpack_pcm16_le(&bytes)?;
-                    let frame = OutboundMediaFrame {
-                        target: MediaTarget::A,
-                        sample_rate: self.sample_rate,
-                        samples,
-                        playback_id: None,
-                        mode: PlayoutMode::Append,
-                    };
-                    self.handle
-                        .send_audio(frame)
-                        .await
-                        .map_err(|e| MediaTapError::PlayoutFailed(e.to_string()))?;
-                    // Bookkeeping for `TapCommand::Mark`: count
-                    // frames pushed to forge and stamp the wallclock
-                    // of the first push so we can estimate when the
-                    // Nth queued frame finishes playing.
-                    let push_now = Instant::now();
-                    if frames_sent_to_forge == 0 {
-                        first_audio_pushed_at = Some(push_now);
-                    }
-                    if self.first_audio_at.is_none() {
-                        self.first_audio_at = Some(push_now);
-                        self.publish_quality();
-                    }
-                    frames_sent_to_forge += 1;
-                    // Advance the barge-in playout clock: from the later of
-                    // `now` and the current cursor (re-anchors after a gap),
-                    // plus one frame of playout.
-                    playout_until = Some(
-                        playout_until.map_or(push_now, |c| c.max(push_now))
-                            + Duration::from_millis(PLAYOUT_FRAME_MS),
-                    );
-                    // Pause mode: shadow the pushed frame so a barge-in
-                    // reject can re-queue it, then drop frames the
-                    // playout clock says have already played — the ring
-                    // only ever holds the unplayed tail plus one frame
-                    // of early-bias slop (repeating ≤20 ms on resume
-                    // beats skipping a syllable). Steady-state cost is
-                    // moving the already-owned `bytes` Vec, no copy.
-                    if shadow_cap > 0 {
-                        if shadow.len() == shadow_cap {
-                            shadow.pop_front();
-                            if !shadow_truncation_warned {
-                                shadow_truncation_warned = true;
-                                warn!(
-                                    call_id = %self.call_id,
-                                    cap_frames = shadow_cap,
-                                    "utterance exceeds barge-in resume_max; oldest unplayed audio won't survive a reject",
-                                );
-                            }
-                        }
-                        shadow.push_back(bytes);
-                        let keep = unplayed_frames(playout_until, push_now).saturating_add(1);
-                        while shadow.len() > keep {
-                            shadow.pop_front();
-                        }
-                    }
+                    // §5.5 (#366): through the tap-owned queue, never
+                    // straight into forge — the queue enforces the
+                    // 200 ms drop-oldest window, and the drain feeds
+                    // forge just-in-time via the playout clock. The
+                    // recording fork happens at the forge push (inside
+                    // the drain), so an evicted frame — audio the
+                    // caller never heard — is never recorded either.
+                    outbound.push_audio(bytes, &self.call_id);
+                    self.drain_outbound(
+                        &mut outbound,
+                        &mut armed_marks,
+                        &events_tx,
+                        FORGE_LEAD_FRAMES,
+                        &mut clock,
+                        &mut shadow,
+                        shadow_cap,
+                        &mut shadow_truncation_warned,
+                    )
+                    .await?;
                 }
 
                 // Caller → server: PCM16 samples from forge, reframed and packed.
@@ -1146,18 +1494,11 @@ impl MediaTap {
                     // so a Mark estimate degenerates to ≈ now — the
                     // honest answer while the room owns playout.
                     let push_now = Instant::now();
-                    if frames_sent_to_forge == 0 {
-                        first_audio_pushed_at = Some(push_now);
-                    }
                     if self.first_audio_at.is_none() {
                         self.first_audio_at = Some(push_now);
                         self.publish_quality();
                     }
-                    frames_sent_to_forge += 1;
-                    playout_until = Some(
-                        playout_until.map_or(push_now, |c| c.max(push_now))
-                            + Duration::from_millis(PLAYOUT_FRAME_MS),
-                    );
+                    clock.note_push(push_now);
                 }
 
                 // Room → server: the mix-minus-`ws` sink becomes the
@@ -1326,7 +1667,7 @@ impl MediaTap {
                                         BargeInAction::Pause { .. }
                                             if room_send.is_some()
                                                 || pending_verdict.is_some()
-                                                || !bot_is_playing(playout_until, speech_now) =>
+                                                || !bot_is_playing(clock.until, speech_now) =>
                                         {
                                             None
                                         }
@@ -1350,7 +1691,7 @@ impl MediaTap {
                                     // — they compose (§7.1).
                                     let gate = self
                                         .barge_in_debounce
-                                        .filter(|_| bot_is_playing(playout_until, speech_now));
+                                        .filter(|_| bot_is_playing(clock.until, speech_now));
                                     if let Some(debounce) = gate {
                                         if pending_barge_in.is_none() {
                                             barge_debounce
@@ -1405,21 +1746,27 @@ impl MediaTap {
                                                     "auto_clear: dropped pending playout on speech",
                                                 );
                                             }
-                                            frames_sent_to_forge = 0;
-                                            first_audio_pushed_at = None;
-                                            playout_until = None;
+                                            drop_outbound_queue(
+                                                &mut outbound,
+                                                &mut armed_marks,
+                                                &self.call_id,
+                                                "auto_clear",
+                                            );
+                                            clock.reset();
                                         }
                                         BargeInAction::Pause { decision, .. } => {
                                             let resume = begin_pause_arbitration(
                                                 &self.call_id,
                                                 &self.handle,
                                                 &mut playout_audio_rx,
+                                                &mut outbound,
                                                 &mut shadow,
                                             )
                                             .await;
-                                            frames_sent_to_forge = 0;
-                                            first_audio_pushed_at = None;
-                                            playout_until = None;
+                                            // Armed marks anchored to the
+                                            // flushed audio; §4.1 drops them.
+                                            armed_marks.clear();
+                                            clock.reset();
                                             arb_deadline
                                                 .as_mut()
                                                 .reset(tokio::time::Instant::now() + decision);
@@ -1555,12 +1902,15 @@ impl MediaTap {
                                     "muted; flushed pending outbound playout",
                                 );
                             }
-                            // Mark bookkeeping reset — anything queued
-                            // before the mute is gone and cannot
-                            // satisfy a pending Mark estimate.
-                            frames_sent_to_forge = 0;
-                            first_audio_pushed_at = None;
-                            playout_until = None;
+                            // Everything queued before the mute is gone
+                            // — held frames, marks, and the clock.
+                            drop_outbound_queue(
+                                &mut outbound,
+                                &mut armed_marks,
+                                &self.call_id,
+                                "mute",
+                            );
+                            clock.reset();
                         }
                         TapCommand::Unmute => {
                             // Just lift the gate. No flush — there's
@@ -1580,12 +1930,7 @@ impl MediaTap {
                                 let n = self
                                     .repush_chunks(p.fresh, true, &mut shadow, shadow_cap)
                                     .await?;
-                                restore_playout_clock(
-                                    n,
-                                    &mut frames_sent_to_forge,
-                                    &mut first_audio_pushed_at,
-                                    &mut playout_until,
-                                );
+                                clock.restore(n);
                                 emit_resolved(&events_tx, &self.call_id, BargeInOutcome::Confirmed);
                                 debug!(
                                     call_id = %self.call_id,
@@ -1613,12 +1958,7 @@ impl MediaTap {
                                 let fresh = self
                                     .repush_chunks(p.fresh, true, &mut shadow, shadow_cap)
                                     .await?;
-                                restore_playout_clock(
-                                    resumed + fresh,
-                                    &mut frames_sent_to_forge,
-                                    &mut first_audio_pushed_at,
-                                    &mut playout_until,
-                                );
+                                clock.restore(resumed + fresh);
                                 emit_resolved(&events_tx, &self.call_id, BargeInOutcome::Rejected);
                                 debug!(
                                     call_id = %self.call_id,
@@ -1678,28 +2018,77 @@ impl MediaTap {
                                     "cleared pending outbound playout",
                                 );
                             }
-                            // Playout dropped → the bot is no longer talking
-                            // for barge-in gating. (Mark bookkeeping is left
-                            // as-is, matching prior behaviour.)
-                            playout_until = None;
+                            // §4.1 (#365): marks queued behind the
+                            // cleared audio are dropped without firing,
+                            // and the playout clock rebases so the next
+                            // mark's estimate tracks the real (flushed)
+                            // queue instead of carrying the discarded
+                            // frames forever.
+                            drop_outbound_queue(
+                                &mut outbound,
+                                &mut armed_marks,
+                                &self.call_id,
+                                "clear",
+                            );
+                            clock.reset();
                         }
                         TapCommand::SendDtmf { digit, duration_ms } => {
-                            handle_send_dtmf(&self.call_id, &self.handle, digit, duration_ms).await;
+                            // Through the outbound queue so a server
+                            // that bursts audio then a digit gets them
+                            // in that order (#366's just-in-time feed
+                            // would otherwise let the digit jump the
+                            // held frames).
+                            outbound.push_dtmf(digit, duration_ms);
+                            self.drain_outbound(
+                                &mut outbound,
+                                &mut armed_marks,
+                                &events_tx,
+                                FORGE_LEAD_FRAMES,
+                                &mut clock,
+                                &mut shadow,
+                                shadow_cap,
+                                &mut shadow_truncation_warned,
+                            )
+                            .await?;
                         }
                         TapCommand::Mark { name } => {
-                            schedule_mark(
-                                &self.call_id,
+                            // §4.1: the mark rides the outbound queue at
+                            // its insertion position (#365). With the
+                            // queue empty it arms (or fires) against the
+                            // playout clock immediately.
+                            outbound.push_mark(name);
+                            self.drain_outbound(
+                                &mut outbound,
+                                &mut armed_marks,
                                 &events_tx,
-                                name,
-                                frames_sent_to_forge,
-                                first_audio_pushed_at,
-                            );
+                                FORGE_LEAD_FRAMES,
+                                &mut clock,
+                                &mut shadow,
+                                shadow_cap,
+                                &mut shadow_truncation_warned,
+                            )
+                            .await?;
                         }
                         TapCommand::JoinRoom { membership } => {
                             // Arbitration is suspended in rooms (§7.2) —
                             // a pending one resolves as confirm before
                             // the re-plumb.
                             self.abandon_arbitration(&mut pending_verdict, &events_tx, "join_room");
+                            // The room owns playout from here; hand any
+                            // held tail to forge eagerly (the pre-#366
+                            // behaviour) rather than dropping it, and
+                            // let queued marks arm/fire on the way out.
+                            self.drain_outbound(
+                                &mut outbound,
+                                &mut armed_marks,
+                                &events_tx,
+                                usize::MAX,
+                                &mut clock,
+                                &mut shadow,
+                                shadow_cap,
+                                &mut shadow_truncation_warned,
+                            )
+                            .await?;
                             if room_send.is_some() {
                                 // Switching rooms: dropping the old
                                 // RoomSender signals the old room to
@@ -1779,6 +2168,16 @@ impl MediaTap {
                                 call_id = %self.call_id,
                                 "tap parked; playing hold music, WS detached"
                             );
+                            // Retrieve opens a *fresh* WS session with
+                            // no replay (§5.7/park semantics) — held
+                            // frames and unfired marks from the old
+                            // session die here.
+                            drop_outbound_queue(
+                                &mut outbound,
+                                &mut armed_marks,
+                                &self.call_id,
+                                "park",
+                            );
                             if let Some((_, done, frames)) = announcing.take() {
                                 debug!(call_id = %self.call_id,
                                        "announcement cut short by park");
@@ -1800,9 +2199,7 @@ impl MediaTap {
                                 caller_audio_tx = new_caller_tx;
                                 playout_audio_rx = new_playout_rx;
                                 events_tx = new_events_tx;
-                                frames_sent_to_forge = 0;
-                                first_audio_pushed_at = None;
-                                playout_until = None;
+                                clock.reset();
                                 // The fresh channels are live — clear the
                                 // WS-drop hold so the audio arms poll again
                                 // (0.7.3 reconnect resume / park retrieve).
@@ -1882,8 +2279,13 @@ impl MediaTap {
                                         "forge flush failed on unhold",
                                     );
                                 }
-                                frames_sent_to_forge = 0;
-                                first_audio_pushed_at = None;
+                                drop_outbound_queue(
+                                    &mut outbound,
+                                    &mut armed_marks,
+                                    &self.call_id,
+                                    "resume",
+                                );
+                                clock.reset();
                                 info!(
                                     call_id = %self.call_id,
                                     "tap resumed; direct bridge restored on existing WS session"
@@ -1891,6 +2293,38 @@ impl MediaTap {
                             }
                         }
                     }
+                }
+
+                // Outbound-queue pace tick (#365/#366): feed held
+                // frames into forge as the playout clock advances and
+                // fire marks whose estimate came due. Guarded so an
+                // idle call never polls it. Audio feeding is suspended
+                // (lead 0) while another feature owns the caller's ear
+                // — a pending arbitration, hold, or an announcement —
+                // but due marks still fire and a leading mark/DTMF
+                // rider still drains, matching the detached-timer
+                // behaviour this replaced.
+                _ = pace_tick.tick(),
+                    if !outbound.is_empty() || !armed_marks.is_empty() =>
+                {
+                    let feed_ok = pending_verdict.is_none()
+                        && held.is_none()
+                        && announcing.is_none()
+                        && !self.muted
+                        && !ws_dropped
+                        && room_send.is_none();
+                    let lead = if feed_ok { FORGE_LEAD_FRAMES } else { 0 };
+                    self.drain_outbound(
+                        &mut outbound,
+                        &mut armed_marks,
+                        &events_tx,
+                        lead,
+                        &mut clock,
+                        &mut shadow,
+                        shadow_cap,
+                        &mut shadow_truncation_warned,
+                    )
+                    .await?;
                 }
 
                 // Idle-detector poll. Fires every 500 ms when at
@@ -2046,12 +2480,12 @@ impl MediaTap {
                                 &self.call_id,
                                 &self.handle,
                                 &mut playout_audio_rx,
+                                &mut outbound,
                                 &mut shadow,
                             )
                             .await;
-                            frames_sent_to_forge = 0;
-                            first_audio_pushed_at = None;
-                            playout_until = None;
+                            armed_marks.clear();
+                            clock.reset();
                             arb_deadline
                                 .as_mut()
                                 .reset(tokio::time::Instant::now() + decision);
@@ -2099,9 +2533,13 @@ impl MediaTap {
                                     "barge-in confirmed after debounce; dropped pending playout",
                                 );
                             }
-                            frames_sent_to_forge = 0;
-                            first_audio_pushed_at = None;
-                            playout_until = None;
+                            drop_outbound_queue(
+                                &mut outbound,
+                                &mut armed_marks,
+                                &self.call_id,
+                                "auto_clear_debounce",
+                            );
+                            clock.reset();
                         }
                     }
                     if let Some(out) = pending_barge_in.take() {
@@ -2130,12 +2568,7 @@ impl MediaTap {
                                 let fresh = self
                                     .repush_chunks(p.fresh, true, &mut shadow, shadow_cap)
                                     .await?;
-                                restore_playout_clock(
-                                    fresh,
-                                    &mut frames_sent_to_forge,
-                                    &mut first_audio_pushed_at,
-                                    &mut playout_until,
-                                );
+                                clock.restore(fresh);
                                 emit_resolved(&events_tx, &self.call_id, BargeInOutcome::Timeout);
                                 debug!(
                                     call_id = %self.call_id,
@@ -2151,12 +2584,7 @@ impl MediaTap {
                                 let fresh = self
                                     .repush_chunks(p.fresh, true, &mut shadow, shadow_cap)
                                     .await?;
-                                restore_playout_clock(
-                                    resumed + fresh,
-                                    &mut frames_sent_to_forge,
-                                    &mut first_audio_pushed_at,
-                                    &mut playout_until,
-                                );
+                                clock.restore(resumed + fresh);
                                 emit_resolved(&events_tx, &self.call_id, BargeInOutcome::Timeout);
                                 debug!(
                                     call_id = %self.call_id,
@@ -2227,52 +2655,6 @@ fn emit_room_event(
     if let Err(e) = events_tx.try_send(build(send.room_id().to_string())) {
         warn!(call_id = %call_id, error = %e, "events_tx full or closed; dropping participant event");
     }
-}
-
-/// Schedule an `OutgoingEvent::Mark` to fire when the audio queued so
-/// far is estimated to have played out.
-///
-/// "Estimated" because forge's streaming `send_audio` path doesn't
-/// expose a per-frame playout-completion event — instead we anchor to
-/// the wallclock when the first frame went into forge and assume one
-/// frame per 20 ms. If `frames_sent` is 0 (no audio queued yet) the
-/// mark fires immediately.
-///
-/// The fire happens on a detached tokio task so the tap's main
-/// `select!` loop keeps draining the audio path during the wait. The
-/// task holds a clone of the events sender; when the tap tears down
-/// and drops the inner receiver, the cloned sender's send returns
-/// `Err` and the task quietly exits.
-fn schedule_mark(
-    call_id: &CallId,
-    events_tx: &mpsc::Sender<OutgoingEvent>,
-    name: String,
-    frames_sent: u64,
-    first_pushed_at: Option<Instant>,
-) {
-    let target = match first_pushed_at {
-        Some(start) if frames_sent > 0 => {
-            start + Duration::from_millis(frames_sent.saturating_mul(PLAYOUT_FRAME_MS))
-        }
-        // Mark requested before any audio queued — fire now.
-        _ => Instant::now(),
-    };
-    let events_tx = events_tx.clone();
-    let call_id = call_id.clone();
-    tokio::spawn(async move {
-        // `sleep_until` accepts `tokio::time::Instant`. Convert.
-        let target = tokio::time::Instant::from_std(target);
-        tokio::time::sleep_until(target).await;
-        if events_tx
-            .send(OutgoingEvent::Mark { name: name.clone() })
-            .await
-            .is_err()
-        {
-            debug!(call_id = %call_id, name = %name, "events_tx closed; mark dropped");
-        } else {
-            debug!(call_id = %call_id, name = %name, "fired mark after estimated playout");
-        }
-    });
 }
 
 async fn handle_send_dtmf(
@@ -2365,9 +2747,23 @@ async fn begin_pause_arbitration(
     call_id: &CallId,
     handle: &MediaBridgeHandle,
     playout_audio_rx: &mut mpsc::Receiver<Vec<u8>>,
+    outbound: &mut OutboundQueue,
     shadow: &mut VecDeque<Vec<u8>>,
 ) -> Vec<Vec<u8>> {
+    // Playout order: the shadow ring (already in forge, unplayed),
+    // then the tap-held §5.5 queue, then whatever is still in the
+    // controller→tap channel — oldest to newest, so a reject replays
+    // seamlessly. Mark/DTMF riders in the held queue are dropped
+    // (§4.1: their anchoring audio is in limbo until the verdict).
     let mut resume: Vec<Vec<u8>> = shadow.drain(..).collect();
+    let riders = outbound.fold_audio_into(&mut resume);
+    if riders > 0 {
+        debug!(
+            call_id = %call_id,
+            riders,
+            "pause arbitration dropped queued mark/DTMF riders",
+        );
+    }
     while let Ok(bytes) = playout_audio_rx.try_recv() {
         resume.push(bytes);
     }
@@ -2418,24 +2814,6 @@ fn emit_resolved(
             "events_tx full or closed; dropping barge_in_resolved",
         );
     }
-}
-
-/// Re-anchor the Mark / barge-in playout bookkeeping after re-queuing
-/// `frames` chunks at arbitration resolution. Zero frames leaves
-/// everything cleared — the pause's flush already reset it.
-fn restore_playout_clock(
-    frames: u64,
-    frames_sent_to_forge: &mut u64,
-    first_audio_pushed_at: &mut Option<Instant>,
-    playout_until: &mut Option<Instant>,
-) {
-    if frames == 0 {
-        return;
-    }
-    let now = Instant::now();
-    *frames_sent_to_forge = frames;
-    *first_audio_pushed_at = Some(now);
-    *playout_until = Some(now + Duration::from_millis(frames * PLAYOUT_FRAME_MS));
 }
 
 /// Returns `None` for events that aren't this call's, that aren't part
@@ -2507,6 +2885,109 @@ fn forge_attach_err(e: ForgeError) -> MediaTapError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn frame(fill: u8) -> Vec<u8> {
+        vec![fill; 320]
+    }
+
+    /// §5.5 (#366): the outbound queue holds at most
+    /// [`OUTBOUND_BUFFER_FRAMES`] audio frames; the **oldest** is
+    /// evicted beyond that, and riders (marks/DTMF) neither count
+    /// against nor are touched by the audio window.
+    #[test]
+    fn outbound_queue_evicts_oldest_audio_beyond_window() {
+        let call_id = CallId::new("q");
+        let mut q = OutboundQueue::new();
+        for i in 0..OUTBOUND_BUFFER_FRAMES {
+            assert_eq!(q.push_audio(frame(i as u8), &call_id), 0);
+        }
+        q.push_mark("m".into());
+        // One more audio frame → exactly one eviction, and it must be
+        // the oldest (fill 0), not the newcomer.
+        assert_eq!(q.push_audio(frame(0xAA), &call_id), 1);
+        assert_eq!(q.audio_len, OUTBOUND_BUFFER_FRAMES);
+        match q.items.front() {
+            Some(OutboundItem::Audio(bytes)) => assert_eq!(bytes[0], 1, "oldest (0) evicted"),
+            other => panic!("front should be audio, got {:?}", other.is_some()),
+        }
+        // The mark rider survived, still ahead of the newest frame.
+        assert!(q
+            .items
+            .iter()
+            .any(|i| matches!(i, OutboundItem::Mark(name) if name == "m")));
+        match q.items.back() {
+            Some(OutboundItem::Audio(bytes)) => assert_eq!(bytes[0], 0xAA),
+            other => panic!("back should be the new frame, got {:?}", other.is_some()),
+        }
+    }
+
+    /// §4.1 (#365): `clear` reports what it dropped and empties both
+    /// audio and mark entries.
+    #[test]
+    fn outbound_queue_clear_drops_audio_and_marks() {
+        let call_id = CallId::new("q");
+        let mut q = OutboundQueue::new();
+        q.push_audio(frame(1), &call_id);
+        q.push_mark("m1".into());
+        q.push_audio(frame(2), &call_id);
+        q.push_dtmf('5', 80);
+        assert_eq!(q.clear(), (2, 1));
+        assert!(q.is_empty());
+        assert_eq!(q.audio_len, 0);
+    }
+
+    /// Pause-arbitration fold: audio moves out in queue order; riders
+    /// are dropped and counted.
+    #[test]
+    fn outbound_queue_fold_keeps_order_and_drops_riders() {
+        let call_id = CallId::new("q");
+        let mut q = OutboundQueue::new();
+        q.push_audio(frame(1), &call_id);
+        q.push_mark("m".into());
+        q.push_audio(frame(2), &call_id);
+        let mut resume = vec![frame(0)];
+        assert_eq!(q.fold_audio_into(&mut resume), 1);
+        assert!(q.is_empty());
+        let fills: Vec<u8> = resume.iter().map(|f| f[0]).collect();
+        assert_eq!(fills, vec![0, 1, 2]);
+    }
+
+    /// The clock rebases on reset (#365): after a reset the next push
+    /// re-anchors `first_pushed_at` and the cursor at `now`, so a mark
+    /// estimate no longer carries flushed frames.
+    #[test]
+    fn playout_clock_reset_rebases() {
+        let mut clock = PlayoutClock::default();
+        let t0 = Instant::now();
+        for i in 0..250u64 {
+            clock.note_push(t0 + Duration::from_millis(i));
+        }
+        assert_eq!(clock.frames_sent, 250);
+        assert!(clock.until.expect("queued") > t0 + Duration::from_secs(4));
+        clock.reset();
+        assert_eq!(clock.frames_sent, 0);
+        assert!(clock.until.is_none());
+        let t1 = t0 + Duration::from_secs(10);
+        clock.note_push(t1);
+        assert_eq!(clock.first_pushed_at, Some(t1));
+        assert_eq!(
+            clock.until,
+            Some(t1 + Duration::from_millis(PLAYOUT_FRAME_MS))
+        );
+    }
+
+    /// `restore(0)` leaves the clock cleared; `restore(n)` re-anchors
+    /// at now with `n` frames queued.
+    #[test]
+    fn playout_clock_restore_reanchors() {
+        let mut clock = PlayoutClock::default();
+        clock.restore(0);
+        assert!(clock.until.is_none());
+        clock.restore(5);
+        assert_eq!(clock.frames_sent, 5);
+        let until = clock.until.expect("restored");
+        assert!(until >= Instant::now());
+    }
 
     #[test]
     fn bot_is_playing_tracks_queued_playout() {

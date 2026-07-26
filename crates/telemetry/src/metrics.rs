@@ -335,6 +335,15 @@ pub const DRAIN_SECONDS: &str = "siphon_ai_drain_seconds";
 /// split.
 pub const BARGE_IN_DECISION_SECONDS: &str = "siphon_ai_barge_in_decision_seconds";
 
+/// Outbound WS-server audio frames evicted by the PROTOCOL.md §5.5
+/// window (#366): the tap buffers at most 200 ms (10 frames) of
+/// outbound audio ahead of realtime and drops the **oldest** beyond
+/// that. A nonzero rate means a WS server is streaming faster than
+/// realtime (unpaced TTS burst, or a hostile peer). Literal must match
+/// the `counter!` call site in `siphon-ai-media-glue::tap`.
+pub const OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL: &str =
+    "siphon_ai_outbound_audio_frames_dropped_total";
+
 /// Outbound webhook / CDR delivery latency in **seconds** (0.11.0):
 /// accepted → 2xx, recorded only on success. Labeled by `sink`
 /// (`lifecycle` / `cdr`). Captures retry/backoff dwell, so a slow
@@ -580,6 +589,10 @@ pub fn register_descriptions() {
     describe_counter!(
         "siphon_ai_barge_in_decisions_total",
         "Pause-mode barge-in arbitration resolutions by outcome (confirmed, rejected, timeout)."
+    );
+    describe_counter!(
+        OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL,
+        "Outbound WS audio frames dropped (oldest-first) by the 200 ms playout window (PROTOCOL.md \u{a7}5.5)."
     );
     describe_counter!(
         REGISTER_ADMIN_TRIGGERS_TOTAL,

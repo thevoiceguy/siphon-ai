@@ -6,14 +6,23 @@
 //!
 //! ## Endpoints
 //!
+//! All routes live under `/admin/v1/` (canonical since 0.43.0, #362).
+//! The five pre-0.6.0 routes are also served at their original
+//! unversioned paths as **deprecated aliases** — same handlers, kept
+//! for existing ops tooling, earliest removal 1.0. The one semantic
+//! difference: `POST /admin/calls/:id/hangup` (legacy) takes the
+//! **SIP** Call-ID, while `POST /admin/v1/calls/:id/hangup` takes the
+//! **bridge** `call_id` like every other `/admin/v1/calls/:id/…`
+//! route. `GET …/calls` returns both ids per row.
+//!
 //! | Method | Path                          | Purpose                              |
 //! |--------|-------------------------------|--------------------------------------|
-//! | GET    | `/admin/calls`                | List active per-call SIP Call-IDs    |
-//! | POST   | `/admin/calls/:id/hangup`     | Force-shutdown a call by Call-ID     |
-//! | GET    | `/admin/registrations`        | Snapshot of every `[[register]]` row |
-//! | GET    | `/admin/log`                  | Current `tracing` filter directive   |
-//! | PUT    | `/admin/log`                  | Replace the filter (body = directive)|
-//! | POST   | `/admin/hep/test`             | Emit a probe HEP log packet          |
+//! | GET    | `/admin/v1/calls`             | List active calls (both id namespaces; alias `GET /admin/calls`) |
+//! | POST   | `/admin/v1/calls/:id/hangup`  | Force-shutdown by bridge `call_id` (0.43.0; alias `POST /admin/calls/:sip_call_id/hangup`) |
+//! | GET    | `/admin/v1/registrations`     | Snapshot of every `[[register]]` row (alias `GET /admin/registrations`) |
+//! | GET    | `/admin/v1/log`               | Current `tracing` filter directive (alias `GET /admin/log`) |
+//! | PUT    | `/admin/v1/log`               | Replace the filter (body = directive; alias `PUT /admin/log`) |
+//! | POST   | `/admin/v1/hep/test`          | Emit a probe HEP log packet (alias `POST /admin/hep/test`) |
 //! | POST   | `/admin/v1/calls`             | Originate an outbound call (0.6.0)    |
 //! | GET    | `/admin/v1/conferences`       | List conference rooms + members (0.7.0) |
 //! | POST   | `/admin/v1/conferences`       | Pre-create a room (0.7.0)            |
@@ -132,22 +141,24 @@ pub type DrainStatusFn = Arc<dyn Fn() -> DrainStatus + Send + Sync>;
 /// runtime adapter passes a closure-wrapping object that delegates
 /// to `CallRegistry`.
 pub trait CallRegistryHandle: Send + Sync + 'static {
-    /// Snapshot every active call for `GET /admin/calls`. Each row
+    /// Snapshot every active call for `GET /admin/v1/calls`. Each row
     /// carries both id namespaces so an operator can drive every admin
-    /// endpoint: the bridge `call_id` (conference / park / stats) and
-    /// the SIP Call-ID (`hangup`). See [`AdminCallRow`].
+    /// endpoint: the bridge `call_id` (v1 hangup / conference / park /
+    /// stats) and the SIP Call-ID (legacy `hangup` alias). See
+    /// [`AdminCallRow`].
     fn snapshot_calls(&self) -> Vec<AdminCallRow>;
     /// Best-effort: returns `true` iff a call with that SIP Call-ID
     /// existed and was signalled to shut down.
     fn hangup(&self, sip_call_id: &str) -> bool;
 }
 
-/// One active call in the `GET /admin/calls` response.
+/// One active call in the `GET /admin/v1/calls` response.
 ///
 /// `call_id` is the **bridge** id — the value on the WS `start` message
-/// and the CDR, and the id `/admin/v1/conferences/*`, `/park`,
-/// `/retrieve`, and `/stats` all take. `sip_call_id` is the **SIP**
-/// Call-ID, the id `POST /admin/calls/:id/hangup` takes. Exposing both
+/// and the CDR, and the id every `/admin/v1/calls/:id/…` route
+/// (`/hangup`, `/park`, `/retrieve`, `/stats`) and `/admin/v1/conferences/*`
+/// take. `sip_call_id` is the **SIP** Call-ID, the id the deprecated
+/// `POST /admin/calls/:id/hangup` alias takes. Exposing both
 /// (with `direction`) is the fix for issue #311, where the listing gave
 /// only the SIP Call-ID and the bridge id had no admin source.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -419,11 +430,15 @@ pub async fn dispatch(
     }
 
     let resp = match (method, path) {
-        (&hyper::Method::GET, "/admin/calls") => list_calls(state),
-        (&hyper::Method::GET, "/admin/registrations") => list_registrations(state),
-        (&hyper::Method::GET, "/admin/log") => get_log_filter(state),
-        (&hyper::Method::PUT, "/admin/log") => set_log_filter(state, &body),
-        (&hyper::Method::POST, "/admin/hep/test") => hep_test(state),
+        // Unversioned paths are deprecated aliases of the /admin/v1/
+        // forms (#362) — same handler, kept for pre-0.6.0 ops tooling.
+        (&hyper::Method::GET, "/admin/calls" | "/admin/v1/calls") => list_calls(state),
+        (&hyper::Method::GET, "/admin/registrations" | "/admin/v1/registrations") => {
+            list_registrations(state)
+        }
+        (&hyper::Method::GET, "/admin/log" | "/admin/v1/log") => get_log_filter(state),
+        (&hyper::Method::PUT, "/admin/log" | "/admin/v1/log") => set_log_filter(state, &body),
+        (&hyper::Method::POST, "/admin/hep/test" | "/admin/v1/hep/test") => hep_test(state),
         (&hyper::Method::POST, "/admin/v1/calls") => originate_call(state, &body),
         (&hyper::Method::GET, "/admin/v1/conferences") => list_conferences(state),
         (&hyper::Method::POST, "/admin/v1/conferences") => create_conference(state, &body),
@@ -485,11 +500,26 @@ pub async fn dispatch(
             call_stats(state, id)
         }
         (m, p)
+            if *m == hyper::Method::POST
+                && p.starts_with("/admin/v1/calls/")
+                && p.ends_with("/hangup") =>
+        {
+            // /admin/v1/calls/:id/hangup — bridge call_id, like its
+            // /park, /retrieve and /stats siblings (#362).
+            let id = p
+                .strip_prefix("/admin/v1/calls/")
+                .and_then(|s| s.strip_suffix("/hangup"))
+                .unwrap_or("");
+            hangup_call_by_bridge_id(state, id)
+        }
+        (m, p)
             if m == hyper::Method::POST
                 && p.starts_with("/admin/calls/")
                 && p.ends_with("/hangup") =>
         {
-            // /admin/calls/:id/hangup — pull the id from the middle.
+            // /admin/calls/:id/hangup (deprecated alias) — pull the id
+            // from the middle. Unlike the v1 form this takes the SIP
+            // Call-ID; scripts written against it keep working.
             let id = p
                 .strip_prefix("/admin/calls/")
                 .and_then(|s| s.strip_suffix("/hangup"))
@@ -598,6 +628,42 @@ fn call_stats(state: &AdminState, call_id: &str) -> Response<Full<Bytes>> {
         None => json_response(
             StatusCode::NOT_FOUND,
             &json!({ "error": "no active call with that call_id" }),
+        ),
+    }
+}
+
+/// `POST /admin/v1/calls/:id/hangup` (0.43.0, #362) — force-shutdown
+/// by **bridge** `call_id`, the id every other `/admin/v1/calls/:id/…`
+/// route takes. Resolved to the SIP Call-ID through the registry
+/// snapshot because the registry (and the legacy alias) key hangup by
+/// SIP Call-ID. A wrong-namespace id is just an unknown id → 404.
+fn hangup_call_by_bridge_id(state: &AdminState, call_id: &str) -> Response<Full<Bytes>> {
+    if call_id.is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({ "error": "empty call_id" }),
+        );
+    }
+    let Some(reg) = state.call_registry.as_ref() else {
+        return service_unavailable("call registry not installed");
+    };
+    let calls = reg.snapshot_calls();
+    let row = calls.into_iter().find(|r| r.call_id == call_id);
+    // The snapshot can race the call ending before `hangup` lands —
+    // both misses collapse to the same 404 the caller must handle
+    // anyway ("call already gone").
+    match row {
+        Some(row) if reg.hangup(&row.sip_call_id) => json_response(
+            StatusCode::OK,
+            &json!({
+                "shutdown_signalled": true,
+                "call_id": call_id,
+                "sip_call_id": row.sip_call_id,
+            }),
+        ),
+        _ => json_response(
+            StatusCode::NOT_FOUND,
+            &json!({ "shutdown_signalled": false, "call_id": call_id }),
         ),
     }
 }
@@ -1303,6 +1369,96 @@ mod tests {
         .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(stub.hung_up.lock().unwrap().len(), 1);
+    }
+
+    /// The five pre-0.6.0 routes and their /admin/v1/ aliases (#362)
+    /// must dispatch to the same handler. Handler behavior is covered
+    /// by the per-handler tests; this pins the *routing*: on an empty
+    /// state each pair returns the same non-404 status (a broken alias
+    /// would fall through to 404).
+    #[tokio::test]
+    async fn v1_aliases_route_like_the_legacy_paths() {
+        use hyper::Method;
+        let pairs = [
+            (Method::GET, "/admin/calls", "/admin/v1/calls"),
+            (
+                Method::GET,
+                "/admin/registrations",
+                "/admin/v1/registrations",
+            ),
+            (Method::GET, "/admin/log", "/admin/v1/log"),
+            (Method::PUT, "/admin/log", "/admin/v1/log"),
+            (Method::POST, "/admin/hep/test", "/admin/v1/hep/test"),
+        ];
+        for (method, legacy, v1) in pairs {
+            let s1 = dispatch(&method, legacy, Bytes::new(), &empty_state())
+                .await
+                .expect("legacy path is an admin route")
+                .status();
+            let s2 = dispatch(&method, v1, Bytes::new(), &empty_state())
+                .await
+                .expect("v1 alias is an admin route")
+                .status();
+            assert_eq!(s1, s2, "{method} {legacy} vs {v1} diverged");
+            assert_ne!(s2, StatusCode::NOT_FOUND, "{method} {v1} fell through");
+        }
+    }
+
+    /// `POST /admin/v1/calls/:id/hangup` takes the **bridge** id and
+    /// resolves it to the SIP Call-ID the registry keys on (#362).
+    #[tokio::test]
+    async fn v1_hangup_takes_the_bridge_id() {
+        let stub = Arc::new(StubRegistry {
+            ids: Mutex::new(vec!["abc@host".into()]),
+            hung_up: Mutex::new(vec![]),
+        });
+        let state = AdminState {
+            call_registry: Some(stub.clone() as AdminCallRegistry),
+            ..AdminState::default()
+        };
+
+        // The stub synthesizes bridge id "siphon-<sip>" per row.
+        let resp = dispatch(
+            &hyper::Method::POST,
+            "/admin/v1/calls/siphon-abc@host/hangup",
+            Bytes::new(),
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(body["shutdown_signalled"], true);
+        assert_eq!(body["call_id"], "siphon-abc@host");
+        assert_eq!(body["sip_call_id"], "abc@host");
+        // The registry was driven by the resolved SIP Call-ID.
+        assert_eq!(*stub.hung_up.lock().unwrap(), vec!["abc@host".to_string()]);
+    }
+
+    /// A SIP Call-ID on the v1 route is a wrong-namespace id → 404.
+    /// (Deliberate: neither endpoint guesses which namespace an id is
+    /// from.)
+    #[tokio::test]
+    async fn v1_hangup_rejects_a_sip_call_id() {
+        let stub = Arc::new(StubRegistry {
+            ids: Mutex::new(vec!["abc@host".into()]),
+            hung_up: Mutex::new(vec![]),
+        });
+        let state = AdminState {
+            call_registry: Some(stub.clone() as AdminCallRegistry),
+            ..AdminState::default()
+        };
+        let resp = dispatch(
+            &hyper::Method::POST,
+            "/admin/v1/calls/abc@host/hangup",
+            Bytes::new(),
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(stub.hung_up.lock().unwrap().is_empty(), "nothing hung up");
     }
 
     #[tokio::test]

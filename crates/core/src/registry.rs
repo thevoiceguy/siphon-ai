@@ -261,7 +261,7 @@ impl ConsultRegistry {
 /// [`Direction`] — both fixed for the call's life — so the admin
 /// active-calls listing can report every identifier an operator needs:
 /// the bridge `call_id` (this map's key; what conference / park / stats
-/// consume) *and* the SIP Call-ID (what `POST /admin/calls/:id/hangup`
+/// consume) *and* the SIP Call-ID (what the legacy `POST /admin/calls/:id/hangup` alias
 /// consumes). Before this the listing exposed only the SIP Call-ID, with
 /// no way to obtain the bridge id the conference API requires (issue
 /// #311).
@@ -279,7 +279,7 @@ struct ControlEntry {
     direction: Direction,
 }
 
-/// One active call in the admin `GET /admin/calls` snapshot. `call_id`
+/// One active call in the admin `GET /admin/v1/calls` snapshot. `call_id`
 /// is the bridge id (the registry key); `sip_call_id` is the SIP
 /// Call-ID; `direction` is inbound/outbound.
 #[derive(Debug, Clone)]
@@ -329,7 +329,7 @@ impl CallControlRegistry {
     }
 
     /// Snapshot every active call — bridge `call_id`, SIP Call-ID, and
-    /// direction — for the admin `GET /admin/calls` listing. Order is
+    /// direction — for the admin `GET /admin/v1/calls` listing. Order is
     /// unspecified. Covers both inbound and outbound calls.
     pub fn snapshot(&self) -> Vec<CallSnapshot> {
         self.inner

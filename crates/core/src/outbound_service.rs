@@ -686,7 +686,7 @@ async fn run_call(
     // Arc-of-AtomicBool).
     let cleanup_handle = handle.clone();
     // Reachable by the admin conference API for this leg's lifetime.
-    // Carries the SIP Call-ID + direction for the `GET /admin/calls`
+    // Carries the SIP Call-ID + direction for the `GET /admin/v1/calls`
     // listing (issue #311).
     ctx.control_registry
         .insert(handle, sip_call_id.clone(), Direction::Outbound);

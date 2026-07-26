@@ -161,7 +161,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 Both return `202` with the binding's accept-time row — the REGISTER
 round-trip is asynchronous. Watch the outcome on any of:
-`GET /admin/registrations` (status flips), the metrics below
+`GET /admin/v1/registrations` (status flips), the metrics below
 (`register_attempts_total` ticks), or the `registration_state_changed`
 webhook. `404` = unknown name; `409` = the daemon is draining.
 

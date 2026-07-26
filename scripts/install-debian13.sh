@@ -413,7 +413,7 @@ The daemon is running. SIP listens on UDP $SIP_PORT, RTP on
 $RTP_PORT_MIN-$RTP_PORT_MAX, and Prometheus + admin on $OBS_LISTEN.
 
 Tail logs:        sudo journalctl -u siphon-ai -f
-Active calls:     curl -s http://$obs_host_port/admin/calls | jq
+Active calls:     curl -s http://$obs_host_port/admin/v1/calls | jq
 Metrics:          curl -s http://$obs_host_port/metrics | grep siphon_ai_
 Recent CDRs:      sudo tail -n 5 /var/log/siphon-ai/cdr.jsonl | jq
 CDR rotation:     /etc/logrotate.d/siphon-ai-cdr (daily, 30 keeps)

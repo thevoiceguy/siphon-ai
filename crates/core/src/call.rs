@@ -232,9 +232,20 @@ pub enum CallTermination {
     /// (clean BYE + WS hangup) but is attributed distinctly on the CDR
     /// and `siphon_ai_calls_total`.
     DrainForced,
-    /// The bridge sub-task ended first (clean WS close, server
-    /// disconnect, or a bridge-side error).
+    /// The bridge sub-task ended first via an *orderly* WS ending:
+    /// we sent `stop` (incl. the `server_too_slow` / `protocol_error`
+    /// definitive teardowns) or the session wound down on our side.
+    /// Unexpected drops are [`Self::WsDisconnect`] since 0.45.0.
     BridgeEnded,
+    /// The WS connection dropped unexpectedly mid-call (issue #369):
+    /// the server closed the socket — cleanly or not — before any
+    /// `stop` exchange, the connection errored, or the keepalive timed
+    /// out; with reconnect enabled, also a reconnect window that
+    /// elapsed without recovering. Reported on the CDR as
+    /// `ws_disconnect` per PROTOCOL.md §5.7 — through 0.44.0 this
+    /// collapsed into [`Self::BridgeEnded`], so the durable record
+    /// couldn't tell a server-ended session from a crashed server.
+    WsDisconnect,
     /// The media tap sub-task ended first (call media stopped, tap
     /// detached).
     TapEnded,
@@ -1957,7 +1968,7 @@ impl CallController {
                             .as_mut()
                             .reset(tokio::time::Instant::now() + WS_FAILURE_PROMPT_CAP);
                     } else {
-                        termination = CallTermination::BridgeEnded;
+                        termination = bridge_termination(bridge_result.as_ref());
                         break;
                     }
                 }
@@ -1980,7 +1991,7 @@ impl CallController {
                                 .increment(1);
                         }
                     }
-                    termination = CallTermination::BridgeEnded;
+                    termination = bridge_termination(bridge_result.as_ref());
                     break;
                 }
                 _ = &mut ws_prompt_deadline, if ws_prompt_done_rx.is_some() => {
@@ -1988,7 +1999,7 @@ impl CallController {
                         "ws-failure prompt hit the 30 s safety cap; tearing down");
                     metrics::counter!(WS_FAILURE_PROMPTS_TOTAL, "result" => "timeout").increment(1);
                     ws_prompt_done_rx = None;
-                    termination = CallTermination::BridgeEnded;
+                    termination = bridge_termination(bridge_result.as_ref());
                     break;
                 }
 
@@ -2044,7 +2055,7 @@ impl CallController {
                                     .as_mut()
                                     .reset(tokio::time::Instant::now() + WS_FAILURE_PROMPT_CAP);
                             } else {
-                                termination = CallTermination::BridgeEnded;
+                                termination = bridge_termination(bridge_result.as_ref());
                                 break;
                             }
                         }
@@ -2060,7 +2071,7 @@ impl CallController {
                         {
                             warn!(call_id = %call_id,
                                 "tap unavailable; cannot hold for reconnect; tearing down");
-                            termination = CallTermination::BridgeEnded;
+                            termination = bridge_termination(bridge_result.as_ref());
                             break;
                         }
                         reconnecting = true;
@@ -2093,11 +2104,11 @@ impl CallController {
                                 .as_mut()
                                 .reset(tokio::time::Instant::now() + WS_FAILURE_PROMPT_CAP);
                         } else {
-                            termination = CallTermination::BridgeEnded;
+                            termination = bridge_termination(bridge_result.as_ref());
                             break;
                         }
                     } else {
-                        termination = CallTermination::BridgeEnded;
+                        termination = bridge_termination(bridge_result.as_ref());
                         break;
                     }
                 }
@@ -2446,6 +2457,25 @@ fn start_ws_failure_prompt(
     Some(done_rx)
 }
 
+/// Classify a bridge-first ending for the CDR (issue #369). An
+/// **unexpected** drop — the server closed the socket (cleanly or not)
+/// before any `stop` exchange, or the connection errored (IO / TLS /
+/// keepalive timeout) — is [`CallTermination::WsDisconnect`], matching
+/// the WS `stop` reason and PROTOCOL.md §5.7. Orderly endings — we sent
+/// `stop`, our own teardown, or the `server_too_slow` /
+/// `protocol_error` definitive teardowns where the conn emitted
+/// `error` + `stop` before closing — stay
+/// [`CallTermination::BridgeEnded`]. The drop set deliberately equals
+/// [`reconnect_eligible`]'s, so a give-up reconnect also lands on
+/// `ws_disconnect`: the retained outcome there is the original drop or
+/// the last failed redial, both in the drop set.
+fn bridge_termination(outcome: Option<&Result<DisconnectReason, BridgeError>>) -> CallTermination {
+    match outcome {
+        Some(Ok(DisconnectReason::ServerClosed)) | Some(Err(_)) => CallTermination::WsDisconnect,
+        _ => CallTermination::BridgeEnded,
+    }
+}
+
 /// Whether a finished bridge's outcome is an **unexpected** drop that WS
 /// reconnect (0.7.3) should try to recover from. A clean `stop` we sent
 /// (`StopSent`) or our own teardown (`ControllerHungUp`) is the call
@@ -2755,5 +2785,75 @@ mod handle_tests {
         // Drain-forced is daemon-initiated: it does NOT imply a remote
         // BYE, so the acceptor still owes the peer an outbound BYE.
         assert!(!h.remote_bye_received());
+    }
+}
+
+#[cfg(test)]
+mod bridge_termination_tests {
+    use super::*;
+
+    /// #369: unexpected drops — a server-side close before any `stop`
+    /// exchange, or any connection error (IO / keepalive) — classify as
+    /// `ws_disconnect` on the CDR.
+    #[test]
+    fn unexpected_drops_classify_as_ws_disconnect() {
+        assert_eq!(
+            bridge_termination(Some(&Ok(DisconnectReason::ServerClosed))),
+            CallTermination::WsDisconnect,
+        );
+        assert_eq!(
+            bridge_termination(Some(&Err(BridgeError::KeepaliveTimeout(
+                Duration::from_secs(10)
+            )))),
+            CallTermination::WsDisconnect,
+        );
+        assert_eq!(
+            bridge_termination(Some(&Err(BridgeError::Internal("reset".into())))),
+            CallTermination::WsDisconnect,
+        );
+    }
+
+    /// Orderly endings stay `bridge_ended`: we sent `stop` (including the
+    /// `server_too_slow` / `protocol_error` definitive teardowns, where
+    /// the conn emits `error` + `stop` before closing) or the teardown
+    /// started on our side.
+    #[test]
+    fn orderly_endings_stay_bridge_ended() {
+        for reason in [
+            DisconnectReason::StopSent,
+            DisconnectReason::ControllerHungUp,
+            DisconnectReason::ServerTooSlow,
+            DisconnectReason::ProtocolError,
+        ] {
+            assert_eq!(
+                bridge_termination(Some(&Ok(reason))),
+                CallTermination::BridgeEnded,
+                "{reason:?} is an orderly ending, not a ws_disconnect",
+            );
+        }
+        // No retained outcome (defensive) → the generic cause.
+        assert_eq!(bridge_termination(None), CallTermination::BridgeEnded);
+    }
+
+    /// The `ws_disconnect` set must equal the reconnect-eligible set —
+    /// PROTOCOL.md §5.7 defines both as "unexpected drop", and a give-up
+    /// reconnect's retained outcome classifies through the same helper.
+    #[test]
+    fn drop_set_matches_reconnect_eligibility() {
+        let outcomes: [Result<DisconnectReason, BridgeError>; 6] = [
+            Ok(DisconnectReason::StopSent),
+            Ok(DisconnectReason::ServerClosed),
+            Ok(DisconnectReason::ControllerHungUp),
+            Ok(DisconnectReason::ServerTooSlow),
+            Ok(DisconnectReason::ProtocolError),
+            Err(BridgeError::ConnectTimeout(Duration::from_secs(5))),
+        ];
+        for o in &outcomes {
+            assert_eq!(
+                bridge_termination(Some(o)) == CallTermination::WsDisconnect,
+                reconnect_eligible(o),
+                "classification diverged from reconnect eligibility for {o:?}",
+            );
+        }
     }
 }

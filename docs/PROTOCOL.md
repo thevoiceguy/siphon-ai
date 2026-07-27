@@ -940,7 +940,10 @@ connection closes (cleanly or otherwise) before SiphonAI has sent
 2. Plays the configured `bridge.fallback_prompt_path` audio file (or
    silence) into the call.
 3. Sends SIP BYE.
-4. Emits a CDR with `stop_reason = "ws_disconnect"`.
+4. Emits a CDR with `termination.cause = "ws_disconnect"` (CDR
+   `version` 7, 0.45.0 — earlier versions recorded `"bridge_ended"`,
+   with the detail only in the free-text `termination.bridge_disconnect`
+   string).
 
 **Opt-in reconnect (`[bridge].ws_reconnect_enabled = true`, 0.7.3).** An
 **unexpected** drop instead triggers automatic reconnect: SiphonAI keeps

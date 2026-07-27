@@ -297,7 +297,7 @@ fn enabled_conference() -> ConferenceRegistry {
 }
 
 #[tokio::test]
-async fn server_closes_after_start_yields_bridge_ended() {
+async fn server_closes_after_start_yields_ws_disconnect() {
     let port = one_shot_server(|mut ws| async move {
         // Read the start message, verify it's well-formed, then close.
         let msg = ws.next().await.expect("recv start").expect("ws ok");
@@ -316,7 +316,10 @@ async fn server_closes_after_start_yields_bridge_ended() {
 
     let (controller, _handle) = make_controller(port, "test-1");
     let outcome = controller.run().await.expect("run");
-    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+    // §5.7: a bare close (even a clean 1000) before any `stop` exchange
+    // is an unexpected drop — `ws_disconnect` on the CDR (#369). A
+    // server that wants `server_hangup` sends `hangup` first.
+    assert_eq!(outcome.termination, CallTermination::WsDisconnect);
     let bridge = outcome.bridge.expect("bridge result");
     assert!(
         matches!(bridge, Ok(DisconnectReason::ServerClosed)),
@@ -411,7 +414,7 @@ async fn ws_reconnect_exhausts_and_tears_down() {
     let (controller, _handle) =
         make_controller_reconnect(port, "recon-2", Duration::from_millis(500));
     let outcome = controller.run().await.expect("run");
-    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+    assert_eq!(outcome.termination, CallTermination::WsDisconnect);
 }
 
 #[tokio::test]
@@ -449,7 +452,7 @@ async fn unreachable_server_yields_bridge_error() {
 
     let (controller, _handle) = make_controller(port, "test-4");
     let outcome = controller.run().await.expect("run");
-    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+    assert_eq!(outcome.termination, CallTermination::WsDisconnect);
     assert!(matches!(outcome.bridge, Some(Err(_))));
 }
 
@@ -493,9 +496,9 @@ async fn transfer_without_uac_emits_error() {
 
     let (controller, _handle) = make_controller(port, "test-5");
     let outcome = controller.run().await.expect("run");
-    // Server closed the WS after the error; controller's bridge
-    // task is the first to exit.
-    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+    // Server closed the WS after the error without a `hangup` — per
+    // §5.7 a bare close is an unexpected drop (`ws_disconnect`, #369).
+    assert_eq!(outcome.termination, CallTermination::WsDisconnect);
 }
 
 #[tokio::test]
@@ -532,7 +535,8 @@ async fn conference_join_without_registry_emits_error() {
 
     let (controller, _handle) = make_controller_with_conference(port, "conf-1", None);
     let outcome = controller.run().await.expect("run");
-    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+    // Bare close without `hangup` → `ws_disconnect` (§5.7, #369).
+    assert_eq!(outcome.termination, CallTermination::WsDisconnect);
 }
 
 #[tokio::test]
@@ -600,7 +604,8 @@ async fn conference_join_then_leave_round_trip() {
     let (controller, _handle) =
         make_controller_with_conference(port, "conf-2", Some(enabled_conference()));
     let outcome = controller.run().await.expect("run");
-    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+    // Bare close without `hangup` → `ws_disconnect` (§5.7, #369).
+    assert_eq!(outcome.termination, CallTermination::WsDisconnect);
 }
 
 // ─── Park / retrieve (0.7.0) ─────────────────────────────────────────
@@ -668,7 +673,9 @@ async fn park_then_retrieve_round_trip() {
     );
 
     let outcome = run.await.expect("join").expect("run");
-    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+    // The retrieved session ended on a bare close without `hangup` —
+    // `ws_disconnect` like any other post-`start` bare close (#369).
+    assert_eq!(outcome.termination, CallTermination::WsDisconnect);
     let park = outcome.park.expect("park summary present");
     assert_eq!(park.count, 1, "one park episode");
 }
@@ -883,7 +890,7 @@ async fn ws_drop_with_play_prompt_plays_then_tears_down() {
     };
 
     let outcome = controller.run().await.expect("run");
-    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+    assert_eq!(outcome.termination, CallTermination::WsDisconnect);
     let bridge = outcome.bridge.expect("bridge result");
     // An abrupt drop surfaces as ServerClosed or a raw IO/protocol
     // error depending on how the socket died — both are prompt-eligible
@@ -918,7 +925,7 @@ async fn ws_drop_with_unusable_prompt_falls_open_to_hangup() {
     );
     let started = std::time::Instant::now();
     let outcome = controller.run().await.expect("run");
-    assert_eq!(outcome.termination, CallTermination::BridgeEnded);
+    assert_eq!(outcome.termination, CallTermination::WsDisconnect);
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "fail-open must not wait on any prompt machinery",

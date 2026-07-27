@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-07-27
+
 ### Fixed
 
 - **CDR now records an unexpected mid-call WS drop as `termination.cause = "ws_disconnect"`** (issue #369; **CDR schema v6 → v7**). PROTOCOL.md §5.7 has always promised that a WS connection closing before any `stop` exchange produces a CDR recording `ws_disconnect` — but the CDR had no such cause: a crashed WS server, a network cut, a keepalive timeout, a bare socket close (even a clean 1000 with no `hangup`), and a reconnect window that elapsed without recovering all collapsed into `bridge_ended`, the same value an orderly SiphonAI-side session ending produces. The only trace of the difference was substring-matching the free-text `termination.bridge_disconnect` diagnostic, which has no stability contract. Same WS-vs-CDR divergence class as #356 (`transfer`) and #332 (`caller_hangup`) — the durable, billing/ops-grade side was the lossy one. New `WsDisconnect` variant on `CallTermination` / the CDR `TerminationCause` (serialises `"ws_disconnect"`, matching the WS `stop` reason); the controller classifies every bridge-first ending through one helper whose drop set deliberately equals reconnect eligibility (`ServerClosed` or any connection error → `ws_disconnect`; `stop`-sent, controller-hung-up, `server_too_slow`, `protocol_error` stay `bridge_ended`), so give-up reconnects land on `ws_disconnect` too. `siphon_ai_calls_total` gains the `cause="ws_disconnect"` label — alert on it; it means the WS server crashed or the network failed, not that a call ended. PROTOCOL.md §5.7 step 4 also named a `stop_reason` CDR field that never existed under any option — corrected to `termination.cause`.
+
+- **Outbound requests no longer reuse one From tag for the process lifetime** (fixed upstream by [siphon-rs#72](https://github.com/thevoiceguy/siphon-rs/pull/72), pin bumped `5c7cf20beb50` → `ead16f9bf9b7`). `UserAgentClient` minted a single `local_tag` at construction and stamped it on every out-of-dialog request until restart, so all outbound INVITEs (and OPTIONS, SUBSCRIBE, MESSAGE, PUBLISH, unsolicited NOTIFY) from a node shared one From tag — RFC 3261 §8.1.1.3 requires a fresh tag per request and §19.3 fresh randomness per tag; a live trunk capture showed 7 unrelated calls with 7 Call-IDs and a single tag over 86 minutes. Upstream now mints a tag per request, with REGISTER as the deliberate exception: a stable per-registrar tag (capped map, like the reused Call-ID) so a refresh series presents one `(Call-ID, From tag)` identity per §10.2. No siphon-ai code change.
 
 ## [0.44.0] - 2026-07-26
 

@@ -2066,18 +2066,38 @@ impl BridgingAcceptor {
     /// Install the daemon-wide REFER plumbing. `uac` issues the
     /// REFER; `dialog_manager` MUST be the same instance the UAS
     /// dispatches against (`IntegratedUAS::dialog_manager()`), or
-    /// the controller's per-call dialog lookup will miss.
+    /// the controller's per-call dialog lookup will miss. `uac` MUST
+    /// have been built over that same store too — it drives the
+    /// hold/resume re-INVITEs as well as the REFER, and re-inserts each
+    /// advanced dialog into its own store, so a private one strands the
+    /// CSeq advance where the lookup can't see it (issue #377).
     ///
     /// Optional: callers that don't enable transfer never call this
     /// and `BridgeIn::Transfer` is rejected at the controller with
     /// `TransferFailed`. Calling twice panics — there is exactly one
     /// transfer UAC per daemon.
+    ///
+    /// Panics when `uac` was built over a *different* store than
+    /// `dialog_manager`. That mismatch is silent at runtime and only
+    /// shows up as a wrong CSeq on the second in-dialog request of an
+    /// inbound call (issue #377), so it fails loudly here at wire-up
+    /// instead — CLAUDE.md §4.6's load-time-validation rule applied to
+    /// daemon plumbing.
     pub fn install_transfer(
         &self,
         uac: Arc<IntegratedUAC>,
         dialog_manager: Arc<DialogManager>,
         consult_registry: ConsultRegistry,
     ) {
+        let shares_store = uac
+            .dialog_manager()
+            .is_some_and(|uac_store| Arc::ptr_eq(uac_store, &dialog_manager));
+        assert!(
+            shares_store,
+            "transfer UAC must be built with the UAS's DialogManager; a private \
+             store strands each in-dialog CSeq advance where the per-call lookup \
+             cannot see it (issue #377)"
+        );
         self.transfer
             .set(InstalledTransfer {
                 uac,

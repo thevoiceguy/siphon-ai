@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Inbound legs no longer reuse `CSeq 1` for every in-dialog request — bot-initiated hold can be resumed again** (issue #377). The daemon-wide transfer UAC — which drives an inbound call's hold/resume re-INVITEs as well as its REFER — was built without a `DialogManager`, so it got a private one. Each in-dialog send advances the dialog's local CSeq and re-inserts the dialog into *that* UAC's store, while the per-call lookup (`DialogSource::Managed`) reads the **UAS's** store, which never saw the advance: every request re-resolved the answer-time snapshot and went out as `CSeq 1`. The first request was fine, so plain hold and plain teardown always worked; the second collided. In practice `hold` → `resume` left the caller **stuck on hold** — the carrier read the repeated CSeq as a retransmission and never sent a final response, the transaction died at Timer B (~32 s) with `error { code: "hold_failed" }`, and the call ran on until the RTP-inactivity watchdog killed it (~60 s, CDR `tap_ended`); `hold` → teardown drew a **`408` thirty seconds later**, stalling teardown and inflating the CDR. This is the inbound half of #353's frozen-snapshot bug reached by a different route — that fix gave outbound legs a shared advancing dialog and left this side alone, because the shared-store assumption encoded in `DialogSource::commit`'s doc comment looked sound. `build_transfer_uac` now shares the UAS's store, exactly as `build_outbound_uac` has since #324, and `BridgingAcceptor::install_transfer` **asserts** the UAC it is handed was built over the store it is handed — a silent mis-wiring that only surfaces as a wrong CSeq on a second request now fails loudly at daemon start. Verified live over a Twilio trunk before and after.
+
 ## [0.45.1] - 2026-07-27
 
 ### Fixed

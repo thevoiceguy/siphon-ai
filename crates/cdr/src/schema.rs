@@ -41,6 +41,20 @@
 //! exhaustive matcher can choke on, so the version moves (same rationale as
 //! v2 / v3).
 //!
+//! **v6 (0.41.x):** added the `transfer` [`TerminationCause`] variant
+//! (issue #356) — the WS `stop` message had always reported a hand-off
+//! correctly; the CDR collapsed it into `local_shutdown`. New cause
+//! value, no field shape change.
+//!
+//! **v7 (0.45.0):** added the `ws_disconnect` [`TerminationCause`]
+//! variant (issue #369) — an unexpected mid-call WS drop (server crash,
+//! network cut, keepalive timeout, or a bare close with no `stop`
+//! exchange; also a reconnect window that elapsed without recovering).
+//! Previously collapsed into `bridge_ended`, the same value a clean
+//! server-side close produced, even though PROTOCOL.md §5.7 had promised
+//! the distinction. Same rationale as v2/v3/v5/v6 — a new cause value a
+//! strict exhaustive matcher can choke on.
+//!
 //! ## What we record vs. what we don't
 //!
 //! - **From / To** users only — full SIP URIs are recorded as the
@@ -58,12 +72,12 @@ use serde::{Deserialize, Serialize};
 /// Schema version of the CDR record. Bump per CLAUDE.md §7.7
 /// whenever a change could break consumer parsers.
 ///
-/// v5 (0.40.0): adds the optional `answered_at` timestamp and the
-/// `caller_hangup` [`TerminationCause`] variant. The variant is why this
-/// bumps rather than riding as a silent addition — a strict consumer that
-/// exhaustively matches the v4 cause set will not recognise it, the same
-/// reasoning that drove v2 and v3.
-pub const CDR_VERSION: u32 = 6;
+/// v7 (0.45.0): adds the `ws_disconnect` [`TerminationCause`] variant
+/// (issue #369). A new cause value is why this bumps rather than riding
+/// as a silent addition — a strict consumer that exhaustively matches
+/// the v6 cause set will not recognise it, the same reasoning that
+/// drove v2, v3, v5 and v6.
+pub const CDR_VERSION: u32 = 7;
 
 /// One call's complete record. Always serialised as a single JSON
 /// object on a single line for JSONL file sinks.
@@ -392,9 +406,23 @@ pub enum TerminationCause {
     /// `local_shutdown` so a deploy's forced terminations are
     /// attributable per-call.
     DrainForced,
-    /// Bridge sub-task ended first (clean WS close, server
-    /// disconnect, or a bridge-side error).
+    /// Bridge sub-task ended first via an *orderly* WS ending that isn't
+    /// one of the richer causes: SiphonAI sent `stop` and closed (e.g.
+    /// after emitting `error { server_too_slow | protocol_error }`), or
+    /// the session wound down on our side without a `hangup`. Before v7
+    /// this also absorbed unexpected drops; see [`Self::WsDisconnect`].
     BridgeEnded,
+    /// The WS connection dropped unexpectedly mid-call (v7, 0.45.0;
+    /// issue #369): the server closed the socket — cleanly or not —
+    /// before any `stop` exchange, the connection errored, or the
+    /// keepalive timed out. With `[bridge].ws_reconnect_enabled` this is
+    /// also the cause when the reconnect window elapsed without
+    /// recovering. Serialises as `ws_disconnect`, matching the WS `stop`
+    /// reason and PROTOCOL.md §5.7's long-standing promise — through v6
+    /// this collapsed into [`Self::BridgeEnded`], so the durable record
+    /// couldn't distinguish "the server ended the session" from "the
+    /// server crashed / the network dropped".
+    WsDisconnect,
     /// Media tap sub-task ended first (RTP ended, tap detached).
     TapEnded,
     /// The call was transferred away: the server sent `transfer` and the
@@ -494,6 +522,11 @@ mod tests {
         assert_eq!(v, serde_json::json!("drain_forced"));
         let v = serde_json::to_value(TerminationCause::Transfer).unwrap();
         assert_eq!(v, serde_json::json!("transfer"));
+        // v7 (#369): matches the WS `stop` reason string exactly.
+        let v = serde_json::to_value(TerminationCause::WsDisconnect).unwrap();
+        assert_eq!(v, serde_json::json!("ws_disconnect"));
+        let back: TerminationCause = serde_json::from_value(v).unwrap();
+        assert_eq!(back, TerminationCause::WsDisconnect);
     }
 
     #[test]
@@ -518,14 +551,15 @@ mod tests {
     }
 
     #[test]
-    fn version_field_is_present_and_is_6() {
-        // Bumped to 6 in 0.41.x (the `transfer` termination cause — issue
-        // #356). Was 5 in 0.40.0 (`answered_at` + `caller_hangup`), 4 in
-        // 0.30.0 (the `quality` block), 3 in 0.17.0 (`drain_forced`) and 2
-        // in 0.9.5 (delayed-offer failure causes).
-        assert_eq!(CDR_VERSION, 6);
+    fn version_field_is_present_and_is_7() {
+        // Bumped to 7 in 0.45.0 (the `ws_disconnect` termination cause —
+        // issue #369). Was 6 in 0.41.x (`transfer` — issue #356), 5 in
+        // 0.40.0 (`answered_at` + `caller_hangup`), 4 in 0.30.0 (the
+        // `quality` block), 3 in 0.17.0 (`drain_forced`) and 2 in 0.9.5
+        // (delayed-offer failure causes).
+        assert_eq!(CDR_VERSION, 7);
         let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
-        assert_eq!(v["version"], serde_json::json!(6));
+        assert_eq!(v["version"], serde_json::json!(7));
     }
 
     /// `answered_at` is what makes connected duration derivable; absent

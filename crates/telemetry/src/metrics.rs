@@ -450,7 +450,7 @@ pub fn register_descriptions() {
     );
     describe_counter!(
         CALLS_TOTAL,
-        "Completed calls by termination cause (server_hangup, local_shutdown, drain_forced, bridge_ended, tap_ended)."
+        "Completed calls by termination cause (caller_hangup, server_hangup, local_shutdown, drain_forced, bridge_ended, ws_disconnect, tap_ended, transfer)."
     );
     describe_counter!(
         CALLS_DRAIN_FORCED_TOTAL,

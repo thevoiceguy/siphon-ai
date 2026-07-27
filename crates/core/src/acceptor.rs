@@ -2408,6 +2408,7 @@ pub(crate) fn termination_label(cause: CdrTerminationCause) -> &'static str {
         CdrTerminationCause::LocalShutdown => "local_shutdown",
         CdrTerminationCause::DrainForced => "drain_forced",
         CdrTerminationCause::BridgeEnded => "bridge_ended",
+        CdrTerminationCause::WsDisconnect => "ws_disconnect",
         CdrTerminationCause::TapEnded => "tap_ended",
         CdrTerminationCause::Transfer => "transfer",
         // Delayed-offer negotiation failures (v2). These don't reach the
@@ -2486,6 +2487,7 @@ fn map_cause(t: CallTermination) -> CdrTerminationCause {
         CallTermination::LocalShutdown => CdrTerminationCause::LocalShutdown,
         CallTermination::DrainForced => CdrTerminationCause::DrainForced,
         CallTermination::BridgeEnded => CdrTerminationCause::BridgeEnded,
+        CallTermination::WsDisconnect => CdrTerminationCause::WsDisconnect,
         CallTermination::TapEnded => CdrTerminationCause::TapEnded,
         CallTermination::Transfer => CdrTerminationCause::Transfer,
     }

@@ -2422,6 +2422,21 @@ pub(crate) fn termination_label(cause: CdrTerminationCause) -> &'static str {
     }
 }
 
+/// Shared end-of-call instruments for every ended bridged call:
+/// `siphon_ai_calls_active` steps down, `siphon_ai_calls_total{cause}`
+/// counts the ending, and the wall-clock duration feeds
+/// `siphon_ai_call_duration_seconds`. Both teardown paths — the inbound
+/// acceptor's and the outbound service's — land here; outbound legs used
+/// to skip all three instruments, so dashboards under-counted and a
+/// `cause="ws_disconnect"` alert never saw an outbound WS server crash
+/// (issue #373). Call *setup* outcomes stay on their own counters
+/// (`siphon_ai_invites_total` / `siphon_ai_outbound_calls_total`).
+pub(crate) fn record_call_ended(cause: CdrTerminationCause, duration_secs: f64) {
+    metrics::gauge!(CALLS_ACTIVE).decrement(1.0);
+    metrics::counter!(CALLS_TOTAL, "cause" => termination_label(cause)).increment(1);
+    metrics::histogram!(CALL_DURATION_SECONDS).record(duration_secs);
+}
+
 /// Build the CDR for a delayed-offer call that failed negotiation after
 /// the 200-OK-with-offer was sent but before it went active (the ACK
 /// answer never arrived or was unusable). No codec was negotiated and no
@@ -3385,13 +3400,7 @@ impl BridgingAcceptor {
                 let duration_ms =
                     (ended_at - call_start.started_at).num_milliseconds().max(0) as u64;
                 let duration_secs = duration_ms as f64 / 1000.0;
-                metrics::gauge!(CALLS_ACTIVE).decrement(1.0);
-                metrics::counter!(
-                    CALLS_TOTAL,
-                    "cause" => termination_label(view.cause),
-                )
-                .increment(1);
-                metrics::histogram!(CALL_DURATION_SECONDS).record(duration_secs);
+                record_call_ended(view.cause, duration_secs);
                 if let Some(rec) = view.recording.as_ref() {
                     metrics::counter!(RECORDINGS_TOTAL, "result" => rec.result.as_str())
                         .increment(1);
@@ -4450,6 +4459,35 @@ mod tests {
         assert_eq!(
             termination_label(map_cause(CallTermination::LocalShutdown)),
             "local_shutdown"
+        );
+    }
+
+    #[test]
+    fn record_call_ended_updates_shared_call_instruments() {
+        // Issue #373: both teardown paths (inbound acceptor, outbound
+        // service) end calls through this one helper — assert the gauge
+        // steps back down, the cause label lands, and a duration sample
+        // is recorded.
+        let recorder = siphon_ai_telemetry::prometheus_builder()
+            .expect("builder")
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            metrics::gauge!(CALLS_ACTIVE).increment(1.0);
+            record_call_ended(CdrTerminationCause::WsDisconnect, 12.5);
+        });
+        let out = handle.render();
+        assert!(
+            out.contains(&format!("{CALLS_TOTAL}{{cause=\"ws_disconnect\"}} 1")),
+            "missing ws_disconnect ending:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("{CALLS_ACTIVE} 0")),
+            "active gauge should return to 0:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("{CALL_DURATION_SECONDS}_count 1")),
+            "missing duration sample:\n{out}"
         );
     }
 

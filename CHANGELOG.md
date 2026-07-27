@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Outbound calls now count in the shared call instruments: `siphon_ai_calls_total{cause}`, `siphon_ai_calls_active`, and `siphon_ai_call_duration_seconds`** (issue #373). All three were updated only on the inbound teardown path, and `siphon_ai_outbound_calls_total{result}` classifies call **setup** only (`answered`/`declined`/…) — so once an outbound call was answered, its termination cause reached no metric at all, and `siphon_ai_calls_active` ignored the leg entirely (live-confirmed: 2 active calls, gauge reading 1). The practical bite: 0.45.0's "alert on `cause="ws_disconnect"`" never fired for outbound legs — origination-heavy deployments, exactly the ones most exposed to their own WS server crashing, got no signal. Both teardown paths now end calls through one shared helper (gauge down, cause counted, wall-clock duration recorded — the same block the acceptor always ran), and an outbound leg joins `calls_active` at answer, mirroring inbound's join-at-accept. Additive to the time series: no labels changed, existing inbound-only dashboards simply start seeing the outbound legs they were silently missing. DEPLOY.md metric table now states the direction coverage for all four metrics.
+
 ## [0.45.0] - 2026-07-27
 
 ### Fixed

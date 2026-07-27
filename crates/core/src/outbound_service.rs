@@ -33,8 +33,8 @@ use siphon_ai_media_glue::{
     rewrite_sdp_direction, MediaDirection, OutboundOfferRequest, OutboundSrtp, TapOptions,
 };
 use siphon_ai_telemetry::{
-    OriginateRejection, OriginateRequest, OutboundOriginateHandle, OUTBOUND_CALLS_ACTIVE,
-    OUTBOUND_CALLS_TOTAL, OUTBOUND_SRTP_TOTAL, RECORDINGS_TOTAL,
+    OriginateRejection, OriginateRequest, OutboundOriginateHandle, CALLS_ACTIVE,
+    OUTBOUND_CALLS_ACTIVE, OUTBOUND_CALLS_TOTAL, OUTBOUND_SRTP_TOTAL, RECORDINGS_TOTAL,
 };
 use siphon_ai_webhooks::{
     CallEndEvent, OutboundAnsweredEvent, OutboundFailedEvent, OutboundInitiatedEvent, WebhookEvent,
@@ -43,8 +43,8 @@ use siphon_ai_webhooks::{
 use tracing::{info, warn};
 
 use crate::acceptor::{
-    barge_in_to_tap_action, build_outbound_start_msg, termination_label, BridgeDefaults,
-    CallIdFactory, CallTerminationView,
+    barge_in_to_tap_action, build_outbound_start_msg, record_call_ended, termination_label,
+    BridgeDefaults, CallIdFactory, CallTerminationView,
 };
 use crate::call::{CallController, CallControllerConfig};
 use crate::conference::ConferenceRegistry;
@@ -560,6 +560,12 @@ async fn run_call(
         call_id,
     } = call;
     let sip_call_id = dialog.id().call_id().to_string();
+    // Answered and bridged → this leg joins the shared active-call gauge,
+    // which the inbound path steps up at accept. Setup-phase outbound legs
+    // stay on `siphon_ai_outbound_calls_active` only; without this, an
+    // outbound-heavy node showed `siphon_ai_calls_active` near zero
+    // (issue #373). Balanced by `record_call_ended` in the teardown below.
+    metrics::gauge!(CALLS_ACTIVE).increment(1.0);
     // Answered → this leg is a valid attended-transfer consult target
     // until it ends. Snapshot is enough: the transfer task only reads
     // the dialog's id and remote target (DEV_PLAN_0.6.1 §2.1).
@@ -745,6 +751,12 @@ async fn run_call(
     }
     let ended_at = Utc::now();
     let mut record = build_outbound_record(&ctx, &sip_call_id, audio, &ws_url, ended_at, &view);
+    // Shared end-of-call instruments — the same block the inbound teardown
+    // runs. `outbound_calls_total{result}` classified only call setup, so
+    // an answered outbound leg's termination cause reached no metric and
+    // `cause="ws_disconnect"` alerting was blind to outbound WS crashes
+    // (issue #373).
+    record_call_ended(view.cause, record.duration_ms as f64 / 1000.0);
     // Spool the finalized recording for object-storage upload (0.25.0
     // machinery, outbound wiring 0.26.0) — mirrors the inbound acceptor.
     if let (Some(upload), Some(rec)) = (ctx.recording_upload.as_ref(), view.recording.as_ref()) {

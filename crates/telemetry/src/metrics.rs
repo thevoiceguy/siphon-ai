@@ -48,8 +48,9 @@ use thiserror::Error;
 /// `require_identity`) so fraud-control alerts don't bury in routing noise.
 pub const INVITES_TOTAL: &str = "siphon_ai_invites_total";
 
-/// Calls that completed (controller exited). Labeled by `cause`:
-/// `server_hangup` / `local_shutdown` / `bridge_ended` / `tap_ended`.
+/// Calls that completed (controller exited), inbound and outbound
+/// (#373 — outbound legs were previously not counted). Labeled by
+/// `cause` — the CDR `termination.cause` set; see DEPLOY.md.
 pub const CALLS_TOTAL: &str = "siphon_ai_calls_total";
 
 /// Per-route call counter. Labeled by `route` (the matched
@@ -233,8 +234,11 @@ pub const WEBHOOK_DELIVERY_ATTEMPTS_TOTAL: &str = "siphon_ai_webhook_delivery_at
 
 // ─── Gauges ─────────────────────────────────────────────────────────
 
-/// Currently-active calls. Incremented when the controller spawns,
-/// decremented when it exits.
+/// Currently-active bridged calls, inbound and outbound (#373 —
+/// outbound legs were previously not counted). Inbound legs join at
+/// accept, outbound legs at answer; both leave when the controller
+/// exits. Setup-phase outbound legs count only on
+/// `OUTBOUND_CALLS_ACTIVE`.
 pub const CALLS_ACTIVE: &str = "siphon_ai_calls_active";
 
 /// Currently in-flight outbound calls (0.6.0) — incremented when an

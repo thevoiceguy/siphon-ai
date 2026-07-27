@@ -815,17 +815,20 @@ impl Runtime {
         // can find the dialog the UAS established on the inbound
         // 200 OK. CLAUDE.md §4.4: per-call state lives inside the
         // controller; process-wide plumbing is what we share here.
-        let transfer_uac = build_transfer_uac(TransferUacBuild {
-            local_uri: &local_uri,
-            contact_uri: &contact_uri,
-            listen_addr: sip.listen_addr,
-            public_addr: sip_public_addr(&node, &sip),
-            transaction_mgr: Arc::clone(&transaction_mgr),
-            dispatcher: Arc::clone(&dispatcher),
-            sip_resolver: Arc::clone(&sip_resolver),
-        })?;
-        let transfer_uac = Arc::new(transfer_uac);
         let dialog_manager = uas.dialog_manager();
+        let transfer_uac = build_transfer_uac(
+            TransferUacBuild {
+                local_uri: &local_uri,
+                contact_uri: &contact_uri,
+                listen_addr: sip.listen_addr,
+                public_addr: sip_public_addr(&node, &sip),
+                transaction_mgr: Arc::clone(&transaction_mgr),
+                dispatcher: Arc::clone(&dispatcher),
+                sip_resolver: Arc::clone(&sip_resolver),
+            },
+            Arc::clone(&dialog_manager),
+        )?;
+        let transfer_uac = Arc::new(transfer_uac);
         // Attended-transfer consult lookup (DEV_PLAN_0.6.1 §2.1): one
         // daemon-wide registry shared between the transfer tasks (readers)
         // and the outbound service (writer, below). With [outbound] off it
@@ -2193,13 +2196,32 @@ struct TransferUacBuild<'a> {
 /// the dialog is already authenticated; REFER inherits the dialog's
 /// authentication state. Shares the system DNS resolver with the
 /// per-[[register]] UACs so SRV/NAPTR resolution happens once.
-fn build_transfer_uac(args: TransferUacBuild<'_>) -> Result<IntegratedUAC> {
+///
+/// `dialog_manager` is the UAS's store, and sharing it is load-bearing
+/// for the same reason it is in [`build_outbound_uac`]. This UAC drives
+/// every in-dialog request an inbound leg sends — REFER *and* the
+/// hold/resume re-INVITEs — and each send advances the dialog's local
+/// CSeq, then re-inserts the dialog into *this* UAC's store. With a
+/// private store those advances landed where the per-call lookup
+/// (`DialogSource::Managed`, which reads the UAS's store) could not see
+/// them, so every request re-resolved the answer-time snapshot and went
+/// out as `CSeq 1`: the first one worked and each one after it collided
+/// — resume was read as a retransmission and never answered, leaving
+/// the caller held until the media watchdog killed the call, and the
+/// teardown BYE drew a `408` thirty seconds later (issue #377). The
+/// inbound half of #353's frozen-snapshot bug, reached by a different
+/// route.
+fn build_transfer_uac(
+    args: TransferUacBuild<'_>,
+    dialog_manager: Arc<sip_dialog::DialogManager>,
+) -> Result<IntegratedUAC> {
     let mut builder = IntegratedUAC::builder()
         .local_uri(args.local_uri)
         .contact_uri(args.contact_uri)
         .transaction_manager(args.transaction_mgr)
         .dispatcher(args.dispatcher)
         .resolver(args.sip_resolver)
+        .dialog_manager(dialog_manager)
         .local_addr(args.listen_addr.to_string())
         .map_err(|e| anyhow!("transfer UAC local_addr: {e}"))?;
     if let Some(public) = args.public_addr {

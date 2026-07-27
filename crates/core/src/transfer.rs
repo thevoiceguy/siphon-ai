@@ -83,11 +83,19 @@ impl DialogSource {
     /// in-dialog request, so the next request on this leg continues the
     /// sequence instead of restarting from the answer-time snapshot.
     ///
-    /// `Managed` legs already persist through the UAC's shared
-    /// `DialogManager` (each in-dialog send re-inserts the advanced
-    /// dialog), so this is a no-op there. `Direct` (outbound) legs hold
-    /// the dialog here and must be written back — without it every
-    /// hold/resume/BYE reused `CSeq 2` (issue #353).
+    /// `Direct` (outbound) legs hold the dialog here and must be written
+    /// back — without it every hold/resume/BYE reused `CSeq 2` (issue
+    /// #353).
+    ///
+    /// `Managed` (inbound) legs persist through the UAC instead: every
+    /// `IntegratedUAC` in-dialog send re-inserts the advanced dialog
+    /// into the `DialogManager` it was built with, so this is a no-op
+    /// here — but *only* while that is the same store `resolve` reads.
+    /// The transfer UAC was built without one and got a private store,
+    /// which stranded the advance where the lookup couldn't see it and
+    /// sent every inbound in-dialog request as `CSeq 1` (issue #377).
+    /// `build_transfer_uac` now shares the UAS's store, and
+    /// `BridgingAcceptor::install_transfer` asserts it at wire-up.
     pub(crate) fn commit(&self, dialog: &Dialog) {
         if let DialogSource::Direct { dialog: shared, .. } = self {
             *shared.lock() = dialog.clone();
@@ -390,6 +398,40 @@ mod tests {
             seen,
             vec![base + 1, base + 2, base + 3],
             "a committed send on one clone must advance the CSeq the others see"
+        );
+    }
+
+    #[test]
+    fn managed_source_resolves_each_request_from_the_store() {
+        // Regression context for #377: an inbound leg's successive
+        // in-dialog requests (hold, resume, BYE) each re-resolve through
+        // the manager, so the advance one request makes must be visible
+        // to the next — otherwise they all reuse `CSeq 1` and the peer
+        // reads every request after the first as a retransmission.
+        // Persistence is the UAC's job (it re-inserts on each send);
+        // this asserts the read side that makes that work, while
+        // `BridgingAcceptor::install_transfer` asserts the write side
+        // lands in this same store.
+        let dialog_manager = Arc::new(DialogManager::new());
+        dialog_manager
+            .insert(consult_dialog("in@pbx", "ltag", "rtag"))
+            .expect("seed the store");
+        let src = DialogSource::Managed {
+            sip_call_id: "in@pbx".into(),
+            dialog_manager: Arc::clone(&dialog_manager),
+        };
+        let base = src.resolve().unwrap().local_cseq();
+
+        // Model one send: consume a CSeq and re-insert, as the UAC does.
+        let mut advanced = src.resolve().unwrap();
+        let first = advanced.next_local_cseq();
+        dialog_manager.insert(advanced).expect("re-insert");
+
+        assert_eq!(first, base + 1);
+        assert_eq!(
+            src.resolve().unwrap().local_cseq(),
+            base + 1,
+            "the next request must resolve the advanced dialog, not the answer-time snapshot"
         );
     }
 

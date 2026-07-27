@@ -68,7 +68,7 @@ All must carry `call_id`, must not carry `seq`. **Invariant to assert on every o
 |---|---|---|---|---|
 | WS-IN-01 | `clear` | send mid-playout | queued audio dropped, pending `mark`s behind it dropped w/o firing | 🟢/🔵 |
 | WS-IN-02 | `mark{name}` | send while streaming audio | `BridgeOut::mark{name}` fires when prior audio drained | 🔵 |
-| WS-IN-03 | `hangup{cause}` | send each cause normal/rejected/busy/not_acceptable | `stop{server_hangup}`+close; SIP 200-BYE/603/486/488 respectively | 🔵 |
+| WS-IN-03 | `hangup{cause}` | send each cause normal/rejected/busy/not_acceptable | `stop{server_hangup}`+close; **BYE for every cause** — `cause` has no wire effect and there is no pre-answer window to decline in (PROTOCOL.md §4.3, issue #376). Verified 2026-07-27: `rejected` sent 1 ms after `start` still answered the call and BYE'd it (no 603); `busy` likewise (no 486) | 🟢 |
 | WS-IN-04 | `send_dtmf{digit,duration_ms}` | send `0-9*#ABCD`; duration clamps `[40,2000]` | RFC2833 injected toward caller; `tx_packets_sent` rises | 🟢/🔵 |
 | WS-IN-05 | `mute` / `unmute` | mute, confirm caller silence, unmute | bot audio dropped+flushed while muted; other controls still flow; unmute no-op if not muted | 🔵 |
 | WS-IN-06 **P0** | `conference_join{room_id}` / `conference_leave` | join then leave | `conference_joined{room_id,participants}` / `conference_left{left}`; leave-when-not-in-room = silent no-op | `[conference].enabled` 🔵 |

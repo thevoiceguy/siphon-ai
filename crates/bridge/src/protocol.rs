@@ -844,18 +844,26 @@ pub enum BridgeIn {
     Resume { call_id: CallId },
 }
 
+/// Why the server is hanging up.
+///
+/// Accepted and validated for forward compatibility, but **no variant
+/// changes what goes on the wire today**: every hangup is a BYE. A WS
+/// session only exists on an answered call (the 200 OK precedes the
+/// WS connect), so the pre-answer rejections these names describe are
+/// unreachable — see PROTOCOL.md §4.3 and issue #376.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum HangupCause {
-    /// BYE on an established dialog, or 487 on an early dialog.
+    /// Ordinary teardown. BYE.
     #[default]
     Normal,
-    /// 603 Decline (the call hasn't been answered).
+    /// Intended as 603 Decline. Not implemented — sends BYE, and the
+    /// call is already answered, so the caller is billed as connected.
     Rejected,
-    /// 486 Busy Here.
+    /// Intended as 486 Busy Here. Not implemented — sends BYE.
     Busy,
-    /// 488 Not Acceptable Here.
+    /// Intended as 488 Not Acceptable Here. Not implemented — sends BYE.
     NotAcceptable,
 }
 

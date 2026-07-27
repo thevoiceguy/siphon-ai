@@ -1295,25 +1295,26 @@
       ]
     },
     "HangupCause": {
+      "description": "Why the server is hanging up.\n\nAccepted and validated for forward compatibility, but **no variant\nchanges what goes on the wire today**: every hangup is a BYE. A WS\nsession only exists on an answered call (the 200 OK precedes the\nWS connect), so the pre-answer rejections these names describe are\nunreachable — see PROTOCOL.md §4.3 and issue #376.",
       "oneOf": [
         {
           "const": "normal",
-          "description": "BYE on an established dialog, or 487 on an early dialog.",
+          "description": "Ordinary teardown. BYE.",
           "type": "string"
         },
         {
           "const": "rejected",
-          "description": "603 Decline (the call hasn't been answered).",
+          "description": "Intended as 603 Decline. Not implemented — sends BYE, and the\ncall is already answered, so the caller is billed as connected.",
           "type": "string"
         },
         {
           "const": "busy",
-          "description": "486 Busy Here.",
+          "description": "Intended as 486 Busy Here. Not implemented — sends BYE.",
           "type": "string"
         },
         {
           "const": "not_acceptable",
-          "description": "488 Not Acceptable Here.",
+          "description": "Intended as 488 Not Acceptable Here. Not implemented — sends BYE.",
           "type": "string"
         }
       ]

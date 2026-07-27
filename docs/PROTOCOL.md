@@ -609,14 +609,38 @@ SiphonAI emits a SiphonAI→server `mark` (§3.4) with the same `name`.
 { "type": "hangup", "call_id": "...", "cause": "normal" }
 ```
 
-`cause` is optional; default `"normal"`. Defined values:
+**Every `hangup` tears the call down with a BYE, whatever `cause`
+says.** A WS session only ever exists on an answered call — SiphonAI
+sends the SIP `200 OK` before it opens the WebSocket and sends `start`
+(§3.1) — so there is no point at which a server could decline a call
+that hasn't been answered yet. `cause` is optional (default
+`"normal"`), accepted and validated for forward compatibility, and
+currently has **no effect on the wire**.
 
-| Cause | SIP response |
+| Cause | Effect today |
 |---|---|
-| `normal` | BYE on an established dialog, or 487 on an early dialog. |
-| `rejected` | 603 Decline (the call hasn't been answered). |
-| `busy` | 486 Busy Here. |
-| `not_acceptable` | 488 Not Acceptable Here. |
+| `normal` | BYE. |
+| `rejected` | BYE. |
+| `busy` | BYE. |
+| `not_acceptable` | BYE. |
+
+> **Servers that screen calls, read this.** Rejecting a call with
+> `hangup { cause: "rejected" }` does not produce a `603 Decline`, a
+> `486 Busy Here`, or a `488 Not Acceptable Here` — the caller's carrier
+> sees a normal answered call that ended immediately, and bills it as
+> connected. There is no way to refuse an inbound call over the WS
+> protocol in v1. Reject before the call reaches a WS server instead:
+> route only what should be answered (`docs/DIALPLAN.md`), or gate at
+> the trunk (`[[trunk]]`) or admission (`[sip.admission]`) layer.
+>
+> Earlier versions of this section described `cause` mapping to
+> 603/486/488 and `normal` mapping to `487` on an early dialog. That
+> mapping was never implemented — it belonged to a deferred-answer
+> design (a `BridgeIn::Answer` message, noted as targeted for 0.2.1/0.3.0
+> in `docs/CONFIG.md` under `[sip.call_progress]`) that has not shipped.
+> Pre-answer rejection is tracked in
+> [#376](https://github.com/thevoiceguy/siphon-ai/issues/376); the cause
+> values stay in the schema so that adding it later is additive.
 
 After a successful hangup, SiphonAI sends `stop` with
 `reason: "server_hangup"` and closes the connection.

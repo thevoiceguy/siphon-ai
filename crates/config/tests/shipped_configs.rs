@@ -95,7 +95,10 @@ fn every_shipped_daemon_config_parses() {
     // The walk finding nothing would make this test pass silently, so
     // assert it saw the configs we know are published.
     let names: Vec<String> = checked.iter().map(|p| p.display().to_string()).collect();
-    for expected in ["configs/local-dev.toml", "examples/twilio-trunk/siphon-ai.toml"] {
+    for expected in [
+        "configs/local-dev.toml",
+        "examples/twilio-trunk/siphon-ai.toml",
+    ] {
         assert!(
             names.iter().any(|n| n.replace('\\', "/") == expected),
             "{expected} was not discovered; found: {names:?}"

@@ -634,6 +634,11 @@ pub struct SipConfig {
     /// disables the idle close. Wired to `sip_transport::set_established_idle_timeout`
     /// at startup. UDP is unaffected.
     pub tcp_idle_timeout_secs: u64,
+    /// CRLF keepalive interval (seconds) for established inbound
+    /// SIP-over-TCP/TLS connections (`[sip].tcp_keepalive_interval_secs`).
+    /// Default 0 = off. Wired to `sip_transport::set_stream_keepalive_interval`
+    /// at startup. UDP is unaffected.
+    pub tcp_keepalive_interval_secs: u64,
 }
 
 /// Compiled `[sip.admission]` — inbound INVITE admission control.
@@ -1545,6 +1550,7 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
         auth,
         admission,
         tcp_idle_timeout_secs: raw.tcp_idle_timeout_secs.unwrap_or(1800),
+        tcp_keepalive_interval_secs: raw.tcp_keepalive_interval_secs.unwrap_or(0),
     })
 }
 

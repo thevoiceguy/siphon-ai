@@ -226,6 +226,30 @@ ws_url = "wss://x/y"
 }
 
 #[test]
+fn tcp_keepalive_defaults_off_and_accepts_interval() {
+    let base = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
+    let cfg = load_from_str_with_env(base, &MapEnv::new([])).expect("compiles");
+    assert_eq!(cfg.sip.tcp_keepalive_interval_secs, 0);
+
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+tcp_keepalive_interval_secs = 30
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
+    let cfg = load_from_str_with_env(toml, &MapEnv::new([])).expect("compiles");
+    assert_eq!(cfg.sip.tcp_keepalive_interval_secs, 30);
+}
+
+#[test]
 fn otlp_disabled_by_default_and_independent_of_metrics_listener() {
     // No [observability] block at all → otlp is None.
     let toml = "[sip]\nlisten = \"127.0.0.1:5060\"\n[bridge]\nws_url = \"wss://x/y\"\n";

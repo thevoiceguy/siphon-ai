@@ -684,6 +684,17 @@ impl Runtime {
                 "inbound SIP TCP/TLS established idle timeout set"
             );
         }
+        // CRLF keepalive on established inbound TCP/TLS connections — keeps
+        // a SIP-quiet call's signaling path alive through carrier idle
+        // windows (~120 s observed on Twilio Secure Trunking). Off by
+        // default; set before any listener accepts, like the idle timeout.
+        sip_transport::set_stream_keepalive_interval(sip.tcp_keepalive_interval_secs);
+        if sip.tcp_keepalive_interval_secs != 0 {
+            info!(
+                secs = sip.tcp_keepalive_interval_secs,
+                "inbound SIP TCP/TLS CRLF keepalive enabled"
+            );
+        }
 
         // Bind UDP eagerly so a port-busy error surfaces here, not
         // after we log "ready". TCP / TLS listeners spawn inside

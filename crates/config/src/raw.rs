@@ -251,6 +251,14 @@ pub struct RawSip {
     /// request. UDP is connectionless and unaffected.
     #[serde(default)]
     pub tcp_idle_timeout_secs: Option<u64>,
+    /// Interval (seconds) between CRLF keepalives sent on **established**
+    /// inbound SIP-over-TCP/TLS connections, so a call that goes SIP-quiet
+    /// survives a carrier's connection-idle window (~120 s observed on
+    /// Twilio Secure Trunking). Default `0` = disabled. Keepalive frames
+    /// are transport noise: never HEP-captured, never parsed as SIP.
+    /// UDP is connectionless and unaffected.
+    #[serde(default)]
+    pub tcp_keepalive_interval_secs: Option<u64>,
 }
 
 /// `[sip.admission]` — inbound INVITE admission control. A per-source

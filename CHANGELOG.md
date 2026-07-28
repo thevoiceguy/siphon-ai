@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **In-dialog requests on an inbound TCP/TLS leg no longer die at Timer B after a carrier idle-closes the connection** (fixed upstream by [siphon-rs#74](https://github.com/thevoiceguy/siphon-rs/pull/74), pin bumped `ead16f9bf9b7` → `4e7d5d7d0bd7`). An inbound session's writer task was stopped only by sender-drop, but the `Flow` clones held by dialogs outlive the session — so after a carrier idle-closed a quiet signaling connection (~2 min observed on Twilio Secure Trunking) the socket sat in CLOSE-WAIT forever (one leaked fd per connection) and its writer channel kept accepting: every in-dialog request on the leg — hold re-INVITE, REFER, the teardown BYE — was written into the half-closed socket and died at Timer B ~32 s later, leaving the caller in dead air until the carrier's own cleanup. Upstream now shuts the writer down when the read side ends (flow sends fail fast, socket properly closed), and `bye`/`refer`/`reinvite_via_flow` hand the transaction a pool-resolved fallback target so the existing RFC 3263 §4.3 dispatch failover re-sends via the connection pool when the flow is dead. No siphon-ai code change needed for the failover; the keepalive below closes the gap end-to-end.
+
+### Added
+
+- **`[sip].tcp_keepalive_interval_secs` — opt-in CRLF keepalive on established inbound SIP-over-TCP/TLS connections.** A call that goes SIP-quiet (RTP is out-of-band) can outlive a carrier's connection-idle window; a periodic CRLF keeps the signaling path open so in-dialog requests never race a dead socket in the first place. Default `0` (off), mirroring `[sip].tcp_idle_timeout_secs`'s wiring; keepalive frames are transport noise — never HEP-captured. Documented in CONFIG.md.
+
 ## [0.45.2] - 2026-07-27
 
 ### Fixed

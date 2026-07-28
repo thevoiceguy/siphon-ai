@@ -535,7 +535,7 @@ fn build_uac(
     // us). `local_addr` below feeds the Via sent-by the same way.
     let contact_uri = build_contact_uri(&cfg.username, local_addr_str, cfg.transport);
 
-    let builder = IntegratedUAC::builder()
+    let mut builder = IntegratedUAC::builder()
         .local_uri(&local_uri)
         .contact_uri(&contact_uri)
         .transaction_manager(transaction_mgr)
@@ -544,6 +544,13 @@ fn build_uac(
         .credentials(cfg.auth_username.clone(), cfg.password.clone())
         .local_addr(local_addr_str)
         .map_err(|e| anyhow::anyhow!("local_addr: {e}"))?;
+    // TLS reference identity for any dial this UAC makes to an
+    // IP-literal target (upstream ignores it for hostname targets).
+    // The registrar's cert bears its configured hostname; an IP-literal
+    // server_host has no name to offer.
+    if !siphon_ai_config::compile::host_is_ip_literal(&cfg.server_host) {
+        builder = builder.tls_server_name(&cfg.server_host);
+    }
 
     builder.build()
 }

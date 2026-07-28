@@ -639,6 +639,12 @@ pub struct SipConfig {
     /// Default 0 = off. Wired to `sip_transport::set_stream_keepalive_interval`
     /// at startup. UDP is unaffected.
     pub tcp_keepalive_interval_secs: u64,
+    /// `[sip].tls_server_name` — TLS reference identity used when a
+    /// client-side dial (in-dialog fallback on an inbound leg) targets
+    /// an IP literal. Passed to the daemon-wide transfer UAC's
+    /// `tls_server_name`; upstream only applies it where the SNI would
+    /// otherwise be an IP. `None` = unset.
+    pub tls_server_name: Option<String>,
 }
 
 /// Compiled `[sip.admission]` — inbound INVITE admission control.
@@ -766,6 +772,12 @@ pub enum CompileError {
 
     #[error("[sip.tls] is configured but transports does not include \"tls\"")]
     SipTlsConfiguredButNotEnabled,
+
+    #[error(
+        "[sip].tls_server_name {0:?} must be a DNS hostname (the trunk's \
+         certificate name) — not empty, not an IP literal"
+    )]
+    BadTlsServerName(String),
 
     #[error("[media].codecs has unknown codec {0:?}")]
     UnknownCodec(String),
@@ -1536,6 +1548,20 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
     let auth = compile_sip_auth(raw.auth)?;
     let admission = compile_sip_admission(raw.admission)?;
 
+    // The whole point of the knob is to substitute a *hostname* for an
+    // IP-literal SNI; an IP or empty value would reintroduce the very
+    // failure it exists to fix. Fail loud at load per CLAUDE.md §4.6.
+    let tls_server_name = match raw.tls_server_name {
+        None => None,
+        Some(name) => {
+            let trimmed = name.trim();
+            if trimmed.is_empty() || host_is_ip_literal(trimmed) {
+                return Err(CompileError::BadTlsServerName(name));
+            }
+            Some(trimmed.to_string())
+        }
+    };
+
     Ok(SipConfig {
         listen_addr,
         transports,
@@ -1551,7 +1577,18 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
         admission,
         tcp_idle_timeout_secs: raw.tcp_idle_timeout_secs.unwrap_or(1800),
         tcp_keepalive_interval_secs: raw.tcp_keepalive_interval_secs.unwrap_or(0),
+        tls_server_name,
     })
+}
+
+/// `true` for `1.2.3.4`, `::1`, and bracketed `[::1]` forms — the hosts
+/// a TLS server-name override must not be.
+pub fn host_is_ip_literal(host: &str) -> bool {
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    bare.parse::<std::net::IpAddr>().is_ok()
 }
 
 /// Compile `[sip.admission]`. `None`, or every knob zero/unset, ⇒ off.
@@ -3282,6 +3319,23 @@ fn compile_quality(raw: crate::raw::RawQuality) -> Result<QualityConfig, Compile
         file,
         webhook,
     })
+}
+
+#[cfg(test)]
+mod tls_server_name_tests {
+    use super::host_is_ip_literal;
+
+    #[test]
+    fn ip_literals_are_detected_hostnames_are_not() {
+        assert!(host_is_ip_literal("203.0.113.9"));
+        assert!(host_is_ip_literal("2001:db8::1"));
+        assert!(host_is_ip_literal("[2001:db8::1]"));
+        assert!(!host_is_ip_literal("example.pstn.twilio.com"));
+        assert!(!host_is_ip_literal("pbx.internal"));
+        // Unclosed bracket is not an IP literal — and not a hostname a
+        // dial would ever produce; the override harmlessly won't apply.
+        assert!(!host_is_ip_literal("[2001:db8::1"));
+    }
 }
 
 #[cfg(test)]

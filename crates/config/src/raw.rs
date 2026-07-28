@@ -259,6 +259,15 @@ pub struct RawSip {
     /// UDP is connectionless and unaffected.
     #[serde(default)]
     pub tcp_keepalive_interval_secs: Option<u64>,
+    /// TLS reference identity for client-side dials whose SNI would
+    /// otherwise be an IP literal — e.g. an in-dialog request on an
+    /// inbound leg re-dialed to a Record-Route hop the carrier wrote
+    /// by IP. Carrier certs carry no IP SANs, so such dials fail
+    /// verification without this. Set it to the trunk's hostname
+    /// (e.g. `example.pstn.twilio.com`). Hostname dial targets are
+    /// never overridden. Default: unset.
+    #[serde(default)]
+    pub tls_server_name: Option<String>,
 }
 
 /// `[sip.admission]` — inbound INVITE admission control. A per-source

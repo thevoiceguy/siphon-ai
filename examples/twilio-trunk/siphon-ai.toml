@@ -48,13 +48,13 @@ http_listen = "127.0.0.1:9091"
 # internet who learns your public IP can send you INVITEs and get
 # bridged to your WS server.
 #
-# The `sources` list below uses RFC-5737 documentation ranges as
+# The `peer_addrs` list below uses RFC-5737 documentation ranges as
 # placeholders. Replace with the actual Twilio signalling IPs for
 # the regions you accept calls from — see Twilio's "SIP signaling
 # IP addresses" page (linked from docs/INTEGRATIONS_TWILIO.md).
 [[trunk]]
 name = "twilio"
-sources = [
+peer_addrs = [
   "192.0.2.0/24",   # placeholder — replace with Twilio NA Virginia
   "198.51.100.0/24", # placeholder — replace with Twilio Ireland
 ]
@@ -62,9 +62,11 @@ sources = [
 # Single default route — every accepted INVITE bridges to the
 # bridge ws_url above. For multi-tenant fan-out, replace `any =
 # true` with `to_user` / `request_uri` / custom-header matches
-# (see docs/DIALPLAN.md).
+# (see docs/DIALPLAN.md). To scope a route to unregistered trunk
+# arrivals instead, drop `any` and match `register_source =
+# "trunk"` inside `[route.match]` — `"trunk"` is the literal every
+# UAS-mode call carries, not the `[[trunk]]` name above.
 [[route]]
 name = "twilio_inbound"
-register_source = "twilio"
 [route.match]
 any = true

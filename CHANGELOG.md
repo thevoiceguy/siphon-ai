@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (config): an unknown key inside `[[route]]`, `[route.match]`, or any `[route.*]` override block is now a startup error instead of being silently ignored** (issue #383). Every section in `crates/config` already carried `#[serde(deny_unknown_fields)]` — its doc comment calls that "the right strictness — it catches typos like `auido_sample_rate`" — but no struct in `crates/routes` did, leaving the dialplan the laxest part of the config. Two ways that bit: a misspelled match key was **dropped**, so a route written as "`from_user` **and** `to`" matched on `from_user` alone and, since routes are first-match-wins, quietly stole calls meant for later routes; and a misspelled override key (`ws_uri` for `ws_url`) was indistinguishable from "not overridden", so the route silently bridged to the global `[bridge].ws_url` — a production misroute with a clean `config OK`. The same shape applied to `[route.media]`/`[route.security]`/`[route.recording]`, where a dropped override silently inherits a *less* restrictive global. Unknown keys now produce the same "unknown field `x`, expected one of …" error the rest of the config gives, which for `to` → `to_user` is self-explaining. Unknown **top-level** tables stay tolerated as before (`RawRouteFile` is deliberately lenient — `load_from_toml` is handed whole config files and picks the routes out), and `[route.match.header]` names are map keys, so arbitrary header names are unaffected. **Upgrade note:** a deployed config carrying a stray key in a route block will now refuse to start; run `siphon-ai --config <file> check` before upgrading — the error names the offending key. The shipped `examples/twilio-trunk/siphon-ai.toml` carried exactly this bug (`register_source = "twilio"` at route level, where it did nothing — and `"twilio"` was the `[[trunk]]` name, not the `"trunk"` literal a UAS-mode call actually carries); it has been corrected.
+
 ## [0.45.3] - 2026-07-28
 
 ### Fixed

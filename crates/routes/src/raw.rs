@@ -19,6 +19,11 @@ use serde::Deserialize;
 /// `[[route]]` arrays. The full siphon-ai TOML embeds these via the
 /// `route` key (TOML's array-of-tables syntax). Standalone test
 /// fixtures use this struct directly.
+///
+/// Deliberately *not* `deny_unknown_fields`: [`crate::load_from_toml`]
+/// hands it whole config files and picks the routes out, so every
+/// other top-level table must stay ignorable. Strictness belongs on
+/// the route tables below, where an unknown key is always a typo.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RawRouteFile {
     #[serde(default, rename = "route")]
@@ -26,7 +31,13 @@ pub struct RawRouteFile {
 }
 
 /// One `[[route]]` entry.
+///
+/// `deny_unknown_fields` here and on every block below: a route's keys
+/// decide where a call goes, so a silently-dropped typo would widen the
+/// match or quietly fall back to a global override. Same policy the
+/// config crate's sections already carry.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawRoute {
     pub name: String,
 
@@ -53,6 +64,7 @@ pub struct RawRoute {
 /// block as a Rust regex pattern. The flag is scoped per-route per
 /// CLAUDE.md §4.6 ("`regex = true` is per-route, not per-match-key").
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawRouteMatch {
     /// Unconditional match. Mutually exclusive with all other keys.
     /// Required on the trailing default route.
@@ -86,6 +98,7 @@ pub struct RawRouteMatch {
 /// inherit from the global `[bridge]` block. The merge happens in
 /// the config crate — routes carries the partial.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeOverride {
     pub ws_url: Option<String>,
     pub ws_auth_header: Option<String>,
@@ -132,6 +145,7 @@ pub struct BridgeOverride {
 /// [`crate::CompiledRoute::bridge_tls`] so a bad path fails loud at
 /// startup, not on the first call that matches the route.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeTlsOverride {
     /// PEM client certificate chain, leaf first.
     pub client_cert: String,
@@ -144,6 +158,7 @@ pub struct BridgeTlsOverride {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct BargeInOverride {
     pub enabled: Option<bool>,
     pub mode: Option<String>,
@@ -159,6 +174,7 @@ pub struct BargeInOverride {
 
 /// `[route.media]` overrides. Same merge rules as `BridgeOverride`.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct MediaOverride {
     pub codecs: Option<Vec<String>>,
     pub dtmf: Option<String>,
@@ -183,6 +199,7 @@ pub struct MediaOverride {
 /// security-policy types; the config crate validates it and the accept
 /// path parses it against the global default.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct SecurityOverride {
     /// `[route.security].min_attestation` — per-route override of the
     /// global `[security].min_attestation` gate. `None` inherits; any of
@@ -197,6 +214,7 @@ pub struct SecurityOverride {
 /// stays free of a dependency on the recording types; the config crate
 /// validates it and the accept path resolves it against the global.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct RecordingOverride {
     /// `[route.recording].mode` — per-route override of the global
     /// `[recording].mode`. `None` inherits; `"off"` / `"always"` /

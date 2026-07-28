@@ -250,6 +250,55 @@ ws_url = "wss://x/y"
 }
 
 #[test]
+fn tls_server_name_unset_by_default_and_accepts_hostname() {
+    let base = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
+    let cfg = load_from_str_with_env(base, &MapEnv::new([])).expect("compiles");
+    assert_eq!(cfg.sip.tls_server_name, None);
+
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+tls_server_name = "example.pstn.twilio.com"
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
+    let cfg = load_from_str_with_env(toml, &MapEnv::new([])).expect("compiles");
+    assert_eq!(
+        cfg.sip.tls_server_name.as_deref(),
+        Some("example.pstn.twilio.com")
+    );
+}
+
+#[test]
+fn tls_server_name_rejects_ip_literals_and_empty() {
+    for bad in ["203.0.113.9", "[2001:db8::1]", "2001:db8::1", "", "   "] {
+        let toml = format!(
+            r#"
+[sip]
+listen = "127.0.0.1:5060"
+tls_server_name = "{bad}"
+
+[bridge]
+ws_url = "wss://x/y"
+"#
+        );
+        let err = load_from_str_with_env(&toml, &MapEnv::new([]))
+            .expect_err("IP-literal / empty tls_server_name must fail at load");
+        assert!(
+            err.to_string().contains("tls_server_name"),
+            "unexpected error for {bad:?}: {err}"
+        );
+    }
+}
+
+#[test]
 fn otlp_disabled_by_default_and_independent_of_metrics_listener() {
     // No [observability] block at all → otlp is None.
     let toml = "[sip]\nlisten = \"127.0.0.1:5060\"\n[bridge]\nws_url = \"wss://x/y\"\n";

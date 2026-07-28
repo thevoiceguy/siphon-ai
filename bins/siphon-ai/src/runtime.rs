@@ -695,6 +695,12 @@ impl Runtime {
                 "inbound SIP TCP/TLS CRLF keepalive enabled"
             );
         }
+        if let Some(name) = sip.tls_server_name.as_deref() {
+            info!(
+                name,
+                "TLS server-name override active for IP-literal dial targets"
+            );
+        }
 
         // Bind UDP eagerly so a port-busy error surfaces here, not
         // after we log "ready". TCP / TLS listeners spawn inside
@@ -836,6 +842,7 @@ impl Runtime {
                 transaction_mgr: Arc::clone(&transaction_mgr),
                 dispatcher: Arc::clone(&dispatcher),
                 sip_resolver: Arc::clone(&sip_resolver),
+                tls_server_name: sip.tls_server_name.as_deref(),
             },
             Arc::clone(&dialog_manager),
         )?;
@@ -2200,6 +2207,12 @@ struct TransferUacBuild<'a> {
     transaction_mgr: Arc<TransactionManager>,
     dispatcher: Arc<dyn TransportDispatcher>,
     sip_resolver: Arc<sip_dns::SipResolver>,
+    /// TLS reference identity for dials whose SNI would otherwise be an
+    /// IP literal (carrier Record-Routes itself by IP; certs have no IP
+    /// SANs). Transfer UAC: `[sip].tls_server_name`. Gateway UACs: the
+    /// gateway's `proxy_host` when it is a hostname. Upstream ignores it
+    /// for hostname targets and non-TLS transports.
+    tls_server_name: Option<&'a str>,
 }
 
 /// Build the daemon-wide UAC used by `BridgeIn::Transfer` to send
@@ -2235,6 +2248,9 @@ fn build_transfer_uac(
         .dialog_manager(dialog_manager)
         .local_addr(args.listen_addr.to_string())
         .map_err(|e| anyhow!("transfer UAC local_addr: {e}"))?;
+    if let Some(name) = args.tls_server_name {
+        builder = builder.tls_server_name(name);
+    }
     if let Some(public) = args.public_addr {
         builder = builder
             .public_addr(public.to_string())
@@ -2298,6 +2314,11 @@ pub(crate) fn build_gateways(
                 transaction_mgr: Arc::clone(&deps.transaction_mgr),
                 dispatcher: Arc::clone(&deps.dispatcher),
                 sip_resolver: Arc::clone(&deps.sip_resolver),
+                // The gateway's cert bears its configured hostname; an
+                // IP-literal proxy_host has nothing to offer as a
+                // reference identity, so leave it unset.
+                tls_server_name: (!siphon_ai_config::compile::host_is_ip_literal(&gw.proxy_host))
+                    .then_some(gw.proxy_host.as_str()),
             },
             gw.credentials.as_ref(),
             Some(answerer),
@@ -2367,6 +2388,9 @@ fn build_outbound_uac(
         .dialog_manager(dialog_manager)
         .local_addr(args.listen_addr.to_string())
         .map_err(|e| anyhow!("outbound UAC local_addr: {e}"))?;
+    if let Some(name) = args.tls_server_name {
+        builder = builder.tls_server_name(name);
+    }
     if let Some(public) = args.public_addr {
         builder = builder
             .public_addr(public.to_string())

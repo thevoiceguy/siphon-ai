@@ -85,6 +85,11 @@ These rules are CLAUDE.md §4.6 cardinal — don't try to bend them:
    keys, duplicate route names, missing register references — all
    fail loud at startup, not on the first call that would have hit
    them.
+6. **Unknown keys are errors, not comments.** A key this document
+   doesn't define is a typo, and every route table rejects it by
+   name (``unknown field `to`, expected one of ...``). Header
+   *names* under `[route.match.header]` are exempt — they're your
+   data, not schema.
 
 ---
 
@@ -373,6 +378,16 @@ ws_url = "wss://shared.example.com/sip-bridge"
   or unquoted dotted keys (`header.X-Customer-Id = "..."`).
 - **Duplicate route names.** Names are how observability
   correlates calls; collisions are a hard error at load time.
+- **`to` / `from` instead of `to_user` / `from_user`.** The bare
+  header names aren't match keys. They used to be silently
+  dropped, which made the route match on whatever keys were left —
+  broader than written, and first-match-wins meant it could swallow
+  calls intended for a later route. They're now rejected by name.
+- **A typo'd override key.** `ws_uri` for `ws_url` in
+  `[route.bridge]` used to look exactly like "not overridden", so
+  the route quietly used the global `[bridge].ws_url`. Also now
+  rejected — but it's worth re-reading §3 rule 3: an override you
+  *don't* set always inherits the global, silently and by design.
 
 ---
 

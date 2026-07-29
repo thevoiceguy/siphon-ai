@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.47.2] - 2026-07-29
+
 ### Fixed
 
 - **`silence_detected` no longer fires mid-utterance, and the silence stretch is measured from the caller's last speech *end*, not its onset** (issue #399). The idle detector anchored its silence timer at `speech_started` and never checked whether speech was still active, so any caller utterance longer than `silence_threshold_ms` (default 3 s — routine in real speech) emitted `silence_detected` while the caller was still talking, and the once-per-stretch suppression flag then swallowed the event for the *real* silence that followed — exactly inverted behavior. Short utterances fired early, with `duration_ms` inflated by the utterance's own length. The detector now tracks speech-active state (fed from every forge-vad transition, including debounce-suppressed provisional pairs, so a suppressed pair can't wedge the gate), holds both idle events while the caller is speaking, and anchors silence *and* dead-air at speech end — which also fixes the latent sibling: an utterance longer than `dead_air_threshold_ms` would have fired `dead_air_detected` mid-audio. `duration_ms` now reports the true silence length, matching what PROTOCOL.md §3.6/§3.7 always promised; speechless-call behavior (measured from call start) is unchanged. Live-found on 0.47.1: the new `offset_ms` field made the wrong anchor arithmetically visible on the wire (`silence.offset_ms − duration_ms == speech_started.offset_ms`, three-for-three).

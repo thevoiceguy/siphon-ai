@@ -500,7 +500,7 @@
           "type": "object"
         },
         {
-          "description": "VAD detected the caller starting to speak. Emitted only when\n`bridge.vad = true`.",
+          "description": "VAD detected the caller starting to speak. Always emitted —\nthere is no enable flag; `[media].vad` selects the detection\nbackend only.",
           "properties": {
             "call_id": {
               "$ref": "#/$defs/CallId"

@@ -66,8 +66,9 @@ pub enum BridgeOut {
     /// audio format both directions will use for the lifetime of the call.
     Start(StartMsg),
 
-    /// VAD detected the caller starting to speak. Emitted only when
-    /// `bridge.vad = true`.
+    /// VAD detected the caller starting to speak. Always emitted —
+    /// there is no enable flag; `[media].vad` selects the detection
+    /// backend only.
     SpeechStarted {
         call_id: CallId,
         seq: Seq,

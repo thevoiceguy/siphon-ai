@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.46.1] - 2026-07-28
+
 ### Fixed
 
 - **A confirmed dialog's route set no longer changes after dialog creation — teardown BYE after hold/resume on a re-dialed connection is answered immediately instead of timing out** (fixed upstream by [siphon-rs#82](https://github.com/thevoiceguy/siphon-rs/pull/82), pin bumped `376d0e9a5c5e` → `065c2c65a0f7`). `Dialog::update_from_response` refreshed the remote target on a 2xx — correct, RFC 3261 §12.2.1.2 — but **also** overwrote the dialog's route set from the response's `Record-Route`, which §12.1 fixes at dialog creation. Invisible when the response returns over the original connection (same `Record-Route` echoes back), it bit on the 0.45.3/0.46.0 idle-close fallback path: a 2xx returned over a connection *we* re-dialed carries Twilio's transaction-scoped `twnat=sip:<ip>:<port>` NAT hint in `Record-Route`; adopting it as dialog state sent the subsequent BYE to a target only valid for the dead connection — `408` after 32 s, teardown stalled, and the CDR's `ended_at` inflated by the same 30 s (billing-grade). Upstream now recomputes the route set only in the one case RFC 3261 §13.2.2.4 requires it (a 2xx confirming an *early* dialog); in-dialog responses never touch it. Wire-isolated upstream on live Twilio Secure Trunking (hold → resume → BYE now `200` in ~40 ms on a re-dialed connection). Pin bump only — no siphon-ai code change.

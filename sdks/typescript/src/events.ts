@@ -59,6 +59,12 @@ export interface SpeechStarted extends Base {
   /** Wall-clock Unix-epoch milliseconds of the transition. */
   ts_ms: number;
   /**
+   * Monotonic milliseconds between `start` being sent and the VAD
+   * transition (0.47.0) — media-timeline placement immune to clock
+   * skew, WS transit jitter, and NTP steps. Absent from older daemons.
+   */
+  offset_ms?: number;
+  /**
    * `true` when this event armed a pause-mode barge-in arbitration
    * (0.32.0): playout is paused with its tail retained, and the daemon
    * expects `barge_in_confirm`/`barge_in_reject` within
@@ -86,6 +92,12 @@ export interface SpeechStopped extends Base {
   type: "speech_stopped";
   /** Wall-clock Unix-epoch milliseconds of the transition. */
   ts_ms: number;
+  /**
+   * Monotonic milliseconds between `start` being sent and the VAD
+   * transition (0.47.0) — media-timeline placement immune to clock
+   * skew, WS transit jitter, and NTP steps. Absent from older daemons.
+   */
+  offset_ms?: number;
   duration_ms: number;
 }
 

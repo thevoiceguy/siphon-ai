@@ -130,6 +130,10 @@ class SpeechStarted:
     # Milliseconds the server has to rule before the daemon's configured
     # `on_timeout` applies. Present exactly when `decision_pending`.
     decision_deadline_ms: int | None = None
+    # Monotonic milliseconds between `start` being sent and the VAD
+    # transition (0.47.0) — media-timeline placement immune to clock
+    # skew, WS transit jitter, and NTP steps. None from older daemons.
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -151,6 +155,10 @@ class SpeechStopped:
     # Wall-clock Unix-epoch milliseconds of the transition.
     ts_ms: int
     duration_ms: int
+    # Monotonic milliseconds between `start` being sent and the VAD
+    # transition (0.47.0) — media-timeline placement immune to clock
+    # skew, WS transit jitter, and NTP steps. None from older daemons.
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)

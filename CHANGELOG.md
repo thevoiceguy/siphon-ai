@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sink changes downgraded to restart-required because their durable spool is active are now reported in the `config_reload` audit event's `restart_required` field and the summarizing reload warning** (issue #390). All three sink arms (`[webhooks]`, `[cdr]`, `[audit]`) logged their own specific journal warning but never added the section to the reload's `restart_required` list, so the machine-readable audit trail claimed a plain `"applied"` while deliveries kept going to the old target until a restart — and since a repeat SIGHUP with an unchanged file short-circuits as `no_change`, that one journal line was the only trace a restart was owed. The sections now surface as `"[webhooks] delivery"` / `"[cdr] delivery"` / `"[audit] delivery"` — distinct from the existing `"[audit]"` entry, which means "audit was disabled at startup and enabling it needs the process-global facade installed". Verified live on 0.46.1: an `[audit.webhook].url` edit under an active spool produced a bare-`applied` audit event while probe events and the drained spool kept POSTing to the old url. Sink fingerprints still advance only on a successful swap, so reverting a downgraded edit converges silently with no restart debt (covered by new tests).
+
 ## [0.46.1] - 2026-07-28
 
 ### Fixed

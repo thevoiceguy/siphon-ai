@@ -453,8 +453,12 @@ pub(crate) struct ReloadState {
 /// outbound gateway set (when outbound is enabled and its `limits` are
 /// unchanged). Mutates `state` in place — advancing a fingerprint only for
 /// a section it actually applied (see [`ReloadState`]) — and returns the
-/// restart-required sections that changed (for the warning). Split out
-/// from the SIGHUP loop so it's unit-testable without signals.
+/// restart-required sections: restart-only sections that changed, plus
+/// sink changes downgraded because their durable spool is active (#390).
+/// The returned vec feeds the summarizing warn AND the `config_reload`
+/// audit event's `restart_required` field — omitting a section here makes
+/// the audit trail claim "applied" for a change that didn't take effect.
+/// Split out from the SIGHUP loop so it's unit-testable without signals.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_reload(
     new: Config,
@@ -519,7 +523,8 @@ pub(crate) async fn apply_reload(
     ) {
         SinkReload::Unchanged => {}
         SinkReload::RestartRequired => {
-            warn!("SIGHUP: [webhooks] changed but its durable spool is active; webhook delivery changes require a restart (not hot-applied)")
+            warn!("SIGHUP: [webhooks] changed but its durable spool is active; webhook delivery changes require a restart (not hot-applied)");
+            restart_required.push("[webhooks] delivery");
         }
         SinkReload::Swap => match crate::runtime::build_webhook_sink(webhooks) {
             Ok(sink) => {
@@ -535,7 +540,8 @@ pub(crate) async fn apply_reload(
     match decide_sink_reload(new_cdr_fp != state.cdr_fp, state.cdr_spool || new_cdr_spool) {
         SinkReload::Unchanged => {}
         SinkReload::RestartRequired => {
-            warn!("SIGHUP: [cdr] changed but its durable spool is active; CDR delivery changes require a restart (not hot-applied)")
+            warn!("SIGHUP: [cdr] changed but its durable spool is active; CDR delivery changes require a restart (not hot-applied)");
+            restart_required.push("[cdr] delivery");
         }
         SinkReload::Swap => match crate::runtime::build_cdr_sink(cdr, hep).await {
             Ok(sink) => {
@@ -562,7 +568,8 @@ pub(crate) async fn apply_reload(
             ) {
                 SinkReload::Unchanged => {}
                 SinkReload::RestartRequired => {
-                    warn!("SIGHUP: [audit] changed but its durable spool is active; audit delivery changes require a restart (not hot-applied)")
+                    warn!("SIGHUP: [audit] changed but its durable spool is active; audit delivery changes require a restart (not hot-applied)");
+                    restart_required.push("[audit] delivery");
                 }
                 SinkReload::Swap => {
                     // `build_audit_sink` requires `enabled = true`; when the
@@ -758,6 +765,97 @@ any = true
         audit_swap
             .emit(AuditEvent::invite_rejected("1.2.3.4:5060", "rate_limited"))
             .await;
+    }
+
+    // #390: a sink change that is downgraded because its durable spool is
+    // active must still be REPORTED as restart-required — the vec feeds
+    // the summarizing warn and the `config_reload` audit event, which
+    // otherwise claims a plain "applied" while the change silently didn't
+    // take effect. One test per sink; each also pins that the sink's
+    // fingerprint baseline does NOT advance (the change was not applied,
+    // so reverting the edit must converge without a restart).
+    #[tokio::test]
+    async fn webhook_change_with_active_spool_is_reported_restart_required() {
+        let with_spool = format!(
+            "{BASE}\n[webhooks]\nenabled = true\nurl = \"http://127.0.0.1:1/hook\"\nspool_dir = \"/spool\"\n"
+        );
+        let route_swap = ArcSwap::from_pointee(cfg(&with_spool).routes);
+        let (wh, cd) = null_sinks();
+        let mut st = state(&cfg(&with_spool));
+        let old_fp = st.webhook_fp.clone();
+
+        let new = cfg(&with_spool.replace("/hook", "/hook2"));
+        let rr = apply_reload(new, &route_swap, &wh, &cd, None, None, None, &mut st).await;
+
+        assert!(
+            rr.contains(&"[webhooks] delivery"),
+            "spool-downgraded [webhooks] change must be reported: {rr:?}"
+        );
+        assert_eq!(
+            st.webhook_fp, old_fp,
+            "baseline must not advance past an unapplied change"
+        );
+    }
+
+    #[tokio::test]
+    async fn cdr_change_with_active_spool_is_reported_restart_required() {
+        let with_spool = format!(
+            "{BASE}\n[cdr]\nenabled = true\n[cdr.webhook]\nenabled = true\nurl = \"http://127.0.0.1:1/cdr\"\nspool_dir = \"/spool\"\n"
+        );
+        let route_swap = ArcSwap::from_pointee(cfg(&with_spool).routes);
+        let (wh, cd) = null_sinks();
+        let mut st = state(&cfg(&with_spool));
+        let old_fp = st.cdr_fp.clone();
+
+        let new = cfg(&with_spool.replace("/cdr", "/cdr2"));
+        let rr = apply_reload(new, &route_swap, &wh, &cd, None, None, None, &mut st).await;
+
+        assert!(
+            rr.contains(&"[cdr] delivery"),
+            "spool-downgraded [cdr] change must be reported: {rr:?}"
+        );
+        assert_eq!(
+            st.cdr_fp, old_fp,
+            "baseline must not advance past an unapplied change"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_change_with_active_spool_is_reported_restart_required() {
+        // Audit enabled at startup (swap present) — the exact live shape
+        // from #390: a url edit under an active spool reported as plain
+        // "applied" in the audit trail.
+        let with_spool = format!(
+            "{BASE}\n[audit]\nenabled = true\n[audit.webhook]\nenabled = true\nurl = \"http://127.0.0.1:1/audit\"\nspool_dir = \"/spool\"\n"
+        );
+        let route_swap = ArcSwap::from_pointee(cfg(&with_spool).routes);
+        let (wh, cd) = null_sinks();
+        let mut st = state(&cfg(&with_spool));
+        let old_fp = st.audit_fp.clone();
+        let audit_swap =
+            SwappableAuditSink::new(Arc::new(siphon_ai_audit::NullSink) as AuditSinkHandle);
+
+        let new = cfg(&with_spool.replace("/audit", "/audit2"));
+        let rr = apply_reload(
+            new,
+            &route_swap,
+            &wh,
+            &cd,
+            Some(&audit_swap),
+            None,
+            None,
+            &mut st,
+        )
+        .await;
+
+        assert!(
+            rr.contains(&"[audit] delivery"),
+            "spool-downgraded [audit] change must be reported: {rr:?}"
+        );
+        assert_eq!(
+            st.audit_fp, old_fp,
+            "baseline must not advance past an unapplied change"
+        );
     }
 
     #[tokio::test]

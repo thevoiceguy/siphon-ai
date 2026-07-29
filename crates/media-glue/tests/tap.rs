@@ -444,6 +444,7 @@ async fn dtmf_end_event_emits_outgoing_event() {
             digit,
             duration_ms,
             method,
+            ..
         } => {
             assert_eq!(digit, '5');
             assert_eq!(duration_ms, 120);

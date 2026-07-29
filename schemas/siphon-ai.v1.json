@@ -658,6 +658,15 @@
               "minimum": 0,
               "type": "integer"
             },
+            "offset_ms": {
+              "description": "Monotonic milliseconds between `start` being sent and the\ndetector poll that crossed the threshold (0.48.0); see the\nspeech events' `offset_ms`. Always present from daemons\nthat know the field; absent from older ones.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "seq": {
               "format": "uint64",
               "minimum": 0,
@@ -686,6 +695,15 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "offset_ms": {
+              "description": "Monotonic milliseconds between `start` being sent and the\ndetector poll that crossed the threshold (0.48.0); see the\nspeech events' `offset_ms`. Always present from daemons\nthat know the field; absent from older ones.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "seq": {
               "format": "uint64",
@@ -849,6 +867,15 @@
             },
             "method": {
               "$ref": "#/$defs/DtmfMethod"
+            },
+            "offset_ms": {
+              "description": "Monotonic milliseconds between `start` being sent and the\ndigit's end being detected (0.48.0); see the speech events'\n`offset_ms`. Always present from daemons that know the\nfield; absent from older ones.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "seq": {
               "format": "uint64",

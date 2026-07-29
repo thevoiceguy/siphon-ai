@@ -2338,11 +2338,17 @@ impl MediaTap {
                         let out = match ev {
                             IdleEvent::SilenceDetected { duration_ms } => {
                                 metrics::counter!("siphon_ai_silence_events_total").increment(1);
-                                OutgoingEvent::SilenceDetected { duration_ms }
+                                OutgoingEvent::SilenceDetected {
+                                    duration_ms,
+                                    at: now,
+                                }
                             }
                             IdleEvent::DeadAirDetected { duration_ms } => {
                                 metrics::counter!("siphon_ai_dead_air_events_total").increment(1);
-                                OutgoingEvent::DeadAirDetected { duration_ms }
+                                OutgoingEvent::DeadAirDetected {
+                                    duration_ms,
+                                    at: now,
+                                }
                             }
                         };
                         if let Err(e) = events_tx.try_send(out) {
@@ -2837,6 +2843,7 @@ fn derive_outgoing_event(call_id: &CallId, event: ForgeEvent) -> Option<Outgoing
             // emit the press so the WS server isn't left guessing.
             duration_ms: duration_ms.unwrap_or(0),
             method: map_dtmf_method(method),
+            at: Instant::now(),
         }),
         ForgeEvent::SpeechStarted {
             call_id: ev_call,

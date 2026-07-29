@@ -115,11 +115,23 @@ export interface FarEndResume extends Base {
 export interface SilenceDetected extends Base {
   type: "silence_detected";
   duration_ms: number;
+  /**
+   * Monotonic milliseconds between `start` being sent and the detector
+   * poll that crossed the threshold (0.48.0); see the speech events'
+   * `offset_ms`. Absent from older daemons.
+   */
+  offset_ms?: number;
 }
 
 export interface DeadAirDetected extends Base {
   type: "dead_air_detected";
   duration_ms: number;
+  /**
+   * Monotonic milliseconds between `start` being sent and the detector
+   * poll that crossed the threshold (0.48.0); see the speech events'
+   * `offset_ms`. Absent from older daemons.
+   */
+  offset_ms?: number;
 }
 
 export interface RtpStats extends Base {
@@ -166,6 +178,12 @@ export interface Dtmf extends Base {
   digit: string;
   duration_ms: number;
   method: "rfc2833" | "inband";
+  /**
+   * Monotonic milliseconds between `start` being sent and the digit's
+   * end being detected (0.48.0); see the speech events' `offset_ms`.
+   * Absent from older daemons.
+   */
+  offset_ms?: number;
 }
 
 /** Playout-position echo of a `mark` the server sent. */

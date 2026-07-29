@@ -525,6 +525,7 @@ async fn outgoing_control_events_get_seq_stamped_in_order() {
             digit: '1',
             duration_ms: 100,
             method: DtmfMethod::Rfc2833,
+            at: std::time::Instant::now(),
         })
         .await
         .unwrap();

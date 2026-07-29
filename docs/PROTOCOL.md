@@ -319,7 +319,7 @@ returns to `sendrecv`.
 
 `digit` is one of `0-9 * # A B C D`.
 `method` is `"rfc2833"` or `"inband"` — depending on detection source.
-`offset_ms` (0.48.0) is monotonic milliseconds between `start` being sent
+`offset_ms` (0.47.1) is monotonic milliseconds between `start` being sent
 and the digit's **end** being detected — same semantics and caveats as the
 speech events' `offset_ms` (§3.2). Absent from older daemons.
 
@@ -345,7 +345,7 @@ override; `0` disables the event). The `duration_ms` reports actual
 elapsed time at fire, which may exceed the threshold by up to one
 poll cadence (500 ms). The event fires **once per silence stretch** —
 the next `silence_detected` only after a speech → silence cycle.
-`offset_ms` (0.48.0) is monotonic milliseconds between `start` being
+`offset_ms` (0.47.1) is monotonic milliseconds between `start` being
 sent and the detector poll that crossed the threshold — same semantics
 as the speech events' `offset_ms` (§3.2), same up-to-500 ms poll
 quantization as `duration_ms`. Absent from older daemons.
@@ -359,7 +359,7 @@ to a human after a configurable wait.
 { "type": "dead_air_detected", "call_id": "...", "seq": 103, "duration_ms": 10000, "offset_ms": 55700 }
 ```
 
-`offset_ms` (0.48.0): as on `silence_detected`.
+`offset_ms` (0.47.1): as on `silence_detected`.
 
 Fired when **neither** caller VAD speech **nor** outbound playout from
 the WS server has been observed for at least

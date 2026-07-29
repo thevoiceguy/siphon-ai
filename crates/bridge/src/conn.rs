@@ -176,7 +176,7 @@ pub enum OutgoingEvent {
         digit: char,
         duration_ms: u32,
         method: DtmfMethod,
-        /// Monotonic stamp of the digit's end detection (0.48.0); the
+        /// Monotonic stamp of the digit's end detection (0.47.1); the
         /// conn turns it into the wire `offset_ms`, as for the speech
         /// events.
         at: std::time::Instant,
@@ -214,7 +214,7 @@ pub enum OutgoingEvent {
     SilenceDetected {
         duration_ms: u64,
         /// Monotonic stamp of the detector poll that crossed the
-        /// threshold (0.48.0) → wire `offset_ms`.
+        /// threshold (0.47.1) → wire `offset_ms`.
         at: std::time::Instant,
     },
     /// No audio in EITHER direction (no caller VAD speech AND no
@@ -226,7 +226,7 @@ pub enum OutgoingEvent {
     DeadAirDetected {
         duration_ms: u64,
         /// Monotonic stamp of the detector poll that crossed the
-        /// threshold (0.48.0) → wire `offset_ms`.
+        /// threshold (0.47.1) → wire `offset_ms`.
         at: std::time::Instant,
     },
     /// Periodic snapshot of RTP / RTCP quality, emitted every
@@ -1159,7 +1159,7 @@ mod tests {
             }
         ));
 
-        // The 0.48.0 additions ride the same anchor.
+        // The 0.47.1 additions ride the same anchor.
         let out = build_bridge_out(
             OutgoingEvent::SilenceDetected {
                 duration_ms: 3000,

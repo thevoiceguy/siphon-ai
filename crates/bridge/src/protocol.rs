@@ -144,6 +144,12 @@ pub enum BridgeOut {
         call_id: CallId,
         seq: Seq,
         duration_ms: u64,
+        /// Monotonic milliseconds between `start` being sent and the
+        /// detector poll that crossed the threshold (0.48.0); see the
+        /// speech events' `offset_ms`. Always present from daemons
+        /// that know the field; absent from older ones.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
     },
 
     /// No audio observed in EITHER direction (no caller VAD speech
@@ -156,6 +162,12 @@ pub enum BridgeOut {
         call_id: CallId,
         seq: Seq,
         duration_ms: u64,
+        /// Monotonic milliseconds between `start` being sent and the
+        /// detector poll that crossed the threshold (0.48.0); see the
+        /// speech events' `offset_ms`. Always present from daemons
+        /// that know the field; absent from older ones.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
     },
 
     /// Periodic snapshot of RTP / RTCP quality, emitted every
@@ -265,6 +277,12 @@ pub enum BridgeOut {
         digit: char,
         duration_ms: u32,
         method: DtmfMethod,
+        /// Monotonic milliseconds between `start` being sent and the
+        /// digit's end being detected (0.48.0); see the speech events'
+        /// `offset_ms`. Always present from daemons that know the
+        /// field; absent from older ones.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
     },
 
     /// Acknowledgement of a server-initiated [`BridgeIn::Mark`]: the audio
@@ -1077,6 +1095,39 @@ mod tests {
             msg,
             BridgeOut::SpeechStopped {
                 offset_ms: Some(13136),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bridge_out_idle_and_dtmf_offset_ms() {
+        // 0.48.0 additive field; the legacy shapes (tests below) must
+        // stay byte-stable — offset_ms is skip_serializing_if.
+        let raw = r#"{ "type": "silence_detected", "call_id": "c", "seq": 12, "duration_ms": 3000, "offset_ms": 41200 }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        assert!(matches!(
+            msg,
+            BridgeOut::SilenceDetected {
+                offset_ms: Some(41200),
+                ..
+            }
+        ));
+        let raw = r#"{ "type": "dead_air_detected", "call_id": "c", "seq": 13, "duration_ms": 10000, "offset_ms": 55700 }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        assert!(matches!(
+            msg,
+            BridgeOut::DeadAirDetected {
+                offset_ms: Some(55700),
+                ..
+            }
+        ));
+        let raw = r#"{ "type": "dtmf", "call_id": "c", "seq": 88, "digit": "5", "duration_ms": 120, "method": "rfc2833", "offset_ms": 9040 }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        assert!(matches!(
+            msg,
+            BridgeOut::Dtmf {
+                offset_ms: Some(9040),
                 ..
             }
         ));

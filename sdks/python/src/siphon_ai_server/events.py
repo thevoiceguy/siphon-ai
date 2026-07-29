@@ -187,6 +187,10 @@ class SilenceDetected:
     call_id: str
     seq: int
     duration_ms: int
+    # Monotonic milliseconds between `start` being sent and the detector
+    # poll that crossed the threshold (0.48.0); see the speech events'
+    # offset_ms. None from older daemons.
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -195,6 +199,10 @@ class DeadAirDetected:
     call_id: str
     seq: int
     duration_ms: int
+    # Monotonic milliseconds between `start` being sent and the detector
+    # poll that crossed the threshold (0.48.0); see the speech events'
+    # offset_ms. None from older daemons.
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -240,6 +248,10 @@ class Dtmf:
     digit: str
     duration_ms: int
     method: str
+    # Monotonic milliseconds between `start` being sent and the digit's
+    # end being detected (0.48.0); see the speech events' offset_ms.
+    # None from older daemons.
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)

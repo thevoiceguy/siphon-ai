@@ -176,6 +176,10 @@ pub enum OutgoingEvent {
         digit: char,
         duration_ms: u32,
         method: DtmfMethod,
+        /// Monotonic stamp of the digit's end detection (0.48.0); the
+        /// conn turns it into the wire `offset_ms`, as for the speech
+        /// events.
+        at: std::time::Instant,
     },
     Mark {
         name: String,
@@ -209,6 +213,9 @@ pub enum OutgoingEvent {
     /// only after a speech-then-silence cycle.
     SilenceDetected {
         duration_ms: u64,
+        /// Monotonic stamp of the detector poll that crossed the
+        /// threshold (0.48.0) → wire `offset_ms`.
+        at: std::time::Instant,
     },
     /// No audio in EITHER direction (no caller VAD speech AND no
     /// outbound playout from the WS server) for at least
@@ -218,6 +225,9 @@ pub enum OutgoingEvent {
     /// producing audio.
     DeadAirDetected {
         duration_ms: u64,
+        /// Monotonic stamp of the detector poll that crossed the
+        /// threshold (0.48.0) → wire `offset_ms`.
+        at: std::time::Instant,
     },
     /// Periodic snapshot of RTP / RTCP quality, emitted every
     /// `[bridge].rtp_stats_interval_ms` (default 5 s). Fields are
@@ -909,12 +919,14 @@ fn build_bridge_out(
             digit,
             duration_ms,
             method,
+            at,
         } => BridgeOut::Dtmf {
             call_id,
             seq,
             digit,
             duration_ms,
             method,
+            offset_ms: Some(at.saturating_duration_since(start_sent).as_millis() as u64),
         },
         OutgoingEvent::Mark { name } => BridgeOut::Mark { call_id, seq, name },
         OutgoingEvent::Hold { direction } => BridgeOut::Hold {
@@ -930,15 +942,17 @@ fn build_bridge_out(
             seq,
             outcome,
         },
-        OutgoingEvent::SilenceDetected { duration_ms } => BridgeOut::SilenceDetected {
+        OutgoingEvent::SilenceDetected { duration_ms, at } => BridgeOut::SilenceDetected {
             call_id,
             seq,
             duration_ms,
+            offset_ms: Some(at.saturating_duration_since(start_sent).as_millis() as u64),
         },
-        OutgoingEvent::DeadAirDetected { duration_ms } => BridgeOut::DeadAirDetected {
+        OutgoingEvent::DeadAirDetected { duration_ms, at } => BridgeOut::DeadAirDetected {
             call_id,
             seq,
             duration_ms,
+            offset_ms: Some(at.saturating_duration_since(start_sent).as_millis() as u64),
         },
         OutgoingEvent::RtpStats {
             jitter_ms,
@@ -1071,6 +1085,7 @@ mod tests {
                 digit: '5',
                 duration_ms: 120,
                 method: DtmfMethod::Rfc2833,
+                at: std::time::Instant::now(),
             },
             CallId::new("c"),
             7,
@@ -1140,6 +1155,24 @@ mod tests {
             out,
             BridgeOut::SpeechStopped {
                 offset_ms: Some(0),
+                ..
+            }
+        ));
+
+        // The 0.48.0 additions ride the same anchor.
+        let out = build_bridge_out(
+            OutgoingEvent::SilenceDetected {
+                duration_ms: 3000,
+                at: start_sent + Duration::from_millis(41_200),
+            },
+            CallId::new("c"),
+            9,
+            start_sent,
+        );
+        assert!(matches!(
+            out,
+            BridgeOut::SilenceDetected {
+                offset_ms: Some(41_200),
                 ..
             }
         ));

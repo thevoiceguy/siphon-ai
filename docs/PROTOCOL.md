@@ -314,11 +314,14 @@ returns to `sendrecv`.
 ### 3.4 `dtmf` — caller pressed a key
 
 ```json
-{ "type": "dtmf", "call_id": "...", "seq": 88, "digit": "5", "duration_ms": 120, "method": "rfc2833" }
+{ "type": "dtmf", "call_id": "...", "seq": 88, "digit": "5", "duration_ms": 120, "method": "rfc2833", "offset_ms": 9040 }
 ```
 
 `digit` is one of `0-9 * # A B C D`.
 `method` is `"rfc2833"` or `"inband"` — depending on detection source.
+`offset_ms` (0.48.0) is monotonic milliseconds between `start` being sent
+and the digit's **end** being detected — same semantics and caveats as the
+speech events' `offset_ms` (§3.2). Absent from older daemons.
 
 ### 3.5 `mark` — playback marker fired
 
@@ -333,7 +336,7 @@ been fully played out into the call.
 ### 3.6 `silence_detected` — caller has been silent
 
 ```json
-{ "type": "silence_detected", "call_id": "...", "seq": 102, "duration_ms": 3000 }
+{ "type": "silence_detected", "call_id": "...", "seq": 102, "duration_ms": 3000, "offset_ms": 41200 }
 ```
 
 Fired when the caller has produced no VAD speech for at least
@@ -342,6 +345,10 @@ override; `0` disables the event). The `duration_ms` reports actual
 elapsed time at fire, which may exceed the threshold by up to one
 poll cadence (500 ms). The event fires **once per silence stretch** —
 the next `silence_detected` only after a speech → silence cycle.
+`offset_ms` (0.48.0) is monotonic milliseconds between `start` being
+sent and the detector poll that crossed the threshold — same semantics
+as the speech events' `offset_ms` (§3.2), same up-to-500 ms poll
+quantization as `duration_ms`. Absent from older daemons.
 
 Typical use: prompt the caller ("are you still there?") or escalate
 to a human after a configurable wait.
@@ -349,8 +356,10 @@ to a human after a configurable wait.
 ### 3.7 `dead_air_detected` — no audio in either direction
 
 ```json
-{ "type": "dead_air_detected", "call_id": "...", "seq": 103, "duration_ms": 10000 }
+{ "type": "dead_air_detected", "call_id": "...", "seq": 103, "duration_ms": 10000, "offset_ms": 55700 }
 ```
+
+`offset_ms` (0.48.0): as on `silence_detected`.
 
 Fired when **neither** caller VAD speech **nor** outbound playout from
 the WS server has been observed for at least

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`offset_ms` extended to `dtmf`, `silence_detected`, and `dead_air_detected`** (completes issue #394 — 0.47.0 added it to the speech events). Same semantics and anchor: monotonic milliseconds between `start` being written to the socket and the event's trigger — the digit's *end* detection for `dtmf`, the detector poll that crossed the threshold for the idle pair (so the idle events' offset carries the same up-to-500 ms poll quantization their `duration_ms` already has). Stamped at detection, saturating to `0` for triggers that predate `start` on the wire. Additive within protocol v1; absent from older daemons; documented in PROTOCOL.md §3.4/§3.6/§3.7, typed in both server SDKs.
+
 ## [0.47.0] - 2026-07-29
 
 ### Added

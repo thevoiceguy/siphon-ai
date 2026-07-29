@@ -1034,9 +1034,7 @@ async fn forge_speech_stopped_emits_outgoing_with_duration() {
 
     match event {
         OutgoingEvent::SpeechStopped {
-            ts_ms,
-            duration_ms,
-            ..
+            ts_ms, duration_ms, ..
         } => {
             assert_eq!(ts_ms, ts.timestamp_millis().max(0) as u64);
             assert_eq!(duration_ms, 1234);

@@ -145,7 +145,7 @@ pub enum BridgeOut {
         seq: Seq,
         duration_ms: u64,
         /// Monotonic milliseconds between `start` being sent and the
-        /// detector poll that crossed the threshold (0.48.0); see the
+        /// detector poll that crossed the threshold (0.47.1); see the
         /// speech events' `offset_ms`. Always present from daemons
         /// that know the field; absent from older ones.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,7 +163,7 @@ pub enum BridgeOut {
         seq: Seq,
         duration_ms: u64,
         /// Monotonic milliseconds between `start` being sent and the
-        /// detector poll that crossed the threshold (0.48.0); see the
+        /// detector poll that crossed the threshold (0.47.1); see the
         /// speech events' `offset_ms`. Always present from daemons
         /// that know the field; absent from older ones.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -278,7 +278,7 @@ pub enum BridgeOut {
         duration_ms: u32,
         method: DtmfMethod,
         /// Monotonic milliseconds between `start` being sent and the
-        /// digit's end being detected (0.48.0); see the speech events'
+        /// digit's end being detected (0.47.1); see the speech events'
         /// `offset_ms`. Always present from daemons that know the
         /// field; absent from older ones.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1102,7 +1102,7 @@ mod tests {
 
     #[test]
     fn bridge_out_idle_and_dtmf_offset_ms() {
-        // 0.48.0 additive field; the legacy shapes (tests below) must
+        // 0.47.1 additive field; the legacy shapes (tests below) must
         // stay byte-stable — offset_ms is skip_serializing_if.
         let raw = r#"{ "type": "silence_detected", "call_id": "c", "seq": 12, "duration_ms": 3000, "offset_ms": 41200 }"#;
         let msg: BridgeOut = assert_round_trip(raw);

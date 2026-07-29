@@ -117,7 +117,7 @@ export interface SilenceDetected extends Base {
   duration_ms: number;
   /**
    * Monotonic milliseconds between `start` being sent and the detector
-   * poll that crossed the threshold (0.48.0); see the speech events'
+   * poll that crossed the threshold (0.47.1); see the speech events'
    * `offset_ms`. Absent from older daemons.
    */
   offset_ms?: number;
@@ -128,7 +128,7 @@ export interface DeadAirDetected extends Base {
   duration_ms: number;
   /**
    * Monotonic milliseconds between `start` being sent and the detector
-   * poll that crossed the threshold (0.48.0); see the speech events'
+   * poll that crossed the threshold (0.47.1); see the speech events'
    * `offset_ms`. Absent from older daemons.
    */
   offset_ms?: number;
@@ -180,7 +180,7 @@ export interface Dtmf extends Base {
   method: "rfc2833" | "inband";
   /**
    * Monotonic milliseconds between `start` being sent and the digit's
-   * end being detected (0.48.0); see the speech events' `offset_ms`.
+   * end being detected (0.47.1); see the speech events' `offset_ms`.
    * Absent from older daemons.
    */
   offset_ms?: number;

@@ -239,15 +239,21 @@ are the same VAD signals that drive barge-in — see `[bridge.barge_in]` in
 `docs/CONFIG.md`.)
 
 ```json
-{ "type": "speech_started", "call_id": "...", "seq": 42, "ts_ms": 1785331555126 }
-{ "type": "speech_stopped", "call_id": "...", "seq": 67, "ts_ms": 1785331555782, "duration_ms": 656 }
+{ "type": "speech_started", "call_id": "...", "seq": 42, "ts_ms": 1785331555126, "offset_ms": 12480 }
+{ "type": "speech_stopped", "call_id": "...", "seq": 67, "ts_ms": 1785331555782, "offset_ms": 13136, "duration_ms": 656 }
 ```
 
 `ts_ms` is the wall-clock Unix-epoch milliseconds of the transition (NOT an
 offset from `start` — every daemon version has stamped epoch here);
 `speech_stopped` also carries `duration_ms` (the length of the speech run).
-To place an event on the media timeline, subtract the wall-clock time at
-which you received `start`, or diff consecutive events.
+`offset_ms` (0.47.0) places the same transition on the media timeline:
+monotonic milliseconds between SiphonAI sending `start` and the VAD
+transition, from the daemon's monotonic clock — immune to the wall-clock
+skew, WS transit jitter, and NTP steps that subtracting `ts_ms` values is
+exposed to. (It is stamped at detection, so on a debounce- or pause-held
+`speech_started` it predates the event's arrival by the hold.) Absent from
+older daemons; fall back to diffing `ts_ms` against the wall-clock time
+you received `start`.
 
 The barge-in **mode** doesn't change *whether* these are sent, only what
 SiphonAI does alongside a `speech_started`: `auto_clear` (the default) also

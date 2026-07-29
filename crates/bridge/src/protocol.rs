@@ -75,6 +75,14 @@ pub enum BridgeOut {
         /// Wall-clock Unix-epoch milliseconds of the transition (NOT an
         /// offset from `start`).
         ts_ms: u64,
+        /// Monotonic milliseconds between `start` being sent and the VAD
+        /// transition (0.47.0) — places the event on the media timeline
+        /// without the wall-clock skew, WS transit jitter, or NTP steps
+        /// that deriving an offset from `ts_ms` is exposed to. Always
+        /// present from daemons that know the field; absent from older
+        /// ones.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
         /// `true` when this event armed a pause-mode barge-in
         /// arbitration (0.32.0, `[bridge.barge_in].mode = "pause"`):
         /// playout is paused with its tail retained, and SiphonAI
@@ -98,6 +106,14 @@ pub enum BridgeOut {
         /// Wall-clock Unix-epoch milliseconds of the transition (NOT an
         /// offset from `start`).
         ts_ms: u64,
+        /// Monotonic milliseconds between `start` being sent and the VAD
+        /// transition (0.47.0) — places the event on the media timeline
+        /// without the wall-clock skew, WS transit jitter, or NTP steps
+        /// that deriving an offset from `ts_ms` is exposed to. Always
+        /// present from daemons that know the field; absent from older
+        /// ones.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
         duration_ms: u64,
     },
 
@@ -1037,6 +1053,30 @@ mod tests {
             BridgeOut::SpeechStarted {
                 decision_pending: true,
                 decision_deadline_ms: Some(500),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bridge_out_speech_events_offset_ms() {
+        // 0.47.0 additive field; the legacy shapes (tests above and
+        // below) must stay byte-stable — offset_ms is skip_serializing_if.
+        let raw = r#"{ "type": "speech_started", "call_id": "c", "seq": 42, "ts_ms": 1785331555126, "offset_ms": 12480 }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        assert!(matches!(
+            msg,
+            BridgeOut::SpeechStarted {
+                offset_ms: Some(12480),
+                ..
+            }
+        ));
+        let raw = r#"{ "type": "speech_stopped", "call_id": "c", "seq": 67, "ts_ms": 1785331555782, "offset_ms": 13136, "duration_ms": 656 }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        assert!(matches!(
+            msg,
+            BridgeOut::SpeechStopped {
+                offset_ms: Some(13136),
                 ..
             }
         ));

@@ -152,6 +152,11 @@ pub struct BridgeChannels {
 pub enum OutgoingEvent {
     SpeechStarted {
         ts_ms: u64,
+        /// Monotonic stamp of the VAD transition (0.47.0). The conn
+        /// turns it into the wire `offset_ms` against the instant it
+        /// wrote `start` — kept separate from send time so a
+        /// debounce-held event keeps its true timeline position.
+        at: std::time::Instant,
         /// `true` when this event armed a pause-mode barge-in
         /// arbitration (0.32.0) — the tap stamps it before forwarding;
         /// [`BridgeOut::SpeechStarted`] carries it to the wire.
@@ -162,6 +167,9 @@ pub enum OutgoingEvent {
     },
     SpeechStopped {
         ts_ms: u64,
+        /// Monotonic stamp of the VAD transition (0.47.0); see the
+        /// `SpeechStarted::at` doc.
+        at: std::time::Instant,
         duration_ms: u64,
     },
     Dtmf {
@@ -568,9 +576,11 @@ async fn run_loop(
     // Handshake done and `start` is on the wire — signal readiness so a
     // reconnect drive can drop hold music now (0.7.3), stamping the
     // moment for the CDR first-audio latency epoch (0.30.0).
-    // Best-effort.
+    // Best-effort. The same instant is the epoch for the speech events'
+    // `offset_ms` (0.47.0).
+    let start_sent = std::time::Instant::now();
     if let Some(tx) = ready_tx {
-        let _ = tx.send(std::time::Instant::now());
+        let _ = tx.send(start_sent);
     }
 
     // Subsequent SiphonAI→server messages use seq starting at 1.
@@ -627,7 +637,7 @@ async fn run_loop(
                     return Ok(DisconnectReason::ControllerHungUp);
                 };
 
-                let bridge_out = build_bridge_out(event, call_id.clone(), seq);
+                let bridge_out = build_bridge_out(event, call_id.clone(), seq, start_sent);
                 seq = seq.wrapping_add(1);
                 let is_stop = matches!(bridge_out, BridgeOut::Stop { .. });
                 let json = serde_json::to_string(&bridge_out)
@@ -861,23 +871,38 @@ fn serialize_or_drop(out: &BridgeOut) -> String {
     serde_json::to_string(out).unwrap_or_else(|_| String::from("{\"type\":\"stop\"}"))
 }
 
-fn build_bridge_out(event: OutgoingEvent, call_id: CallId, seq: Seq) -> BridgeOut {
+fn build_bridge_out(
+    event: OutgoingEvent,
+    call_id: CallId,
+    seq: Seq,
+    start_sent: std::time::Instant,
+) -> BridgeOut {
     match event {
         OutgoingEvent::SpeechStarted {
             ts_ms,
+            at,
             decision_pending,
             decision_deadline_ms,
         } => BridgeOut::SpeechStarted {
             call_id,
             seq,
             ts_ms,
+            // Saturates to 0 for a transition detected before `start`
+            // hit the wire (the event queued while the WS was still
+            // connecting).
+            offset_ms: Some(at.saturating_duration_since(start_sent).as_millis() as u64),
             decision_pending,
             decision_deadline_ms,
         },
-        OutgoingEvent::SpeechStopped { ts_ms, duration_ms } => BridgeOut::SpeechStopped {
+        OutgoingEvent::SpeechStopped {
+            ts_ms,
+            at,
+            duration_ms,
+        } => BridgeOut::SpeechStopped {
             call_id,
             seq,
             ts_ms,
+            offset_ms: Some(at.saturating_duration_since(start_sent).as_millis() as u64),
             duration_ms,
         },
         OutgoingEvent::Dtmf {
@@ -1049,6 +1074,7 @@ mod tests {
             },
             CallId::new("c"),
             7,
+            std::time::Instant::now(),
         );
         let BridgeOut::Dtmf {
             call_id,
@@ -1068,10 +1094,55 @@ mod tests {
     fn build_bridge_out_maps_held_and_resumed() {
         // The bot-initiated hold acks (0.7.2) — distinct from the
         // peer-hold Hold/Resume events — stamp call_id + seq.
-        let held = build_bridge_out(OutgoingEvent::Held, CallId::new("c"), 3);
+        let now = std::time::Instant::now();
+        let held = build_bridge_out(OutgoingEvent::Held, CallId::new("c"), 3, now);
         assert!(matches!(held, BridgeOut::Held { seq: 3, .. }));
-        let resumed = build_bridge_out(OutgoingEvent::Resumed, CallId::new("c"), 4);
+        let resumed = build_bridge_out(OutgoingEvent::Resumed, CallId::new("c"), 4, now);
         assert!(matches!(resumed, BridgeOut::Resumed { seq: 4, .. }));
+    }
+
+    #[test]
+    fn build_bridge_out_stamps_speech_offset_ms() {
+        let start_sent = std::time::Instant::now();
+        let out = build_bridge_out(
+            OutgoingEvent::SpeechStarted {
+                ts_ms: 1_785_331_555_126,
+                at: start_sent + Duration::from_millis(250),
+                decision_pending: false,
+                decision_deadline_ms: None,
+            },
+            CallId::new("c"),
+            7,
+            start_sent,
+        );
+        assert!(matches!(
+            out,
+            BridgeOut::SpeechStarted {
+                offset_ms: Some(250),
+                ..
+            }
+        ));
+
+        // A transition detected before `start` hit the wire (the event
+        // queued while the WS was still connecting) saturates to 0
+        // instead of panicking or wrapping.
+        let out = build_bridge_out(
+            OutgoingEvent::SpeechStopped {
+                ts_ms: 1_785_331_555_782,
+                at: start_sent,
+                duration_ms: 656,
+            },
+            CallId::new("c"),
+            8,
+            start_sent + Duration::from_millis(40),
+        );
+        assert!(matches!(
+            out,
+            BridgeOut::SpeechStopped {
+                offset_ms: Some(0),
+                ..
+            }
+        ));
     }
 
     #[test]

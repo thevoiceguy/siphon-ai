@@ -518,6 +518,15 @@
               "description": "`true` when this event armed a pause-mode barge-in\narbitration (0.32.0, `[bridge.barge_in].mode = \"pause\"`):\nplayout is paused with its tail retained, and SiphonAI\nexpects [`BridgeIn::BargeInConfirm`] /\n[`BridgeIn::BargeInReject`] within `decision_deadline_ms`.\nAdditive — omitted (and `false`) in every other mode, so\npre-0.32.0 servers see the exact shape they always saw.",
               "type": "boolean"
             },
+            "offset_ms": {
+              "description": "Monotonic milliseconds between `start` being sent and the VAD\ntransition (0.47.0) — places the event on the media timeline\nwithout the wall-clock skew, WS transit jitter, or NTP steps\nthat deriving an offset from `ts_ms` is exposed to. Always\npresent from daemons that know the field; absent from older\nones.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "seq": {
               "format": "uint64",
               "minimum": 0,
@@ -552,6 +561,15 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "offset_ms": {
+              "description": "Monotonic milliseconds between `start` being sent and the VAD\ntransition (0.47.0) — places the event on the media timeline\nwithout the wall-clock skew, WS transit jitter, or NTP steps\nthat deriving an offset from `ts_ms` is exposed to. Always\npresent from daemons that know the field; absent from older\nones.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "seq": {
               "format": "uint64",

@@ -982,6 +982,7 @@ async fn forge_speech_started_emits_outgoing_speech_started() {
             ts_ms,
             decision_pending,
             decision_deadline_ms,
+            ..
         } => {
             assert_eq!(ts_ms, ts.timestamp_millis().max(0) as u64);
             // No arbitration on the default (Notify) policy.
@@ -1032,7 +1033,11 @@ async fn forge_speech_stopped_emits_outgoing_with_duration() {
         .expect("events_tx open");
 
     match event {
-        OutgoingEvent::SpeechStopped { ts_ms, duration_ms } => {
+        OutgoingEvent::SpeechStopped {
+            ts_ms,
+            duration_ms,
+            ..
+        } => {
             assert_eq!(ts_ms, ts.timestamp_millis().max(0) as u64);
             assert_eq!(duration_ms, 1234);
         }

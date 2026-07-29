@@ -2848,6 +2848,12 @@ fn derive_outgoing_event(call_id: &CallId, event: ForgeEvent) -> Option<Outgoing
             // wrap, but that won't happen for live calls). The WS
             // server decides how to display it.
             ts_ms: timestamp.timestamp_millis().max(0) as u64,
+            // Monotonic twin of `ts_ms` (0.47.0), stamped as the
+            // transition comes off the forge bus — deliberately BEFORE
+            // any debounce/pause hold, which delays forwarding, so the
+            // wire `offset_ms` keeps the transition's true timeline
+            // position.
+            at: Instant::now(),
             // Stamped by the pause-mode arm just before forwarding,
             // when this event arms an arbitration (0.32.0).
             decision_pending: false,
@@ -2859,6 +2865,7 @@ fn derive_outgoing_event(call_id: &CallId, event: ForgeEvent) -> Option<Outgoing
             duration_ms,
         } if &ev_call == call_id => Some(OutgoingEvent::SpeechStopped {
             ts_ms: timestamp.timestamp_millis().max(0) as u64,
+            at: Instant::now(),
             duration_ms,
         }),
         _ => None,

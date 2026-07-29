@@ -39,7 +39,15 @@ pub enum IdleEvent {
 pub struct IdleDetector {
     silence_threshold: Option<Duration>,
     dead_air_threshold: Option<Duration>,
-    last_speech_started: Instant,
+    /// True between `note_speech_started` and `note_speech_stopped`:
+    /// the caller is mid-utterance, so neither idle event may fire
+    /// (#399 — measuring "silence" from the utterance's *onset* made
+    /// any utterance longer than the threshold emit `silence_detected`
+    /// while the caller was still talking).
+    speech_active: bool,
+    /// When the caller last **stopped** speaking (call start before
+    /// any speech) — the anchor actual silence is measured from.
+    last_speech_ended: Instant,
     last_any_audio: Instant,
     /// True once we've emitted `SilenceDetected` for the current
     /// silence stretch; cleared on the next `note_speech_started`.
@@ -57,7 +65,8 @@ impl IdleDetector {
         Self {
             silence_threshold,
             dead_air_threshold,
-            last_speech_started: now,
+            speech_active: false,
+            last_speech_ended: now,
             last_any_audio: now,
             silence_fired: false,
         }
@@ -69,13 +78,25 @@ impl IdleDetector {
         self.silence_threshold.is_some() || self.dead_air_threshold.is_some()
     }
 
-    /// VAD reported the caller started speaking. Resets both
-    /// timers — caller is no longer silent and there's audio
-    /// activity on the call.
+    /// VAD reported the caller started speaking. Marks speech active
+    /// (gating both idle events until the matching
+    /// [`Self::note_speech_stopped`]), notes the audio activity, and
+    /// re-arms the once-per-stretch silence suppression.
     pub fn note_speech_started(&mut self, now: Instant) {
-        self.last_speech_started = now;
+        self.speech_active = true;
         self.last_any_audio = now;
         self.silence_fired = false;
+    }
+
+    /// VAD reported the caller stopped speaking. Silence is measured
+    /// from THIS moment (#399), and caller audio was flowing until it,
+    /// so the dead-air anchor moves too. Safe on a stop without a
+    /// matching start (forge emits one at call setup): both anchors
+    /// just move forward.
+    pub fn note_speech_stopped(&mut self, now: Instant) {
+        self.speech_active = false;
+        self.last_speech_ended = now;
+        self.last_any_audio = now;
     }
 
     /// The WS server pushed audio toward the caller. Resets ONLY
@@ -90,9 +111,15 @@ impl IdleDetector {
     pub fn poll(&mut self, now: Instant) -> Vec<IdleEvent> {
         let mut out = Vec::new();
 
+        // Mid-utterance: the caller is neither silent nor is the call
+        // dead — audio is arriving right now (#399).
+        if self.speech_active {
+            return out;
+        }
+
         if let Some(threshold) = self.silence_threshold {
             if !self.silence_fired {
-                let elapsed = now.saturating_duration_since(self.last_speech_started);
+                let elapsed = now.saturating_duration_since(self.last_speech_ended);
                 if elapsed >= threshold {
                     out.push(IdleEvent::SilenceDetected {
                         duration_ms: elapsed.as_millis() as u64,
@@ -163,12 +190,66 @@ mod tests {
         let now = Instant::now();
         let mut d = IdleDetector::new(Some(ms(3000)), None, now);
         let _ = d.poll(now + ms(3100));
-        // Speech resets the suppression flag.
+        // A speech cycle resets the suppression flag; the next stretch
+        // is measured from the cycle's END.
         d.note_speech_started(now + ms(5000));
-        assert!(d.poll(now + ms(6000)).is_empty());
-        let events = d.poll(now + ms(8500));
+        d.note_speech_stopped(now + ms(5500));
+        assert!(d.poll(now + ms(8499)).is_empty());
+        let events = d.poll(now + ms(8501));
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], IdleEvent::SilenceDetected { .. }));
+        assert!(matches!(
+            events[0],
+            IdleEvent::SilenceDetected { duration_ms } if duration_ms == 3001
+        ));
+    }
+
+    #[test]
+    fn no_idle_events_while_speech_is_active() {
+        // #399 regression: a caller utterance LONGER than the
+        // thresholds must not fire either event mid-utterance, and the
+        // following silence stretch must (a) still fire and (b) be
+        // measured from the utterance's END, not its onset.
+        let now = Instant::now();
+        let mut d = IdleDetector::new(Some(ms(3000)), Some(ms(10000)), now);
+        d.note_speech_started(now + ms(1000));
+        // 14s into the utterance: old code had fired silence at +4s
+        // and dead-air at +11s.
+        assert!(d.poll(now + ms(4500)).is_empty());
+        assert!(d.poll(now + ms(15000)).is_empty());
+        d.note_speech_stopped(now + ms(16000));
+        // Silence counts from the END (16s), not the onset (1s).
+        assert!(d.poll(now + ms(18999)).is_empty());
+        let events = d.poll(now + ms(19001));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            IdleEvent::SilenceDetected { duration_ms } if duration_ms == 3001
+        ));
+        // Dead-air likewise: caller audio flowed until 16s.
+        assert!(d.poll(now + ms(25999)).is_empty());
+        let events = d.poll(now + ms(26001));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            IdleEvent::DeadAirDetected { duration_ms } if duration_ms == 10001
+        ));
+    }
+
+    #[test]
+    fn stop_without_start_re_anchors_both_timers() {
+        // forge emits a zero-length SpeechStopped at call setup; a
+        // stop with no active speech must not wedge anything — both
+        // anchors simply move forward.
+        let now = Instant::now();
+        let mut d = IdleDetector::new(Some(ms(3000)), None, now);
+        d.note_speech_stopped(now + ms(500));
+        assert!(d.poll(now + ms(3499)).is_empty());
+        let events = d.poll(now + ms(3501));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            IdleEvent::SilenceDetected { duration_ms } if duration_ms == 3001
+        ));
     }
 
     #[test]
@@ -209,10 +290,11 @@ mod tests {
         let now = Instant::now();
         let mut d = IdleDetector::new(Some(ms(3000)), Some(ms(10000)), now);
         d.note_speech_started(now + ms(8000));
-        // After speech, neither event should fire until thresholds
-        // elapse from the new anchor.
+        d.note_speech_stopped(now + ms(8100));
+        // After the speech cycle, neither event fires until its
+        // threshold elapses from the cycle's end.
         assert!(d.poll(now + ms(10000)).is_empty());
-        let events = d.poll(now + ms(11001));
+        let events = d.poll(now + ms(11101));
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], IdleEvent::SilenceDetected { .. }));
     }

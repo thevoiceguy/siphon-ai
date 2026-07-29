@@ -604,9 +604,11 @@ pub struct MediaTap {
     muted: bool,
     /// Timer-based derivation of `silence_detected` / `dead_air_detected`
     /// events. Polled on a 500 ms tick in `run()` when at least one
-    /// threshold is configured; receives `note_speech_started` on
-    /// every forge-vad speech-started, and `note_ws_audio` on every
-    /// playout byte arriving from the WS server. Initialized with
+    /// threshold is configured; receives `note_speech_started` /
+    /// `note_speech_stopped` on every forge-vad transition (wire
+    /// suppression notwithstanding — VAD truth, #399), and
+    /// `note_ws_audio` on every playout byte arriving from the WS
+    /// server. Initialized with
     /// both thresholds `None` (disabled); the acceptor calls
     /// [`Self::with_idle_thresholds`] before `run()` to install the
     /// resolved per-call values.
@@ -1646,6 +1648,18 @@ impl MediaTap {
                                 // a fresh event.
                                 if matches!(out, OutgoingEvent::SpeechStarted { .. }) {
                                     self.idle_detector.note_speech_started(Instant::now());
+                                }
+                                // …and on every SpeechStopped, at the
+                                // same altitude — BEFORE the debounce
+                                // cancel below can `continue` past
+                                // forwarding. The idle detector tracks
+                                // VAD truth, not wire truth: a
+                                // suppressed provisional pair must
+                                // still clear `speech_active`, or the
+                                // idle events stay gated forever
+                                // (#399).
+                                if matches!(out, OutgoingEvent::SpeechStopped { .. }) {
+                                    self.idle_detector.note_speech_stopped(Instant::now());
                                 }
                                 // Barge-in reaction beyond forwarding the
                                 // event. `auto_clear` drops pending

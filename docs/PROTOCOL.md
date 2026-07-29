@@ -239,12 +239,15 @@ are the same VAD signals that drive barge-in — see `[bridge.barge_in]` in
 `docs/CONFIG.md`.)
 
 ```json
-{ "type": "speech_started", "call_id": "...", "seq": 42, "ts_ms": 1234 }
-{ "type": "speech_stopped", "call_id": "...", "seq": 67, "ts_ms": 1890, "duration_ms": 656 }
+{ "type": "speech_started", "call_id": "...", "seq": 42, "ts_ms": 1785331555126 }
+{ "type": "speech_stopped", "call_id": "...", "seq": 67, "ts_ms": 1785331555782, "duration_ms": 656 }
 ```
 
-`ts_ms` is monotonic milliseconds since `start` was sent (NOT wall-clock);
+`ts_ms` is the wall-clock Unix-epoch milliseconds of the transition (NOT an
+offset from `start` — every daemon version has stamped epoch here);
 `speech_stopped` also carries `duration_ms` (the length of the speech run).
+To place an event on the media timeline, subtract the wall-clock time at
+which you received `start`, or diff consecutive events.
 
 The barge-in **mode** doesn't change *whether* these are sent, only what
 SiphonAI does alongside a `speech_started`: `auto_clear` (the default) also
@@ -263,7 +266,7 @@ arbitration**: SiphonAI instantly pauses playout (same one-frame reaction as
 extra fields:
 
 ```json
-{ "type": "speech_started", "call_id": "...", "seq": 42, "ts_ms": 1234,
+{ "type": "speech_started", "call_id": "...", "seq": 42, "ts_ms": 1785331555126,
   "decision_pending": true, "decision_deadline_ms": 500 }
 ```
 

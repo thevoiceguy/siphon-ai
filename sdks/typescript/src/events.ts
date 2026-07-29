@@ -56,6 +56,7 @@ export interface Start extends Base {
 
 export interface SpeechStarted extends Base {
   type: "speech_started";
+  /** Wall-clock Unix-epoch milliseconds of the transition. */
   ts_ms: number;
   /**
    * `true` when this event armed a pause-mode barge-in arbitration
@@ -83,6 +84,7 @@ export interface BargeInResolved extends Base {
 
 export interface SpeechStopped extends Base {
   type: "speech_stopped";
+  /** Wall-clock Unix-epoch milliseconds of the transition. */
   ts_ms: number;
   duration_ms: number;
 }

@@ -120,6 +120,7 @@ class SpeechStarted:
     type = "speech_started"
     call_id: str
     seq: int
+    # Wall-clock Unix-epoch milliseconds of the transition.
     ts_ms: int
     # True when this event armed a pause-mode barge-in arbitration
     # (0.32.0): playout is paused with its tail retained, and the daemon
@@ -147,6 +148,7 @@ class SpeechStopped:
     type = "speech_stopped"
     call_id: str
     seq: int
+    # Wall-clock Unix-epoch milliseconds of the transition.
     ts_ms: int
     duration_ms: int
 

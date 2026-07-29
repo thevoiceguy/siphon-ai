@@ -71,7 +71,8 @@ pub enum BridgeOut {
     SpeechStarted {
         call_id: CallId,
         seq: Seq,
-        /// Milliseconds since `start` was sent (monotonic, NOT wall-clock).
+        /// Wall-clock Unix-epoch milliseconds of the transition (NOT an
+        /// offset from `start`).
         ts_ms: u64,
         /// `true` when this event armed a pause-mode barge-in
         /// arbitration (0.32.0, `[bridge.barge_in].mode = "pause"`):
@@ -93,6 +94,8 @@ pub enum BridgeOut {
     SpeechStopped {
         call_id: CallId,
         seq: Seq,
+        /// Wall-clock Unix-epoch milliseconds of the transition (NOT an
+        /// offset from `start`).
         ts_ms: u64,
         duration_ms: u64,
     },

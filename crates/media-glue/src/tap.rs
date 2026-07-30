@@ -596,6 +596,15 @@ pub struct MediaTap {
     /// fully-built tap via [`Self::with_inactivity_timeout`] so the
     /// 4-arg `attach()` form in tests stays terse.
     inactivity_timeout: Option<Duration>,
+    /// Whether the far end currently has us on hold (peer re-INVITE
+    /// `sendonly`/`inactive`). Shared with the `CallHandle` — the
+    /// acceptor's re-INVITE handler flips it. While `true` (or while
+    /// bot-held) the RTP inactivity watchdog is parked instead of
+    /// tearing the call down: an `inactive` peer-hold legitimately
+    /// stops all inbound RTP (#402). `None` (tests / legs without a
+    /// handle) reads as "never peer-held". Set via
+    /// [`Self::with_peer_held`] before `run()`.
+    peer_held: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// AI-side playout gate. Set by [`TapCommand::Mute`], cleared by
     /// [`TapCommand::Unmute`]. While `true`, the playout arm drains
     /// the controller→tap audio channel but drops the bytes instead
@@ -714,6 +723,7 @@ impl MediaTap {
             barge_in_action,
             barge_in_debounce: None,
             inactivity_timeout: None,
+            peer_held: None,
             muted: false,
             idle_detector: IdleDetector::new(None, None, Instant::now()),
             rtp_stats: RtpStatsTracker::new(None),
@@ -730,6 +740,15 @@ impl MediaTap {
     /// `inactivity_timeout_secs` lands on the tap before `run` starts.
     pub fn with_inactivity_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.inactivity_timeout = timeout;
+        self
+    }
+
+    /// Share the "far end has us on hold" flag with the tap so the
+    /// RTP inactivity watchdog is parked during a peer-hold (#402).
+    /// The `CallController` passes the same `AtomicBool` the
+    /// acceptor's re-INVITE handler flips.
+    pub fn with_peer_held(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.peer_held = Some(flag);
         self
     }
 
@@ -1267,9 +1286,34 @@ impl MediaTap {
                 // entirely rather than registering its waker, so the
                 // far-future sleep never costs anything.
                 _ = &mut watchdog, if inactivity.is_some() => {
+                    // While the call is held, silence from the far end
+                    // is *compliance*, not death: a bot-hold's sendonly
+                    // re-INVITE told the caller to stop sending, and a
+                    // peer-hold with `a=inactive` stops RTP both ways.
+                    // Park the watchdog by re-arming a full window; a
+                    // resumed call gets a fresh window before the next
+                    // check (#402). Checked at fire time (not as an arm
+                    // guard) so no hold↔resume transition can race an
+                    // already-expired deadline into a spurious teardown.
+                    let d = inactivity.unwrap();
+                    let held_by_us = held.is_some();
+                    let held_by_peer = self
+                        .peer_held
+                        .as_ref()
+                        .is_some_and(|f| f.load(Ordering::Acquire));
+                    if held_by_us || held_by_peer {
+                        debug!(
+                            call_id = %self.call_id,
+                            bot_hold = held_by_us,
+                            peer_hold = held_by_peer,
+                            "inactivity window elapsed while held; watchdog parked",
+                        );
+                        watchdog.as_mut().reset(tokio::time::Instant::now() + d);
+                        continue;
+                    }
                     warn!(
                         call_id = %self.call_id,
-                        timeout_ms = inactivity.unwrap().as_millis() as u64,
+                        timeout_ms = d.as_millis() as u64,
                         "no inbound RTP within inactivity window; tearing down",
                     );
                     return Ok(TapDisconnect::InactivityTimeout);
@@ -2281,6 +2325,16 @@ impl MediaTap {
                         }
                         TapCommand::Unhold => {
                             if held.take().is_some() {
+                                // Grant the resumed caller a fresh
+                                // inactivity window — the deadline went
+                                // stale during the hold, and the first
+                                // post-resume RTP frame may still be a
+                                // few hundred ms out (#402).
+                                if let Some(d) = inactivity {
+                                    watchdog
+                                        .as_mut()
+                                        .reset(tokio::time::Instant::now() + d);
+                                }
                                 // The WS channels never changed — just
                                 // flush any MOH tail out of forge's leg-A
                                 // queue so the resumed bot audio doesn't
@@ -3159,6 +3213,99 @@ mod tests {
         // straight from the watchdog arm.
         assert!(caller_rx.try_recv().is_err());
         assert!(events_rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_parks_while_bot_held_and_rearms_on_resume() {
+        // #402: a bot-hold's sendonly re-INVITE tells the caller to
+        // stop sending, so inbound silence during the hold must NOT
+        // trip the inactivity watchdog — a hold much longer than the
+        // window keeps the call alive. On resume the watchdog gets a
+        // fresh window, after which real silence kills the call again.
+        let manager = Arc::new(MediaBridgeManager::new());
+        let tap = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            CallId::new("c-hold-watchdog"),
+            8000,
+        )
+        .expect("attach")
+        .with_inactivity_timeout(Some(Duration::from_millis(100)));
+
+        let (caller_tx, _caller_rx) = mpsc::channel(4);
+        let (_playout_tx, playout_rx) = mpsc::channel(4);
+        let (events_tx, _events_rx) = mpsc::channel(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel(4);
+
+        let join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+        // Hold immediately, then let 10x the inactivity window pass.
+        cmd_tx
+            .send(TapCommand::Hold {
+                moh: Box::new(crate::moh::MohSource::new(None, 8000)),
+            })
+            .await
+            .expect("send hold");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !join.is_finished(),
+            "watchdog must not fire while the call is bot-held"
+        );
+
+        // Resume: a fresh window, then unbroken silence → timeout.
+        cmd_tx.send(TapCommand::Unhold).await.expect("send unhold");
+        tokio::time::advance(Duration::from_millis(300)).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(1), join)
+            .await
+            .expect("tap exits after resume + silence")
+            .expect("join")
+            .expect("ok");
+        assert_eq!(outcome, TapDisconnect::InactivityTimeout);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_parks_while_peer_held() {
+        // #402 sibling: a peer-hold with `a=inactive` stops inbound
+        // RTP too. The shared peer-held flag (flipped by the
+        // acceptor's re-INVITE handler in production) parks the
+        // watchdog for as long as it is set.
+        let peer_held = ::std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let manager = Arc::new(MediaBridgeManager::new());
+        let tap = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            CallId::new("c-peer-hold-watchdog"),
+            8000,
+        )
+        .expect("attach")
+        .with_inactivity_timeout(Some(Duration::from_millis(100)))
+        .with_peer_held(::std::sync::Arc::clone(&peer_held));
+
+        let (caller_tx, _caller_rx) = mpsc::channel(4);
+        let (_playout_tx, playout_rx) = mpsc::channel(4);
+        let (events_tx, _events_rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+
+        let join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !join.is_finished(),
+            "watchdog must not fire while the peer holds us"
+        );
+
+        // Peer resumes (flag cleared) but sends nothing — the parked
+        // watchdog's next fire tears the call down.
+        peer_held.store(false, Ordering::Release);
+        tokio::time::advance(Duration::from_millis(300)).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(1), join)
+            .await
+            .expect("tap exits after peer resume + silence")
+            .expect("join")
+            .expect("ok");
+        assert_eq!(outcome, TapDisconnect::InactivityTimeout);
     }
 
     #[tokio::test]

@@ -475,7 +475,7 @@ then closes the WebSocket cleanly (close code 1000).
 
 | Code | Meaning |
 |---|---|
-| `rtp_timeout` | No **inbound** RTP for the configured idle period — `[media].inactivity_timeout_secs`, default `60` s, per-route overridable via `[route.media].inactivity_timeout_secs`; `0` disables the watchdog entirely. **Fatal:** the call is torn down and `stop` (`reason: "error"`) follows. |
+| `rtp_timeout` | No **inbound** RTP for the configured idle period — `[media].inactivity_timeout_secs`, default `60` s, per-route overridable via `[route.media].inactivity_timeout_secs`; `0` disables the watchdog entirely. Never fires while the call is held (bot-initiated §4.10 hold or a peer-hold): held silence is compliance with the hold, not a dead peer — the watchdog re-arms with a fresh window on resume. **Fatal:** the call is torn down and `stop` (`reason: "error"`) follows. |
 | `audio_format` | Server sent an audio frame of an unexpected **size** — not the negotiated 20 ms frame (320 bytes @ 8 kHz, 640 @ 16 kHz). Only the byte length is checkable: a binary audio frame carries no sample-rate or channel metadata, so the daemon assumes the negotiated rate + mono. **Non-fatal:** the frame is dropped, the call continues, and the error is rate-limited (§2.2) — no `stop` follows. |
 | `protocol_error` | A WS message was malformed JSON, used an unknown `type`, or had a `call_id` that doesn't match the connection. **Fatal** and definitive — the call is torn down and (with `ws_reconnect_enabled`) **not** reconnected, since a buggy server would just repeat it. |
 | `server_too_slow` | Server didn't send its first audio frame (or a `hangup`) within the start-deadline of `start` — `[bridge].server_start_deadline_secs`, default 5 s (§3.1). |
@@ -869,6 +869,11 @@ the primitive for "user asks to hold → bot holds → bot resumes."
   not stack on a peer-hold in this release) SiphonAI replies
   `error { code: "hold_failed" }` (§3.10) and the call stays in its
   **prior** state — a failed hold never drops it.
+
+Hold duration is unbounded: the RTP inactivity watchdog (§3.10
+`rtp_timeout`) is parked while the call is held — the caller's silence is
+what the hold re-INVITE asked for — and re-arms with a fresh window on
+`resume`.
 
 **Self-scoped (§5.3):** `hold` acts only on the session's *own* call.
 

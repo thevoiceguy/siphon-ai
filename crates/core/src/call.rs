@@ -1129,6 +1129,11 @@ impl CallController {
         // its own re-INVITE at the same moment, our offer draws a 491 —
         // we wait this long, then retry once.
         const HOLD_GLARE_BACKOFF: Duration = Duration::from_millis(250);
+        // How long to wait for the tap to acknowledge a Hold command
+        // (#403 — it refuses when the call is in a conference room).
+        // The tap answers from its select loop, so this is effectively
+        // instant; the timeout only guards a wedged tap.
+        const HOLD_TAP_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
         // ─── Reconnect state (0.7.3 §6) ──────────────────────────
         // `reconnecting` true between an eligible WS drop and a
@@ -1387,19 +1392,47 @@ impl CallController {
                                     // stops hearing the caller, the caller
                                     // hears hold music), then confirm at the
                                     // SIP layer with a sendonly re-INVITE.
+                                    // The tap answers whether it installed
+                                    // the hold — it refuses when the call is
+                                    // in a conference room (#403), and only
+                                    // the tap knows the membership state.
                                     let moh = MohSource::new(
                                         hctx.moh_file.as_deref(),
                                         call_sample_rate,
                                     );
-                                    if let Err(e) = tap_cmd_tx
-                                        .try_send(TapCommand::Hold { moh: Box::new(moh) })
-                                    {
+                                    let (accepted_tx, accepted_rx) =
+                                        tokio::sync::oneshot::channel();
+                                    if let Err(e) = tap_cmd_tx.try_send(TapCommand::Hold {
+                                        moh: Box::new(moh),
+                                        accepted: accepted_tx,
+                                    }) {
                                         warn!(call_id = %call_id, error = %e,
                                             "tap command channel full/closed; hold aborted");
                                         metrics::counter!(HOLDS_TOTAL, "result" => "failed").increment(1);
                                         let _ = control_out_tx.send(OutgoingEvent::Error {
                                             code: ErrorCode::HoldFailed,
                                             message: "tap unavailable for hold".to_string(),
+                                        }).await;
+                                    } else if !matches!(
+                                        tokio::time::timeout(HOLD_TAP_ACK_TIMEOUT, accepted_rx)
+                                            .await,
+                                        Ok(Ok(true))
+                                    ) {
+                                        // Refused (in a conference room), or
+                                        // the tap never answered. No media
+                                        // state changed on refusal; on the
+                                        // never-answered path send a
+                                        // best-effort Unhold in case the
+                                        // hold landed after the timeout.
+                                        let _ = tap_cmd_tx.try_send(TapCommand::Unhold);
+                                        warn!(call_id = %call_id,
+                                            "hold rejected: call is in a conference room (or tap unresponsive)");
+                                        metrics::counter!(HOLDS_TOTAL, "result" => "failed").increment(1);
+                                        let _ = control_out_tx.send(OutgoingEvent::Error {
+                                            code: ErrorCode::HoldFailed,
+                                            message: "call is in a conference room; \
+                                                      leave the room before holding"
+                                                .to_string(),
                                         }).await;
                                     } else {
                                         match drive_hold_reinvite(

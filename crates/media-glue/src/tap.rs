@@ -462,7 +462,17 @@ pub enum TapCommand {
     /// than letting it back-pressure the bridge. Caller audio is dropped
     /// (the caller is on hold), but still recorded. Pairs with
     /// [`Unhold`](Self::Unhold).
-    Hold { moh: Box<crate::moh::MohSource> },
+    ///
+    /// `accepted` reports whether the tap installed the hold: `false`
+    /// when the call is in a conference room — hold does not stack on
+    /// room membership (#403); the controller replies `hold_failed`
+    /// and skips the re-INVITE, and the call stays in the room. The
+    /// tap owns room-membership state, so the refusal lives here
+    /// rather than in the controller.
+    Hold {
+        moh: Box<crate::moh::MohSource>,
+        accepted: tokio::sync::oneshot::Sender<bool>,
+    },
 
     /// Resume a held call (0.7.2): stop the MOH tick and restore the
     /// direct caller↔WS pair on the **existing** channels (no swap, the
@@ -2268,19 +2278,30 @@ impl MediaTap {
                                 );
                             }
                         }
-                        TapCommand::Hold { moh } => {
+                        TapCommand::Hold { moh, accepted } => {
+                            // Hold does not stack on conference
+                            // membership (#403): the room's mix owns
+                            // the caller's ear, and silently evicting
+                            // the leg (the pre-fix behavior) violated
+                            // §3.12 — every other member saw
+                            // `participant_left` while the held leg
+                            // never got a `conference_left`. Refuse;
+                            // the controller replies `hold_failed` and
+                            // the call stays in the room untouched. A
+                            // server that wants hold semantics leaves
+                            // the room first, explicitly.
+                            if room_send.is_some() {
+                                info!(
+                                    call_id = %self.call_id,
+                                    "hold refused: call is in a conference room"
+                                );
+                                let _ = accepted.send(false);
+                                continue;
+                            }
+                            let _ = accepted.send(true);
                             // Same as Park: MOH takes over the caller's
                             // ear, pending arbitration resolves as confirm.
                             self.abandon_arbitration(&mut pending_verdict, &events_tx, "hold");
-                            // Holding while in a room first leaves it
-                            // (drops the RoomSender → the room reaps us),
-                            // same as Park.
-                            if let Some(send) = room_send.take() {
-                                drop(send);
-                                room_sip_out = None;
-                                room_ws_out = None;
-                                room_events = None;
-                            }
                             info!(
                                 call_id = %self.call_id,
                                 "tap held; playing hold music, WS attached but paused"
@@ -3240,12 +3261,21 @@ mod tests {
         let join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
 
         // Hold immediately, then let 10x the inactivity window pass.
+        let (hold_ack_tx, hold_ack_rx) = tokio::sync::oneshot::channel();
         cmd_tx
             .send(TapCommand::Hold {
                 moh: Box::new(crate::moh::MohSource::new(None, 8000)),
+                accepted: hold_ack_tx,
             })
             .await
             .expect("send hold");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), hold_ack_rx)
+                .await
+                .expect("tap answers the hold")
+                .expect("ack channel open"),
+            "direct-pair hold must be accepted"
+        );
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
         assert!(
@@ -3262,6 +3292,74 @@ mod tests {
             .expect("join")
             .expect("ok");
         assert_eq!(outcome, TapDisconnect::InactivityTimeout);
+    }
+
+    #[tokio::test]
+    async fn hold_refused_while_in_conference_room_and_membership_survives() {
+        // #403: hold does not stack on room membership. The tap must
+        // answer `accepted = false`, leave the room membership fully
+        // intact (no participant_left fan-out to the other member),
+        // and stay un-held.
+        let manager = Arc::new(MediaBridgeManager::new());
+        let tap = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            CallId::new("call-a"),
+            8000,
+        )
+        .expect("attach");
+
+        let (caller_tx, _caller_rx) = mpsc::channel(16);
+        let (_playout_tx, playout_rx) = mpsc::channel(16);
+        let (events_tx, _events_rx) = mpsc::channel(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel(16);
+        let _join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+        let room = crate::room::spawn_room(
+            crate::room::RoomConfig {
+                room_id: "r-hold".into(),
+                sample_rate: 8000,
+                max_calls: 8,
+                join_tones: false,
+            },
+            None,
+        );
+        let membership_a = room.join("call-a", 8000).await.expect("join a");
+        let membership_b = room.join("call-b", 8000).await.expect("join b");
+        let (_b_send, _b_sip_out, _b_ws_out, mut b_events) = membership_b.split();
+        // Drain the fan-out of A's presence... B joined after A, so B
+        // has no pending events; A's join predates B's subscription.
+        cmd_tx
+            .send(TapCommand::JoinRoom {
+                membership: membership_a,
+            })
+            .await
+            .expect("send join");
+
+        let (hold_ack_tx, hold_ack_rx) = tokio::sync::oneshot::channel();
+        cmd_tx
+            .send(TapCommand::Hold {
+                moh: Box::new(crate::moh::MohSource::new(None, 8000)),
+                accepted: hold_ack_tx,
+            })
+            .await
+            .expect("send hold");
+        let accepted = tokio::time::timeout(Duration::from_secs(2), hold_ack_rx)
+            .await
+            .expect("tap answers the hold")
+            .expect("ack channel open");
+        assert!(!accepted, "hold in a room must be refused");
+
+        // Membership intact: the room still lists both calls, and B
+        // saw no participant_left for A.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut members = room.participants();
+        members.sort();
+        assert_eq!(members, vec!["call-a".to_string(), "call-b".to_string()]);
+        assert!(
+            b_events.try_recv().is_err(),
+            "no membership-change fan-out may result from a refused hold"
+        );
     }
 
     #[tokio::test(start_paused = true)]

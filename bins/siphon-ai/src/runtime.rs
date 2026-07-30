@@ -656,8 +656,14 @@ impl Runtime {
                 .with_register_source_resolver(register_source_resolver(&registration_mgr))
                 .with_drain(drain.clone(), drain_retry_after_secs);
         if !trunks.is_empty() {
+            // Registration attribution runs before the trunk walk so a
+            // registrar's INVITEs resolve to the `[[register]].name`
+            // even when its IP also matches a trunk CIDR (#405).
             let gate: Arc<dyn siphon_ai_sip_glue::TrunkAllowlist> =
-                Arc::new(ConfigTrunkAllowlist::new(trunks));
+                Arc::new(RegistrationAwareTrunkGate {
+                    registrations: registration_mgr.clone(),
+                    trunks: ConfigTrunkAllowlist::new(trunks),
+                });
             routing_handler_builder = routing_handler_builder.with_trunk_gate(gate);
         }
         if let Some(auth) = digest_auth {
@@ -1699,6 +1705,37 @@ impl ConfigTrunkAllowlist {
             return None;
         }
         Some(host.to_ascii_lowercase())
+    }
+}
+
+/// The trunk gate the routing handler actually gets when `[[trunk]]`
+/// blocks are configured: registration attribution first, then the
+/// `[[trunk]]` allowlist walk, then (by returning `None`) 403.
+///
+/// A peer we are registered *to* is implicitly trusted — we
+/// authenticated to it, and its address is operator-declared in
+/// `[[register]].server`/`port` — so its INVITEs are attributed to the
+/// registration name even when the same IP also matches a trunk CIDR
+/// (`register_source = "<register name>"` routes must stay reachable,
+/// #405). The lookup is exact `ip:port`, which preserves a useful
+/// split: a PBX's *other* profiles (same IP, different source port,
+/// e.g. FreeSWITCH's external profile on :5080) keep identifying via
+/// the trunk walk.
+struct RegistrationAwareTrunkGate {
+    registrations: RegistrationManager,
+    trunks: ConfigTrunkAllowlist,
+}
+
+impl siphon_ai_sip_glue::TrunkAllowlist for RegistrationAwareTrunkGate {
+    fn identify(
+        &self,
+        request: &sip_core::Request,
+        ctx: &sip_transaction::TransportContext,
+    ) -> Option<String> {
+        if let Some(name) = self.registrations.resolve_source(ctx.peer()) {
+            return Some(name);
+        }
+        self.trunks.identify(request, ctx)
     }
 }
 
@@ -2882,6 +2919,76 @@ mod trunk_allowlist_tests {
         // Right From, wrong IP → 403.
         assert_eq!(
             siphon_ai_sip_glue::TrunkAllowlist::identify(&gate, &good_req, &ctx("10.0.0.11:5060")),
+            None,
+        );
+    }
+
+    /// #405: with both a registration and a trunk covering the same
+    /// peer, the registration name wins so `register_source =
+    /// "<register name>"` routes stay reachable.
+    #[test]
+    fn registration_wins_over_matching_trunk() {
+        let mgr = RegistrationManager::new();
+        mgr.seed(&[RegistrationEntry {
+            name: "freeswitch".into(),
+            server_addr: "10.0.0.5:5060".parse().unwrap(),
+            register_on_startup: true,
+        }]);
+        let gate = RegistrationAwareTrunkGate {
+            registrations: mgr,
+            trunks: allowlist(vec![TrunkConfig {
+                name: "freeswitch-main".into(),
+                peer_addrs: vec![TrunkCidr::parse("10.0.0.0/24").unwrap()],
+                from_hosts: vec![],
+                auth_required: false,
+            }]),
+        };
+        let req = invite_with_from("<sip:0000000000@10.0.0.5>;tag=t");
+        // Registrar ip:port → registration name, not the trunk name.
+        assert_eq!(
+            siphon_ai_sip_glue::TrunkAllowlist::identify(&gate, &req, &ctx("10.0.0.5:5060")),
+            Some("freeswitch".to_string()),
+        );
+        // Same IP, different source port (e.g. the PBX's external
+        // profile on :5080) → falls through to the trunk walk.
+        assert_eq!(
+            siphon_ai_sip_glue::TrunkAllowlist::identify(&gate, &req, &ctx("10.0.0.5:5080")),
+            Some("freeswitch-main".to_string()),
+        );
+    }
+
+    /// #405: a registrar outside every trunk allowlist is admitted
+    /// with the registration name instead of getting 403.
+    #[test]
+    fn registration_admits_peer_outside_trunk_allowlist() {
+        let mgr = RegistrationManager::new();
+        mgr.seed(&[RegistrationEntry {
+            name: "cucm".into(),
+            server_addr: "192.0.2.7:5060".parse().unwrap(),
+            register_on_startup: true,
+        }]);
+        let gate = RegistrationAwareTrunkGate {
+            registrations: mgr,
+            trunks: allowlist(vec![TrunkConfig {
+                name: "carrier".into(),
+                peer_addrs: vec![TrunkCidr::parse("10.0.0.0/24").unwrap()],
+                from_hosts: vec![],
+                auth_required: false,
+            }]),
+        };
+        let req = invite_with_from("<sip:in@192.0.2.7>;tag=t");
+        assert_eq!(
+            siphon_ai_sip_glue::TrunkAllowlist::identify(&gate, &req, &ctx("192.0.2.7:5060")),
+            Some("cucm".to_string()),
+        );
+        // Unregistered peer inside the trunk CIDR → trunk name
+        // (unchanged), and a peer matching neither → None (403).
+        assert_eq!(
+            siphon_ai_sip_glue::TrunkAllowlist::identify(&gate, &req, &ctx("10.0.0.9:5060")),
+            Some("carrier".to_string()),
+        );
+        assert_eq!(
+            siphon_ai_sip_glue::TrunkAllowlist::identify(&gate, &req, &ctx("203.0.113.1:5060")),
             None,
         );
     }

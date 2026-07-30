@@ -536,7 +536,7 @@ join_tones = false
 | `enabled` | `false` | Off = every join refused. A 0.6.x config upgrades with zero behaviour change. |
 | `max_rooms` | `16` | Live rooms across the daemon. Must be ≥ 1. |
 | `max_participants_per_room` | `8` | Member **calls** per room (each contributes 2 mixer participants: its SIP leg and its WS session). Must be ≥ 2. Kept small on purpose — per-sink mixing cost grows quadratically with this cap. |
-| `join_tones` | `false` | Short chime into the room on every join/leave. |
+| `join_tones` | `false` | Short chime mixed into the room on every membership change: joins (660 Hz) and leaves (440 Hz) — including a member's hang-up/teardown departure, so remaining participants always hear the roster change (#404). Mixed room-wide at the mixer, so per-call recordings of conferenced calls capture it too. |
 
 A room locks to its first joiner's negotiated sample rate (8 kHz or 16 kHz);
 a join at a different rate is rejected — no resampling in 0.7.0 (documented

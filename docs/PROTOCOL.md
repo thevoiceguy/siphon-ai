@@ -807,6 +807,14 @@ bot can put itself in or out of a room, but it cannot add or remove
 plane). A bot tracks the rest of the room via the `participant_joined`
 / `participant_left` fan-out events.
 
+**Roster-change tones:** the daemon can play a short chime into the
+room on every join and leave (including a member's hang-up) — set
+`[conference].join_tones = true` (off by default; distinct pitches for
+join vs leave, mixed room-wide so recordings capture them too). A
+server can also synthesize its own richer cues by playing audio on
+`participant_joined` / `participant_left` — a member's WS audio is
+mixed to the whole room, so every participant hears it.
+
 The room model: N calls share one mixed room, **every call keeps its
 own WS session** (there is no single "host" bot). For N member calls
 the room mixes 2N streams — each call's SIP caller and its bot — and

@@ -1055,6 +1055,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn leave_tone_is_audible_when_a_member_hangs_up() {
+        // #404 (the live-observed case): when a member departs via
+        // teardown — its membership drops without an explicit
+        // conference_leave — the remaining participant must hear the
+        // leave chime. The Drop impl fires a best-effort RoomCtrl::Leave
+        // and the per-tick reap is the guaranteed path; either way the
+        // tone plays.
+        let handle = spawn_room(cfg("r-leave-tone", 8000, 8, true), None);
+        let a = handle.join("call-a", 8000).await.expect("join a");
+        let b = handle.join("call-b", 8000).await.expect("join b");
+        let (_a_send, mut a_sip_out, _a_ws_out, _a_events) = a.split();
+
+        // Drain B's join chime (and anything in flight) until A's
+        // sink goes quiet, so what we hear next is attributable to
+        // the leave alone.
+        timeout(WAIT, async {
+            loop {
+                match timeout(Duration::from_millis(300), a_sip_out.recv()).await {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => panic!("sink closed unexpectedly"),
+                    Err(_) => return, // 300 ms of silence — join chime done
+                }
+            }
+        })
+        .await
+        .expect("join chime drains");
+
+        // B hangs up: its tap tears down and the membership drops.
+        drop(b);
+
+        let frame = first_audible(&mut a_sip_out).await;
+        assert!(
+            frame.iter().any(|&s| s != 0),
+            "remaining member must hear the leave chime"
+        );
+    }
+
+    #[tokio::test]
     async fn clear_ws_input_drops_buffered_bot_audio() {
         let handle = spawn_room(cfg("r9", 8000, 8, false), None);
         let a = handle.join("call-a", 8000).await.expect("join a");

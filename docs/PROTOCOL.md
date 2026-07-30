@@ -865,10 +865,13 @@ the primitive for "user asks to hold → bot holds → bot resumes."
 - **`resume`** re-INVITEs back to two-way audio and restores the direct
   caller↔server pair; SiphonAI replies `resumed`. No-op if not held.
 - On failure (the peer rejects the re-INVITE, it times out, glare can't
-  be resolved, or the **far end already has you on hold** — bot-hold does
-  not stack on a peer-hold in this release) SiphonAI replies
-  `error { code: "hold_failed" }` (§3.10) and the call stays in its
-  **prior** state — a failed hold never drops it.
+  be resolved, the **far end already has you on hold** — bot-hold does
+  not stack on a peer-hold in this release — or the call is **in a
+  conference room**; hold does not stack on room membership either: the
+  room's mix owns the caller's ear, so `conference_leave` first, then
+  `hold`) SiphonAI replies `error { code: "hold_failed" }` (§3.10) and
+  the call stays in its **prior** state — a failed hold never drops it,
+  and a refused hold never changes room membership.
 
 Hold duration is unbounded: the RTP inactivity watchdog (§3.10
 `rtp_timeout`) is parked while the call is held — the caller's silence is

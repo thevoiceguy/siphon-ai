@@ -130,40 +130,45 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # main branch and replace the rev hashes here (see CLAUDE.md §7.5).
 
 # siphon-rs — RFC 3261 SIP stack.
-# Bumped 2026-07-28 `ead16f9bf9b7` → `4e7d5d7d0bd7` = siphon-rs #74: inbound
-# TCP/TLS flows tear down properly on peer FIN (was: permanent CLOSE-WAIT +
-# leaked fd, and every in-dialog request on the leg — hold re-INVITE, REFER,
-# the teardown BYE — died at Timer B after a carrier idle-closed the
-# connection, ~2 min on Twilio Secure Trunking). Flow sends now fail fast and
-# bye/refer/reinvite_via_flow fail over to the connection pool via RFC 3263
-# §4.3 dispatch. Also adds opt-in set_stream_keepalive_interval (CRLF
-# keepalive on established inbound sessions) — wired to the new
-# [sip].tcp_keepalive_interval_secs.
-# (Prior: `ead16f9bf9b7` = #72 per-request From tag, RFC 3261 §8.1.1.3;
+# Bumped 2026-07-30 `065c2c65a0f7` → `74b903b9afe7` = siphon-rs #85 + #86.
+# #85: negotiate_answer accepts only ONE m-line per media type — an offer
+# carrying RTP/SAVP and RTP/AVP audio alternatives on one port (stock
+# FreeSWITCH late negotiation) previously got BOTH accepted on the same
+# local port, and media died in both directions (siphon-ai #406 root).
+# #86: IntegratedUAC auto-retries INVITE on 401/407 digest challenges —
+# InviteTransactionUser.auto_retry_auth was dead code, so outbound calls
+# through a digest-authenticated gateway (FreeSWITCH/Asterisk PBXes)
+# surfaced the challenge as a terminal rejection ~1 ms after dial
+# (siphon-rs #83); outbound.rs's classify_failure comment ("401/407 are
+# auto-retried by the UAC") is now actually true.
+# (Prior: `065c2c65a0f7` = #82 route set fixed after dialog creation,
+#  #79 tls_server_name, #80 RFC 5626 ping, #78 UAS route-set order;
+#  `4e7d5d7d0bd7` = #74 flow teardown on peer FIN + failover;
+#  `ead16f9bf9b7` = #72 per-request From tag, RFC 3261 §8.1.1.3;
 #  `5c7cf20beb50` = #70 TLS pool cross-SNI reuse, siphon-ai #342 outbound;
 #  `fbdf132a11d6` = #69 in-dialog BYE route set, siphon-ai #342 inbound;
 #  `50866b1599a7` = #68 pool SIP HEP, siphon-ai #341;
 #  `6fd432270bb8` = #67 dialog_manager share, siphon-ai #324;
 #  `fcaff011f9c6` = #65 invite_with_from, siphon-ai #316;
 #  `3a4fc312ade3` = #64 TLS-SNI-is-hostname, siphon-ai #312.)
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "065c2c65a0f7" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "065c2c65a0f7" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "065c2c65a0f7", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "065c2c65a0f7" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "065c2c65a0f7" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "065c2c65a0f7" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "065c2c65a0f7" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "065c2c65a0f7" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "065c2c65a0f7" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
 # (distinct from forge-media's pinned sip-sdp). Used by the outbound
 # delayed-offer answer generator to hand the UAC a SessionDescription it
 # accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "065c2c65a0f7" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "065c2c65a0f7" }
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "065c2c65a0f7" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #
@@ -173,8 +178,14 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "065
 # AI logic belongs in the WS server, never here. See CLAUDE.md §4.1 and the
 # upstream gate at https://github.com/thevoiceguy/forge-media/pull/39.
 #
-# forge-media is pinned to a `main` rev. Bumped 2026-07-25 to 003b5e1be563
-# = forge-media #98: per-SSRC SRTCP replay windows (RFC 3711 §3.4). The
+# forge-media is pinned to a `main` rev. Bumped 2026-07-30 to aeae479b391d
+# = forge-media #100: external/siphon-rs submodule f3454c7 → 74b903b, which
+# is how siphon-rs #85 (negotiate_answer accepts one m-line per media type)
+# reaches forge-sdp — the negotiator siphon-ai's media path actually runs.
+# The outbound delayed-offer fixes (siphon-ai #406) depend on this behavior.
+#
+# Prior pin 003b5e1be563 = forge-media #98: per-SSRC SRTCP replay windows
+# (RFC 3711 §3.4). The
 # receive context kept ONE replay window keyed only by SRTCP index, so when
 # the inbound RTCP SSRC changed mid-call (Twilio: ringback/early-media →
 # answered stream) the new SSRC's fresh low indices were rejected as
@@ -206,20 +217,20 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "065
 # comment for the current rev.) Prior forge pins: forge 1c996ae5fb4f = #86
 # neural VAD; forge 3c59b5f6e464 = #82-#85 dependency migrations; forge
 # 5fa76fb38675 = #81.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "003b5e1be563" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "003b5e1be563" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "003b5e1be563", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "003b5e1be563" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "003b5e1be563" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "003b5e1be563" }
-forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "003b5e1be563" }
-forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "003b5e1be563" }
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
+forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
+forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
 # Conference rooms (0.7.0): forge-mixer is the per-room AudioMixer;
 # forge-injection provides ToneGenerator (join/leave tones now, MOH
 # for park later). Deliberately NOT forge-conference — its DTMF
 # IVR/PIN/host-control layer is unused per DEV_PLAN_0.7.0.md §9.4.
-forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "003b5e1be563" }
-forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "003b5e1be563" }
+forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
+forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.

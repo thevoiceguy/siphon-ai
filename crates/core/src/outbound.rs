@@ -510,8 +510,13 @@ impl OutboundOriginator {
         //     BEFORE awaiting the final response. The peer cannot 2xx until
         //     it receives the INVITE we just sent, so the generator (which
         //     fires on that 2xx) can't run before this registration.
+        // `invite_request()` is async as of siphon-rs #86 (the live
+        // attempt is replaced on a 401/407 auth retry); the Call-ID is
+        // stable across retries, so reading it from whichever attempt
+        // is live is correct.
         let sip_call_id = handle
             .invite_request()
+            .await
             .headers()
             .get_smol("Call-ID")
             .map(|s| s.to_string())

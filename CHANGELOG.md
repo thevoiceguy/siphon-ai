@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Outbound calls through a digest-authenticated gateway no longer fail instantly as `rejected`** (siphon-rs #83, fixed upstream in siphon-rs #86; pin bump). The UAC never auto-retried an INVITE on a 401/407 challenge — the flag existed but was dead code on the INVITE path — so a perfectly credentialed call through FreeSWITCH/Asterisk-style PBXes that digest-challenge INVITE surfaced the challenge as a terminal rejection ~1 ms after dial (`outbound_failed{cause:"rejected"}`). IP-ACL trunks (e.g. Twilio) masked it. The UAC now builds the authenticated re-INVITE (same Call-ID, CSeq+1, fresh branch) transparently, honoring `max_auth_retries`. `CallHandle::invite_request()` became async upstream (the live attempt is replaced on retry); the one call site adapted.
+- **An offer carrying secure and plaintext audio alternatives (e.g. stock FreeSWITCH late negotiation offering `RTP/SAVP` + `RTP/AVP` on one port) no longer gets both m-lines accepted on the same local port** (siphon-rs #84, fixed upstream in siphon-rs #85; reaches the media path via forge-media #100's submodule bump). Both alternatives were accepted in the answer — indistinguishable on the wire, one encrypted and one not — so the dialog established and then no media flowed in either direction for the life of the call (siphon-ai #406 §2's root). The negotiator now accepts the first acceptable alternative per media type and rejects the rest with port 0, per RFC 3264 §6. The remaining siphon-ai-side hardening for delayed-offer alternatives (SRTP policy gate over the m-line *set*, patching the *selected* m-line) is tracked in #406.
+
 ## [0.47.2] - 2026-07-29
 
 ### Fixed

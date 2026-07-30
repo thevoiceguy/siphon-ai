@@ -153,6 +153,22 @@ pub const REGISTER_ADMIN_TRIGGERS_TOTAL: &str = "siphon_ai_register_admin_trigge
 /// `siphon-ai-core::acceptor`.
 pub const DELAYED_OFFER_TOTAL: &str = "siphon_ai_delayed_offer_total";
 
+/// Outbound delayed-offer (offerless INVITE we sent; the peer offers
+/// in its 2xx and we answer in the ACK) negotiation outcomes (issue
+/// #406 — previously this path emitted no delayed-offer metric at
+/// all; both live failure modes in that issue would have been
+/// one-line diagnoses with it). Labeled by `result`: `answered` (our
+/// ACK answer built and media bridged), `srtp_policy` (the gateway's
+/// `srtp` mode refused every audio alternative the peer offered),
+/// `srtp_setup` (the selected secure alternative failed to negotiate
+/// or install — bad crypto/fingerprint, post-process or DTLS enable
+/// failure), `invalid_remote_media` (the peer's offer was unusable —
+/// parse/codec/negotiation failure), or `missing_sdp_offer` (the 2xx
+/// carried no usable SDP offer). Pre-2xx failures ride
+/// `siphon_ai_outbound_calls_total`, not this. Bounded cardinality.
+/// Literal must match the call sites in `siphon-ai-core::outbound`.
+pub const OUTBOUND_DELAYED_OFFER_TOTAL: &str = "siphon_ai_outbound_delayed_offer_total";
+
 /// REFER transfers attempted (0.6.1; back-fills blind-transfer
 /// counting, which previously had no metric). Labeled by `mode`
 /// (`blind` / `attended`) and `result`: `accepted` (202, call torn
@@ -492,6 +508,10 @@ pub fn register_descriptions() {
     describe_counter!(
         DELAYED_OFFER_TOTAL,
         "Inbound delayed-offer (offerless INVITE) outcomes, by result (answered, ack_timeout, missing_sdp_answer, invalid_sdp_answer, no_compatible_codec, invalid_remote_media)."
+    );
+    describe_counter!(
+        OUTBOUND_DELAYED_OFFER_TOTAL,
+        "Outbound delayed-offer (offerless INVITE) negotiation outcomes, by result (answered, srtp_policy, srtp_setup, invalid_remote_media, missing_sdp_offer)."
     );
     describe_counter!(
         TRANSFERS_TOTAL,

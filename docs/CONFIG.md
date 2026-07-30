@@ -343,6 +343,11 @@ request_uri_user = "9000"
   in depth). For an OR relationship, declare two `[[trunk]]`
   blocks.
 - Trunks are walked in declaration order; first match wins.
+- **Precedence with `[[register]]`**: an INVITE whose source
+  `ip:port` is exactly a `[[register]].server`/`port` is attributed
+  to that registration's name *before* the trunk walk (registration
+  > trunk > 403). The same PBX's other profiles (same IP, different
+  source port) still identify via the trunk walk.
 - **Zero `[[trunk]]` blocks defined**: the daemon stays in legacy
   "accept any source" mode. `register_source` defaults to
   `"trunk"` for unregistered inbound (matching today's behavior).

@@ -46,6 +46,7 @@ use crate::acceptor::{
     enforce_srtp_mode, maybe_tweak_dtls_srtp_offer, maybe_tweak_sdes_offer,
     post_process_dtls_srtp_answer, post_process_sdes_answer, SrtpMode,
 };
+use siphon_ai_telemetry::OUTBOUND_DELAYED_OFFER_TOTAL;
 
 /// Per-call state for an outbound **delayed-offer** call (we sent an
 /// offerless INVITE; the peer's offer arrives in the 2xx). Parked in the
@@ -167,23 +168,29 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
         // one m-line). Mirrors the inbound early-offer path.
         if let Ok(parsed) = <forge_sdp::SessionDescription>::from_str(&offer_sdp) {
             if let Err(e) = enforce_srtp_mode(srtp_mode, &parsed) {
+                metrics::counter!(OUTBOUND_DELAYED_OFFER_TOTAL, "result" => "srtp_policy")
+                    .increment(1);
                 let msg = e.to_string();
                 let _ = result_tx.send(Err(SetupError::Srtp(msg.clone())));
                 return Err(anyhow::anyhow!("delayed-offer SRTP policy: {msg}"));
             }
         }
-        let dtls_tweak = match maybe_tweak_dtls_srtp_offer(&offer_sdp) {
+        let dtls_tweak = match maybe_tweak_dtls_srtp_offer(&offer_sdp, srtp_mode) {
             Ok(t) => t,
             Err(e) => {
+                metrics::counter!(OUTBOUND_DELAYED_OFFER_TOTAL, "result" => "srtp_setup")
+                    .increment(1);
                 let msg = e.to_string();
                 let _ = result_tx.send(Err(SetupError::Srtp(msg.clone())));
                 return Err(anyhow::anyhow!("delayed-offer DTLS offer: {msg}"));
             }
         };
         let sdes_tweak = if dtls_tweak.is_none() {
-            match maybe_tweak_sdes_offer(&offer_sdp) {
+            match maybe_tweak_sdes_offer(&offer_sdp, srtp_mode) {
                 Ok(t) => t,
                 Err(e) => {
+                    metrics::counter!(OUTBOUND_DELAYED_OFFER_TOTAL, "result" => "srtp_setup")
+                        .increment(1);
                     let msg = e.to_string();
                     let _ = result_tx.send(Err(SetupError::Srtp(msg.clone())));
                     return Err(anyhow::anyhow!("delayed-offer SDES offer: {msg}"));
@@ -222,6 +229,8 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
         let mut accepted = match result {
             Ok(a) => a,
             Err(e) => {
+                metrics::counter!(OUTBOUND_DELAYED_OFFER_TOTAL, "result" => "invalid_remote_media")
+                    .increment(1);
                 let msg = e.to_string();
                 let _ = result_tx.send(Err(e));
                 return Err(anyhow::anyhow!("delayed-offer answer build failed: {msg}"));
@@ -242,6 +251,8 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
             ) {
                 Ok(t) => t,
                 Err(e) => {
+                    metrics::counter!(OUTBOUND_DELAYED_OFFER_TOTAL, "result" => "srtp_setup")
+                        .increment(1);
                     let msg = e.to_string();
                     let _ = result_tx.send(Err(SetupError::Srtp(msg.clone())));
                     return Err(anyhow::anyhow!("delayed-offer DTLS answer: {msg}"));
@@ -258,6 +269,8 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
                 )
                 .await
             {
+                metrics::counter!(OUTBOUND_DELAYED_OFFER_TOTAL, "result" => "srtp_setup")
+                    .increment(1);
                 let msg = e.to_string();
                 let _ = result_tx.send(Err(SetupError::Srtp(format!("enable_dtls: {msg}"))));
                 return Err(anyhow::anyhow!("delayed-offer enable_dtls: {msg}"));
@@ -282,6 +295,8 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
                     )
                 }
                 Err(e) => {
+                    metrics::counter!(OUTBOUND_DELAYED_OFFER_TOTAL, "result" => "srtp_setup")
+                        .increment(1);
                     let msg = e.to_string();
                     let _ = result_tx.send(Err(SetupError::Srtp(msg.clone())));
                     return Err(anyhow::anyhow!("delayed-offer SDES answer: {msg}"));
@@ -295,6 +310,7 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
         // UAC's sip-sdp type for the ACK, then hand the media back.
         let answer_sd = SessionDescription::parse(&accepted.answer.answer_text)
             .map_err(|e| anyhow::anyhow!("re-parse delayed-offer answer: {e}"))?;
+        metrics::counter!(OUTBOUND_DELAYED_OFFER_TOTAL, "result" => "answered").increment(1);
         let _ = result_tx.send(Ok(DelayedMediaResult {
             accepted,
             srtp_profile,
@@ -587,6 +603,8 @@ impl OutboundOriginator {
                 // The generator never delivered — a 2xx that carried no
                 // usable SDP offer (a non-compliant answer to an offerless
                 // INVITE), or it timed out.
+                metrics::counter!(OUTBOUND_DELAYED_OFFER_TOTAL, "result" => "missing_sdp_offer")
+                    .increment(1);
                 unpark();
                 warn!("2xx to offerless INVITE carried no usable SDP offer");
                 self.stop_session(&call_id).await;

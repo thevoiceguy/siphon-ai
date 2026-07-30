@@ -306,6 +306,40 @@ RTP back to FreeSWITCH or a `c=` line advertising the wrong IP
   `[bridge.barge_in].mode = "notify_only"` in the daemon config
   to keep the bot from auto-cancelling on detected speech.
 
+### Outbound delayed offer (offerless INVITE) prerequisites
+
+SiphonAI's outbound **delayed-offer** mode (`"offer": "delayed"` on
+`POST /admin/v1/calls`) sends an INVITE with no SDP and answers the
+offer FreeSWITCH returns in its 200 OK. Stock FreeSWITCH refuses
+offerless INVITEs unless **both** of these are set on the profile
+that receives the call (e.g. `sip_profiles/internal.xml`):
+
+```xml
+<param name="enable-3pcc" value="true"/>
+<param name="inbound-late-negotiation" value="true"/>
+```
+
+Each missing param fails differently, and neither failure names the
+real cause:
+
+- Without `inbound-late-negotiation`: **`488 Not Acceptable Here`**
+  — easily misread as a codec mismatch.
+- Without `enable-3pcc`: **`480 Temporarily Unavailable`**,
+  returned instantly — easily misread as "extension unavailable"
+  or a registration problem. If the 480 arrives within a few
+  milliseconds of the INVITE, suspect this param, not the extension.
+
+Reload the profile after editing (`fs_cli -x "sofia profile
+internal restart"`).
+
+Note that FreeSWITCH's late-negotiation 200 OK advertises secure and
+plaintext audio **alternatives** (`RTP/SAVP` + `RTP/AVP` m-lines on
+one port). SiphonAI selects one per the gateway's `srtp` mode —
+`off` takes the plaintext alternative, `preferred`/`required` take
+the secure one — and zeroes the rest in its answer (issue #406).
+Watch `siphon_ai_outbound_delayed_offer_total{result=...}` for the
+negotiation outcome.
+
 ---
 
 ## 4. Building the bot

@@ -449,7 +449,13 @@ pub fn parse_offer(sdp: &str) -> Result<SessionDescription, SdpError> {
 /// the first inbound packet — that wait blocks the first ~500 ms of
 /// any greeting otherwise.
 pub fn audio_remote_addr(session: &SessionDescription) -> Option<std::net::SocketAddr> {
-    let media = session.find_media(MediaType::Audio)?;
+    // Skip rejected (port-0) audio m-lines — a session carrying
+    // alternatives (or an answer rejecting some of them) still has
+    // exactly one live audio stream, and port 0 is not an endpoint.
+    let media = session
+        .media
+        .iter()
+        .find(|m| m.media_type == MediaType::Audio && m.port != 0)?;
     let conn = media.connection.as_ref().or(session.connection.as_ref())?;
     let ip: std::net::IpAddr = conn.connection_address.as_str().parse().ok()?;
     Some(std::net::SocketAddr::new(ip, media.port))
@@ -466,22 +472,31 @@ pub fn negotiate_answer(
     let mut answer = SessionDescription::negotiate_answer(offer, &local_caps, &caps.local_ip)
         .map_err(|e| SdpError::Negotiate(e.to_string()))?;
 
-    let audio = answer
-        .find_media(MediaType::Audio)
-        .ok_or(SdpError::NoAudio)?;
-
-    if audio.port == 0 {
-        // The negotiator returned a "rejected" media stream
-        // (port 0). The most common cause is no common codec
-        // between offer and caps — if `audio.formats` is empty,
-        // surface NoCommonCodec; otherwise bubble the generic
-        // rejection.
+    // The *accepted* audio stream, not the first audio m-line: an
+    // offer may carry alternative audio m-lines (e.g. RTP/SAVP +
+    // RTP/AVP on one port, stock FreeSWITCH late negotiation), and
+    // the negotiator accepts exactly one — which need not be first
+    // (siphon-rs #85 / siphon-ai #406). The rest come back rejected
+    // with port 0.
+    let accepted_idx = answer
+        .media
+        .iter()
+        .position(|m| m.media_type == MediaType::Audio && m.port != 0);
+    let Some(accepted_idx) = accepted_idx else {
+        // Every audio stream was rejected (port 0). The most common
+        // cause is no common codec between offer and caps — if the
+        // first audio line's `formats` is empty, surface
+        // NoCommonCodec; otherwise bubble the generic rejection.
+        let audio = answer
+            .find_media(MediaType::Audio)
+            .ok_or(SdpError::NoAudio)?;
         return Err(if audio.formats.is_empty() {
             SdpError::NoCommonCodec
         } else {
             SdpError::AudioRejected
         });
-    }
+    };
+    let audio = &answer.media[accepted_idx];
 
     // sip-sdp's negotiate sets the answer's first format to the
     // first negotiated codec. Pull our metadata from that PT.
@@ -515,7 +530,7 @@ pub fn negotiate_answer(
     // is actually in the answer. No-op for codecs without fmtp.
     let negotiated_pt = primary.payload_type;
     if let Some(params) = codec.fmtp_params() {
-        if let Some(media) = answer.find_media_mut(MediaType::Audio) {
+        if let Some(media) = answer.media.get_mut(accepted_idx) {
             media.set_fmtp(negotiated_pt, params);
         }
     }
@@ -676,6 +691,56 @@ a=rtpmap:{pt} {name}/{clock}\r\n\
 a=ptime:20\r\n\
 a=sendrecv\r\n"
         )
+    }
+
+    #[test]
+    fn negotiate_answer_picks_accepted_alternative_not_first_m_line() {
+        // An offer carrying secure + plaintext audio alternatives on
+        // one port (stock FreeSWITCH late negotiation, siphon-ai
+        // #406). Against our plain-RTP capability set the negotiator
+        // rejects the RTP/SAVP line (protocol mismatch, port 0) and
+        // accepts the RTP/AVP one — the SECOND audio m-line. The
+        // outcome must come from the accepted line, not error out on
+        // the first line's port 0.
+        let offer_sdp = "\
+v=0\r\n\
+o=fs 1 1 IN IP4 198.51.100.20\r\n\
+s=-\r\n\
+c=IN IP4 198.51.100.20\r\n\
+t=0 0\r\n\
+m=audio 30990 RTP/SAVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:qqqqqqqqqqqqqqqqqqqqqlVVVVVVVVVVVVVVVVVV\r\n\
+m=audio 30990 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=sendrecv\r\n";
+        let offer = parse_offer(offer_sdp).expect("offer parses");
+        let outcome =
+            negotiate_answer(&offer, &caps(vec![Codec::Pcmu])).expect("plain alternative accepted");
+        assert_eq!(outcome.negotiated_codec, Codec::Pcmu);
+        // Same m-line count and order as the offer (RFC 3264 §6):
+        // first audio rejected, second accepted on our port.
+        assert_eq!(outcome.answer.media.len(), 2);
+        assert_eq!(outcome.answer.media[0].port, 0, "SAVP alternative rejected");
+        assert_ne!(outcome.answer.media[1].port, 0, "AVP alternative accepted");
+    }
+
+    #[test]
+    fn audio_remote_addr_skips_rejected_audio_lines() {
+        // A session whose first audio m-line is rejected (port 0)
+        // must resolve the remote endpoint from the live line.
+        let sdp = "\
+v=0\r\n\
+o=peer 1 1 IN IP4 198.51.100.20\r\n\
+s=-\r\n\
+c=IN IP4 198.51.100.20\r\n\
+t=0 0\r\n\
+m=audio 0 RTP/SAVP 0\r\n\
+m=audio 4000 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n";
+        let session = parse_offer(sdp).expect("parses");
+        let addr = audio_remote_addr(&session).expect("live audio line found");
+        assert_eq!(addr.to_string(), "198.51.100.20:4000");
     }
 
     #[test]

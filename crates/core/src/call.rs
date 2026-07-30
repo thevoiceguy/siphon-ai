@@ -604,6 +604,13 @@ impl CallHandle {
         self.peer_held.load(Ordering::Acquire)
     }
 
+    /// The shared peer-held flag itself, for handing to the media tap
+    /// (its RTP inactivity watchdog parks while the peer holds us —
+    /// an `a=inactive` hold legitimately stops all inbound RTP, #402).
+    pub fn peer_held_flag(&self) -> std::sync::Arc<AtomicBool> {
+        std::sync::Arc::clone(&self.peer_held)
+    }
+
     /// Ask the controller to shut down cleanly. The controller
     /// will drain audio briefly, send `stop` over the bridge, and
     /// return.
@@ -929,7 +936,12 @@ impl CallController {
         // outcome build. Watch semantics — no backpressure, no loss
         // that matters.
         let (quality_tx, quality_rx) = tokio::sync::watch::channel(QualityReport::default());
-        let media_tap = media_tap.with_quality_watch(quality_tx);
+        let media_tap = media_tap
+            .with_quality_watch(quality_tx)
+            // Park the RTP inactivity watchdog while the far end holds
+            // us (#402) — the acceptor's re-INVITE handler flips this
+            // flag; the tap reads it at watchdog-fire time.
+            .with_peer_held(handle.peer_held_flag());
         let media_tap = if let Some(setup) = recording {
             let (rec_tx, rec_rx) = mpsc::channel::<RecFrame>(RECORDING_CHANNEL_CAPACITY);
             let (ctrl_tx, ctrl_rx) = mpsc::channel::<RecControl>(CONTROL_CHANNEL_CAPACITY);

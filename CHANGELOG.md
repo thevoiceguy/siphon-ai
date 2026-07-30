@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-07-30
+
 ### Added
 
 - **`siphon_ai_outbound_delayed_offer_total{result=…}`** (issue #406 §3) — the outbound delayed-offer path (offerless INVITE we sent; peer offers in its 2xx, we answer in the ACK) previously emitted no delayed-offer metric at all: every increment of `siphon_ai_delayed_offer_total` was on the *inbound* path. Results: `answered`, `srtp_policy` (the gateway's `srtp` mode refused every offered audio alternative), `srtp_setup` (selected secure alternative failed to negotiate/install), `invalid_remote_media`, `missing_sdp_offer`. Both live failure modes in #406 would have been one-line diagnoses with it. Documented in `docs/DEPLOY.md`.

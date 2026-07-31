@@ -169,6 +169,18 @@ pub const DELAYED_OFFER_TOTAL: &str = "siphon_ai_delayed_offer_total";
 /// Literal must match the call sites in `siphon-ai-core::outbound`.
 pub const OUTBOUND_DELAYED_OFFER_TOTAL: &str = "siphon_ai_outbound_delayed_offer_total";
 
+/// Caller-leg 20 ms frames dropped because the negotiated direction
+/// forbade our send — we answered a peer hold with `recvonly` /
+/// `inactive` (RFC 3264 §6.1, #417). Counts every suppressed push
+/// site (WS playout, barge-in re-queues, the room mix, parked MOH and
+/// announcements); a sustained rate means the WS server keeps
+/// streaming through peer holds instead of pausing on the §3.3 `hold`
+/// event — harmless but wasted bandwidth. No labels. Literal must
+/// match the const in `siphon-ai-media-glue::tap` (same pattern as
+/// the room metrics above it in that crate).
+pub const PEER_HOLD_TX_SUPPRESSED_FRAMES_TOTAL: &str =
+    "siphon_ai_peer_hold_tx_suppressed_frames_total";
+
 /// REFER transfers attempted (0.6.1; back-fills blind-transfer
 /// counting, which previously had no metric). Labeled by `mode`
 /// (`blind` / `attended`) and `result`: `accepted` (202, call torn
@@ -524,6 +536,10 @@ pub fn register_descriptions() {
     describe_counter!(
         ROOM_FRAMES_DROPPED_TOTAL,
         "20 ms frames a conference room dropped instead of blocking, by stage (input, sink) and side (sip, ws)."
+    );
+    describe_counter!(
+        PEER_HOLD_TX_SUPPRESSED_FRAMES_TOTAL,
+        "Caller-leg 20 ms frames dropped because the answered direction (recvonly/inactive, peer hold) forbade our send (#417)."
     );
     describe_counter!(PARKS_TOTAL, "Calls parked, by result (ok, rejected).");
     describe_counter!(

@@ -1043,9 +1043,10 @@ a=sendrecv\r\n";
             .find_media_mut(MediaType::Audio)
             .expect("answer has audio");
         audio.add_media_crypto(&peer);
-        let outcome =
-            negotiate_offer_answer(&sdp.serialize(), &caps(vec![Codec::Pcmu])).unwrap();
-        let got = outcome.peer_srtp.expect("peer crypto surfaced from AVP answer");
+        let outcome = negotiate_offer_answer(&sdp.serialize(), &caps(vec![Codec::Pcmu])).unwrap();
+        let got = outcome
+            .peer_srtp
+            .expect("peer crypto surfaced from AVP answer");
         assert_eq!(got.suite, CryptoSuite::Aes128CmHmacSha1_80);
     }
 

@@ -122,6 +122,18 @@ impl DelayedOfferAnswerer {
             dtls_cert,
         }
     }
+
+    /// Roll the forge session back after a post-`accept_inbound` failure.
+    /// `place_delayed` treats any `Err` delivered on the oneshot as "the
+    /// generator rolled its own session back" — inside `accept_inbound`
+    /// that's the `SessionGuard`'s job, but once it returns the session is
+    /// ours to reclaim; without this, a failed SRTP bring-up or activation
+    /// would leak the session (and its port pair) for the process lifetime.
+    async fn rollback_session(&self, call_id: &CallId) {
+        if let Err(e) = self.media.session_manager().stop_session(call_id).await {
+            warn!(call_id = %call_id, error = %e, "delayed-offer session rollback failed");
+        }
+    }
 }
 
 #[async_trait]
@@ -208,7 +220,7 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
         let result = self
             .media
             .accept_inbound(InboundCall {
-                call_id: forge_call_id,
+                call_id: forge_call_id.clone(),
                 offer_sdp: &offer_for_negotiator,
                 codecs,
                 dtmf_payload_type,
@@ -253,6 +265,7 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
                 Err(e) => {
                     metrics::counter!(OUTBOUND_DELAYED_OFFER_TOTAL, "result" => "srtp_setup")
                         .increment(1);
+                    self.rollback_session(&forge_call_id).await;
                     let msg = e.to_string();
                     let _ = result_tx.send(Err(SetupError::Srtp(msg.clone())));
                     return Err(anyhow::anyhow!("delayed-offer DTLS answer: {msg}"));
@@ -271,6 +284,7 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
             {
                 metrics::counter!(OUTBOUND_DELAYED_OFFER_TOTAL, "result" => "srtp_setup")
                     .increment(1);
+                self.rollback_session(&forge_call_id).await;
                 let msg = e.to_string();
                 let _ = result_tx.send(Err(SetupError::Srtp(format!("enable_dtls: {msg}"))));
                 return Err(anyhow::anyhow!("delayed-offer enable_dtls: {msg}"));
@@ -297,6 +311,7 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
                 Err(e) => {
                     metrics::counter!(OUTBOUND_DELAYED_OFFER_TOTAL, "result" => "srtp_setup")
                         .increment(1);
+                    self.rollback_session(&forge_call_id).await;
                     let msg = e.to_string();
                     let _ = result_tx.send(Err(SetupError::Srtp(msg.clone())));
                     return Err(anyhow::anyhow!("delayed-offer SDES answer: {msg}"));
@@ -305,6 +320,33 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
         } else {
             (None, siphon_ai_bridge::protocol::SrtpExchange::Sdes)
         };
+
+        // Activate the forge session: Initializing → Active, spawning the
+        // RTP forwarding task (decode/forward inbound, send outbound).
+        // `accept_inbound` allocates, negotiates and attaches the tap but
+        // does NOT activate — the inbound early-offer path compensates with
+        // an explicit `start_session` in the acceptor before its 200 OK, and
+        // this is that call's outbound delayed-offer twin: after DTLS/SDES
+        // key install (same ordering as inbound) and before our answer rides
+        // out in the ACK. The peer learns our RTP address only from that
+        // ACK, so the session is Active before the first packet can arrive.
+        // Without this the session stays Initializing forever and no RTP
+        // flows in either direction — the call answers, the tap's timers
+        // fire, but nothing is bridged (#414).
+        if let Err(e) = self
+            .media
+            .session_manager()
+            .start_session(&forge_call_id)
+            .await
+        {
+            metrics::counter!(OUTBOUND_DELAYED_OFFER_TOTAL, "result" => "media_activate")
+                .increment(1);
+            self.rollback_session(&forge_call_id).await;
+            let err = SetupError::from(e);
+            let msg = err.to_string();
+            let _ = result_tx.send(Err(err));
+            return Err(anyhow::anyhow!("delayed-offer start_session: {msg}"));
+        }
 
         // Re-parse our (possibly SAVP/SAVPF-patched) answer text into the
         // UAC's sip-sdp type for the ACK, then hand the media back.
@@ -902,6 +944,103 @@ mod tests {
             guard.available(),
             4,
             "rate-limited admit didn't keep a slot"
+        );
+    }
+
+    /// Regression for #414 — the outbound delayed-offer path answered via
+    /// `accept_inbound`, which allocates/negotiates/attaches but never
+    /// activates, and nothing downstream compensated: the call answered
+    /// (valid SDP, ACK sent, WS `start` delivered) while the forge session
+    /// sat in `Initializing` forever and zero RTP flowed in either
+    /// direction. Mirror of media-glue's
+    /// `apply_answer_binds_codec_and_attaches_tap` activation assertion,
+    /// for the one offer/answer path that does NOT funnel through
+    /// `apply_answer`.
+    #[tokio::test]
+    async fn delayed_offer_answer_activates_session() {
+        let session_mgr = forge_engine::SessionManager::new(
+            forge_engine::SessionManagerConfig {
+                port_pool_config: forge_rtp::PortPoolConfig::new(62100, 62200)
+                    .expect("valid port range"),
+                ..Default::default()
+            },
+            None,
+        );
+        let media = MediaSetup::new(
+            Arc::clone(&session_mgr),
+            Arc::new(forge_engine::MediaBridgeManager::new()),
+            Arc::new(forge_core::EventBus::new()),
+            "127.0.0.1",
+        );
+
+        // Park the per-call state the way `place_delayed` does, keyed by
+        // the SIP Call-ID the generator reads off the dialog.
+        let sip_call_id = "delayed-414";
+        let forge_call_id = CallId::new("c-delayed-414");
+        let (result_tx, result_rx) = oneshot::channel();
+        let registry: DelayedOfferRegistry = Arc::new(Mutex::new(HashMap::new()));
+        registry.lock().expect("registry").insert(
+            sip_call_id.to_string(),
+            DelayedOfferPending {
+                forge_call_id: forge_call_id.clone(),
+                codecs: vec![Codec::Pcmu],
+                dtmf_payload_type: Some(101),
+                participant_a: ParticipantId::generate(),
+                participant_b: ParticipantId::generate(),
+                tap: TapOptions {
+                    barge_in_action: siphon_ai_media_glue::BargeInAction::Notify,
+                    barge_in_debounce: None,
+                    inactivity_timeout: None,
+                    silence_threshold: None,
+                    dead_air_threshold: None,
+                    rtp_stats_interval: None,
+                },
+                vad: siphon_ai_media_glue::VadBackend::default(),
+                srtp_mode: SrtpMode::Off,
+                result_tx,
+            },
+        );
+        let answerer = DelayedOfferAnswerer::new(
+            media,
+            Arc::clone(&registry),
+            Arc::new(forge_rtp::dtls::DtlsCertificate::generate().expect("dtls cert")),
+        );
+
+        // The peer's offer, as it arrives in the 2xx to our offerless INVITE.
+        let peer_offer = SessionDescription::parse(
+            "v=0\r\n\
+             o=peer 1 1 IN IP4 198.51.100.20\r\n\
+             s=-\r\n\
+             c=IN IP4 198.51.100.20\r\n\
+             t=0 0\r\n\
+             m=audio 4000 RTP/AVP 0 101\r\n\
+             a=rtpmap:0 PCMU/8000\r\n\
+             a=rtpmap:101 telephone-event/8000\r\n\
+             a=ptime:20\r\n\
+             a=sendrecv\r\n",
+        )
+        .expect("parse peer offer");
+        let dialog =
+            crate::registry::test_support::consult_dialog(sip_call_id, "ltag-414", "rtag-414");
+
+        let answer = answerer
+            .generate_answer(&peer_offer, &dialog)
+            .await
+            .expect("answer built");
+        assert!(
+            answer.serialize().contains("PCMU/8000"),
+            "answer negotiated PCMU: {}",
+            answer.serialize()
+        );
+
+        let media_result = result_rx
+            .await
+            .expect("generator delivered a result")
+            .expect("media setup succeeded");
+        assert_eq!(
+            media_result.accepted.session.state().await,
+            forge_engine::SessionState::Active,
+            "delayed-offer answer path must start RTP forwarding (Initializing → Active)"
         );
     }
 

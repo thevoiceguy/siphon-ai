@@ -511,7 +511,7 @@ pub fn register_descriptions() {
     );
     describe_counter!(
         OUTBOUND_DELAYED_OFFER_TOTAL,
-        "Outbound delayed-offer (offerless INVITE) negotiation outcomes, by result (answered, srtp_policy, srtp_setup, invalid_remote_media, missing_sdp_offer)."
+        "Outbound delayed-offer (offerless INVITE) negotiation outcomes, by result (answered, srtp_policy, srtp_setup, invalid_remote_media, media_activate, missing_sdp_offer)."
     );
     describe_counter!(
         TRANSFERS_TOTAL,

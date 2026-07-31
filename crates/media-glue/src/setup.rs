@@ -58,7 +58,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::sdp::{
     generate_offer, negotiate_answer, negotiate_offer_answer, parse_offer, AnswerOutcome, Codec,
-    LocalCapabilities, SdpError,
+    LocalCapabilities, SdesOfferMode, SdpError,
 };
 use crate::tap::{BargeInAction, MediaTap, MediaTapError};
 
@@ -204,19 +204,24 @@ pub struct OutboundOfferRequest {
 }
 
 /// SRTP policy for an **originated** call (RFC 4568 SDES on the offer).
-/// Plaintext by default; the secure modes offer `RTP/SAVP` with an
-/// `a=crypto:` key we generate, and differ only in how a peer that
-/// answers plaintext `RTP/AVP` is handled.
+/// Plaintext by default; the secure modes offer an `a=crypto:` key we
+/// generate, on a transport profile that matches the policy (#422).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutboundSrtp {
     /// Plaintext `RTP/AVP` offer (the default — unchanged 0.6.x behaviour).
     #[default]
     Off,
-    /// Offer SRTP, but accept a plaintext downgrade if the peer answers
-    /// `RTP/AVP` (best-effort encryption).
+    /// Offer optional SRTP: `RTP/AVP` + `a=crypto` (#422). An
+    /// SRTP-capable peer answers with its own key and both sides
+    /// encrypt; any other peer ignores the attribute and answers
+    /// plaintext — which is accepted (best-effort encryption). The
+    /// pre-0.48.3 `RTP/SAVP` shape made a compliant plaintext-only peer
+    /// reject the stream instead: RFC 3264 answers echo the offered
+    /// profile, so "preferred" only worked against peers willing to
+    /// violate that.
     Preferred,
-    /// Offer SRTP and **require** it: a peer that answers plaintext fails
-    /// the call.
+    /// Offer SRTP and **require** it: `RTP/SAVP` + `a=crypto`, and a
+    /// peer that answers plaintext anyway fails the call.
     Required,
 }
 
@@ -611,10 +616,13 @@ impl MediaSetup {
             dtmf_payload_type: req.dtmf_payload_type,
         };
 
-        // SRTP (SDES): mint a master key and offer RTP/SAVP. The key is our
+        // SRTP (SDES): mint a master key and offer it. The key is our
         // *send* key; the peer's answer carries theirs (our recv key),
         // bound onto the session at `apply_answer`. AES_CM_128_HMAC_SHA1_80
-        // is the near-universal trunk default (e.g. Twilio).
+        // is the near-universal trunk default (e.g. Twilio). The transport
+        // profile follows the policy (#422): `required` offers RTP/SAVP
+        // (non-negotiable), `preferred` offers RTP/AVP + a=crypto so a
+        // plaintext-only peer can still answer compliantly.
         let offer_crypto = match req.srtp {
             OutboundSrtp::Off => None,
             OutboundSrtp::Preferred | OutboundSrtp::Required => Some(CryptoAttribute::generate(
@@ -622,7 +630,11 @@ impl MediaSetup {
                 CryptoSuite::Aes128CmHmacSha1_80,
             )),
         };
-        let offer_sdp = generate_offer(&offered, offer_crypto.as_ref());
+        let sdes_mode = match req.srtp {
+            OutboundSrtp::Required => SdesOfferMode::Savp,
+            _ => SdesOfferMode::AvpWithCrypto,
+        };
+        let offer_sdp = generate_offer(&offered, offer_crypto.as_ref().map(|c| (c, sdes_mode)));
 
         debug!(
             rtp_port = ports.rtp_port,
@@ -1080,6 +1092,102 @@ a=sendrecv\r\n"
             "offer carries a=crypto"
         );
         assert!(offer.offer_crypto.is_some(), "our send key retained");
+    }
+
+    #[tokio::test]
+    async fn originate_offer_preferred_emits_avp_with_crypto() {
+        // #422: `preferred` must leave the transport plaintext RTP/AVP —
+        // an SAVP offer can't be answered by a compliant non-SRTP peer,
+        // which made "preferred" behave like "required" on the wire.
+        let session_mgr = small_session_manager(43400, 43500);
+        let setup = setup_with(&session_mgr);
+        let offer = setup
+            .originate_offer(outbound_req_srtp(
+                "c-srtp-pref",
+                vec![Codec::Pcmu],
+                OutboundSrtp::Preferred,
+            ))
+            .await
+            .expect("offer");
+        assert!(
+            !offer.offer_sdp.contains("RTP/SAVP"),
+            "preferred offer must NOT be SAVP: {}",
+            offer.offer_sdp
+        );
+        assert!(
+            offer.offer_sdp.contains("RTP/AVP"),
+            "preferred offer stays RTP/AVP"
+        );
+        assert!(
+            offer.offer_sdp.contains("a=crypto:"),
+            "preferred offer still invites SRTP via a=crypto"
+        );
+        assert!(offer.offer_crypto.is_some(), "our send key retained");
+    }
+
+    /// A peer answer to our *preferred* offer that accepted SRTP the
+    /// compliant way (#422): profile stays RTP/AVP (echoing our offer),
+    /// crypto attribute carries the peer key.
+    fn avp_crypto_peer_answer(port: u16, pt: u8, name: &str) -> String {
+        use forge_sdp::sdes::{CryptoAttribute, CryptoSuite, MediaSdesAttributesExt};
+        use forge_sdp::{MediaType, SessionDescriptionExt};
+        let crypto = CryptoAttribute::generate(1, CryptoSuite::Aes128CmHmacSha1_80);
+        let mut sdp = crate::sdp::parse_offer(&peer_answer(port, pt, name)).expect("base answer");
+        let audio = sdp.find_media_mut(MediaType::Audio).expect("audio");
+        audio.add_media_crypto(&crypto);
+        sdp.serialize()
+    }
+
+    #[tokio::test]
+    async fn apply_answer_preferred_encrypts_on_avp_crypto_answer() {
+        // #422 happy path: preferred offer (AVP + a=crypto), capable peer
+        // answers AVP + its own a=crypto → keys install, call encrypted.
+        let session_mgr = small_session_manager(43600, 43700);
+        let setup = setup_with(&session_mgr);
+        let offer = setup
+            .originate_offer(outbound_req_srtp(
+                "c-srtp-pref-enc",
+                vec![Codec::Pcmu],
+                OutboundSrtp::Preferred,
+            ))
+            .await
+            .expect("offer");
+        let accepted = setup
+            .apply_answer(offer, &avp_crypto_peer_answer(4000, 0, "PCMU"), tap_opts())
+            .await
+            .expect("crypto answer applied");
+        assert_eq!(
+            accepted.srtp_profile.as_deref(),
+            Some("AES_CM_128_HMAC_SHA1_80"),
+            "SRTP established from the AVP+crypto answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_answer_preferred_accepts_plaintext_answer() {
+        // #422 downgrade path: preferred offer, plaintext-only peer
+        // ignores the a=crypto attribute and answers plain RTP/AVP — the
+        // call proceeds unencrypted (this answer is now RFC-compliant,
+        // where against the old SAVP offer it required the peer to
+        // violate RFC 3264).
+        let session_mgr = small_session_manager(43800, 43900);
+        let setup = setup_with(&session_mgr);
+        let offer = setup
+            .originate_offer(outbound_req_srtp(
+                "c-srtp-pref-plain",
+                vec![Codec::Pcmu],
+                OutboundSrtp::Preferred,
+            ))
+            .await
+            .expect("offer");
+        let accepted = setup
+            .apply_answer(offer, &peer_answer(4000, 0, "PCMU"), tap_opts())
+            .await
+            .expect("plaintext answer accepted under preferred");
+        assert!(
+            accepted.srtp_profile.is_none(),
+            "downgrade is honest: no srtp profile claimed"
+        );
     }
 
     #[tokio::test]

@@ -24,7 +24,7 @@ pub use rtp_stats::{QualityReport, QualitySummary, RxStats};
 pub use sdp::{
     audio_remote_addr, build_answer, generate_offer, negotiate_answer, negotiate_offer_answer,
     parse_offer, rewrite_sdp_direction, AnswerOutcome, Codec, LocalCapabilities, MediaDirection,
-    SdpError,
+    SdesOfferMode, SdpError,
 };
 pub use setup::{
     InboundAccepted, InboundCall, MediaSetup, OutboundAccepted, OutboundOffer,

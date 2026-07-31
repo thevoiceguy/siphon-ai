@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.1] - 2026-07-31
+
 ### Fixed
 
 - **Outbound delayed-offer calls now carry media** (issue #414). The path's forge session was never transitioned `Initializing → Active` — `DelayedOfferAnswerer::generate_answer` answers via `accept_inbound`, which allocates/negotiates/attaches but deliberately does not activate, and unlike the inbound early-offer path nothing downstream compensated with an explicit `start_session`. The call looked healthy at every other layer (200 OK → ACK with a valid answer, WS `start` delivered, `result="answered"` counted) while zero RTP flowed in either direction, since the forwarding task was never spawned. Present since the feature's introduction (0.9.0, #191), masked until 0.48.0 by the #406 SDP-negotiation failures that killed these calls earlier. The generator now activates the session after DTLS/SDES key install and before the answer rides out in the ACK — the peer only learns our RTP address from the ACK, so the session is Active before the first packet can arrive; a new `result="media_activate"` label on `siphon_ai_outbound_delayed_offer_total` counts the (previously impossible-to-see) activation failure, and a regression test pins `SessionState::Active` on this path, mirroring the one that already pinned it for `apply_answer`. Also fixed while there: the generator's post-`accept_inbound` SRTP failure arms (DTLS/SDES post-processing, `enable_dtls`) now roll the session back instead of leaking it and its port pair, and `apply_answer`'s activation comment no longer claims to cover this path — the mis-statement that kept the gap invisible.

@@ -753,14 +753,19 @@ impl MediaSetup {
         //     the RTP forwarding task (decode/forward inbound, send outbound).
         //     Without this the session stays Initializing forever and **no RTP
         //     flows** — the tap still attaches (its timers fire `rtp_stats` /
-        //     `silence_detected`), but nothing is bridged. Every offer/answer
-        //     path funnels through `apply_answer` (outbound origination,
-        //     outbound + inbound delayed offer), so this is their single media
-        //     activation point — the mirror of the early-offer inbound path's
-        //     explicit `start_session` before its 200 OK. forge requires the
-        //     Initializing → Active transition exactly once; `apply_answer` is
-        //     called once per call, before the remote is bound above. Done
-        //     before `guard.disarm()` so a failure still rolls the session back.
+        //     `silence_detected`), but nothing is bridged. This is the
+        //     activation point for the paths that funnel through
+        //     `apply_answer`: outbound early-offer origination and inbound
+        //     delayed offer (via `finalize_delayed_offer`). The two paths
+        //     that answer via `accept_inbound` activate at their own call
+        //     sites instead — inbound early offer in the acceptor before its
+        //     200 OK, outbound delayed offer in core's `DelayedOfferAnswerer`
+        //     before its answer rides out in the ACK (#414: that path shipped
+        //     without any activation, and every such call carried no media).
+        //     forge requires the Initializing → Active transition exactly
+        //     once; `apply_answer` is called once per call, before the remote
+        //     is bound above. Done before `guard.disarm()` so a failure still
+        //     rolls the session back.
         self.session_manager
             .start_session(&call_id)
             .await

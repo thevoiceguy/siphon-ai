@@ -311,6 +311,21 @@ Transitions between non-`sendrecv` states (e.g. `sendonly` →
 the call is paused. The matching `resume` arrives when the peer
 returns to `sendrecv`.
 
+> **SiphonAI enforces the direction at the RTP layer** (0.48.2).
+> When the answered direction excludes its send (`hold` with
+> `direction` `"sendonly"` or `"inactive"` — SiphonAI answered
+> `recvonly`/`inactive`), SiphonAI itself stops transmitting RTP, as
+> RFC 3264 §6.1 requires. Audio the server streams during such a
+> hold is **discarded, not queued** — on `resume`, playout picks up
+> with whatever the server sends next — and `send_dtmf` requests are
+> dropped too (telephone-events are RTP). Recording captures none of
+> it: the caller heard nothing. The SHOULD above still stands — a
+> paused server saves bandwidth and keeps its own pipeline aligned
+> with what the caller actually hears — but wire compliance no
+> longer depends on it. A `hold` with `direction` `"recvonly"`
+> (SiphonAI answered `sendonly`) leaves transmission legal and
+> playout flows unchanged.
+
 ### 3.4 `dtmf` — caller pressed a key
 
 ```json

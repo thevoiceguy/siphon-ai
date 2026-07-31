@@ -111,6 +111,13 @@ const OUTBOUND_BUFFER_FRAMES: usize = 10;
 /// can hear.
 const FORGE_LEAD_FRAMES: usize = 5;
 
+/// Caller-leg frames dropped because the negotiated direction forbade
+/// our send — we answered a peer hold with `recvonly`/`inactive`
+/// (#417). Counts 20 ms frames across every push site (WS playout,
+/// barge-in re-queue, room mix, parked MOH / announcements); outbound
+/// DTMF drops log but don't count (not a frame).
+const PEER_HOLD_TX_SUPPRESSED_TOTAL: &str = "siphon_ai_peer_hold_tx_suppressed_frames_total";
+
 /// One entry in the tap-owned outbound queue (#365/#366). Audio frames
 /// wait here for their just-in-time push into forge; `mark` riders and
 /// outbound DTMF keep their queued positions relative to the audio
@@ -615,6 +622,25 @@ pub struct MediaTap {
     /// handle) reads as "never peer-held". Set via
     /// [`Self::with_peer_held`] before `run()`.
     peer_held: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Outbound-RTP suppression (#417). Shared with the `CallHandle`;
+    /// the acceptor's re-INVITE handler sets it while the direction we
+    /// committed to in our answer is `recvonly`/`inactive` (RFC 3264
+    /// §6.1 — we answered a peer hold, so we may not transmit). While
+    /// set, every forge-push site for the caller leg drops its frame
+    /// instead: WS playout, barge-in re-queues, the room mix, parked
+    /// MOH and announcements, and outbound DTMF. Dropped — not queued:
+    /// audio the server streams during a peer hold is gone, matching
+    /// [`Self::muted`]'s drain-and-drop stance, and the recording fork
+    /// is skipped with it (the caller heard nothing). `None` (tests /
+    /// legs without a handle) reads as "never suppressed". Set via
+    /// [`Self::with_tx_suppressed`] before `run()`.
+    tx_suppressed: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Edge memory for `tx_suppressed` — the last state observed by
+    /// [`Self::tx_gate_active`], so engage/release each log once.
+    tx_gate_engaged: bool,
+    /// Frames dropped by the gate since it engaged; reported in the
+    /// release log line (the metric increments per frame).
+    tx_gate_dropped: u64,
     /// AI-side playout gate. Set by [`TapCommand::Mute`], cleared by
     /// [`TapCommand::Unmute`]. While `true`, the playout arm drains
     /// the controller→tap audio channel but drops the bytes instead
@@ -734,6 +760,9 @@ impl MediaTap {
             barge_in_debounce: None,
             inactivity_timeout: None,
             peer_held: None,
+            tx_suppressed: None,
+            tx_gate_engaged: false,
+            tx_gate_dropped: 0,
             muted: false,
             idle_detector: IdleDetector::new(None, None, Instant::now()),
             rtp_stats: RtpStatsTracker::new(None),
@@ -759,6 +788,16 @@ impl MediaTap {
     /// acceptor's re-INVITE handler flips.
     pub fn with_peer_held(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
         self.peer_held = Some(flag);
+        self
+    }
+
+    /// Share the "our answered direction forbids sending" flag with
+    /// the tap so outbound RTP is suppressed while the peer holds us
+    /// with `sendonly`/`inactive` (#417, RFC 3264 §6.1). The
+    /// `CallController` passes the same `AtomicBool` the acceptor's
+    /// re-INVITE handler recomputes on every direction change.
+    pub fn with_tx_suppressed(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.tx_suppressed = Some(flag);
         self
     }
 
@@ -847,6 +886,44 @@ impl MediaTap {
         }
     }
 
+    /// Read the #417 outbound-RTP gate, logging the engage/release
+    /// edges exactly once each. Every caller-leg push site consults
+    /// this before touching a frame; while `true` the site drops the
+    /// frame — and its recording fork with it, since the caller heard
+    /// nothing — via [`Self::note_tx_suppressed`]. Lazy edge
+    /// detection: the flag flips on the acceptor's re-INVITE task, and
+    /// we notice at the next frame that would have gone out. A gate
+    /// engaging while nothing is flowing has nothing to suppress, so
+    /// noticing late costs nothing.
+    fn tx_gate_active(&mut self) -> bool {
+        let gated = self.tx_suppressed.as_ref().is_some_and(|f| f.load(Ordering::Acquire));
+        if gated != self.tx_gate_engaged {
+            self.tx_gate_engaged = gated;
+            if gated {
+                info!(
+                    call_id = %self.call_id,
+                    "peer hold: negotiated direction excludes our send; suppressing outbound RTP",
+                );
+            } else {
+                info!(
+                    call_id = %self.call_id,
+                    frames = self.tx_gate_dropped,
+                    ms = self.tx_gate_dropped * PLAYOUT_FRAME_MS,
+                    "peer resumed: outbound RTP suppression released",
+                );
+                self.tx_gate_dropped = 0;
+            }
+        }
+        gated
+    }
+
+    /// Account one frame dropped by the #417 gate: the release-edge
+    /// log total plus the per-frame metric.
+    fn note_tx_suppressed(&mut self) {
+        self.tx_gate_dropped += 1;
+        metrics::counter!(PEER_HOLD_TX_SUPPRESSED_TOTAL).increment(1);
+    }
+
     /// Re-queue retained playout chunks into forge at arbitration
     /// resolution (design note §5.3). `fork_recording` is set for the
     /// post-pause `fresh` audio (first time it plays) and unset for
@@ -856,12 +933,22 @@ impl MediaTap {
     /// reversible; the caller re-anchors the playout clock afterwards
     /// via [`PlayoutClock::restore`].
     async fn repush_chunks(
-        &self,
+        &mut self,
         chunks: Vec<Vec<u8>>,
         fork_recording: bool,
         shadow: &mut VecDeque<Vec<u8>>,
         shadow_cap: usize,
     ) -> Result<u64, MediaTapError> {
+        // #417: an arbitration armed just before a peer hold can
+        // resolve during it — the retained tail may not go out.
+        // Dropped, not deferred (matching the playout arm): the
+        // caller returns `0` so `PlayoutClock::restore` stays cleared.
+        if self.tx_gate_active() {
+            let dropped = chunks.len() as u64;
+            self.tx_gate_dropped += dropped;
+            metrics::counter!(PEER_HOLD_TX_SUPPRESSED_TOTAL).increment(dropped);
+            return Ok(0);
+        }
         let mut pushed = 0u64;
         for bytes in chunks {
             let samples = unpack_pcm16_le(&bytes)?;
@@ -914,6 +1001,15 @@ impl MediaTap {
         shadow_cap: usize,
         shadow_truncation_warned: &mut bool,
     ) -> Result<(), MediaTapError> {
+        // #417: our answered direction forbids sending — drop the
+        // frame before the recording fork (the caller heard nothing)
+        // and without advancing the playout clock (nothing played, and
+        // a stalled clock makes queued residue drain-and-drop on the
+        // next pace tick instead of lingering until resume).
+        if self.tx_gate_active() {
+            self.note_tx_suppressed();
+            return Ok(());
+        }
         if let Some((rec, drops)) = &self.recording {
             if let Err(mpsc::error::TrySendError::Full(_)) =
                 rec.try_send(RecFrame::Bot(bytes.clone()))
@@ -1024,6 +1120,18 @@ impl MediaTap {
                     }
                 }
                 Some(OutboundItem::Dtmf { digit, duration_ms }) => {
+                    // #417: telephone-events are RTP too — a queued
+                    // DTMF rider must not go out while our answered
+                    // direction forbids sending. Dropped (there is no
+                    // ack to withhold), logged, not counted as a frame.
+                    if self.tx_gate_active() {
+                        debug!(
+                            call_id = %self.call_id,
+                            digit = %digit,
+                            "dropping outbound DTMF: peer hold suppresses our RTP",
+                        );
+                        continue;
+                    }
                     handle_send_dtmf(&self.call_id, &self.handle, digit, duration_ms).await;
                 }
                 None => break,
@@ -1412,6 +1520,21 @@ impl MediaTap {
                         send.send_ws(samples);
                         continue;
                     }
+                    // #417: peer-held with our send forbidden. Same
+                    // drain-and-drop stance as `muted` — recv to keep
+                    // WS backpressure away, drop the bytes. Dropping
+                    // here (not just at the forge push) keeps the
+                    // outbound queue empty for the hold's duration, so
+                    // release resumes with fresh audio, not a stale
+                    // buffered tail. Deliberately BELOW the room
+                    // routing: a peer-held conference member's server
+                    // audio still mixes for the *other* members (their
+                    // wires are not held) — only this leg's own RTP is
+                    // forbidden, and the mix-minus-`sip` arm gates that.
+                    if self.tx_gate_active() {
+                        self.note_tx_suppressed();
+                        continue;
+                    }
                     // §5.5 (#366): through the tap-owned queue, never
                     // straight into forge — the queue enforces the
                     // 200 ms drop-oldest window, and the drain feeds
@@ -1525,6 +1648,17 @@ impl MediaTap {
                         );
                         continue;
                     };
+                    // #417: a conference member can be peer-held too —
+                    // the room mix must not reach a leg whose answered
+                    // direction forbids our send. Only THIS leg's wire
+                    // is gated: the member stays in the room, and its
+                    // server audio (routed via `room_send` in the
+                    // playout arm) still mixes for the other members,
+                    // whose wires are not held.
+                    if self.tx_gate_active() {
+                        self.note_tx_suppressed();
+                        continue;
+                    }
                     // Recording fork (right channel) in room mode:
                     // the room mix IS what the caller hears.
                     if let Some((rec, drops)) = &self.recording {
@@ -2501,6 +2635,20 @@ impl MediaTap {
                 // per 20 ms into the caller leg. Active in either state;
                 // both share the same MohSource-driven tick.
                 _ = moh_tick.tick(), if parked.is_some() || held.is_some() || announcing.is_some() => {
+                    // #417: a parked call (or one mid-announcement) can
+                    // be peer-held underneath — skip the whole tick
+                    // while our send is forbidden. MOH is a loop, so
+                    // skipping pauses it harmlessly; an announcement
+                    // deliberately STALLS rather than plays into a deaf
+                    // leg — it exists to be heard (recording-consent),
+                    // so it resumes where it left off when the peer
+                    // does. (Bot-hold can't coexist with a peer hold —
+                    // the no-stacking rejection — so `held` never
+                    // races this.)
+                    if self.tx_gate_active() {
+                        self.note_tx_suppressed();
+                        continue;
+                    }
                     // A running announcement owns the tick over parked
                     // MOH (announce-over-park, 0.34.0 §3.3) — but never
                     // over hold, whose command site skips announcements
@@ -3404,6 +3552,70 @@ mod tests {
             .expect("join")
             .expect("ok");
         assert_eq!(outcome, TapDisconnect::InactivityTimeout);
+    }
+
+    #[tokio::test]
+    async fn peer_hold_tx_gate_drops_playout_until_released() {
+        // #417: while the acceptor-set flag is up (we answered a peer
+        // hold with `recvonly`/`inactive`), WS playout must not reach
+        // forge — dropped, not queued. Releasing the flag resumes the
+        // flow with fresh audio only.
+        let suppressed = ::std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let manager = Arc::new(MediaBridgeManager::new());
+        let call_id = CallId::new("c-tx-gate");
+        let tap = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            call_id.clone(),
+            8000,
+        )
+        .expect("attach")
+        .with_tx_suppressed(::std::sync::Arc::clone(&suppressed));
+
+        let (caller_tx, _caller_rx) = mpsc::channel(4);
+        let (playout_tx, playout_rx) = mpsc::channel(16);
+        let (events_tx, _events_rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+        let _join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+        let frame = pack_pcm16_le(&vec![1000i16; 160]);
+        for _ in 0..5 {
+            playout_tx.send(frame.clone()).await.expect("send playout");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            manager.try_recv_outbound_request(&call_id).await.is_none(),
+            "no frame may reach forge while our answered direction forbids sending"
+        );
+
+        // Peer resumes: the acceptor clears the flag; playout flows
+        // again, and the first audio out is post-release audio (the
+        // held-era frames are gone, not buffered).
+        suppressed.store(false, Ordering::Release);
+        let resumed = pack_pcm16_le(&vec![2000i16; 160]);
+        for _ in 0..5 {
+            playout_tx.send(resumed.clone()).await.expect("send playout");
+        }
+        let got = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(req) = manager.try_recv_outbound_request(&call_id).await {
+                    return req;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("playout reaches forge after the gate releases");
+        match got {
+            forge_engine::OutboundMediaRequest::Audio(f) => {
+                assert_eq!(
+                    f.samples,
+                    vec![2000i16; 160],
+                    "first frame after release must be post-release audio"
+                );
+            }
+            other => panic!("expected an audio request, got {other:?}"),
+        }
     }
 
     #[tokio::test]

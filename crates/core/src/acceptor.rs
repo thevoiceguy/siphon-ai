@@ -4257,10 +4257,13 @@ impl BridgingAcceptor {
         // SRTP on inbound delayed offer: WE offer, so the `[sip]`/route
         // SRTP policy drives an SDES *offer* in the 200 OK (the inbound
         // early-offer path answers SRTP; here we must offer it).
-        // `Preferred`/`Required` → offer `RTP/SAVP` + `a=crypto`;
-        // `apply_answer` (in `finalize_delayed_offer`) installs the peer's
-        // answered key from the ACK, and `Required` fails the call if the
-        // peer answers plaintext.
+        // `Required` → `RTP/SAVP` + `a=crypto`; `Preferred` → `RTP/AVP` +
+        // `a=crypto` (#422 — a compliant plaintext-only peer can't answer
+        // an SAVP m-line, so the old SAVP-preferred shape killed exactly
+        // the calls "preferred" exists to save). `apply_answer` (in
+        // `finalize_delayed_offer`) installs the peer's answered key from
+        // the ACK, and `Required` fails the call if the peer answers
+        // plaintext.
         //
         // DTLS-SRTP (0.9.4): when `[media].srtp_offer = "dtls"`, offer
         // DTLS instead of SDES — build a plaintext offer (srtp Off), then

@@ -29,8 +29,9 @@
 //!   `MediaSetup` helper or the daemon's `CallAcceptor`).
 //! - **Inbound SRTP is forge's job.** When answering, we pass the raw
 //!   offer to forge, which negotiates SRTP (DTLS-SRTP) itself. The
-//!   *outbound* offer path here can produce an SDES `a=crypto:` /
-//!   `RTP/SAVP` offer ([`generate_offer`] with a crypto attribute) and
+//!   *outbound* offer path here can produce an SDES `a=crypto:` offer —
+//!   `RTP/SAVP` (required) or `RTP/AVP` + crypto (preferred, #422) via
+//!   [`generate_offer`] with a crypto attribute + [`SdesOfferMode`] — and
 //!   surface the peer's answered key ([`AnswerOutcome::peer_srtp`]); the
 //!   key install onto the forge session lives in [`crate::setup`].
 
@@ -185,12 +186,18 @@ impl LocalCapabilities {
     }
 
     /// Like [`to_sdp`](Self::to_sdp), but when `srtp` is `Some` the audio
-    /// media is offered as `RTP/SAVP` carrying the given SDES `a=crypto:`
-    /// line (RFC 4568) — the master key *we* generated and will use to
-    /// encrypt our outbound RTP. Used only on the **offer** side (outbound
-    /// origination); inbound answers pass `None` (forge negotiates inbound
-    /// SRTP from the received offer).
-    pub fn to_sdp_with_srtp(&self, srtp: Option<&CryptoAttribute>) -> SessionDescription {
+    /// media carries the given SDES `a=crypto:` line (RFC 4568) — the
+    /// master key *we* generated and will use to encrypt our outbound RTP
+    /// — with the transport profile chosen by the [`SdesOfferMode`]:
+    /// `RTP/SAVP` when encryption is non-negotiable, plain `RTP/AVP` for
+    /// the optional-SRTP convention (#422). Used only on the **offer**
+    /// side (outbound origination and the inbound delayed-offer 200 OK);
+    /// inbound answers pass `None` (forge negotiates inbound SRTP from
+    /// the received offer).
+    pub fn to_sdp_with_srtp(
+        &self,
+        srtp: Option<(&CryptoAttribute, SdesOfferMode)>,
+    ) -> SessionDescription {
         // sip-sdp's negotiator uses `local_media.port` for the
         // answer's `m=audio` port (negotiate.rs §base_answer_media).
         // So whatever we put here ends up on the wire.
@@ -245,12 +252,20 @@ impl LocalCapabilities {
             .with_direction("sendrecv")
             .expect("sendrecv is a valid direction");
 
-        // SRTP (SDES, RFC 4568): flip the transport to RTP/SAVP and
-        // attach the `a=crypto:` line carrying our master key. forge's
-        // RTP path encrypts once the matching key is installed on the
-        // session (see `MediaSetup::apply_answer`).
-        if let Some(crypto) = srtp {
-            audio.protocol = Protocol::RtpSavp;
+        // SRTP (SDES, RFC 4568): attach the `a=crypto:` line carrying our
+        // master key. The transport profile depends on the mode (#422):
+        // `Savp` flips to RTP/SAVP — encryption non-negotiable, and a
+        // compliant plaintext-only peer must reject the stream (RFC 3264
+        // answers echo the offered profile); `AvpWithCrypto` keeps
+        // RTP/AVP so such a peer simply ignores the unknown attribute
+        // and answers plaintext, while an SRTP-capable peer answers with
+        // its own key and both sides encrypt. forge's RTP path encrypts
+        // once the matching key is installed on the session (see
+        // `MediaSetup::apply_answer`).
+        if let Some((crypto, mode)) = srtp {
+            if mode == SdesOfferMode::Savp {
+                audio.protocol = Protocol::RtpSavp;
+            }
             audio.add_media_crypto(crypto);
         }
 
@@ -555,15 +570,38 @@ pub fn build_answer(offer_sdp: &str, caps: &LocalCapabilities) -> Result<AnswerO
     negotiate_answer(&offer, caps)
 }
 
+/// Transport profile for an SDES crypto **offer** we generate (#422).
+/// Which one a call uses is a policy decision — `[media]`/`[[gateway]]`
+/// `srtp = "required"` vs `"preferred"` — made in `crate::setup`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SdesOfferMode {
+    /// `RTP/SAVP` + `a=crypto` — encryption is non-negotiable. RFC 3264
+    /// answers echo the offered transport profile, so a compliant
+    /// plaintext-only peer must **reject** the stream rather than answer
+    /// `RTP/AVP`. The right shape for `srtp = "required"`, and only for
+    /// it.
+    Savp,
+    /// `RTP/AVP` + `a=crypto` — the de-facto optional-SRTP convention:
+    /// an SRTP-capable peer answers with its own `a=crypto` and both
+    /// sides encrypt; any other peer ignores the unknown attribute and
+    /// answers plaintext. The shape `srtp = "preferred"` promises —
+    /// offering `SAVP` there made "preferred" mean "required, against
+    /// peers polite enough to violate RFC 3264" (#422).
+    AvpWithCrypto,
+}
+
 /// Build the SDP **offer** for an outbound call — every configured codec,
 /// in priority order, at our `local_port`, `sendrecv`. This is the inverse
 /// of [`negotiate_answer`]: there we answer a peer's offer; here we make the
 /// first move. The result is the body for the outbound INVITE.
 ///
-/// When `srtp` is `Some`, the offer is `RTP/SAVP` with the given SDES
-/// `a=crypto:` line (the master key we'll encrypt with); `None` offers
-/// plaintext `RTP/AVP`.
-pub fn generate_offer(caps: &LocalCapabilities, srtp: Option<&CryptoAttribute>) -> String {
+/// When `srtp` is `Some`, the offer carries the given SDES `a=crypto:`
+/// line (the master key we'll encrypt with) on the transport profile the
+/// [`SdesOfferMode`] picks; `None` offers plaintext `RTP/AVP`.
+pub fn generate_offer(
+    caps: &LocalCapabilities,
+    srtp: Option<(&CryptoAttribute, SdesOfferMode)>,
+) -> String {
     caps.to_sdp_with_srtp(srtp).serialize()
 }
 
@@ -941,14 +979,41 @@ a=sendrecv\r\n";
 
     #[test]
     fn generate_offer_with_srtp_emits_savp_and_crypto() {
+        // Savp mode = `srtp = "required"`: encryption non-negotiable.
         let crypto = a_crypto();
-        let sdp = generate_offer(&caps(vec![Codec::Pcmu]), Some(&crypto));
+        let sdp = generate_offer(
+            &caps(vec![Codec::Pcmu]),
+            Some((&crypto, SdesOfferMode::Savp)),
+        );
         let parsed = parse_offer(&sdp).expect("offer parses");
         let audio = parsed.find_media(MediaType::Audio).expect("audio present");
         assert_eq!(
             audio.protocol,
             Protocol::RtpSavp,
             "SRTP offer uses RTP/SAVP"
+        );
+        let cryptos = audio.get_media_crypto_attributes();
+        assert_eq!(cryptos.len(), 1, "exactly one a=crypto offered");
+        assert_eq!(cryptos[0].suite, CryptoSuite::Aes128CmHmacSha1_80);
+    }
+
+    #[test]
+    fn generate_offer_preferred_emits_avp_with_crypto() {
+        // AvpWithCrypto mode = `srtp = "preferred"` (#422): the transport
+        // stays plaintext RTP/AVP so a non-SRTP peer can answer it
+        // compliantly, while the a=crypto line invites capable peers to
+        // encrypt.
+        let crypto = a_crypto();
+        let sdp = generate_offer(
+            &caps(vec![Codec::Pcmu]),
+            Some((&crypto, SdesOfferMode::AvpWithCrypto)),
+        );
+        let parsed = parse_offer(&sdp).expect("offer parses");
+        let audio = parsed.find_media(MediaType::Audio).expect("audio present");
+        assert_eq!(
+            audio.protocol,
+            Protocol::RtpAvp,
+            "preferred offer stays plaintext RTP/AVP"
         );
         let cryptos = audio.get_media_crypto_attributes();
         assert_eq!(cryptos.len(), 1, "exactly one a=crypto offered");
@@ -965,6 +1030,24 @@ a=sendrecv\r\n";
         assert_eq!(got.suite, CryptoSuite::Aes128CmHmacSha1_80);
         // Key material is convertible (what the install path needs).
         assert!(got.to_srtp_key_material().is_ok());
+    }
+
+    #[test]
+    fn negotiate_offer_answer_extracts_peer_crypto_from_avp_answer() {
+        // #422: a peer answering our AvpWithCrypto (preferred) offer keeps
+        // the RTP/AVP profile and carries its own a=crypto. Key extraction
+        // is profile-agnostic — the crypto attribute alone decides.
+        let peer = a_crypto();
+        let mut sdp = parse_offer(&answer_sdp(4000, 0, "PCMU", 8000)).expect("base parses");
+        let audio = sdp
+            .find_media_mut(MediaType::Audio)
+            .expect("answer has audio");
+        audio.add_media_crypto(&peer);
+        let outcome = negotiate_offer_answer(&sdp.serialize(), &caps(vec![Codec::Pcmu])).unwrap();
+        let got = outcome
+            .peer_srtp
+            .expect("peer crypto surfaced from AVP answer");
+        assert_eq!(got.suite, CryptoSuite::Aes128CmHmacSha1_80);
     }
 
     #[test]
@@ -1001,7 +1084,10 @@ a=sendrecv\r\n";
         // A hold offer on an SRTP call must keep the a=crypto line so the
         // media stays encrypted across the re-INVITE (no re-key in v1).
         let crypto = a_crypto();
-        let answer = generate_offer(&caps(vec![Codec::Pcmu]), Some(&crypto));
+        let answer = generate_offer(
+            &caps(vec![Codec::Pcmu]),
+            Some((&crypto, SdesOfferMode::Savp)),
+        );
         let hold = rewrite_sdp_direction(&answer, MediaDirection::SendOnly);
         assert!(hold.contains("a=crypto:"), "crypto retained through flip");
         assert!(hold.contains("a=sendonly"));

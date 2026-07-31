@@ -340,6 +340,18 @@ the secure one — and zeroes the rest in its answer (issue #406).
 Watch `siphon_ai_outbound_delayed_offer_total{result=...}` for the
 negotiation outcome.
 
+The mirror direction exists too: when a FreeSWITCH leg sends the
+**offerless INVITE toward SiphonAI** (e.g. an `originate
+loopback/<ext>` whose gateway leg has no media yet), SiphonAI
+generates the offer in its 200 OK per `[media].srtp` (or the route
+override). Under `"preferred"` that offer is `RTP/AVP` +
+`a=crypto` (issue #422), so a profile without SRTP simply answers
+plaintext. Diagnostic signature of the pre-0.48.3 `RTP/SAVP` shape
+— worth knowing if you see it against other UAs that offer SAVP to
+a non-SRTP FreeSWITCH: FS ACKs the 200 and then BYEs within
+milliseconds with `cause=500 "Internal media error"`, because a
+compliant peer has no legal plaintext answer to an SAVP m-line.
+
 ---
 
 ## 4. Building the bot

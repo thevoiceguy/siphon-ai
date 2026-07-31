@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`srtp = "preferred"` now offers `RTP/AVP` + `a=crypto` instead of `RTP/SAVP`** (issue #422). RFC 3264 answers echo the offered transport profile, so an `RTP/SAVP` offer gives a compliant plaintext-only peer no legal way to answer — it must reject the stream — which made "preferred" behave as "required, against peers polite enough to violate the RFC." Live shape: a FreeSWITCH `originate loopback/9000` makes its gateway leg send an offerless INVITE, our delayed-offer 200 OK offered SAVP, and FS (no SRTP on that leg) correctly gave up — ACK then BYE with `cause=500 "Internal media error"` — while the same peer on the early-offer path (where we merely mirror its `RTP/AVP`) worked fine. The generated SDES offer now follows the policy: `required` keeps `RTP/SAVP` (encryption non-negotiable, unchanged); `preferred` offers plain `RTP/AVP` carrying `a=crypto` — the long-standing optional-SRTP convention — so capable peers answer with their own key and both sides encrypt, and everyone else answers plaintext and proceeds in the clear. The answer path already keyed off the crypto attribute rather than the transport profile, so both outcomes flow through the existing install/downgrade logic; new tests pin the offer shape per mode and both answer outcomes (AVP+crypto → keys installed + `start.srtp.profile`; plaintext → clean downgrade, no profile claimed). Applies to both users of the shared offer builder: outbound origination (`[[gateway]].srtp`) and the inbound delayed-offer 200 OK (`[media].srtp` / route override). Documented in CONFIG.md (`[media].srtp_offer`, `[[gateway]].srtp`).
+
 ## [0.48.2] - 2026-07-31
 
 ### Fixed

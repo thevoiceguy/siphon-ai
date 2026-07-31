@@ -115,7 +115,9 @@ const FORGE_LEAD_FRAMES: usize = 5;
 /// our send — we answered a peer hold with `recvonly`/`inactive`
 /// (#417). Counts 20 ms frames across every push site (WS playout,
 /// barge-in re-queue, room mix, parked MOH / announcements); outbound
-/// DTMF drops log but don't count (not a frame).
+/// DTMF drops log but don't count (not a frame). Literal must match
+/// `siphon-ai-telemetry::metrics` (same pattern as the room metrics
+/// in `room.rs`), where the Prometheus description is registered.
 const PEER_HOLD_TX_SUPPRESSED_TOTAL: &str = "siphon_ai_peer_hold_tx_suppressed_frames_total";
 
 /// One entry in the tap-owned outbound queue (#365/#366). Audio frames
@@ -2638,16 +2640,19 @@ impl MediaTap {
                 // per 20 ms into the caller leg. Active in either state;
                 // both share the same MohSource-driven tick.
                 _ = moh_tick.tick(), if parked.is_some() || held.is_some() || announcing.is_some() => {
-                    // #417: a parked call (or one mid-announcement) can
-                    // be peer-held underneath — skip the whole tick
-                    // while our send is forbidden. MOH is a loop, so
-                    // skipping pauses it harmlessly; an announcement
-                    // deliberately STALLS rather than plays into a deaf
-                    // leg — it exists to be heard (recording-consent),
-                    // so it resumes where it left off when the peer
-                    // does. (Bot-hold can't coexist with a peer hold —
-                    // the no-stacking rejection — so `held` never
-                    // races this.)
+                    // #417: a parked, bot-held, or mid-announcement
+                    // call can be peer-held underneath — skip the
+                    // whole tick while our send is forbidden. MOH is a
+                    // loop, so skipping pauses it harmlessly; an
+                    // announcement deliberately STALLS rather than
+                    // plays into a deaf leg — it exists to be heard
+                    // (recording-consent), so it resumes where it left
+                    // off when the peer does. (The no-stacking
+                    // rejection blocks a bot-hold *request* while
+                    // peer-held, but not the reverse order — a peer
+                    // re-INVITE arriving during a bot-hold lands here,
+                    // and stalling the bot-hold's MOH is exactly the
+                    // recvonly-compliant behavior.)
                     if self.tx_gate_active() {
                         self.note_tx_suppressed();
                         continue;

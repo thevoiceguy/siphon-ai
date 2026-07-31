@@ -47,23 +47,30 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 **Current release: v0.48.2.** Production-deployed against real carriers
 (Twilio Elastic SIP Trunking, FreeSWITCH, CUCM). The WS protocol is still
 `version: "1"` — every release has been additive, so a WS server built
-against 0.1.0 keeps working unchanged, and upgrading the daemon is a
-behaviour-preserving drop-in (features below are **off by default** until
-you turn them on; the one operator-facing move was v0.10.0 relocating
-`/admin/*` onto its own authenticated listener). The full per-release
-history is in [`CHANGELOG.md`](CHANGELOG.md).
+against 0.1.0 keeps working unchanged. Daemon upgrades are near-drop-in
+(features below are **off by default** until you turn them on), with a
+handful of operator-facing moves to check on the way up: v0.10.0
+relocated `/admin/*` onto its own authenticated listener, v0.46.0 made
+unknown `[route.match]` keys **fatal at startup** (run `siphon-ai check`
+against your config before upgrading), and v0.48.0 gave registration
+attribution precedence over the `[[trunk]]` walk (routes matching a
+registrar's traffic by *trunk* name now match its `[[register]].name`
+instead). The full per-release history is in
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ### What's shipped
 
 On top of the core bridge — SIP signaling, RTP, jitter buffer, barge-in,
 DTMF, and the WebSocket protocol:
 
-- **Codecs & media** — G.711 (µ-law/A-law) and **Opus** (negotiated at a
-  16 kHz bridge rate); **SRTP both directions** — SDES (`a=crypto:`) and
-  DTLS-SRTP, inbound and outbound; offerless / delayed-offer INVITEs (CUCM,
-  avoids a forced MTP); selectable **speech detection backend** —
-  energy/ZCR (default) or the **Silero neural VAD** (local inference, no
-  network) for fewer acoustic false positives, per-route via `[media].vad`.
+- **Codecs & media** — G.711 (µ-law/A-law), **G.722** wideband, and
+  **Opus** (negotiated at a 16 kHz bridge rate); **SRTP both directions**
+  — SDES (`a=crypto:`) and DTLS-SRTP, inbound and outbound; offerless /
+  delayed-offer INVITEs both ways — answering them inbound (CUCM, avoids
+  a forced MTP) and sending them outbound (the peer offers in its 2xx);
+  selectable **speech detection backend** — energy/ZCR (default) or the
+  **Silero neural VAD** (local inference, no network) for fewer acoustic
+  false positives, per-route via `[media].vad`.
 - **Call control** — bot-initiated **hold/resume** (true SIP re-INVITE +
   hold music), blind and **attended transfer** (REFER / REFER-with-Replaces),
   **N-way conferencing** (mixed rooms, every leg keeps its WS), and media-only
@@ -243,10 +250,15 @@ journal — grep `turn_summary` for SLO numbers. See
 | `crates/sip-glue/`    | Adapter from `siphon-rs` events to core |
 | `crates/media-glue/`  | Adapter from `forge-engine` to core (the audio tap) |
 | `crates/routes/`      | Route matching engine (TOML dialplan) |
-| `crates/cdr/`         | CDR generation (JSON), file sink, signed/spooled webhook sink |
+| `crates/cdr/`         | CDR generation (JSON/CSV), file sink, signed/spooled webhook sink |
 | `crates/webhooks/`    | Out-of-band lifecycle webhooks (signed, durable spool) |
 | `crates/http/`        | Shared retrying HTTP delivery (signing, idempotency, spool) |
 | `crates/config/`      | TOML config + validation + SIGHUP reload |
+| `crates/recording/`   | Per-call recording writers (WAV/Opus, encryption at rest, S3 upload) |
+| `crates/quality/`     | Per-call quality records (jitter/loss/MOS → CDR, admin API, sinks) |
+| `crates/security/`    | Call-authentication types (verstat, attestation, policy gate config) |
+| `crates/stir-shaken/` | STIR/SHAKEN `Identity` verification service (PASSporT, cert fetch) |
+| `crates/audit/`       | Signed audit-event stream (admin actions, SIP refusals → SIEM) |
 | `crates/telemetry/`   | tracing + metrics + HEP wiring + admin API (auth + RBAC) |
 | `crates/protocol-testkit/` | `siphon-ai-testkit` — WS protocol conformance harness |
 | `bins/siphon-ai/`     | The daemon binary |
@@ -274,7 +286,7 @@ cargo test --workspace
 | Per-call live quality stats | `GET /admin/v1/calls/<id>/stats` | `[admin]` (auth) |
 | Per-call hangup | `POST /admin/v1/calls/<id>/hangup` | `[admin]` (auth) |
 | Outbound origination | `POST /admin/v1/calls` | `[admin]` (auth) |
-| Registration refresh / restart | `POST /admin/v1/registrations/<name>/refresh\|restart` | `[admin]` (auth) |
+| Registration list / refresh / restart | `GET /admin/v1/registrations`, `POST .../<name>/refresh\|restart` | `[admin]` (auth) |
 | Conference / park control | `/admin/v1/conferences`, `/admin/v1/parked` | `[admin]` (auth) |
 | Runtime log filter | `PUT /admin/v1/log` | `[admin]` (auth) |
 | HEP test packet | `POST /admin/v1/hep/test` | `[admin]` (auth) |

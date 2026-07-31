@@ -539,6 +539,15 @@ pub struct CallHandle {
     /// own loop can touch it without a lock (§4.4: per-call state on the
     /// handle, not a global registry).
     peer_held: std::sync::Arc<AtomicBool>,
+    /// Set while the negotiated media direction excludes our send —
+    /// we answered a peer re-INVITE with `recvonly` or `inactive`
+    /// (#417). Distinct from `peer_held`: a peer `recvonly` offer is
+    /// also a hold (event-wise) but our `sendonly` answer still
+    /// permits transmission. The acceptor's `on_reinvite` recomputes
+    /// it on every accepted direction change (including held→held
+    /// flavor changes that emit no event); the media tap reads it to
+    /// suppress outbound RTP for as long as it is set.
+    tx_suppressed: std::sync::Arc<AtomicBool>,
     /// Set just before the graceful-shutdown drain force-terminates
     /// this call (0.17.0). The controller reads it when its `shutdown`
     /// notify fires to attribute the termination as `DrainForced`
@@ -588,6 +597,7 @@ impl CallHandle {
             conf_cmd_tx,
             park_cmd_tx,
             peer_held: std::sync::Arc::new(AtomicBool::new(false)),
+            tx_suppressed: std::sync::Arc::new(AtomicBool::new(false)),
             drain_forced: std::sync::Arc::new(AtomicBool::new(false)),
         }
     }
@@ -609,6 +619,22 @@ impl CallHandle {
     /// an `a=inactive` hold legitimately stops all inbound RTP, #402).
     pub fn peer_held_flag(&self) -> std::sync::Arc<AtomicBool> {
         std::sync::Arc::clone(&self.peer_held)
+    }
+
+    /// Record whether the negotiated direction currently forbids our
+    /// send (#417). Called by the acceptor's `on_reinvite` on every
+    /// accepted direction change, not just hold/resume boundaries —
+    /// a held→held flavor change (`sendonly` → `recvonly`) flips the
+    /// answer across the may-send line without emitting an event.
+    pub fn set_tx_suppressed(&self, suppressed: bool) {
+        self.tx_suppressed.store(suppressed, Ordering::Release);
+    }
+
+    /// The shared tx-suppression flag itself, for handing to the
+    /// media tap (it drops outbound playout while our answered
+    /// direction is `recvonly`/`inactive` — RFC 3264 §6.1, #417).
+    pub fn tx_suppressed_flag(&self) -> std::sync::Arc<AtomicBool> {
+        std::sync::Arc::clone(&self.tx_suppressed)
     }
 
     /// Ask the controller to shut down cleanly. The controller
@@ -941,7 +967,10 @@ impl CallController {
             // Park the RTP inactivity watchdog while the far end holds
             // us (#402) — the acceptor's re-INVITE handler flips this
             // flag; the tap reads it at watchdog-fire time.
-            .with_peer_held(handle.peer_held_flag());
+            .with_peer_held(handle.peer_held_flag())
+            // Suppress outbound RTP while our answered direction is
+            // recvonly/inactive (#417) — same writer, read per frame.
+            .with_tx_suppressed(handle.tx_suppressed_flag());
         let media_tap = if let Some(setup) = recording {
             let (rec_tx, rec_rx) = mpsc::channel::<RecFrame>(RECORDING_CHANNEL_CAPACITY);
             let (ctrl_tx, ctrl_rx) = mpsc::channel::<RecControl>(CONTROL_CHANNEL_CAPACITY);

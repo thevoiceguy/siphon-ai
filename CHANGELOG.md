@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **SiphonAI stops transmitting RTP while a peer hold forbids it** (issue #417). Answering a peer's `a=sendonly`/`a=inactive` re-INVITE with `recvonly`/`inactive` commits us to silence per RFC 3264 §6.1 — but nothing enforced it: the tap kept pushing WS playout to forge at an unbroken 50 pps for the whole held span (live-proven against FreeSWITCH `uuid_hold`, which honors its own `recvonly` in the mirrored case). The `negotiated_direction` doc comment's "(eventually) pause forge's outbound RTP" was that never-landed enforcement. Now the acceptor recomputes a shared tx-suppression flag on **every** accepted direction change — not just the hold/resume event boundary, since a held→held flavor change (`sendonly` → `recvonly`) crosses the may-send line without emitting anything — and the tap drops every caller-leg push while it is set: WS playout (drain-and-drop, same stance as mute — the WS server is never back-pressured and held-era audio is discarded, not queued), barge-in re-queues, the room mix for a peer-held conference member (only that leg's wire — its server audio still mixes for the other members, whose wires are not held), parked MOH, announcements (which stall to be heard on resume rather than play into a deaf leg), and queued outbound DTMF (telephone-events are RTP too). The recording fork is skipped with it — the caller heard nothing. A peer `recvonly` hold (we answered `sendonly`) correctly leaves transmission flowing. New `siphon_ai_peer_hold_tx_suppressed_frames_total` counter + engage/release log lines with per-hold totals; documented in PROTOCOL.md §3.3 and DEPLOY.md. Scope: inbound legs (the same scope as the §3.3 events and the #402 watchdog park — outbound-leg peer re-INVITEs don't reach this handler today).
+
 ## [0.48.1] - 2026-07-31
 
 ### Fixed

@@ -2969,6 +2969,18 @@ fn prepare_reinvite_answer(
     })
 }
 
+/// Whether a direction we committed to in an SDP answer forbids us
+/// from transmitting RTP (#417). `recvonly` and `inactive` both mean
+/// "we send nothing" — RFC 3264 §6.1; the media tap enforces it by
+/// dropping outbound playout while the flag is set. Note the
+/// asymmetry with [`MediaDirection::is_held`]: a peer `recvonly`
+/// offer is still a hold (we mirror `sendonly` and emit the §3.3
+/// event) but our transmission stays legal.
+fn direction_forbids_send(answer: siphon_ai_media_glue::MediaDirection) -> bool {
+    use siphon_ai_media_glue::MediaDirection::*;
+    matches!(answer, RecvOnly | Inactive)
+}
+
 /// RFC 3264 §6.1 direction mirror. Hold/resume re-INVITE answering
 /// depends on this — see `BridgingAcceptor::on_reinvite`.
 fn mirror_direction(
@@ -3158,6 +3170,18 @@ impl CallAcceptor for BridgingAcceptor {
             let prev = *current;
             *current = new_direction;
             drop(current);
+            // Outbound-RTP gate (#417): the direction we just committed
+            // to in our answer decides whether we may transmit at all —
+            // answering `recvonly`/`inactive` forbids it (RFC 3264
+            // §6.1). Recomputed on EVERY accepted direction change, not
+            // just the hold/resume boundary below: a held→held flavor
+            // change (peer `sendonly` → `recvonly`) crosses the
+            // may-send line without emitting any event.
+            if let Some(answer) = answer_direction {
+                entry
+                    .handle
+                    .set_tx_suppressed(direction_forbids_send(answer));
+            }
             let was_held = prev.is_held();
             let now_held = new_direction.is_held();
             match (was_held, now_held) {
@@ -6285,6 +6309,18 @@ a=sendrecv\r\n";
     // ─── Hold / resume helpers ──────────────────────────────────
 
     use siphon_ai_media_glue::MediaDirection;
+
+    #[test]
+    fn direction_forbids_send_only_for_recvonly_and_inactive() {
+        // #417: the tx gate keys off the direction WE answered with.
+        // `sendonly` (the peer offered `recvonly`) is still a §3.3
+        // hold, but our transmission stays legal — only `recvonly`
+        // and `inactive` forbid it.
+        assert!(!direction_forbids_send(MediaDirection::SendRecv));
+        assert!(!direction_forbids_send(MediaDirection::SendOnly));
+        assert!(direction_forbids_send(MediaDirection::RecvOnly));
+        assert!(direction_forbids_send(MediaDirection::Inactive));
+    }
 
     #[test]
     fn mirror_direction_follows_rfc_3264_section_6_1() {

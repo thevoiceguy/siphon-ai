@@ -3178,7 +3178,9 @@ impl CallAcceptor for BridgingAcceptor {
             // change (peer `sendonly` → `recvonly`) crosses the
             // may-send line without emitting any event.
             if let Some(answer) = answer_direction {
-                entry.handle.set_tx_suppressed(direction_forbids_send(answer));
+                entry
+                    .handle
+                    .set_tx_suppressed(direction_forbids_send(answer));
             }
             let was_held = prev.is_held();
             let now_held = new_direction.is_held();

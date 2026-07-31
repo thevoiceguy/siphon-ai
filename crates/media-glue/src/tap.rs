@@ -896,7 +896,10 @@ impl MediaTap {
     /// engaging while nothing is flowing has nothing to suppress, so
     /// noticing late costs nothing.
     fn tx_gate_active(&mut self) -> bool {
-        let gated = self.tx_suppressed.as_ref().is_some_and(|f| f.load(Ordering::Acquire));
+        let gated = self
+            .tx_suppressed
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Acquire));
         if gated != self.tx_gate_engaged {
             self.tx_gate_engaged = gated;
             if gated {
@@ -3594,7 +3597,10 @@ mod tests {
         suppressed.store(false, Ordering::Release);
         let resumed = pack_pcm16_le(&vec![2000i16; 160]);
         for _ in 0..5 {
-            playout_tx.send(resumed.clone()).await.expect("send playout");
+            playout_tx
+                .send(resumed.clone())
+                .await
+                .expect("send playout");
         }
         let got = tokio::time::timeout(Duration::from_secs(2), async {
             loop {

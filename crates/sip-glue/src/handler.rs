@@ -937,7 +937,8 @@ mod tests {
         let mut h = Headers::new();
         h.push("Via", "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-a1")
             .unwrap();
-        h.push("From", "<sip:caller@pbx.example.com>;tag=rt").unwrap();
+        h.push("From", "<sip:caller@pbx.example.com>;tag=rt")
+            .unwrap();
         h.push("To", "<sip:siphon@siphon.example.com>;tag=lt")
             .unwrap();
         h.push("Call-ID", call_id).unwrap();

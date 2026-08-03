@@ -565,7 +565,12 @@ impl Runtime {
         // phase's poll-until-empty wait before the registry is moved
         // into the dialog terminator.
         let registry_for_drain = registry.clone();
-        let dialog_terminator: DialogTerminatorHandle = Arc::new(registry);
+        // The acceptor, not the bare registry, is the dialog
+        // terminator (#425): it delegates BYE/CANCEL to the controller
+        // registry as before, and additionally lets a BYE reap a
+        // delayed-offer call parked between our 200-with-offer and
+        // the ACK answer — a window in which no controller exists.
+        let dialog_terminator: DialogTerminatorHandle = acceptor.clone();
         // Trunk allowlist gate. Installed only when the operator
         // declared one or more `[[trunk]]` blocks; with zero blocks
         // we leave the gate unset and the routing handler accepts

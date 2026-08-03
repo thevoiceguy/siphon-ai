@@ -238,11 +238,13 @@ pub struct ReinviteCall<'a> {
 /// transaction handle — just the request (whose body may carry an SDP
 /// answer, for the delayed-offer flow) and the resolved dialog.
 ///
-/// Only ACKs that carry a body are dispatched here; an ACK confirming
-/// an early-offer 2xx (no body) is absorbed by the UAS and never
-/// reaches the acceptor. The acceptor matches the dialog against any
-/// half-negotiated delayed-offer call it is holding and finalizes media
-/// from the answer in the ACK body.
+/// Every in-dialog ACK is dispatched here, body or not (#425). The
+/// acceptor matches the dialog against any half-negotiated
+/// delayed-offer call it is holding: a body finalizes media from the
+/// answer it carries, while a body-less ACK on a held dialog is the
+/// peer failing to answer our offer (RFC 3261 §13.2.2.4) and reaps the
+/// call as `missing_sdp_answer`. ACKs for dialogs the acceptor is not
+/// holding — the entire early-offer population — are a no-op.
 pub struct AckCall<'a> {
     pub request: &'a Request,
     pub dialog: &'a Dialog,
@@ -274,11 +276,13 @@ pub trait CallAcceptor: Send + Sync {
         Ok(())
     }
 
-    /// An ACK carrying a body arrived. The default impl ignores it
-    /// (early-offer ACKs need no application handling). The
-    /// delayed-offer acceptor overrides this to read the SDP answer
-    /// from the ACK body and finalize the call. There is no response
-    /// to send — an ACK is the end of the INVITE transaction.
+    /// An in-dialog ACK arrived (with or without a body). The default
+    /// impl ignores it (early-offer ACKs need no application
+    /// handling). The delayed-offer acceptor overrides this to read
+    /// the SDP answer from the ACK body and finalize the call — or,
+    /// for a body-less ACK on a dialog it is holding, to reap the
+    /// call as `missing_sdp_answer` (#425). There is no response to
+    /// send — an ACK is the end of the INVITE transaction.
     async fn on_ack(&self, call: AckCall<'_>) -> anyhow::Result<()> {
         let _ = call;
         Ok(())
@@ -701,20 +705,19 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
 
     #[instrument(skip_all, fields(method = "ACK"))]
     async fn on_ack(&self, request: &Request, dialog: &Dialog) -> anyhow::Result<()> {
-        // Only ACKs with a body interest us — that's where a
-        // delayed-offer answer rides. An empty ACK (the early-offer
-        // case) is the normal end of the INVITE transaction; nothing
-        // to do. Skipping the empty case keeps the hot path free of a
-        // pointless acceptor round-trip and a dialog-map probe.
-        if request.body().is_empty() {
-            return Ok(());
-        }
+        // Forward every in-dialog ACK, body-less ones included. An
+        // empty ACK is the normal end of an early-offer INVITE
+        // transaction (the acceptor's dialog-map probe makes it a
+        // no-op), but on a pending delayed-offer dialog it means the
+        // peer sent no SDP answer — the acceptor must see it to
+        // classify the call as `missing_sdp_answer` instead of
+        // letting Timer H expire 32 s later (#425).
         let sip_call_id = request
             .headers()
             .get_smol("Call-ID")
             .map(|s| s.to_string())
             .unwrap_or_default();
-        debug!(sip_call_id = %sip_call_id, "ACK with body → acceptor");
+        debug!(sip_call_id = %sip_call_id, has_body = !request.body().is_empty(), "ACK → acceptor");
         self.acceptor
             .on_ack(AckCall {
                 request,
@@ -873,5 +876,115 @@ mod tests {
         let routes = Arc::new(ArcSwap::from_pointee(siphon_ai_routes::RouteSet::default()));
         let handler = RoutingHandler::new(routes, Arc::new(FakeAcceptor));
         assert!(handler.allow_header().contains("NOTIFY"));
+    }
+
+    /// Acceptor that records every ACK it is handed, with body presence.
+    #[derive(Default)]
+    struct RecordingAckAcceptor {
+        acks: parking_lot::Mutex<Vec<(String, bool)>>,
+    }
+
+    #[async_trait]
+    impl CallAcceptor for RecordingAckAcceptor {
+        async fn on_matched(&self, _call: MatchedCall<'_>) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn on_ack(&self, call: AckCall<'_>) -> anyhow::Result<()> {
+            self.acks
+                .lock()
+                .push((call.sip_call_id.clone(), !call.request.body().is_empty()));
+            Ok(())
+        }
+    }
+
+    /// A confirmed dialog to hang the test ACK on. The handler only
+    /// threads the dialog through, so a UAC-built one is fine.
+    fn test_dialog(call_id: &str) -> Dialog {
+        let invite = format!(
+            "INVITE sip:callee@pbx.example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP siphon.example.com;branch=z9hG4bK-ack-test\r\n\
+             From: <sip:siphon@siphon.example.com>;tag=lt\r\n\
+             To: <sip:callee@pbx.example.com>\r\n\
+             Call-ID: {call_id}\r\n\
+             CSeq: 1 INVITE\r\n\
+             Contact: <sip:siphon@siphon.example.com:5060>\r\n\
+             Content-Length: 0\r\n\r\n"
+        );
+        let ok = format!(
+            "SIP/2.0 200 OK\r\n\
+             Via: SIP/2.0/UDP siphon.example.com;branch=z9hG4bK-ack-test\r\n\
+             From: <sip:siphon@siphon.example.com>;tag=lt\r\n\
+             To: <sip:callee@pbx.example.com>;tag=rt\r\n\
+             Call-ID: {call_id}\r\n\
+             CSeq: 1 INVITE\r\n\
+             Contact: <sip:callee@10.0.0.5:5060>\r\n\
+             Content-Length: 0\r\n\r\n"
+        );
+        let req = sip_parse::parse_request(&bytes::Bytes::from(invite)).expect("parse INVITE");
+        let resp = sip_parse::parse_response(&bytes::Bytes::from(ok)).expect("parse 200");
+        Dialog::new_uac(
+            &req,
+            &resp,
+            sip_core::SipUri::parse("sip:siphon@siphon.example.com").unwrap(),
+            sip_core::SipUri::parse("sip:callee@pbx.example.com").unwrap(),
+        )
+        .expect("dialog")
+    }
+
+    fn ack(call_id: &str, body: &str) -> Request {
+        use sip_core::{Headers, Method, RequestLine, SipUri};
+        let uri = SipUri::parse("sip:siphon@siphon.example.com").unwrap();
+        let mut h = Headers::new();
+        h.push("Via", "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-a1")
+            .unwrap();
+        h.push("From", "<sip:caller@pbx.example.com>;tag=rt").unwrap();
+        h.push("To", "<sip:siphon@siphon.example.com>;tag=lt")
+            .unwrap();
+        h.push("Call-ID", call_id).unwrap();
+        h.push("CSeq", "1 ACK").unwrap();
+        h.push("Content-Length", &body.len().to_string()).unwrap();
+        Request::new(
+            RequestLine::new(Method::Ack, uri),
+            h,
+            bytes::Bytes::from(body.to_string()),
+        )
+        .unwrap()
+    }
+
+    /// #425: a body-less ACK must reach the acceptor — it is how a
+    /// pending delayed-offer call learns the peer sent no answer.
+    /// (Before the fix the handler dropped empty ACKs, so the only
+    /// exit for that call was the Timer-H `ack_timeout` 32 s later.)
+    #[tokio::test]
+    async fn body_less_ack_is_forwarded_to_acceptor() {
+        let acceptor = Arc::new(RecordingAckAcceptor::default());
+        let routes = Arc::new(ArcSwap::from_pointee(siphon_ai_routes::RouteSet::default()));
+        let handler = RoutingHandler::new(routes, Arc::clone(&acceptor) as Arc<dyn CallAcceptor>);
+        let dialog = test_dialog("empty-ack@peer");
+        handler
+            .on_ack(&ack("empty-ack@peer", ""), &dialog)
+            .await
+            .expect("on_ack");
+        assert_eq!(
+            acceptor.acks.lock().as_slice(),
+            &[("empty-ack@peer".to_string(), false)]
+        );
+    }
+
+    /// The body-carrying path is unchanged: still forwarded, body seen.
+    #[tokio::test]
+    async fn ack_with_body_is_forwarded_to_acceptor() {
+        let acceptor = Arc::new(RecordingAckAcceptor::default());
+        let routes = Arc::new(ArcSwap::from_pointee(siphon_ai_routes::RouteSet::default()));
+        let handler = RoutingHandler::new(routes, Arc::clone(&acceptor) as Arc<dyn CallAcceptor>);
+        let dialog = test_dialog("sdp-ack@peer");
+        handler
+            .on_ack(&ack("sdp-ack@peer", "v=0\r\n"), &dialog)
+            .await
+            .expect("on_ack");
+        assert_eq!(
+            acceptor.acks.lock().as_slice(),
+            &[("sdp-ack@peer".to_string(), true)]
+        );
     }
 }

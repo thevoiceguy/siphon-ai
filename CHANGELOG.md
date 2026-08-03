@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.48.3] - 2026-08-03
+### Fixed
+
+- **A BYE or body-less ACK during the delayed-offer pending window now ends the call immediately** (issue #425). Between our 200-with-offer and the peer's ACK answer, an inbound delayed-offer call has a confirmed dialog but no controller yet — and both teardown signals fell into that gap: the routing handler dropped ACKs without a body before the acceptor could see them, and `dispatch_bye` consulted only the controller registry, so the peer's BYE got its RFC-mandated 200 while the parked call sat — forge session and ports held — until the Timer-H watchdog expired 32 s later and wrote a CDR claiming `ack_timeout` with a 32 s duration for a call the peer had ended in milliseconds (live shape: FreeSWITCH's gateway leg failing its own media setup sends exactly this empty-ACK + BYE pair 2 ms after our 200). Now every in-dialog ACK reaches the acceptor — a body-less one on a held dialog is the peer failing to answer our offer (RFC 3261 §13.2.2.4) and reaps the call as `missing_sdp_answer`, the outcome that was documented in the metric description and CDR schema since 0.9.5 but that no code path ever emitted — and the daemon installs the acceptor as the dialog terminator, so a BYE that misses the controller registry also checks the pending window and reaps the call with the ordinary `caller_hangup` cause and its real duration (CANCEL deliberately does not: RFC 3261 §9.2, no effect after a final response). `siphon_ai_delayed_offer_total` gains the `caller_hangup` result label; documented in DEPLOY.md.
 
 ### Fixed
 

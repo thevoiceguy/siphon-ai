@@ -2701,12 +2701,6 @@ pub(crate) fn record_call_ended(cause: CdrTerminationCause, duration_secs: f64) 
     metrics::histogram!(CALL_DURATION_SECONDS).record(duration_secs);
 }
 
-/// Build the CDR for a delayed-offer call that failed negotiation after
-/// the 200-OK-with-offer was sent but before it went active (the ACK
-/// answer never arrived or was unusable). No codec was negotiated and no
-/// controller ran, so `audio` is empty and the disconnect detail strings
-/// are blank. `cause` is one of the v2 delayed-offer failure variants.
-#[allow(clippy::too_many_arguments)]
 /// The daemon installs the acceptor — not the bare [`CallRegistry`] —
 /// as the routing handler's dialog terminator (#425): BYE/CANCEL first
 /// try the controller registry as before, and a BYE that misses there
@@ -2729,6 +2723,12 @@ impl DialogTerminator for BridgingAcceptor {
     }
 }
 
+/// Build the CDR for a delayed-offer call that failed negotiation after
+/// the 200-OK-with-offer was sent but before it went active (the ACK
+/// answer never arrived or was unusable). No codec was negotiated and no
+/// controller ran, so `audio` is empty and the disconnect detail strings
+/// are blank. `cause` is one of the v2 delayed-offer failure variants.
+#[allow(clippy::too_many_arguments)]
 fn build_delayed_failure_cdr(
     cause: CdrTerminationCause,
     bridge_call_id: &BridgeCallId,

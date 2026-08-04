@@ -345,12 +345,53 @@ The mirror direction exists too: when a FreeSWITCH leg sends the
 loopback/<ext>` whose gateway leg has no media yet), SiphonAI
 generates the offer in its 200 OK per `[media].srtp` (or the route
 override). Under `"preferred"` that offer is `RTP/AVP` +
-`a=crypto` (issue #422), so a profile without SRTP simply answers
-plaintext. Diagnostic signature of the pre-0.48.3 `RTP/SAVP` shape
-— worth knowing if you see it against other UAs that offer SAVP to
-a non-SRTP FreeSWITCH: FS ACKs the 200 and then BYEs within
-milliseconds with `cause=500 "Internal media error"`, because a
-compliant peer has no legal plaintext answer to an SAVP m-line.
+`a=crypto` (issue #422). Diagnostic signature of the pre-0.48.3
+`RTP/SAVP` shape — worth knowing if you see it against other UAs
+that offer SAVP to a non-SRTP FreeSWITCH: FS ACKs the 200 and then
+BYEs within milliseconds with `cause=500 "Internal media error"`,
+because a compliant peer has no legal plaintext answer to an SAVP
+m-line.
+
+Two FreeSWITCH-specific caveats on these paths, both live-verified
+against FS 1.11:
+
+**A `bypass_media` leg cannot answer a delayed offer at all.** With
+`bypass_media=true`, FreeSWITCH does no media of its own — it
+relays SDP between bridge legs. A leg whose bridge partner has no
+SDP to relay (the classic case: a `loopback/` A-leg) goes out as an
+offerless INVITE — the sofia log prints `Local SDP: NO SDP PRESENT`
+— and when SiphonAI's 200-with-offer comes back, FS has nothing
+that can produce the ACK answer. It gives up instantly: empty ACK,
+then BYE with `cause=500 "Internal media error"`, *regardless of
+what the 200 offered* (the failure is on the FS side, before any
+transport-profile question arises). If an offerless INVITE from
+FreeSWITCH surprises you, check the dialplan for `bypass_media`
+before suspecting late negotiation — and don't use
+`originate loopback/<ext>` through a `bypass_media` extension as a
+delayed-offer test rig; it can never complete.
+
+**Stock FreeSWITCH rejects the `RTP/AVP` + `a=crypto` convention as
+a callee.** Dial *into* a stock-configured FS extension with
+`srtp = "preferred"` (gateway or route) and the call draws
+`488 Not Acceptable Here` (`Q.850;cause=88`,
+`INCOMPATIBLE_DESTINATION`) — the FS log names the real reason:
+`switch_core_media.c: "a=crypto in RTP/AVP, refer to rfc3711"`.
+Setting FS's NDLB channel variable `rtp_allow_crypto_in_avp=true`
+bypasses that hard reject, and FS then *accepts* the offered crypto
+(its log shows the suite matched and a local key built) — but FS
+1.11's answer generation still cannot emit crypto on an `RTP/AVP`
+m-line: it silently zeroes the audio stream in its 200 OK
+(`m=audio 0 ...`, no warning logged) and the call dies a few
+seconds later with a `MEDIA_TIMEOUT` BYE. `rtp_secure_media`
+(`true` / `optional` / `false`) does not change this. Practical
+guidance: **toward FreeSWITCH, use `srtp = "required"`** (an
+`RTP/SAVP` offer, which FS negotiates SDES on happily) **or
+`"off"`**; reserve `"preferred"` for peers that speak the
+crypto-in-AVP convention (most SBCs and carriers do). The reverse
+directions are unaffected: FS as the SDES *offerer* works (it
+advertises SAVP + AVP alternatives; see #406 above), and a
+`"preferred"` offer to a peer that answers plaintext downgrades
+cleanly.
 
 ---
 

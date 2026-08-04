@@ -147,9 +147,10 @@ pub const REGISTER_ADMIN_TRIGGERS_TOTAL: &str = "siphon_ai_register_admin_trigge
 /// `result`: `answered` (peer's ACK answer negotiated and the call
 /// bridged), `ack_timeout` (no ACK before Timer H), `missing_sdp_answer`
 /// (ACK had no body), `invalid_sdp_answer` (ACK body unparseable),
-/// `no_compatible_codec` (answer selected nothing we offered), or
+/// `no_compatible_codec` (answer selected nothing we offered),
 /// `invalid_remote_media` (answer's RTP address/port unusable or stream
-/// rejected). Bounded cardinality. Literal must match the call site in
+/// rejected), or `caller_hangup` (peer BYE'd before answering, #425).
+/// Bounded cardinality. Literal must match the call site in
 /// `siphon-ai-core::acceptor`.
 pub const DELAYED_OFFER_TOTAL: &str = "siphon_ai_delayed_offer_total";
 
@@ -519,7 +520,7 @@ pub fn register_descriptions() {
     );
     describe_counter!(
         DELAYED_OFFER_TOTAL,
-        "Inbound delayed-offer (offerless INVITE) outcomes, by result (answered, ack_timeout, missing_sdp_answer, invalid_sdp_answer, no_compatible_codec, invalid_remote_media)."
+        "Inbound delayed-offer (offerless INVITE) outcomes, by result (answered, ack_timeout, missing_sdp_answer, invalid_sdp_answer, no_compatible_codec, invalid_remote_media, caller_hangup)."
     );
     describe_counter!(
         OUTBOUND_DELAYED_OFFER_TOTAL,

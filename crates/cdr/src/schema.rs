@@ -439,7 +439,9 @@ pub enum TerminationCause {
     // offer was sent) but never went active — the ACK answer never
     // arrived or was unusable. The call never reached a controller, so
     // `bridge_disconnect` / `tap_disconnect` are empty and `audio` is
-    // unpopulated (no codec was negotiated).
+    // unpopulated (no codec was negotiated). A peer that BYEs inside
+    // this window (#425) is the ordinary [`Self::CallerHangup`] — no
+    // dedicated variant — with the same empty-disconnect shape.
     /// No ACK (with the SDP answer) arrived before SIP Timer H (~32 s).
     AckTimeout,
     /// The ACK arrived but carried no SDP body.

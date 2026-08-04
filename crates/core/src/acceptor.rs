@@ -78,7 +78,7 @@ use siphon_ai_media_glue::{
 use siphon_ai_recording::{RecordingConfig, RecordingMode, RecordingSetup};
 use siphon_ai_routes::CompiledRoute;
 use siphon_ai_security::MinAttestation;
-use siphon_ai_sip_glue::{CallAcceptor, InviteFacts, MatchedCall};
+use siphon_ai_sip_glue::{CallAcceptor, DialogTerminator, InviteFacts, MatchedCall};
 use siphon_ai_stir_shaken::Verifier;
 use siphon_ai_telemetry::{
     HepTelemetry, CALLS_ACTIVE, CALLS_TOTAL, CALL_DURATION_SECONDS, DELAYED_OFFER_TOTAL,
@@ -2701,6 +2701,28 @@ pub(crate) fn record_call_ended(cause: CdrTerminationCause, duration_secs: f64) 
     metrics::histogram!(CALL_DURATION_SECONDS).record(duration_secs);
 }
 
+/// The daemon installs the acceptor — not the bare [`CallRegistry`] —
+/// as the routing handler's dialog terminator (#425): BYE/CANCEL first
+/// try the controller registry as before, and a BYE that misses there
+/// also checks the delayed-offer pending window, where a call has a
+/// dialog (we sent 200-with-offer) but no controller yet.
+impl DialogTerminator for BridgingAcceptor {
+    fn terminate(&self, sip_call_id: &str) -> bool {
+        // CANCEL path: controller registry only. A CANCEL racing past
+        // our delayed-offer 200 must NOT reap the pending call —
+        // RFC 3261 §9.2: CANCEL after a final response has no effect;
+        // the peer either ACKs with an answer or BYEs.
+        self.registry.terminate(sip_call_id)
+    }
+
+    fn terminate_from_bye(&self, sip_call_id: &str) -> bool {
+        if self.registry.terminate_from_bye(sip_call_id) {
+            return true;
+        }
+        self.reap_pending_from_bye(sip_call_id)
+    }
+}
+
 /// Build the CDR for a delayed-offer call that failed negotiation after
 /// the 200-OK-with-offer was sent but before it went active (the ACK
 /// answer never arrived or was unusable). No codec was negotiated and no
@@ -3015,10 +3037,11 @@ fn rewrite_sdp_direction(sdp: &str, new_dir: siphon_ai_media_glue::MediaDirectio
 impl CallAcceptor for BridgingAcceptor {
     #[instrument(skip(self, call), fields(sip_call_id = %call.sip_call_id))]
     async fn on_ack(&self, call: siphon_ai_sip_glue::AckCall<'_>) -> anyhow::Result<()> {
-        // The routing handler only forwards body-carrying ACKs here. A
-        // delayed-offer call we're holding is finalized from the answer;
-        // any other body-bearing ACK is matched against nothing and
-        // ignored.
+        // The routing handler forwards every in-dialog ACK (#425). A
+        // delayed-offer call we're holding is finalized from the
+        // answer in the body — or reaped as `missing_sdp_answer` when
+        // the ACK has none. ACKs for dialogs we're not holding (the
+        // early-offer population) match nothing and are ignored.
         self.finalize_delayed_offer(call).await;
         Ok(())
     }
@@ -4487,6 +4510,53 @@ impl BridgingAcceptor {
         Ok(())
     }
 
+    /// Reap a delayed-offer call whose peer sent BYE between our
+    /// 200-with-offer and the ACK answer (#425). No controller exists
+    /// yet in that window, so the BYE would otherwise hit the "unknown
+    /// call" arm and the parked call would sit — media held, CDR wrong
+    /// — until the Timer-H watchdog recorded it as `ack_timeout` 32 s
+    /// after the peer had already hung up. Returns whether a pending
+    /// entry matched.
+    ///
+    /// Sync on purpose: the caller sits on sip-glue's synchronous BYE
+    /// dispatch path, so the CDR emit and forge teardown are spawned.
+    fn reap_pending_from_bye(&self, sip_call_id: &str) -> bool {
+        let entry = {
+            let mut pending = self.pending_delayed.write();
+            let key = pending
+                .iter()
+                .find(|(_, p)| p.sip_call_id == sip_call_id)
+                .map(|(id, _)| id.clone());
+            key.and_then(|id| pending.remove(&id))
+        };
+        let Some(stale) = entry else {
+            return false;
+        };
+        info!(
+            call_id = %stale.bridge_call_id,
+            "peer BYE during delayed-offer ACK wait; reaping pending call"
+        );
+        metrics::counter!(DELAYED_OFFER_TOTAL, "result" => "caller_hangup").increment(1);
+        let cdr = build_delayed_failure_cdr(
+            CdrTerminationCause::CallerHangup,
+            &stale.bridge_call_id,
+            &stale.sip_call_id,
+            &stale.cdr_from,
+            &stale.cdr_to,
+            &stale.route_name,
+            &stale.cdr_ws_url,
+            stale.started_at,
+        );
+        let forge_call_id = stale.forge_call_id;
+        let cdr_sink = Arc::clone(&self.cdr_sink);
+        let media = Arc::clone(&self.media);
+        tokio::spawn(async move {
+            cdr_sink.emit(cdr).await;
+            let _ = media.session_manager().stop_session(&forge_call_id).await;
+        });
+        true
+    }
+
     /// Finalize a delayed-offer call from the SDP answer in its ACK.
     /// Looks up the parked offer by dialog, applies the answer (codec +
     /// peer RTP endpoint), and spawns the controller via the shared
@@ -4539,6 +4609,26 @@ impl BridgingAcceptor {
                 started_at,
             )
         };
+
+        // A body-less ACK on a dialog we're holding is the peer
+        // declining to answer our offer — RFC 3261 §13.2.2.4 requires
+        // the answer in the ACK — which is exactly what the
+        // `missing_sdp_answer` outcome was specified for (#425). Reap
+        // now instead of letting the Timer-H watchdog expire 32 s
+        // later with the wrong cause and duration.
+        if call.request.body().is_empty() {
+            warn!(call_id = %bridge_call_id, "delayed-offer ACK carried no SDP answer");
+            metrics::counter!(DELAYED_OFFER_TOTAL, "result" => "missing_sdp_answer").increment(1);
+            self.cdr_sink
+                .emit(fail_cdr(CdrTerminationCause::MissingSdpAnswer))
+                .await;
+            let _ = self
+                .media
+                .session_manager()
+                .stop_session(&forge_call_id)
+                .await;
+            return;
+        }
 
         let answer_sdp = match std::str::from_utf8(call.request.body()) {
             Ok(s) => s.to_string(),
@@ -6821,5 +6911,208 @@ a=sendrecv\r\n",
             resolve_min_attestation(MinAttestation::None, &route(Some("A"))),
             MinAttestation::A
         );
+    }
+
+    // ─── #425: delayed-offer pending-window teardown ──────────────
+
+    /// CDR sink that captures every record for assertion.
+    #[derive(Default)]
+    struct CaptureCdrSink(parking_lot::Mutex<Vec<CdrRecord>>);
+
+    #[async_trait]
+    impl siphon_ai_cdr::CdrSink for CaptureCdrSink {
+        async fn emit(&self, record: CdrRecord) {
+            self.0.lock().push(record);
+        }
+    }
+
+    /// Acceptor + capturing CDR sink over a tiny real media setup.
+    /// Port ranges differ per test so parallel tests don't contend for
+    /// UDP binds.
+    fn pending_test_acceptor(
+        port_min: u16,
+        port_max: u16,
+    ) -> (Arc<BridgingAcceptor>, Arc<MediaSetup>, Arc<CaptureCdrSink>) {
+        use forge_engine::{MediaBridgeManager, SessionManager, SessionManagerConfig};
+        use forge_rtp::PortPoolConfig;
+        let config = SessionManagerConfig {
+            port_pool_config: PortPoolConfig::new(port_min, port_max).expect("valid port range"),
+            ..Default::default()
+        };
+        let session_mgr = SessionManager::new(config, None);
+        let media = Arc::new(MediaSetup::new(
+            session_mgr,
+            Arc::new(MediaBridgeManager::new()),
+            Arc::new(forge_core::EventBus::new()),
+            "127.0.0.1",
+        ));
+        let sink = Arc::new(CaptureCdrSink::default());
+        let cdr_handle: CdrSinkHandle = sink.clone();
+        let acceptor = Arc::new(
+            BridgingAcceptor::new(
+                Arc::clone(&media),
+                BridgeDefaults::default(),
+                CallRegistry::new(),
+            )
+            .with_cdr_sink(cdr_handle),
+        );
+        (acceptor, media, sink)
+    }
+
+    /// Park a half-negotiated delayed-offer call the way
+    /// `accept_delayed_offer` does, minus the wire. Returns a dialog
+    /// with the same `DialogId` the entry is keyed under.
+    async fn park_pending(
+        acceptor: &BridgingAcceptor,
+        media: &Arc<MediaSetup>,
+        sip_call_id: &str,
+    ) -> sip_dialog::Dialog {
+        let forge_call_id = forge_core::CallId::new(sip_call_id);
+        let offer = media
+            .originate_offer(OutboundOfferRequest {
+                call_id: forge_call_id.clone(),
+                codecs: vec![Codec::Pcmu],
+                dtmf_payload_type: None,
+                participant_a: forge_core::ParticipantId::generate(),
+                participant_b: forge_core::ParticipantId::generate(),
+                from_tag: None,
+                to_tag: None,
+                srtp: OutboundSrtp::Off,
+                vad: siphon_ai_media_glue::VadBackend::default(),
+            })
+            .await
+            .expect("originate offer");
+        // `consult_dialog` derives its `DialogId` from the call-id +
+        // tags, so two builds with the same args key identically —
+        // one goes into the entry, one back to the caller.
+        let dialog = crate::registry::test_support::consult_dialog(sip_call_id, "lt", "rt");
+        let keyed = crate::registry::test_support::consult_dialog(sip_call_id, "lt", "rt");
+        acceptor.pending_delayed.write().insert(
+            keyed.id().clone(),
+            PendingDelayedOffer {
+                offer,
+                bridge_call_id: BridgeCallId::new(format!("siphon-test-{sip_call_id}")),
+                forge_call_id,
+                sip_call_id: sip_call_id.to_string(),
+                facts: facts_with_identity(None),
+                verstat: None,
+                bridge_config: BridgeConfig::default(),
+                tap_options: TapOptions {
+                    barge_in_action: siphon_ai_media_glue::BargeInAction::Notify,
+                    barge_in_debounce: None,
+                    inactivity_timeout: None,
+                    silence_threshold: None,
+                    dead_air_threshold: None,
+                    rtp_stats_interval: None,
+                },
+                route_name: "test-route".into(),
+                ws_reconnect_enabled: false,
+                ws_reconnect_max: Duration::from_secs(1),
+                recording: None,
+                dialog: keyed,
+                session_timer: None,
+                flow: None,
+                offered_dtls: false,
+                started_at: Utc::now(),
+                cdr_from: "1000".into(),
+                cdr_to: "9000".into(),
+                cdr_ws_url: "ws://127.0.0.1:9/".into(),
+                barge_in_mode: siphon_ai_bridge::BargeInModeInfo::NotifyOnly,
+                ws_failure_prompt: None,
+            },
+        );
+        dialog
+    }
+
+    /// #425: a BYE between our 200-with-offer and the ACK answer must
+    /// reap the parked call — `caller_hangup` CDR with the real (small)
+    /// duration — instead of leaving it for the 32 s Timer-H watchdog.
+    #[tokio::test]
+    async fn bye_during_pending_delayed_offer_reaps_the_call() {
+        let (acceptor, media, sink) = pending_test_acceptor(41000, 41100);
+        park_pending(&acceptor, &media, "bye-pending@peer").await;
+
+        // Through the DialogTerminator surface the daemon installs.
+        assert!(acceptor.terminate_from_bye("bye-pending@peer"));
+        assert!(acceptor.pending_delayed.read().is_empty());
+
+        // CDR emit + forge teardown run on a spawned task.
+        for _ in 0..100 {
+            if !sink.0.lock().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        {
+            let records = sink.0.lock();
+            assert_eq!(records.len(), 1);
+            assert!(matches!(
+                records[0].termination.cause,
+                CdrTerminationCause::CallerHangup
+            ));
+            assert!(
+                records[0].duration_ms < 5_000,
+                "real duration, not Timer H's 32 s"
+            );
+        }
+
+        // A second BYE (or one for an unknown dialog): nothing to reap.
+        assert!(!acceptor.terminate_from_bye("bye-pending@peer"));
+    }
+
+    /// A CANCEL racing past our delayed-offer 200 must NOT reap the
+    /// pending call — RFC 3261 §9.2: CANCEL after a final response has
+    /// no effect; the peer either ACKs with an answer or BYEs.
+    #[tokio::test]
+    async fn cancel_does_not_reap_pending_delayed_offer() {
+        let (acceptor, media, _sink) = pending_test_acceptor(41200, 41300);
+        park_pending(&acceptor, &media, "cancel-pending@peer").await;
+        assert!(!acceptor.terminate("cancel-pending@peer"));
+        assert_eq!(acceptor.pending_delayed.read().len(), 1);
+    }
+
+    fn empty_ack(call_id: &str) -> Request {
+        let uri = SipUri::parse("sip:siphon@siphon.example.com").expect("uri");
+        let line = RequestLine::new(Method::Ack, uri);
+        let mut headers = SipHeaders::new();
+        headers
+            .push("Via", "SIP/2.0/UDP h:5060;branch=z9hG4bK-ack")
+            .unwrap();
+        headers
+            .push("From", "<sip:bot@siphon.example.com>;tag=lt")
+            .unwrap();
+        headers
+            .push("To", "<sip:agent@pbx.example.com>;tag=rt")
+            .unwrap();
+        headers.push("Call-ID", call_id).unwrap();
+        headers.push("CSeq", "1 ACK").unwrap();
+        headers.push("Content-Length", "0").unwrap();
+        Request::new(line, headers, Bytes::new()).unwrap()
+    }
+
+    /// #425: a body-less ACK on a held delayed-offer dialog reaps the
+    /// call as `missing_sdp_answer` — the outcome documented in the
+    /// metric description and CDR schema since 0.9.5 that nothing ever
+    /// emitted while the routing handler swallowed empty ACKs.
+    #[tokio::test]
+    async fn body_less_ack_on_pending_delayed_offer_is_missing_sdp_answer() {
+        let (acceptor, media, sink) = pending_test_acceptor(41400, 41500);
+        let dialog = park_pending(&acceptor, &media, "empty-ack-pending@peer").await;
+        let req = empty_ack("empty-ack-pending@peer");
+        acceptor
+            .on_ack(siphon_ai_sip_glue::AckCall {
+                request: &req,
+                dialog: &dialog,
+                sip_call_id: "empty-ack-pending@peer".to_string(),
+            })
+            .await
+            .expect("on_ack");
+        assert!(acceptor.pending_delayed.read().is_empty());
+        let records = sink.0.lock();
+        assert_eq!(records.len(), 1);
+        assert!(matches!(
+            records[0].termination.cause,
+            CdrTerminationCause::MissingSdpAnswer
+        ));
     }
 }

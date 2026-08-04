@@ -7029,7 +7029,7 @@ a=sendrecv\r\n",
     /// duration — instead of leaving it for the 32 s Timer-H watchdog.
     #[tokio::test]
     async fn bye_during_pending_delayed_offer_reaps_the_call() {
-        let (acceptor, media, sink) = pending_test_acceptor(41000, 41020);
+        let (acceptor, media, sink) = pending_test_acceptor(41000, 41100);
         park_pending(&acceptor, &media, "bye-pending@peer").await;
 
         // Through the DialogTerminator surface the daemon installs.
@@ -7065,7 +7065,7 @@ a=sendrecv\r\n",
     /// no effect; the peer either ACKs with an answer or BYEs.
     #[tokio::test]
     async fn cancel_does_not_reap_pending_delayed_offer() {
-        let (acceptor, media, _sink) = pending_test_acceptor(41030, 41050);
+        let (acceptor, media, _sink) = pending_test_acceptor(41200, 41300);
         park_pending(&acceptor, &media, "cancel-pending@peer").await;
         assert!(!acceptor.terminate("cancel-pending@peer"));
         assert_eq!(acceptor.pending_delayed.read().len(), 1);
@@ -7096,7 +7096,7 @@ a=sendrecv\r\n",
     /// emitted while the routing handler swallowed empty ACKs.
     #[tokio::test]
     async fn body_less_ack_on_pending_delayed_offer_is_missing_sdp_answer() {
-        let (acceptor, media, sink) = pending_test_acceptor(41060, 41080);
+        let (acceptor, media, sink) = pending_test_acceptor(41400, 41500);
         let dialog = park_pending(&acceptor, &media, "empty-ack-pending@peer").await;
         let req = empty_ack("empty-ack-pending@peer");
         acceptor

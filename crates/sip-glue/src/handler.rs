@@ -960,7 +960,7 @@ mod tests {
     async fn body_less_ack_is_forwarded_to_acceptor() {
         let acceptor = Arc::new(RecordingAckAcceptor::default());
         let routes = Arc::new(ArcSwap::from_pointee(siphon_ai_routes::RouteSet::default()));
-        let handler = RoutingHandler::new(routes, Arc::clone(&acceptor) as Arc<dyn CallAcceptor>);
+        let handler = RoutingHandler::new(routes, Arc::clone(&acceptor));
         let dialog = test_dialog("empty-ack@peer");
         handler
             .on_ack(&ack("empty-ack@peer", ""), &dialog)
@@ -977,7 +977,7 @@ mod tests {
     async fn ack_with_body_is_forwarded_to_acceptor() {
         let acceptor = Arc::new(RecordingAckAcceptor::default());
         let routes = Arc::new(ArcSwap::from_pointee(siphon_ai_routes::RouteSet::default()));
-        let handler = RoutingHandler::new(routes, Arc::clone(&acceptor) as Arc<dyn CallAcceptor>);
+        let handler = RoutingHandler::new(routes, Arc::clone(&acceptor));
         let dialog = test_dialog("sdp-ack@peer");
         handler
             .on_ack(&ack("sdp-ack@peer", "v=0\r\n"), &dialog)

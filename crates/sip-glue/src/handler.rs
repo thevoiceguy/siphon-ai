@@ -943,7 +943,7 @@ mod tests {
             .unwrap();
         h.push("Call-ID", call_id).unwrap();
         h.push("CSeq", "1 ACK").unwrap();
-        h.push("Content-Length", &body.len().to_string()).unwrap();
+        h.push("Content-Length", body.len().to_string()).unwrap();
         Request::new(
             RequestLine::new(Method::Ack, uri),
             h,

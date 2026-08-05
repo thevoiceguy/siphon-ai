@@ -1157,7 +1157,11 @@ should be incrementing across calls.
 ## Metrics
 
 All histograms have sensible default buckets defined explicitly — no reliance
-on the metrics crate's defaults (CLAUDE.md §7.4).
+on the metrics crate's defaults (CLAUDE.md §7.4) — and every metric below
+carries a `# HELP` line on the endpoint. Both are enforced by tests over the
+full metric list in `crates/telemetry/src/metrics.rs`, so a metric can't ship
+undescribed or unbucketed (issue #431, which found eleven of the former and
+four of the latter).
 
 > **Dashboards & alerts as code (0.21.0).** You don't have to author these
 > from scratch: [`examples/observability/`](../examples/observability/) ships
@@ -1199,11 +1203,11 @@ on the metrics crate's defaults (CLAUDE.md §7.4).
 | `siphon_ai_barge_in_decision_seconds`   | histogram | —                                     | Arbitration latency: armed on `speech_started` → resolved. Explicit buckets 50ms–5s; the ceiling of the distribution is the configured `decision_ms` (timeout resolutions land there). |
 | `siphon_ai_silence_events_total`        | counter   | —                                     | Times `silence_detected` fired on the WS bridge. Configurable via `[bridge].silence_threshold_ms`. |
 | `siphon_ai_dead_air_events_total`       | counter   | —                                     | Times `dead_air_detected` fired on the WS bridge. Configurable via `[bridge].dead_air_threshold_ms`. |
-| `siphon_ai_rtp_jitter_ms`               | histogram | —                                     | RTP jitter snapshot recorded on every `rtp_stats` emission (when forge has reported a value). |
-| `siphon_ai_rtp_packet_loss_ratio`       | histogram | —                                     | Packet-loss ratio (0.0-1.0) recorded on every `rtp_stats` emission. |
+| `siphon_ai_rtp_jitter_ms`               | histogram | —                                     | RTP jitter snapshot recorded on every `rtp_stats` emission (when forge has reported a value). Explicit buckets 1 ms – 500 ms. |
+| `siphon_ai_rtp_packet_loss_ratio`       | histogram | —                                     | Packet-loss ratio (0.0-1.0) recorded on every `rtp_stats` emission. Explicit buckets 0.001 – 1.0 (a fraction, not a percentage). |
 | `siphon_ai_rtp_rtt_ms`                  | histogram | —                                     | RTCP-derived round-trip time (ms) per received Receiver Report (RFC 3550 §A.7). Populated since 0.3.2 (forge originates SRs); explicit buckets 10ms–1s. Records a sample roughly every RTCP cycle (~5s) once bidirectional RTCP is flowing. |
-| `siphon_ai_rtp_rx_jitter_ms`            | histogram | —                                     | Locally-measured interarrival jitter (RFC 3550 §6.4.1) on the caller→SiphonAI stream, recorded on every `rtp_stats` emission once local media-stats snapshots exist (0.30.0). The receive-side counterpart of `siphon_ai_rtp_jitter_ms` (which is remote-reported). |
-| `siphon_ai_rtp_mos_estimate`            | histogram | —                                     | Transport-only MOS-CQE estimate (1.0–5.0), simplified E-model over local RX jitter/loss + RTCP RTT, recorded on every `rtp_stats` emission once RX data exists (0.30.0). Same math heplify-server applies to HEP QoS chunks. |
+| `siphon_ai_rtp_rx_jitter_ms`            | histogram | —                                     | Locally-measured interarrival jitter (RFC 3550 §6.4.1) on the caller→SiphonAI stream, recorded on every `rtp_stats` emission once local media-stats snapshots exist (0.30.0). The receive-side counterpart of `siphon_ai_rtp_jitter_ms` (which is remote-reported); same buckets, 1 ms – 500 ms. |
+| `siphon_ai_rtp_mos_estimate`            | histogram | —                                     | Transport-only MOS-CQE estimate (1.0–5.0), simplified E-model over local RX jitter/loss + RTCP RTT, recorded on every `rtp_stats` emission once RX data exists (0.30.0). Same math heplify-server applies to HEP QoS chunks. Buckets cut on the conventional quality bands (2.6 / 3.1 / 3.6 / 4.0). |
 | `siphon_ai_sip_tls_reload_attempts_total` | counter | `outcome=ok\|failed`                  | One tick per SIGHUP cert-reload attempt. `failed` means a broken cert/key on disk; the listener keeps serving the previous cert. |
 | `siphon_ai_admin_tls_reload_attempts_total` | counter | `outcome=ok\|failed`                | Same as above for the `[admin.tls]` listener cert (0.18.0). One tick per SIGHUP admin-cert reload; `failed` keeps the previous cert. Only emitted when `[admin.tls]` is configured. |
 | `siphon_ai_config_reloads_total`        | counter   | `result=applied\|no_change\|failed`   | SIGHUP config-file reloads (0.12.0). `applied` = a changed config loaded and the hot-reloadable sections (routes, webhook/CDR sinks) were swapped; `no_change` = the file was byte-identical to the last load; `failed` = the new config didn't load/compile and the running config was kept. Alert on `failed` after a deploy. |

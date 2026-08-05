@@ -387,9 +387,13 @@ trust no longer rests on a spoofable network identity (source IP /
 without a valid `Authorization` is answered `401 Unauthorized` with a
 `WWW-Authenticate` challenge (nonce, realm, qop); the peer re-sends the
 INVITE with a digest `response` computed from its shared secret, which is
-verified against the configured credentials. Replay is bounded by a
-server nonce with a TTL; an expired nonce gets a `stale=true`
-re-challenge (no user re-prompt). **Off by default.**
+verified against the configured credentials. Replay is bounded by **two
+independent nonce-freshness windows**, both of which re-challenge with
+`stale=true` (no user re-prompt) when exceeded: the nonce **TTL**
+(`nonce_ttl_secs`, default 300 s), and the **reuse window**
+(`nonce_reuse_window_secs`, default 10 s) — a nonce may not be reused
+more than that long after its previous successful authentication, however
+much TTL it has left. **Off by default.**
 
 ```toml
 [sip.auth]
@@ -397,6 +401,8 @@ enabled   = true
 realm     = "siphon.example"      # advertised in the challenge + folded into HA1
 algorithm = "SHA-256"             # MD5 | SHA-256 (default) | SHA-512
 qop       = "auth"                # auth (default) | auth-int
+nonce_ttl_secs          = 300     # server-nonce lifetime
+nonce_reuse_window_secs = 10      # max gap between reuses of one nonce; 0 = off
 
 [[sip.auth.user]]
 username = "carrier-a"
@@ -413,6 +419,8 @@ password = "${cred:softphone_12_sip}"
 | `realm`      | string   | required if on | The digest realm advertised in the challenge and folded into HA1. Typically your SIP domain. Empty/missing while `enabled` → fatal at load. |
 | `algorithm`  | enum     | `SHA-256`  | `MD5` \| `SHA-256` \| `SHA-512` (case-insensitive). MD5 is accepted for legacy peers but is weak (RFC 7616 §3) — prefer SHA-256. |
 | `qop`        | enum     | `auth`     | `auth` \| `auth-int`. |
+| `nonce_ttl_secs` | integer | `300` | Server-nonce lifetime. A nonce presented past it gets a `401 stale=true` re-challenge, scored `stale`. Must be ≥ 1 (0 → fatal at load). |
+| `nonce_reuse_window_secs` | integer | `10` | How long after a nonce's last **successful** authentication it may still be reused. A correct digest over a still-valid nonce presented past this window is re-challenged `stale=true` and scored **`stale`, not `failed`** — the credential is not implicated (#430). Peers that cache credentials and authenticate pre-emptively (PJSIP-based UAs by default) hit this whenever their calls are further apart than the window; the call still succeeds after the transparent re-auth. Raise it, or set `0` to disable the window (reuse then bounded only by the TTL), to skip the extra 401 round-trip. |
 | `user[]`     | table array | ≥ 1 if on | At least one `[[sip.auth.user]]` when `enabled`. |
 | `user[].username` | string | required | SIP username presented in `Authorization`. Duplicate usernames → fatal error. |
 | `user[].password` | string | required | Shared secret. Held in memory as cleartext to recompute HA1 on verify (like `[[gateway]]`/`[[register]]`); use `${file:…}`/`${cred:…}` to keep it out of the config file. Empty → fatal error. |
@@ -432,7 +440,11 @@ the trunk policy:
 
 In-dialog requests (re-INVITE, ACK, BYE) are never re-challenged. The
 outcome is counted on `siphon_ai_sip_auth_total{result}`
-(`ok`/`challenged`/`failed`/`stale`). `[sip.auth]` changes are
+(`ok`/`challenged`/`failed`/`stale`): `failed` means a **credential**
+problem (bad password / unknown user), while every nonce-freshness
+rejection — TTL expiry *or* the reuse window — is `stale`. SIEM rules of
+the form "N `failed` from one peer ⇒ credential attack" are safe against
+honest re-authenticating peers by construction. `[sip.auth]` changes are
 restart-required on `SIGHUP` (part of `[sip]`).
 
 ## `[sip.admission]` — inbound INVITE admission control (0.19.0)

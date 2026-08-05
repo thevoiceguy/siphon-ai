@@ -645,11 +645,15 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                         result,
                         "INVITE challenged: digest authentication required (401)"
                     );
-                    // Audit only the anomalous outcomes: `failed` (a bad
-                    // credential) and `stale` (a possibly-replayed nonce).
-                    // The bare `challenged` (normal first-leg 401, before
-                    // any credential) fires on every authenticated call, so
-                    // auditing it would track call volume, not security.
+                    // Audit `failed` (a bad credential — the attack
+                    // signal) and `stale` (a nonce-freshness rejection:
+                    // TTL expiry or the reuse window, #430 — kept in the
+                    // stream for replay forensics, but NOT a credential
+                    // anomaly; honest pre-emptively-authenticating peers
+                    // land here routinely). The bare `challenged` (normal
+                    // first-leg 401, before any credential) fires on every
+                    // authenticated call, so auditing it would track call
+                    // volume, not security.
                     if result == "failed" || result == "stale" {
                         siphon_ai_audit::emit(siphon_ai_audit::AuditEvent::sip_auth(
                             ctx.peer().to_string(),

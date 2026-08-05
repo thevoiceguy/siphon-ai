@@ -322,6 +322,19 @@ pub struct RawSipAuth {
     /// Quality of protection: `auth` (default) or `auth-int`.
     #[serde(default)]
     pub qop: Option<String>,
+    /// Server-nonce lifetime, in seconds. Past it a reused nonce gets a
+    /// `stale=true` re-challenge (RFC 7616 §3.5). Default 300. Must be
+    /// ≥ 1 — a zero TTL would make every challenge instantly stale.
+    #[serde(default)]
+    pub nonce_ttl_secs: Option<u64>,
+    /// How long after a nonce's last **successful** authentication it may
+    /// still be reused, in seconds (replay bound, distinct from the TTL).
+    /// A reuse attempt past this window is re-challenged `stale=true` and
+    /// scored `stale`, not `failed` — the credential is not implicated
+    /// (#430). Default 10. `0` disables the window (nonce reuse is then
+    /// bounded only by the TTL).
+    #[serde(default)]
+    pub nonce_reuse_window_secs: Option<u64>,
     /// The credential set. At least one `[[sip.auth.user]]` is
     /// required when `enabled`. The password is held in memory to
     /// compute HA1 on verify (the upstream digest verifier needs the

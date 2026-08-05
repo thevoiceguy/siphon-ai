@@ -17,12 +17,14 @@
 //! digest (decision: AND-gate, per-trunk opt-in via `auth_required`).
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use sip_auth::{
     Authenticator, CredentialStore, Credentials, DigestAlgorithm, DigestAuthenticator, Qop,
 };
 use sip_core::{Request, Response};
 use sip_uas::UserAgentServer;
+use tracing::debug;
 
 /// Credential store over the configured `[[sip.auth.user]]` set. All
 /// users share the single `[sip.auth].realm`.
@@ -49,7 +51,11 @@ pub enum DigestOutcome {
     /// The `Authorization` header verified — proceed with the call.
     Authenticated,
     /// Send a `401` challenge. `stale` ⇒ the presented nonce was one we
-    /// issued but has expired (re-challenge silently, RFC 7616 §3.5);
+    /// issued but is no longer acceptable — TTL-expired, **or** past its
+    /// reuse window (more than `nonce_reuse_window` since its last
+    /// successful auth, #430). Either way the credentials are not
+    /// implicated: re-challenge with `stale=true` so the peer retries
+    /// silently (RFC 7616 §3.5), and score `stale`, not `failed`.
     /// `had_credentials` ⇒ the client *did* present an `Authorization`
     /// header but it failed (bad password / unknown user) — used only
     /// to label the metric (`failed` vs first-time `challenged`).
@@ -69,6 +75,18 @@ impl DigestOutcome {
             DigestOutcome::Challenge { .. } => "challenged",
         }
     }
+}
+
+/// `[sip.auth]` nonce-freshness knobs (#430). Both windows re-challenge
+/// with `stale=true` when exceeded; neither implicates the credential.
+#[derive(Debug, Clone, Copy)]
+pub struct NonceFreshness {
+    /// Server-nonce TTL (`nonce_ttl_secs`).
+    pub ttl: Duration,
+    /// Reuse window (`nonce_reuse_window_secs`): max gap after a nonce's
+    /// last successful auth within which it may be reused. `None` =
+    /// disabled — reuse bounded only by the TTL.
+    pub reuse_window: Option<Duration>,
 }
 
 /// Inbound digest authenticator + per-source policy.
@@ -96,12 +114,18 @@ impl InboundDigestAuth {
         users: Vec<(String, String)>,
         require_all: bool,
         required_trunks: HashSet<String>,
+        freshness: NonceFreshness,
     ) -> Self {
         let store = ConfigCredentialStore {
             realm: realm.to_string(),
             users,
         };
-        let mut authn = DigestAuthenticator::new(realm, store);
+        // `with_nonce_ttl` rebuilds the upstream NonceManager, so it must
+        // run before `with_max_request_age`. `Duration::MAX` is the
+        // "disabled" form — `elapsed() > MAX` can never hold.
+        let mut authn = DigestAuthenticator::new(realm, store)
+            .with_nonce_ttl(freshness.ttl)
+            .with_max_request_age(freshness.reuse_window.unwrap_or(Duration::MAX));
         if let Some(a) = DigestAlgorithm::parse(algorithm) {
             authn = authn.with_algorithm(a);
         }
@@ -125,10 +149,26 @@ impl InboundDigestAuth {
         let had_credentials = request.headers().get("Authorization").is_some();
         match self.authn.verify(request, request.headers()) {
             Ok(true) => DigestOutcome::Authenticated,
-            _ => DigestOutcome::Challenge {
-                stale: self.authn.nonce_is_stale(request),
-                had_credentials,
-            },
+            _ => {
+                // Both nonce-freshness rejections score `stale`: the
+                // TTL expiry, and the reuse window (#430 — upstream
+                // rejects the latter before the digest is compared, so
+                // without this it would read as a credential failure
+                // and put honest pre-emptively-authenticating peers in
+                // the audit stream as attacks).
+                let ttl_stale = self.authn.nonce_is_stale(request);
+                let reuse_stale = !ttl_stale && self.authn.nonce_reuse_expired(request);
+                if reuse_stale {
+                    debug!(
+                        "digest nonce past its reuse window; re-challenging stale \
+                         (credentials not implicated)"
+                    );
+                }
+                DigestOutcome::Challenge {
+                    stale: ttl_stale || reuse_stale,
+                    had_credentials,
+                }
+            }
         }
     }
 
@@ -166,6 +206,20 @@ mod tests {
     }
 
     fn auth(require_all: bool, trunks: &[&str]) -> InboundDigestAuth {
+        auth_with_windows(
+            require_all,
+            trunks,
+            Duration::from_secs(300),
+            Some(Duration::from_secs(10)),
+        )
+    }
+
+    fn auth_with_windows(
+        require_all: bool,
+        trunks: &[&str],
+        nonce_ttl: Duration,
+        nonce_reuse_window: Option<Duration>,
+    ) -> InboundDigestAuth {
         InboundDigestAuth::new(
             "siphon.example",
             "SHA-256",
@@ -173,6 +227,10 @@ mod tests {
             store_users(),
             require_all,
             trunks.iter().map(|s| s.to_string()).collect(),
+            NonceFreshness {
+                ttl: nonce_ttl,
+                reuse_window: nonce_reuse_window,
+            },
         )
     }
 
@@ -293,6 +351,89 @@ mod tests {
             "expected a credentialed failure, got {outcome:?}"
         );
         assert_eq!(outcome.metric_result(), "failed");
+    }
+
+    /// Compute a correct `Authorization` header for `alice:secret`
+    /// against the challenge's nonce/realm/opaque, at nonce-count `nc`.
+    fn correct_digest_header(challenge: &Response, nc: &str) -> String {
+        let wa = challenge.headers().get("WWW-Authenticate").unwrap();
+        let nonce = extract_param(wa, "nonce");
+        let realm = extract_param(wa, "realm");
+        let opaque = extract_param(wa, "opaque");
+        let uri = "sip:9000@siphon.example";
+        let (cnonce, qop) = ("0a4f113b", "auth");
+        let ha1 = sha256_hex(&format!("alice:{realm}:secret"));
+        let ha2 = sha256_hex(&format!("INVITE:{uri}"));
+        let response = sha256_hex(&format!("{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}"));
+        format!(
+            "Digest username=\"alice\", realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{uri}\", \
+             algorithm=SHA-256, qop=auth, nc={nc}, cnonce=\"{cnonce}\", response=\"{response}\", \
+             opaque=\"{opaque}\""
+        )
+    }
+
+    #[test]
+    fn nonce_reuse_past_window_is_scored_stale_not_failed() {
+        // The #430 shape: correct credential, known nonce well within its
+        // TTL, but reused after the reuse window has lapsed. Must be a
+        // stale re-challenge (`result="stale"`), never `failed` — an
+        // honest pre-emptively-authenticating peer is not an attack.
+        let a = auth_with_windows(
+            true,
+            &[],
+            Duration::from_secs(300),
+            Some(Duration::from_millis(1)),
+        );
+        let challenge = a.challenge(&invite(None), false);
+
+        // First use authenticates and arms the reuse window.
+        let first = correct_digest_header(&challenge, "00000001");
+        assert_eq!(
+            a.evaluate(&invite(Some(&first))),
+            DigestOutcome::Authenticated
+        );
+
+        // Reuse after the window: correct digest, still-valid nonce.
+        std::thread::sleep(Duration::from_millis(10));
+        let second = correct_digest_header(&challenge, "00000002");
+        let outcome = a.evaluate(&invite(Some(&second)));
+        assert_eq!(
+            outcome,
+            DigestOutcome::Challenge {
+                stale: true,
+                had_credentials: true
+            },
+            "reuse-window rejection must be stale"
+        );
+        assert_eq!(outcome.metric_result(), "stale");
+
+        // And the 401 it produces carries stale=true so the peer retries
+        // without re-prompting (RFC 7616 §3.5).
+        let resp = a.challenge(&invite(Some(&second)), true);
+        let wa = resp.headers().get("WWW-Authenticate").unwrap();
+        assert!(wa.contains("stale=true"), "expected stale=true in: {wa}");
+    }
+
+    #[test]
+    fn nonce_reuse_window_disabled_allows_late_reuse() {
+        // nonce_reuse_window_secs = 0 ⇒ window off: the same late reuse
+        // authenticates (bounded only by the TTL).
+        let a = auth_with_windows(true, &[], Duration::from_secs(300), None);
+        let challenge = a.challenge(&invite(None), false);
+
+        let first = correct_digest_header(&challenge, "00000001");
+        assert_eq!(
+            a.evaluate(&invite(Some(&first))),
+            DigestOutcome::Authenticated
+        );
+
+        std::thread::sleep(Duration::from_millis(10));
+        let second = correct_digest_header(&challenge, "00000002");
+        assert_eq!(
+            a.evaluate(&invite(Some(&second))),
+            DigestOutcome::Authenticated,
+            "with the window disabled, late reuse within TTL must authenticate"
+        );
     }
 
     fn extract_param(header: &str, name: &str) -> String {

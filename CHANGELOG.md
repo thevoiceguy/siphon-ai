@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`[route.media].dtmf` and `[route.media].srtp` typos now fail startup instead of silently inheriting the global.** Both route overrides were accepted unvalidated: `dtmf = "of"` (or any unknown token) loaded fine and behaved as "inherit the global RFC-2833 payload type" — only an exact `"off"` disabled telephone-events — and an unknown `srtp` token loaded and warn-fell-back to the daemon default on every call. Config load now checks both against the same token sets as the global fields (`"rfc2833" | "off"`, `"off" | "preferred" | "required"`) and rejects anything else, matching the existing load-time validation for route `vad`, `recording.mode`, `min_attestation`, and `on_ws_failure`. **Upgrade note:** a config that today carries a misspelled value in either field will stop loading — run `siphon-ai check` before upgrading production, same drill as the 0.46.1 strict route keys (#384). Documented in CONFIG.md.
+
+### Documentation
+
+- **Stale "deferred" notes swept.** A code-review pass found doc comments still describing shipped work as pending: the acceptor's module header claimed BYE/CANCEL plumbing, CDR/webhook emission, and config-driven `forward_headers` were unwired (all landed with the daemon runtime); the runtime's deferred list still included outbound REGISTER, HEP/Homer, and the admin endpoints; the call controller claimed `clear`/`mark`/`transfer`/`send_dtmf` were logged-only; the webhook schema claimed HMAC signing was a follow-up (`X-SiphonAI-Signature` ships since 0.11.0); the raw config called `recording.mode = "on_demand"` "a later chunk" (shipped 0.5.0); and PROTOCOL.md §3.8 + the WS schema still said `rtp_stats.rtcp_rtt_ms` is `null` "until forge originates its own RTCP SRs (deferred to 0.3.1)" — it populates since 0.3.2. Comments and docs now describe what's actually built; no behavior change.
+
 ## [0.48.4] - 2026-08-04
 
 ### Fixed

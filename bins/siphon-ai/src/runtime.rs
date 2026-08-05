@@ -28,23 +28,26 @@
 //!                       (siphon-ai-core ─ tap + WS bridge)
 //! ```
 //!
-//! ## What's in scope (v1)
+//! ## What's in scope
 //!
 //! - **SIP transports**: UDP, TCP, and TLS (SIPS). UDP and TCP
 //!   share the same `[sip].listen` address per RFC 3261 §18; TLS
 //!   binds on `[sip.tls].listen` (default 5061).
 //! - Inbound INVITE → routed → MediaSetup → 200 OK → CallController.
 //! - BYE / CANCEL via the CallRegistry.
+//! - Outbound REGISTER (UAC mode) via `[[register]]` config, and
+//!   outbound origination via `[[gateway]]` + the admin API.
 //! - CDR (file + webhook), lifecycle webhooks (call_start, call_end),
 //!   Prometheus metrics + `/health` + `/ready`.
+//! - HEP / Homer (via the `hep-rs` crate) — SIP, RTCP QoS, CDR,
+//!   and verstat chunks.
+//! - The `[admin]` HTTP API — dynamic log level, call inspection,
+//!   force-hangup, registrations, originate.
 //!
 //! ## What's deferred
 //!
 //! - WebSocket SIP transport (`run_ws` / `run_wss`) — same shape as
 //!   TCP/TLS, deferred until we have a deployment that needs it.
-//! - Outbound REGISTER (UAC mode) — requires `[[register]]` config.
-//! - HEP / Homer (depends on the upstream `hep-rs` crate).
-//! - Admin endpoints (dynamic log level, force-hangup).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

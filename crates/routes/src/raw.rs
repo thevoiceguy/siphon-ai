@@ -177,6 +177,10 @@ pub struct BargeInOverride {
 #[serde(deny_unknown_fields)]
 pub struct MediaOverride {
     pub codecs: Option<Vec<String>>,
+    /// `[route.media].dtmf` — per-route override of the global
+    /// `[media].dtmf` mode. `None` means "inherit"; `"rfc2833"` /
+    /// `"off"` override. Validated at config load via the same
+    /// token set as the global field.
     pub dtmf: Option<String>,
     pub inactivity_timeout_secs: Option<u64>,
     pub rtp_port_range: Option<(u16, u16)>,

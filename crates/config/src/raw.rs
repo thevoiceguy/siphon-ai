@@ -522,7 +522,7 @@ pub struct RawStirShaken {
 /// `[recording]` — per-call audio recording (0.5.0). Off by default.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct RawRecording {
-    /// `"off"` (default) / `"always"`. (`"on_demand"` is a later chunk.)
+    /// `"off"` (default) / `"always"` / `"on_demand"`.
     #[serde(default)]
     pub mode: Option<String>,
     /// Directory recordings are written to. Required when `mode != "off"`.

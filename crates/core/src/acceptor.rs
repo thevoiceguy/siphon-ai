@@ -37,17 +37,22 @@
 //!
 //! ## What's deferred
 //!
-//! - **BYE / CANCEL plumbing.** The spawned controller has a
-//!   [`CallHandle`] but nothing calls `handle.shutdown()` on a SIP
-//!   BYE yet. Tracked as the next layer; until then, the call ends
-//!   when the WS server hangs up or the tap sees forge tear down.
-//! - **CDR / lifecycle webhooks.** The controller's `CallOutcome`
-//!   carries everything needed to emit them; the wiring belongs
-//!   alongside BYE plumbing so a single "call ended" event drives
-//!   both.
-//! - **Forwarded headers.** `forward_headers` is honored if the
-//!   caller passes a list, but the daemon doesn't read it from
-//!   config yet.
+//! (BYE/CANCEL plumbing, CDR + lifecycle webhook emission, and
+//! config-driven `forward_headers` were deferred here once; all
+//! three are long since wired — BYE/CANCEL via the sip-glue routing
+//! handler and [`CallRegistry`], CDR/webhooks off `CallOutcome` in
+//! `run_call`, `forward_headers` compiled from `[bridge]` /
+//! `[route.bridge]` config.)
+//!
+//! - **Reliable provisionals (PRACK) / early media.** See the
+//!   `CallProgressMode` notes below — "Flavour C" is not built.
+//! - **UAS-initiated RFC 4028 session refreshes** — we negotiate
+//!   timers but never take the refresher role ourselves.
+//! - **Mid-call codec renegotiation** — a peer re-INVITE that
+//!   changes the codec set is answered with the original codec.
+//! - **Delayed-offer edge cases** — in-dialog transfer/hold on
+//!   delayed-offer inbound legs; DTLS-SRTP answers on outbound
+//!   delayed-offer calls.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -737,16 +742,16 @@ pub fn resolve_codecs(defaults: &BridgeDefaults, route: &CompiledRoute) -> Vec<C
     }
 }
 
-/// Pick the RFC-2833 PT for this call. v1 has no per-route override
-/// for it, but the seam is here so a future `[route.media].dtmf`
-/// (`"rfc2833" | "off" | "inband"`) merge can land without changing
-/// callers.
+/// Pick the RFC-2833 PT for this call by merging the daemon default
+/// (`[media].dtmf`) with the per-route override (`[route.media].dtmf`,
+/// `"rfc2833" | "off"`). Route values are validated at config load
+/// (`RouteBadDtmfMode`), so the catch-all arm here is a
+/// belt-and-braces fallback for callers that assemble
+/// `CompiledRoute`s outside the config loader.
 pub fn resolve_dtmf_pt(defaults: &BridgeDefaults, route: &CompiledRoute) -> Option<u8> {
     match route.media.dtmf.as_deref() {
         Some(v) if v.eq_ignore_ascii_case("off") => None,
-        // "rfc2833" / "inband" / unset — keep the global PT. Inband
-        // doesn't need a PT but advertising one costs nothing and
-        // lets a peer that prefers RFC-2833 pick it.
+        // "rfc2833" / unset — keep the global PT.
         _ => defaults.dtmf_payload_type,
     }
 }
@@ -929,13 +934,11 @@ pub fn resolve_vad(
 
 /// Resolve the per-call SRTP mode by merging the daemon default
 /// (`[media].srtp`) with the per-route override
-/// (`[route.media].srtp: Option<String>`). The route override is
-/// stored unparsed; we parse it here strictly — unknown tokens are
-/// **not** treated as `Off`, they panic-equivalent by returning
-/// the default with a `warn!` (route validation should catch this
-/// at config compile, but the compiled-route struct can't currently
-/// carry the typed enum without an upstream refactor — track in a
-/// follow-up).
+/// (`[route.media].srtp: Option<String>`). Route values are
+/// validated at config load (`RouteBadSrtpMode`), so the unknown-token
+/// arm here is a belt-and-braces fallback for callers that assemble
+/// `CompiledRoute`s outside the config loader — it warn-falls-back to
+/// the daemon default rather than guessing `Off`.
 pub fn resolve_srtp_mode(defaults: &BridgeDefaults, route: &CompiledRoute) -> SrtpMode {
     match route.media.srtp.as_deref() {
         None => defaults.srtp_mode,

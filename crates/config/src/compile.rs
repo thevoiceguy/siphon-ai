@@ -876,6 +876,15 @@ pub enum CompileError {
     )]
     RouteBadVadBackend { route: String, value: String },
 
+    #[error("[route.media].dtmf on route {route:?} is {value:?}; expected \"rfc2833\" or \"off\"")]
+    RouteBadDtmfMode { route: String, value: String },
+
+    #[error(
+        "[route.media].srtp on route {route:?} is {value:?}; expected \"off\", \
+         \"preferred\", or \"required\""
+    )]
+    RouteBadSrtpMode { route: String, value: String },
+
     #[error("[bridge.tls] is malformed: {0}")]
     BadBridgeTls(#[from] siphon_ai_bridge::tls::TlsConfigError),
 
@@ -1413,9 +1422,10 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
 
     // Route-level VAD override strings are validated here at load
     // (fail loud, CLAUDE.md §4.6) — `resolve_vad` at accept time only
-    // re-parses already-validated values. (`[route.media].srtp`
-    // predates this pattern and still warn-falls-back at resolve
-    // time; tracked as a follow-up there.)
+    // re-parses already-validated values. (`[route.media].dtmf` and
+    // `.srtp` get the same treatment in `compile_dialplan`; the
+    // resolve-time fallbacks in the core crate are belt-and-braces
+    // for `CompiledRoute`s assembled outside this loader.)
     for route in routes.iter() {
         if let Some(vad) = route.media.vad.as_deref() {
             if compile_vad_backend(Some(vad)).is_err() {
@@ -2633,6 +2643,26 @@ fn compile_dialplan(routes: Vec<siphon_ai_routes::RawRoute>) -> Result<RouteSet,
         if let Some(value) = route.recording.mode.as_deref() {
             if !matches!(value, "off" | "always" | "on_demand") {
                 return Err(CompileError::RouteRecordingModeInvalid {
+                    route: route.name.clone(),
+                    value: value.to_string(),
+                });
+            }
+        }
+        // [route.media].dtmf and .srtp: same token sets as the global
+        // fields ([media].dtmf / [media].srtp). Without this check a
+        // typo like dtmf = "of" would load fine and silently inherit
+        // the global at resolve time instead of failing loud (§4.6).
+        if let Some(value) = route.media.dtmf.as_deref() {
+            if !matches!(value, "rfc2833" | "off") {
+                return Err(CompileError::RouteBadDtmfMode {
+                    route: route.name.clone(),
+                    value: value.to_string(),
+                });
+            }
+        }
+        if let Some(value) = route.media.srtp.as_deref() {
+            if !matches!(value, "off" | "preferred" | "required") {
+                return Err(CompileError::RouteBadSrtpMode {
                     route: route.name.clone(),
                     value: value.to_string(),
                 });
@@ -4074,6 +4104,62 @@ mod recording_tests {
             compile_dialplan(vec![route]),
             Err(CompileError::RouteRecordingModeInvalid { value, .. }) if value == "sometimes"
         ));
+    }
+
+    fn route_with_media(media: siphon_ai_routes::MediaOverride) -> RawRoute {
+        RawRoute {
+            name: "r".into(),
+            match_: RawRouteMatch {
+                any: true,
+                ..Default::default()
+            },
+            bridge: Default::default(),
+            media,
+            security: Default::default(),
+            recording: Default::default(),
+        }
+    }
+
+    #[test]
+    fn per_route_invalid_dtmf_fails_loud() {
+        // The typo the check exists for: "of" would previously load and
+        // silently inherit the global RFC-2833 PT at resolve time.
+        let route = route_with_media(siphon_ai_routes::MediaOverride {
+            dtmf: Some("of".into()),
+            ..Default::default()
+        });
+        assert!(matches!(
+            compile_dialplan(vec![route]),
+            Err(CompileError::RouteBadDtmfMode { value, .. }) if value == "of"
+        ));
+
+        for ok in ["rfc2833", "off"] {
+            let route = route_with_media(siphon_ai_routes::MediaOverride {
+                dtmf: Some(ok.into()),
+                ..Default::default()
+            });
+            assert!(compile_dialplan(vec![route]).is_ok(), "{ok} should load");
+        }
+    }
+
+    #[test]
+    fn per_route_invalid_srtp_fails_loud() {
+        let route = route_with_media(siphon_ai_routes::MediaOverride {
+            srtp: Some("prefered".into()),
+            ..Default::default()
+        });
+        assert!(matches!(
+            compile_dialplan(vec![route]),
+            Err(CompileError::RouteBadSrtpMode { value, .. }) if value == "prefered"
+        ));
+
+        for ok in ["off", "preferred", "required"] {
+            let route = route_with_media(siphon_ai_routes::MediaOverride {
+                srtp: Some(ok.into()),
+                ..Default::default()
+            });
+            assert!(compile_dialplan(vec![route]).is_ok(), "{ok} should load");
+        }
     }
 }
 

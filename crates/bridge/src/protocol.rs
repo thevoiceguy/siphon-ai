@@ -201,8 +201,10 @@ pub enum BridgeOut {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         packet_loss_ratio: Option<f32>,
         /// Mean round-trip time over the reporting window in milliseconds,
-        /// or `null` until forge-engine originates its own RTCP SRs
-        /// (deferred to 0.3.1 per DEV_PLAN_0.3.0.md §9 decision 10).
+        /// or `null` until the first RTT sample resolves — forge-engine
+        /// originates an RTCP SR every ~5 s (0.3.2) and derives RTT from
+        /// the peer RR that echoes it, so expect the first sample once
+        /// both RTCP directions are live.
         #[serde(skip_serializing_if = "Option::is_none", default)]
         rtcp_rtt_ms: Option<f32>,
         /// Locally-measured interarrival jitter (RFC 3550 §6.4.1) on the

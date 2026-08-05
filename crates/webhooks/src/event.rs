@@ -17,9 +17,12 @@
 //! ## What's NOT here yet
 //!
 //! - `ws_failure` — needs richer hooks into the bridge connection
-//!   lifecycle than `BridgingAcceptor` currently exposes.
-//! - HMAC `X-SiphonAI-Signature` header — sketched in CLAUDE.md
-//!   §11.6, deferred to a follow-up.
+//!   lifecycle than `BridgingAcceptor` currently exposes. (WS loss
+//!   is visible today via the CDR `ws_disconnect` hangup cause.)
+//!
+//! (Delivery-side HMAC signing is not this crate's concern — the
+//! `X-SiphonAI-Signature` header ships since 0.11.0 in
+//! `siphon-ai-http`, shared with the CDR webhook sink.)
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

@@ -34,7 +34,7 @@ pub use dialog::{
     dispatch_bye, dispatch_cancel, DialogAction, DialogTerminator, DialogTerminatorHandle,
     NullDialogTerminator,
 };
-pub use digest::{DigestOutcome, InboundDigestAuth};
+pub use digest::{DigestOutcome, InboundDigestAuth, NonceFreshness};
 pub use drain::DrainFlag;
 pub use handler::{
     dispatch_invite, AckCall, CallAcceptor, MatchedCall, RegisterSourceResolver, ReinviteCall,

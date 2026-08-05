@@ -130,18 +130,18 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # main branch and replace the rev hashes here (see CLAUDE.md §7.5).
 
 # siphon-rs — RFC 3261 SIP stack.
-# Bumped 2026-07-30 `065c2c65a0f7` → `74b903b9afe7` = siphon-rs #85 + #86.
-# #85: negotiate_answer accepts only ONE m-line per media type — an offer
-# carrying RTP/SAVP and RTP/AVP audio alternatives on one port (stock
-# FreeSWITCH late negotiation) previously got BOTH accepted on the same
-# local port, and media died in both directions (siphon-ai #406 root).
-# #86: IntegratedUAC auto-retries INVITE on 401/407 digest challenges —
-# InviteTransactionUser.auto_retry_auth was dead code, so outbound calls
-# through a digest-authenticated gateway (FreeSWITCH/Asterisk PBXes)
-# surfaced the challenge as a terminal rejection ~1 ms after dial
-# (siphon-rs #83); outbound.rs's classify_failure comment ("401/407 are
-# auto-retried by the UAC") is now actually true.
-# (Prior: `065c2c65a0f7` = #82 route set fixed after dialog creation,
+# Bumped 2026-08-05 `74b903b9afe7` → `daee496e1a17` = siphon-rs #87.
+# #87: sip-auth discriminates a nonce reuse-window rejection (correct
+# digest, known valid nonce, >max_request_age since its last successful
+# auth — rejected before the digest is compared) from a credential
+# failure, via nonce_reuse_expired / is_nonce_reuse_expired in
+# nonce_is_stale's post-hoc-query style. Lets the inbound digest gate
+# score honest pre-emptively-authenticating peers as `stale` instead of
+# `failed` (siphon-ai #430).
+# (Prior: `74b903b9afe7` = #85 one m-line per media type in
+#  negotiate_answer (siphon-ai #406 root) + #86 IntegratedUAC auto-retry
+#  on 401/407 (siphon-rs #83);
+#  `065c2c65a0f7` = #82 route set fixed after dialog creation,
 #  #79 tls_server_name, #80 RFC 5626 ping, #78 UAS route-set order;
 #  `4e7d5d7d0bd7` = #74 flow teardown on peer FIN + failover;
 #  `ead16f9bf9b7` = #72 per-request From tag, RFC 3261 §8.1.1.3;
@@ -151,24 +151,24 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 #  `6fd432270bb8` = #67 dialog_manager share, siphon-ai #324;
 #  `fcaff011f9c6` = #65 invite_with_from, siphon-ai #316;
 #  `3a4fc312ade3` = #64 TLS-SNI-is-hostname, siphon-ai #312.)
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
 # (distinct from forge-media's pinned sip-sdp). Used by the outbound
 # delayed-offer answer generator to hand the UAC a SessionDescription it
 # accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "74b903b9afe7" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #

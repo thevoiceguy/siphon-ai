@@ -675,6 +675,15 @@ pub struct SipAuthConfig {
     /// Canonical qop token: `auth` | `auth-int`.
     pub qop: String,
     pub users: Vec<SipAuthUser>,
+    /// Server-nonce TTL (`nonce_ttl_secs`, default 300 s). Past it a
+    /// reused nonce is re-challenged `stale=true`.
+    pub nonce_ttl: Duration,
+    /// Nonce reuse window (`nonce_reuse_window_secs`, default 10 s):
+    /// max gap after a nonce's last successful auth within which it may
+    /// be reused. `None` ⇒ the window is disabled (`0` in config) and
+    /// reuse is bounded only by the TTL. A rejection by this window is
+    /// scored `stale`, not `failed` (#430).
+    pub nonce_reuse_window: Option<Duration>,
 }
 
 /// One inbound digest credential. The password is cleartext (the
@@ -878,6 +887,13 @@ pub enum CompileError {
 
     #[error("[route.media].dtmf on route {route:?} is {value:?}; expected \"rfc2833\" or \"off\"")]
     RouteBadDtmfMode { route: String, value: String },
+
+    #[error(
+        "[sip.auth].nonce_ttl_secs is 0; the nonce TTL must be positive \
+         (a zero TTL makes every challenge instantly stale). Use \
+         nonce_reuse_window_secs = 0 if you meant to disable the reuse window."
+    )]
+    SipAuthZeroNonceTtl,
 
     #[error(
         "[route.media].srtp on route {route:?} is {value:?}; expected \"off\", \
@@ -1698,11 +1714,26 @@ fn compile_sip_auth(
         });
     }
 
+    // Nonce freshness knobs (#430). TTL 0 is degenerate (every
+    // challenge instantly stale) — fail loud. Reuse-window 0 is the
+    // documented "disabled" sentinel, same convention as the RTP
+    // inactivity watchdog.
+    let nonce_ttl_secs = raw.nonce_ttl_secs.unwrap_or(300);
+    if nonce_ttl_secs == 0 {
+        return Err(CompileError::SipAuthZeroNonceTtl);
+    }
+    let nonce_reuse_window = match raw.nonce_reuse_window_secs.unwrap_or(10) {
+        0 => None,
+        secs => Some(Duration::from_secs(secs)),
+    };
+
     Ok(Some(SipAuthConfig {
         realm,
         algorithm,
         qop,
         users,
+        nonce_ttl: Duration::from_secs(nonce_ttl_secs),
+        nonce_reuse_window,
     }))
 }
 

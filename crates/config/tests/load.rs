@@ -669,6 +669,41 @@ password = "${ALICE_PW}"
     assert_eq!(auth.users.len(), 1);
     assert_eq!(auth.users[0].username, "alice");
     assert_eq!(auth.users[0].password, "s3cret"); // env-expanded
+    assert_eq!(auth.nonce_ttl, std::time::Duration::from_secs(300)); // default
+    assert_eq!(
+        auth.nonce_reuse_window,
+        Some(std::time::Duration::from_secs(10)) // default
+    );
+}
+
+#[test]
+fn sip_auth_nonce_windows_configurable_and_zero_disables_reuse() {
+    let toml = ADMIN_BASE.replace(
+        "__ADMIN__",
+        "[sip.auth]\nenabled=true\nrealm=\"x\"\nnonce_ttl_secs=600\nnonce_reuse_window_secs=120\n[[sip.auth.user]]\nusername=\"a\"\npassword=\"b\"\n",
+    );
+    let auth = load_from_str_with_env(&toml, &MapEnv::new([]))
+        .expect("compiles")
+        .sip
+        .auth
+        .expect("auth");
+    assert_eq!(auth.nonce_ttl, std::time::Duration::from_secs(600));
+    assert_eq!(
+        auth.nonce_reuse_window,
+        Some(std::time::Duration::from_secs(120))
+    );
+
+    // 0 = disable the reuse window (reuse bounded only by the TTL).
+    let toml = ADMIN_BASE.replace(
+        "__ADMIN__",
+        "[sip.auth]\nenabled=true\nrealm=\"x\"\nnonce_reuse_window_secs=0\n[[sip.auth.user]]\nusername=\"a\"\npassword=\"b\"\n",
+    );
+    let auth = load_from_str_with_env(&toml, &MapEnv::new([]))
+        .expect("compiles")
+        .sip
+        .auth
+        .expect("auth");
+    assert_eq!(auth.nonce_reuse_window, None);
 }
 
 #[test]
@@ -701,6 +736,8 @@ fn sip_auth_validation_errors() {
         "[sip.auth]\nenabled=true\nrealm=\"x\"\n[[sip.auth.user]]\nusername=\"a\"\npassword=\"\"\n",
         // duplicate username
         "[sip.auth]\nenabled=true\nrealm=\"x\"\n[[sip.auth.user]]\nusername=\"a\"\npassword=\"b\"\n[[sip.auth.user]]\nusername=\"a\"\npassword=\"c\"\n",
+        // zero nonce TTL (degenerate: every challenge instantly stale)
+        "[sip.auth]\nenabled=true\nrealm=\"x\"\nnonce_ttl_secs=0\n[[sip.auth.user]]\nusername=\"a\"\npassword=\"b\"\n",
     ];
     for (i, block) in cases.iter().enumerate() {
         let toml = ADMIN_BASE.replace("__ADMIN__", block);

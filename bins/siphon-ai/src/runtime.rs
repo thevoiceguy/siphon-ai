@@ -621,6 +621,11 @@ impl Runtime {
                 users = users.len(),
                 require_all,
                 required_trunks = required_trunks.len(),
+                nonce_ttl_secs = a.nonce_ttl.as_secs(),
+                nonce_reuse_window_secs = a
+                    .nonce_reuse_window
+                    .map(|w| w.as_secs())
+                    .unwrap_or(0),
                 "inbound digest authentication enabled ([sip.auth])"
             );
             Arc::new(siphon_ai_sip_glue::InboundDigestAuth::new(
@@ -630,6 +635,10 @@ impl Runtime {
                 users,
                 require_all,
                 required_trunks,
+                siphon_ai_sip_glue::NonceFreshness {
+                    ttl: a.nonce_ttl,
+                    reuse_window: a.nonce_reuse_window,
+                },
             ))
         });
 

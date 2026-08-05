@@ -47,13 +47,15 @@
 //! sacred") is preserved by routing audio directly between tap and
 //! bridge tasks.
 //!
-//! ## What this PR does NOT do
+//! ## What this module does NOT do
 //!
 //! - No SDP negotiation (forge-side answer construction).
 //! - No SIP 200 OK (the layer that built this controller already did it).
-//! - No actual handling of `Clear`, `Mark`, `Transfer`, `SendDtmf`
-//!   yet — they're logged. Hangup terminates the call.
-//! - No CDR / webhook emission.
+//! - No CDR / call_start / call_end webhook emission — the
+//!   controller returns a [`CallOutcome`] and the acceptor's
+//!   `run_call` emits both from it. (Park lifecycle webhooks are
+//!   the exception: they fire mid-call, so the controller sends
+//!   them directly.)
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;

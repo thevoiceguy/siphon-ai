@@ -754,7 +754,7 @@
               ]
             },
             "rtcp_rtt_ms": {
-              "description": "Mean round-trip time over the reporting window in milliseconds,\nor `null` until forge-engine originates its own RTCP SRs\n(deferred to 0.3.1 per DEV_PLAN_0.3.0.md §9 decision 10).",
+              "description": "Mean round-trip time over the reporting window in milliseconds,\nor `null` until the first RTT sample resolves — forge-engine\noriginates an RTCP SR every ~5 s (0.3.2) and derives RTT from\nthe peer RR that echoes it, so expect the first sample once\nboth RTCP directions are live.",
               "format": "float",
               "type": [
                 "number",

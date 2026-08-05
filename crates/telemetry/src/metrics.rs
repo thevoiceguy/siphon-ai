@@ -13,11 +13,21 @@
 //! `# HELP` lines appear in Prometheus output. The describe call is
 //! a no-op when no recorder is installed — perfectly fine for tests.
 //!
+//! Every name declared here is also listed in [`ALL_COUNTERS`] /
+//! [`ALL_GAUGES`] / [`ALL_HISTOGRAMS`], and the tests assert both that
+//! those lists are complete and that every listed metric renders a
+//! `# HELP` line. A metric can't reach `/metrics` undescribed without
+//! failing a test — the gap issue #431 found (eleven documented
+//! families exporting a bare `# TYPE`) was silent because coverage was
+//! a hand-written list of seven.
+//!
 //! ## Buckets
 //!
-//! Four histograms get explicit buckets per the CLAUDE.md guidance
-//! ("histograms get sensible buckets defined explicitly; don't rely
-//! on defaults"). Buckets target the latencies operators care about:
+//! **Every** histogram gets explicit buckets per the CLAUDE.md guidance
+//! ("histograms get sensible buckets defined explicitly; don't rely on
+//! defaults") — an unbucketed histogram renders as a *summary*
+//! (quantiles), which can't be aggregated across instances. Each bucket
+//! array documents the range it targets; for example:
 //!
 //! - `ws_connect_seconds`: 25ms → 30s. Most healthy connects land
 //!   under 200ms; the long tail is for hung TLS handshakes.
@@ -261,6 +271,66 @@ pub const WEBHOOK_DELIVERIES_TOTAL: &str = "siphon_ai_webhook_deliveries_total";
 /// attempts-per-delivery ratio. Emitted from `siphon-ai-http`.
 pub const WEBHOOK_DELIVERY_ATTEMPTS_TOTAL: &str = "siphon_ai_webhook_delivery_attempts_total";
 
+/// Inbound digest-auth outcomes per challenged INVITE (0.19.0),
+/// counted only for sources whose policy requires `[sip.auth]`.
+/// Labeled by `result`: `ok` (a presented `Authorization` verified),
+/// `challenged` (no credentials → first `401`), `failed` (credentials
+/// presented but not accepted), `stale` (a known-but-expired nonce →
+/// `401` with `stale=true`). Bounded cardinality; `failed` and `stale`
+/// also emit an audit event. Literal must match the call site in
+/// `siphon-ai-sip-glue::handler`.
+pub const SIP_AUTH_TOTAL: &str = "siphon_ai_sip_auth_total";
+
+/// Inbound INVITE admission decisions (0.19.0), counted only when
+/// `[sip.admission]` is on — the first gate on a new INVITE. Labeled by
+/// `result`: `accepted`, `rate_limited` (per-source rate trip or the
+/// global concurrency cap → `503`), `dropped` (source flooding past
+/// `drop_after` → no response at all). Literal must match the call site
+/// in `siphon-ai-sip-glue::handler`.
+pub const INVITE_ADMISSION_TOTAL: &str = "siphon_ai_invite_admission_total";
+
+/// Inbound NOTIFYs answered (#357). Labeled by `result`: `accepted`
+/// (`Event: refer` post-REFER progress, RFC 3515 — 200 and dropped),
+/// `bad_event` (an event package we don't implement → `489`),
+/// `bad_request` (no `Event` header → `400`). Literal must match the
+/// call site in `siphon-ai-sip-glue::handler`.
+pub const NOTIFY_TOTAL: &str = "siphon_ai_notify_total";
+
+/// Quality-history records emitted through the `[quality]` sinks
+/// (0.31.0). Labeled by `kind`: `interval` / `final`. Records skipped
+/// as empty don't count. Literal must match the call site in
+/// `siphon-ai-quality::facade`.
+pub const QUALITY_RECORDS_TOTAL: &str = "siphon_ai_quality_records_total";
+
+/// Times the idle detector fired `silence_detected` on the WS bridge
+/// (`[bridge].silence_threshold_ms` — no *caller* audio). No labels.
+/// Literal must match the call site in `siphon-ai-media-glue::tap`.
+pub const SILENCE_EVENTS_TOTAL: &str = "siphon_ai_silence_events_total";
+
+/// Times the idle detector fired `dead_air_detected` on the WS bridge
+/// (`[bridge].dead_air_threshold_ms` — no audio in *either* direction).
+/// No labels. Literal must match the call site in
+/// `siphon-ai-media-glue::tap`.
+pub const DEAD_AIR_EVENTS_TOTAL: &str = "siphon_ai_dead_air_events_total";
+
+/// Pause-mode barge-in arbitration resolutions (0.32.0). Labeled by
+/// `outcome`: `confirmed` / `rejected` / `timeout`. The companion
+/// histogram is [`BARGE_IN_DECISION_SECONDS`]. Literal must match the
+/// call site in `siphon-ai-media-glue::tap`.
+pub const BARGE_IN_DECISIONS_TOTAL: &str = "siphon_ai_barge_in_decisions_total";
+
+/// `SIGHUP` cert-reload attempts for the SIP/TLS listener (0.3.0), one
+/// tick per attempt. Labeled by `outcome`: `ok` / `failed` (a broken
+/// cert/key on disk — the listener keeps serving the previous cert).
+/// Emitted from the daemon binary's reloader.
+pub const SIP_TLS_RELOAD_ATTEMPTS_TOTAL: &str = "siphon_ai_sip_tls_reload_attempts_total";
+
+/// `SIGHUP` cert-reload attempts for the `[admin.tls]` listener
+/// (0.18.0) — the [`SIP_TLS_RELOAD_ATTEMPTS_TOTAL`] counterpart, same
+/// `outcome` labels and same keep-the-old-cert-on-failure behavior.
+/// Only emitted when `[admin.tls]` is configured.
+pub const ADMIN_TLS_RELOAD_ATTEMPTS_TOTAL: &str = "siphon_ai_admin_tls_reload_attempts_total";
+
 // ─── Gauges ─────────────────────────────────────────────────────────
 
 /// Currently-active bridged calls, inbound and outbound (#373 —
@@ -317,6 +387,13 @@ pub const WEBHOOK_SPOOL_DEPTH: &str = "siphon_ai_webhook_spool_depth";
 /// worker each pass. Healthy = 0; rising = the object store is
 /// unreachable and uploads are backing up on disk.
 pub const RECORDING_UPLOAD_SPOOL_DEPTH: &str = "siphon_ai_recording_upload_spool_depth";
+
+/// Distinct source IPs currently tracked by per-source INVITE
+/// admission (0.19.0). Bounded by `[sip.admission].max_sources`; idle
+/// sources are evicted, so this reads as "peers seen recently", not
+/// "peers ever seen". Literal must match the call site in
+/// `siphon-ai-sip-glue::handler`.
+pub const INVITE_ADMISSION_SOURCES: &str = "siphon_ai_invite_admission_sources";
 
 // ─── Histograms ─────────────────────────────────────────────────────
 
@@ -383,6 +460,30 @@ pub const OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL: &str =
 /// receiver shows up as a fat tail. Emitted from `siphon-ai-http`.
 pub const WEBHOOK_DELIVERY_SECONDS: &str = "siphon_ai_webhook_delivery_seconds";
 
+/// Remote-reported RTP jitter, in **milliseconds**, sampled on every
+/// `rtp_stats` emission that carries a value (cadence:
+/// `[bridge].rtp_stats_interval_ms`, default 5 s). The transmit-side
+/// counterpart of [`RTP_RX_JITTER_MS`]. Literal must match the
+/// `histogram!` call site in `siphon-ai-media-glue::tap`; the bucket
+/// matcher keys on this string.
+pub const RTP_JITTER_MS: &str = "siphon_ai_rtp_jitter_ms";
+
+/// Locally-measured interarrival jitter (RFC 3550 §6.4.1) on the
+/// caller→SiphonAI stream, in **milliseconds** (0.30.0) — the
+/// receive-side counterpart of [`RTP_JITTER_MS`], which is what the
+/// peer reports to us. Same sampling cadence.
+pub const RTP_RX_JITTER_MS: &str = "siphon_ai_rtp_rx_jitter_ms";
+
+/// Packet-loss ratio as a **0.0–1.0 fraction** (not a percentage),
+/// sampled on every `rtp_stats` emission that carries a value.
+pub const RTP_PACKET_LOSS_RATIO: &str = "siphon_ai_rtp_packet_loss_ratio";
+
+/// Transport-only MOS-CQE estimate (**1.0–5.0**, higher is better;
+/// 0.30.0): a simplified E-model over local RX jitter/loss + RTCP RTT,
+/// the same math heplify-server applies to HEP QoS chunks. Sampled on
+/// every `rtp_stats` emission once RX data exists.
+pub const RTP_MOS_ESTIMATE: &str = "siphon_ai_rtp_mos_estimate";
+
 #[derive(Debug, Error)]
 pub enum InitError {
     #[error("metrics recorder install failed: {0}")]
@@ -438,6 +539,30 @@ pub fn prometheus_builder() -> Result<PrometheusBuilder, InitError> {
             b.set_buckets_for_metric(
                 Matcher::Full(BARGE_IN_DECISION_SECONDS.to_string()),
                 &BARGE_IN_DECISION_BUCKETS,
+            )
+        })
+        .and_then(|b| {
+            b.set_buckets_for_metric(
+                Matcher::Full(RTP_JITTER_MS.to_string()),
+                &RTP_JITTER_MS_BUCKETS,
+            )
+        })
+        .and_then(|b| {
+            b.set_buckets_for_metric(
+                Matcher::Full(RTP_RX_JITTER_MS.to_string()),
+                &RTP_JITTER_MS_BUCKETS,
+            )
+        })
+        .and_then(|b| {
+            b.set_buckets_for_metric(
+                Matcher::Full(RTP_PACKET_LOSS_RATIO.to_string()),
+                &RTP_PACKET_LOSS_RATIO_BUCKETS,
+            )
+        })
+        .and_then(|b| {
+            b.set_buckets_for_metric(
+                Matcher::Full(RTP_MOS_ESTIMATE.to_string()),
+                &RTP_MOS_ESTIMATE_BUCKETS,
             )
         })
         .map_err(|e| InitError::Install(e.to_string()))
@@ -628,8 +753,63 @@ pub fn register_descriptions() {
         "Pause-mode barge-in arbitration latency: armed on speech_started, resolved by verdict/timeout/preemption."
     );
     describe_counter!(
-        "siphon_ai_barge_in_decisions_total",
+        BARGE_IN_DECISIONS_TOTAL,
         "Pause-mode barge-in arbitration resolutions by outcome (confirmed, rejected, timeout)."
+    );
+    describe_counter!(
+        SIP_AUTH_TOTAL,
+        "Inbound digest-auth outcomes per challenged INVITE, by result (ok, challenged, failed, stale)."
+    );
+    describe_counter!(
+        INVITE_ADMISSION_TOTAL,
+        "Inbound INVITE admission decisions, by result (accepted, rate_limited, dropped)."
+    );
+    describe_gauge!(
+        INVITE_ADMISSION_SOURCES,
+        Unit::Count,
+        "Distinct source IPs currently tracked by per-source INVITE admission."
+    );
+    describe_counter!(
+        NOTIFY_TOTAL,
+        "Inbound NOTIFYs answered, by result (accepted, bad_event, bad_request)."
+    );
+    describe_counter!(
+        QUALITY_RECORDS_TOTAL,
+        "Quality-history records emitted through the [quality] sinks, by kind (interval, final)."
+    );
+    describe_counter!(
+        SILENCE_EVENTS_TOTAL,
+        "Times silence_detected fired on the WS bridge ([bridge].silence_threshold_ms)."
+    );
+    describe_counter!(
+        DEAD_AIR_EVENTS_TOTAL,
+        "Times dead_air_detected fired on the WS bridge ([bridge].dead_air_threshold_ms)."
+    );
+    describe_histogram!(
+        RTP_JITTER_MS,
+        Unit::Milliseconds,
+        "Remote-reported RTP jitter (ms), sampled on every rtp_stats emission."
+    );
+    describe_histogram!(
+        RTP_RX_JITTER_MS,
+        Unit::Milliseconds,
+        "Locally-measured interarrival jitter (ms, RFC 3550 6.4.1) on the caller-to-SiphonAI stream."
+    );
+    describe_histogram!(
+        RTP_PACKET_LOSS_RATIO,
+        "Packet-loss ratio (0.0-1.0), sampled on every rtp_stats emission."
+    );
+    describe_histogram!(
+        RTP_MOS_ESTIMATE,
+        "Transport-only MOS-CQE estimate (1.0-5.0) from local RX jitter/loss + RTCP RTT."
+    );
+    describe_counter!(
+        SIP_TLS_RELOAD_ATTEMPTS_TOTAL,
+        "SIGHUP SIP/TLS cert-reload attempts, by outcome (ok, failed — previous cert kept)."
+    );
+    describe_counter!(
+        ADMIN_TLS_RELOAD_ATTEMPTS_TOTAL,
+        "SIGHUP [admin.tls] cert-reload attempts, by outcome (ok, failed — previous cert kept)."
     );
     describe_counter!(
         OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL,
@@ -728,6 +908,105 @@ pub const RECORDING_UPLOAD_BUCKETS: [f64; 9] = [0.05, 0.1, 0.25, 0.5, 1.0, 5.0, 
 /// raise it to a few seconds), so resolution past 5 s means a
 /// misconfigured window rather than a slow server.
 pub const BARGE_IN_DECISION_BUCKETS: [f64; 9] = [0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 2.5, 5.0];
+
+/// Buckets for `rtp_jitter_ms` and `rtp_rx_jitter_ms`, in
+/// **milliseconds** (both measure the same quantity from opposite
+/// ends, so they share a scale). Healthy VoIP sits under one frame
+/// time (20 ms); 30–100 ms is where the jitter buffer starts spending
+/// its budget; the 500 ms top keeps a pathological path visible
+/// instead of clipped into +Inf.
+pub const RTP_JITTER_MS_BUCKETS: [f64; 10] =
+    [1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 50.0, 100.0, 200.0, 500.0];
+
+/// Buckets for `rtp_packet_loss_ratio`, a **0.0–1.0 fraction** (not a
+/// percentage — 0.01 is 1 %). The bottom (0.1 %) is inaudible, callers
+/// start noticing around 1–5 %, and 1.0 closes the scale so a fully
+/// dead stream lands in a real bucket.
+pub const RTP_PACKET_LOSS_RATIO_BUCKETS: [f64; 9] =
+    [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0];
+
+/// Buckets for `rtp_mos_estimate` (MOS-CQE, **1.0–5.0**, higher is
+/// better). Cut on the conventional quality bands — below 2.6 poor,
+/// 2.6–3.1 low, 3.1–3.6 medium, 3.6–4.0 high, above 4.0 best — so a
+/// bucket boundary is a band boundary. The 5.0 top bounds the scale.
+pub const RTP_MOS_ESTIMATE_BUCKETS: [f64; 8] = [1.5, 2.0, 2.6, 3.1, 3.6, 4.0, 4.4, 5.0];
+
+/// Every counter this module declares. Exhaustive by test
+/// (`every_metric_const_is_listed`), which is what keeps the
+/// `# HELP` coverage test honest as metrics are added (#431).
+pub const ALL_COUNTERS: &[&str] = &[
+    INVITES_TOTAL,
+    CALLS_TOTAL,
+    CALLS_DRAIN_FORCED_TOTAL,
+    ROUTE_MATCH_TOTAL,
+    VERSTAT_TOTAL,
+    RECORDINGS_TOTAL,
+    RECORDING_UPLOADS_TOTAL,
+    REGISTER_ATTEMPTS_TOTAL,
+    REGISTER_ADMIN_TRIGGERS_TOTAL,
+    OUTBOUND_CALLS_TOTAL,
+    OUTBOUND_SRTP_TOTAL,
+    ADMIN_REQUESTS_TOTAL,
+    METRICS_REQUESTS_TOTAL,
+    WS_FAILURE_PROMPTS_TOTAL,
+    DELAYED_OFFER_TOTAL,
+    OUTBOUND_DELAYED_OFFER_TOTAL,
+    PEER_HOLD_TX_SUPPRESSED_FRAMES_TOTAL,
+    OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL,
+    TRANSFERS_TOTAL,
+    CONFERENCE_JOINS_TOTAL,
+    ROOM_FRAMES_DROPPED_TOTAL,
+    PARKS_TOTAL,
+    RETRIEVES_TOTAL,
+    HOLDS_TOTAL,
+    WS_RECONNECTS_TOTAL,
+    CONFIG_RELOADS_TOTAL,
+    WEBHOOK_DELIVERIES_TOTAL,
+    WEBHOOK_DELIVERY_ATTEMPTS_TOTAL,
+    SIP_AUTH_TOTAL,
+    INVITE_ADMISSION_TOTAL,
+    NOTIFY_TOTAL,
+    QUALITY_RECORDS_TOTAL,
+    SILENCE_EVENTS_TOTAL,
+    DEAD_AIR_EVENTS_TOTAL,
+    BARGE_IN_DECISIONS_TOTAL,
+    SIP_TLS_RELOAD_ATTEMPTS_TOTAL,
+    ADMIN_TLS_RELOAD_ATTEMPTS_TOTAL,
+];
+
+/// Every gauge this module declares. See [`ALL_COUNTERS`].
+pub const ALL_GAUGES: &[&str] = &[
+    CALLS_ACTIVE,
+    OUTBOUND_CALLS_ACTIVE,
+    REGISTER_STATE,
+    CONFERENCES_ACTIVE,
+    CONFERENCE_PARTICIPANTS,
+    PARKED_CALLS_ACTIVE,
+    DRAINING,
+    WEBHOOK_SPOOL_DEPTH,
+    RECORDING_UPLOAD_SPOOL_DEPTH,
+    INVITE_ADMISSION_SOURCES,
+];
+
+/// Every histogram this module declares. See [`ALL_COUNTERS`]. Each of
+/// these also has explicit buckets registered in
+/// [`prometheus_builder`] — pinned by
+/// `every_histogram_renders_with_buckets_not_a_summary`.
+pub const ALL_HISTOGRAMS: &[&str] = &[
+    WS_CONNECT_SECONDS,
+    SDP_NEGOTIATE_SECONDS,
+    CALL_DURATION_SECONDS,
+    RECORDING_UPLOAD_SECONDS,
+    RTP_RTT_MS,
+    RTP_JITTER_MS,
+    RTP_RX_JITTER_MS,
+    RTP_PACKET_LOSS_RATIO,
+    RTP_MOS_ESTIMATE,
+    ROOM_TICK_LAG_SECONDS,
+    DRAIN_SECONDS,
+    BARGE_IN_DECISION_SECONDS,
+    WEBHOOK_DELIVERY_SECONDS,
+];
 
 #[cfg(test)]
 mod tests {
@@ -836,16 +1115,106 @@ mod tests {
     #[test]
     fn metric_names_have_siphon_ai_prefix() {
         // Pin the convention so a typo doesn't drift the namespace.
-        for name in [
-            INVITES_TOTAL,
-            CALLS_TOTAL,
-            ROUTE_MATCH_TOTAL,
-            CALLS_ACTIVE,
-            WS_CONNECT_SECONDS,
-            SDP_NEGOTIATE_SECONDS,
-            CALL_DURATION_SECONDS,
-        ] {
+        for &name in ALL_COUNTERS
+            .iter()
+            .chain(ALL_GAUGES.iter())
+            .chain(ALL_HISTOGRAMS.iter())
+        {
             assert!(name.starts_with("siphon_ai_"), "{name} missing prefix");
+        }
+    }
+
+    #[test]
+    fn every_declared_metric_renders_a_help_line() {
+        // The #431 regression: eleven metrics emitted from other crates
+        // were never described here, so they exported a bare `# TYPE`
+        // with no description while DEPLOY.md documented them. Touching
+        // every declared name and demanding HELP makes that unshippable.
+        let out = with_recorder(|| {
+            for &name in ALL_COUNTERS {
+                counter!(name).increment(1);
+            }
+            for &name in ALL_GAUGES {
+                gauge!(name).set(1.0);
+            }
+            for &name in ALL_HISTOGRAMS {
+                histogram!(name).record(1.0);
+            }
+        });
+        for &name in ALL_COUNTERS
+            .iter()
+            .chain(ALL_GAUGES.iter())
+            .chain(ALL_HISTOGRAMS.iter())
+        {
+            assert!(
+                out.contains(&format!("# HELP {name} ")),
+                "missing HELP for {name} in:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_metric_const_is_listed() {
+        // The coverage test above only sees what the ALL_* lists name,
+        // so the lists themselves need pinning: scan this module's own
+        // source (everything above the test module, where every
+        // `"siphon_ai_…"` literal is a const declaration) and require
+        // the two sets to agree in both directions.
+        let src = include_str!("metrics.rs");
+        let decls = src.split("#[cfg(test)]").next().expect("module source");
+        let mut declared: Vec<&str> = Vec::new();
+        let mut rest = decls;
+        while let Some(idx) = rest.find("\"siphon_ai_") {
+            let after = &rest[idx + 1..];
+            let end = after.find('"').expect("unterminated metric name literal");
+            declared.push(&after[..end]);
+            rest = &after[end..];
+        }
+        assert!(
+            declared.len() > 40,
+            "source scan found only {} names — did the declaration style change?",
+            declared.len()
+        );
+
+        let listed: Vec<&str> = ALL_COUNTERS
+            .iter()
+            .chain(ALL_GAUGES.iter())
+            .chain(ALL_HISTOGRAMS.iter())
+            .copied()
+            .collect();
+        for name in &declared {
+            assert!(
+                listed.contains(name),
+                "{name} is declared in this module but missing from ALL_COUNTERS / ALL_GAUGES / ALL_HISTOGRAMS"
+            );
+        }
+        for name in &listed {
+            assert!(
+                declared.contains(name),
+                "{name} is listed in an ALL_* array but not declared as a const here"
+            );
+        }
+    }
+
+    #[test]
+    fn every_histogram_renders_with_buckets_not_a_summary() {
+        // CLAUDE.md §7.4 and DEPLOY.md both promise explicit buckets on
+        // every histogram. Four rtp_* histograms didn't have them and
+        // rendered as summaries — unaggregatable across instances
+        // (#431) — while their sibling rtp_rtt_ms, recorded three lines
+        // away, did.
+        for &name in ALL_HISTOGRAMS {
+            let out = with_recorder(|| {
+                histogram!(name).record(1.0);
+            });
+            assert!(
+                out.contains(&format!("{name}_bucket")),
+                "{name} has no buckets registered in prometheus_builder():\n{out}"
+            );
+            assert!(
+                !out.contains(&format!("{name}{{quantile")),
+                "{name} rendered as a summary:\n{out}"
+            );
         }
     }
 }

@@ -530,6 +530,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "const-oid"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -745,6 +751,18 @@ dependencies = [
  "block-buffer 0.10.4",
  "crypto-common 0.1.7",
  "subtle",
+]
+
+[[package]]
+name = "digest"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
+dependencies = [
+ "block-buffer 0.12.1",
+ "const-oid",
+ "crypto-common 0.2.2",
+ "ctutils",
 ]
 
 [[package]]
@@ -1010,7 +1028,7 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 [[package]]
 name = "forge-codecs"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d#aeae479b391ddd2e73b9962e55623f72192fb5fd"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09#b4f8df5c8f09dedcc86f39a700304b1c19a6f167"
 dependencies = [
  "audiopus",
  "ezk-g722",
@@ -1022,7 +1040,7 @@ dependencies = [
 [[package]]
 name = "forge-core"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d#aeae479b391ddd2e73b9962e55623f72192fb5fd"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09#b4f8df5c8f09dedcc86f39a700304b1c19a6f167"
 dependencies = [
  "chrono",
  "serde",
@@ -1037,7 +1055,7 @@ dependencies = [
 [[package]]
 name = "forge-dtmf"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d#aeae479b391ddd2e73b9962e55623f72192fb5fd"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09#b4f8df5c8f09dedcc86f39a700304b1c19a6f167"
 dependencies = [
  "chrono",
  "forge-core",
@@ -1049,7 +1067,7 @@ dependencies = [
 [[package]]
 name = "forge-engine"
 version = "0.5.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d#aeae479b391ddd2e73b9962e55623f72192fb5fd"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09#b4f8df5c8f09dedcc86f39a700304b1c19a6f167"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1079,7 +1097,7 @@ dependencies = [
 [[package]]
 name = "forge-hep"
 version = "0.0.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d#aeae479b391ddd2e73b9962e55623f72192fb5fd"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09#b4f8df5c8f09dedcc86f39a700304b1c19a6f167"
 dependencies = [
  "bytes",
  "hep-rs",
@@ -1092,7 +1110,7 @@ dependencies = [
 [[package]]
 name = "forge-injection"
 version = "0.1.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d#aeae479b391ddd2e73b9962e55623f72192fb5fd"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09#b4f8df5c8f09dedcc86f39a700304b1c19a6f167"
 dependencies = [
  "forge-core",
  "rubato",
@@ -1105,7 +1123,7 @@ dependencies = [
 [[package]]
 name = "forge-mixer"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d#aeae479b391ddd2e73b9962e55623f72192fb5fd"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09#b4f8df5c8f09dedcc86f39a700304b1c19a6f167"
 dependencies = [
  "bytes",
  "dashmap 6.2.1",
@@ -1119,7 +1137,7 @@ dependencies = [
 [[package]]
 name = "forge-recorder"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d#aeae479b391ddd2e73b9962e55623f72192fb5fd"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09#b4f8df5c8f09dedcc86f39a700304b1c19a6f167"
 dependencies = [
  "bytes",
  "forge-core",
@@ -1133,7 +1151,7 @@ dependencies = [
 [[package]]
 name = "forge-resampler"
 version = "0.1.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d#aeae479b391ddd2e73b9962e55623f72192fb5fd"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09#b4f8df5c8f09dedcc86f39a700304b1c19a6f167"
 dependencies = [
  "thiserror 2.0.18",
  "tracing",
@@ -1142,21 +1160,21 @@ dependencies = [
 [[package]]
 name = "forge-rtp"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d#aeae479b391ddd2e73b9962e55623f72192fb5fd"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09#b4f8df5c8f09dedcc86f39a700304b1c19a6f167"
 dependencies = [
  "aes 0.9.1",
  "aes-gcm 0.11.0",
  "bytes",
  "foreign-types",
  "forge-core",
- "hmac",
+ "hmac 0.13.0",
  "libc",
  "metrics",
  "openssl",
  "openssl-sys",
  "rand 0.10.1",
- "sha1",
- "sha2",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
  "socket2 0.6.3",
  "subtle",
  "thiserror 2.0.18",
@@ -1167,14 +1185,14 @@ dependencies = [
 [[package]]
 name = "forge-sdp"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d#aeae479b391ddd2e73b9962e55623f72192fb5fd"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09#b4f8df5c8f09dedcc86f39a700304b1c19a6f167"
 dependencies = [
  "base64",
  "chrono",
  "forge-core",
  "forge-rtp",
  "rand 0.10.1",
- "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d)",
+ "sip-sdp 0.3.0 (git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09)",
  "smol_str",
  "thiserror 2.0.18",
 ]
@@ -1182,7 +1200,7 @@ dependencies = [
 [[package]]
 name = "forge-transcoder"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d#aeae479b391ddd2e73b9962e55623f72192fb5fd"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09#b4f8df5c8f09dedcc86f39a700304b1c19a6f167"
 dependencies = [
  "bytes",
  "forge-codecs",
@@ -1195,7 +1213,7 @@ dependencies = [
 [[package]]
 name = "forge-vad"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d#aeae479b391ddd2e73b9962e55623f72192fb5fd"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09#b4f8df5c8f09dedcc86f39a700304b1c19a6f167"
 dependencies = [
  "thiserror 2.0.18",
  "tract-onnx",
@@ -1576,7 +1594,16 @@ version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
- "digest",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "hmac"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
+dependencies = [
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -3531,7 +3558,18 @@ checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
- "digest",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -3542,7 +3580,18 @@ checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
- "digest",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "sha2"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -3604,7 +3653,7 @@ dependencies = [
  "hex",
  "md5",
  "rand 0.10.1",
- "sha2",
+ "sha2 0.10.9",
  "sip-core",
  "sip-parse",
  "sip-ratelimit",
@@ -3721,7 +3770,7 @@ dependencies = [
 [[package]]
 name = "sip-sdp"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/forge-media?rev=aeae479b391d#aeae479b391ddd2e73b9962e55623f72192fb5fd"
+source = "git+https://github.com/thevoiceguy/forge-media?rev=b4f8df5c8f09#b4f8df5c8f09dedcc86f39a700304b1c19a6f167"
 dependencies = [
  "nom 7.1.3",
  "smol_str",
@@ -3785,7 +3834,7 @@ dependencies = [
  "bytes",
  "hex",
  "rand 0.10.1",
- "sha1",
+ "sha1 0.10.6",
  "sip-auth",
  "sip-core",
  "sip-dialog",
@@ -3899,7 +3948,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.10.9",
  "siphon-ai-security",
  "thiserror 1.0.69",
  "tokio",
@@ -3995,7 +4044,7 @@ name = "siphon-ai-http"
 version = "0.48.5"
 dependencies = [
  "base64",
- "hmac",
+ "hmac 0.12.1",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -4003,7 +4052,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -4121,7 +4170,7 @@ dependencies = [
  "chrono",
  "metrics",
  "parking_lot",
- "sha2",
+ "sha2 0.10.9",
  "sip-auth",
  "sip-core",
  "sip-dialog",
@@ -4172,7 +4221,7 @@ dependencies = [
  "opentelemetry_sdk",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.10.9",
  "sip-hep",
  "siphon-ai-audit",
  "subtle",
@@ -5198,7 +5247,7 @@ dependencies = [
  "rand 0.8.6",
  "rustls",
  "rustls-pki-types",
- "sha1",
+ "sha1 0.10.6",
  "thiserror 1.0.69",
  "utf-8",
 ]

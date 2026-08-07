@@ -178,7 +178,21 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "dae
 # AI logic belongs in the WS server, never here. See CLAUDE.md §4.1 and the
 # upstream gate at https://github.com/thevoiceguy/forge-media/pull/39.
 #
-# forge-media is pinned to a `main` rev. Bumped 2026-07-30 to aeae479b391d
+# forge-media is pinned to a `main` rev. Bumped 2026-08-07 to b4f8df5c8f09
+# = forge-media #102 + #104 + #105 (plus dependabot bumps #88/#89/#91/#99).
+# #102: every facade metric family gets describe_*! HELP text and every
+# histogram explicit buckets (forge's sibling of siphon-ai #432); six
+# forge-api metrics were renamed to gain the forge_ prefix — forge-api is
+# not a crate we consume, and no siphon-ai dashboard/doc referenced the old
+# names. #104: sha1 0.11 / hmac 0.13 / sha2 0.11 (digest 0.11 move) — we
+# still ship hmac 0.12 / sha2 0.10 for our own use, so those now build as
+# duplicate versions; harmless, dedupe when we do our own digest move.
+# #105: forge_rtcp_sender_{packets,bytes}_total now count SR deltas per
+# SSRC instead of summing running totals. `metrics` facade stays 0.24 on
+# both sides (must move in lockstep with our exporter — see v0.31.1 note).
+# external/siphon-rs submodule unchanged (74b903b).
+#
+# Prior pin: bumped 2026-07-30 to aeae479b391d
 # = forge-media #100: external/siphon-rs submodule f3454c7 → 74b903b, which
 # is how siphon-rs #85 (negotiate_answer accepts one m-line per media type)
 # reaches forge-sdp — the negotiator siphon-ai's media path actually runs.
@@ -217,20 +231,20 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "dae
 # comment for the current rev.) Prior forge pins: forge 1c996ae5fb4f = #86
 # neural VAD; forge 3c59b5f6e464 = #82-#85 dependency migrations; forge
 # 5fa76fb38675 = #81.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
-forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
-forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
+forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
+forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
 # Conference rooms (0.7.0): forge-mixer is the per-room AudioMixer;
 # forge-injection provides ToneGenerator (join/leave tones now, MOH
 # for park later). Deliberately NOT forge-conference — its DTMF
 # IVR/PIN/host-control layer is unused per DEV_PLAN_0.7.0.md §9.4.
-forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
-forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "aeae479b391d" }
+forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
+forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.

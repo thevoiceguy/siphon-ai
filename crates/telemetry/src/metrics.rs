@@ -565,6 +565,26 @@ pub fn prometheus_builder() -> Result<PrometheusBuilder, InitError> {
                 &RTP_MOS_ESTIMATE_BUCKETS,
             )
         })
+        // The embedded forge crates emit through this same recorder, and
+        // bucket registration is exporter-side — forge can only *suggest*
+        // buckets by exporting consts (forge-media #102). Without these
+        // two matchers the forge histograms fall back to summaries
+        // (quantiles), unaggregatable across instances (#437). These are
+        // the only histogram families the forge crates we consume emit;
+        // referencing forge-engine's consts keeps name and buckets in
+        // lockstep with the pin by construction.
+        .and_then(|b| {
+            b.set_buckets_for_metric(
+                Matcher::Full(forge_engine::metrics::M_VAD_NEURAL_INFERENCE.to_string()),
+                &forge_engine::metrics::VAD_NEURAL_INFERENCE_SECONDS_BUCKETS,
+            )
+        })
+        .and_then(|b| {
+            b.set_buckets_for_metric(
+                Matcher::Full(forge_engine::metrics::M_TRANSCODING_DURATION.to_string()),
+                &forge_engine::metrics::TRANSCODING_DURATION_SECONDS_BUCKETS,
+            )
+        })
         .map_err(|e| InitError::Install(e.to_string()))
 }
 
@@ -1206,6 +1226,31 @@ mod tests {
         for &name in ALL_HISTOGRAMS {
             let out = with_recorder(|| {
                 histogram!(name).record(1.0);
+            });
+            assert!(
+                out.contains(&format!("{name}_bucket")),
+                "{name} has no buckets registered in prometheus_builder():\n{out}"
+            );
+            assert!(
+                !out.contains(&format!("{name}{{quantile")),
+                "{name} rendered as a summary:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn forge_histograms_render_with_buckets_not_summaries() {
+        // Same promise as above, for the forge families that emit
+        // through our recorder (#437): forge-media #102 exports
+        // suggested buckets, but only prometheus_builder() can apply
+        // them. Kept out of ALL_HISTOGRAMS — that list is pinned to the
+        // `siphon_ai_` namespace by the source-scan test.
+        for &name in &[
+            forge_engine::metrics::M_VAD_NEURAL_INFERENCE,
+            forge_engine::metrics::M_TRANSCODING_DURATION,
+        ] {
+            let out = with_recorder(|| {
+                histogram!(name).record(0.001);
             });
             assert!(
                 out.contains(&format!("{name}_bucket")),

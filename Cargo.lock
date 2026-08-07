@@ -4209,6 +4209,7 @@ name = "siphon-ai-telemetry"
 version = "0.48.6"
 dependencies = [
  "anyhow",
+ "forge-engine",
  "forge-hep",
  "hep-rs",
  "http-body-util",

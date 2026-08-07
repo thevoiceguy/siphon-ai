@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.6] - 2026-08-07
+
+### Changed
+
+- **forge-media bumped `aeae479b391d` → `b4f8df5c8f09`** (PR #435 — forge-media [#102](https://github.com/thevoiceguy/forge-media/pull/102), [#104](https://github.com/thevoiceguy/forge-media/pull/104), [#105](https://github.com/thevoiceguy/forge-media/pull/105), plus dependabot bumps #88/#89/#91/#99). Two of these are visible on this daemon's own `/metrics`, since the embedded forge crates' `forge_*` families export through our recorder: forge #102 gives every forge facade metric a `# HELP` line and every forge histogram explicit buckets (forge's sibling of our #431/#432 sweep — `forge_vad_neural_inference_seconds` previously rendered as an unaggregatable summary), and forge #105 makes `forge_rtcp_sender_{packets,bytes}_total` count per-SSRC deltas from received sender reports instead of summing running totals, so they now grow linearly as wire counts do rather than superlinearly. forge #102 also renamed six unprefixed forge-api metrics — forge-api is not a crate SiphonAI consumes, and nothing here referenced the old names. forge #104 moves forge to the digest-0.11 stack (sha1 0.11 / hmac 0.13 / sha2 0.11); SiphonAI's own hmac 0.12 / sha2 0.10 now build alongside as duplicate versions — harmless, to be deduped with our own digest move. The `metrics` facade stays 0.24 on both sides (exporter lockstep preserved), and forge's `external/siphon-rs` submodule is unchanged. siphon-rs (`daee496e1a17`) and hep-rs (`91e689b`) were audited in the same pass and were already at their latest upstream commits. No SiphonAI behavior change; full workspace tests plus all 38 SIPp integration scenarios pass on the new pin.
+
 ## [0.48.5] - 2026-08-05
 
 ### Fixed

@@ -42,6 +42,12 @@ tokio-rustls.workspace                = true
 hep-rs       = { workspace = true }
 sip-hep      = { workspace = true }
 forge-hep    = { workspace = true }
+# Only for the exported metric-name/bucket consts in
+# `forge_engine::metrics` (#437): the embedded forge crates emit through
+# our recorder, and their histograms need exporter-side bucket
+# registration in `prometheus_builder()`. Already in the build graph at
+# the same pin/features via core and media-glue — no new compilation.
+forge-engine = { workspace = true }
 opentelemetry = "0.32.0"
 opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "trace"] }

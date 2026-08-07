@@ -1161,7 +1161,9 @@ on the metrics crate's defaults (CLAUDE.md §7.4) — and every metric below
 carries a `# HELP` line on the endpoint. Both are enforced by tests over the
 full metric list in `crates/telemetry/src/metrics.rs`, so a metric can't ship
 undescribed or unbucketed (issue #431, which found eleven of the former and
-four of the latter).
+four of the latter). This covers the embedded forge crates' histograms too:
+bucket registration is exporter-side, so forge-engine's suggested buckets are
+applied (and test-enforced) in our `prometheus_builder()` (issue #437).
 
 > **Dashboards & alerts as code (0.21.0).** You don't have to author these
 > from scratch: [`examples/observability/`](../examples/observability/) ships
@@ -1233,7 +1235,7 @@ four of the latter).
 | `siphon_ai_draining`                    | gauge     | —                                     | `1` while the daemon is draining for shutdown (0.17.0, `[shutdown]`), `0` otherwise. Set the instant a SIGTERM/SIGINT drain begins — new INVITEs are then `503`'d and `/ready` reports not-ready. A scraper that catches `1` knows the pod is going away. |
 | `siphon_ai_drain_seconds`               | histogram | —                                     | How long the shutdown drain took (0.17.0): drain start → registry empty or the `[shutdown].drain_timeout_secs` deadline. Observed once per process lifetime, so only a scrape catching the dying pod (or a push gateway) sees it. Buckets 0.1 s – 120 s. A value near the timeout means calls didn't finish in the window. |
 | `siphon_ai_calls_drain_forced_total`    | counter   | —                                     | Calls force-terminated (BYE + WS hangup) at the drain deadline (0.17.0) — they were still active when `[shutdown].drain_timeout_secs` elapsed. `0` after a clean rolling deploy; non-zero means the drain window was too short for the call mix. Also appear on `siphon_ai_calls_total{cause="drain_forced"}` and per-call on the CDR. |
-| `forge_rtcp_*`                          | various   | per-call (forge-side)                 | RTP/RTCP quality. See forge-media's own metric inventory. |
+| `forge_*`                               | various   | per-call (forge-side)                 | Media internals from the embedded forge crates, exported through this daemon's recorder. See forge-media's `docs/METRICS.md` for the inventory. The two forge histograms this daemon can emit — `forge_vad_neural_inference_seconds` (`vad = "neural"` routes) and `forge_transcoding_duration_seconds` — render with forge-engine's suggested buckets, applied by our exporter (#437); every other reachable forge family is a counter or gauge. |
 | `heplify_*`                             | various   | from the HEP collector                | Only visible if you scrape heplify too. |
 
 The §11.8 ten-questions audit in `docs/OPERATIONS.md` shows how to use

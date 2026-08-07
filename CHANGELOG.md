@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.7] - 2026-08-07
+
 ### Fixed
 
 - **The forge histograms actually render buckets now** (issue #437). The 0.48.6 note below claimed the forge-media bump gave "every forge histogram explicit buckets"; that was wrong for this daemon's own `/metrics` — a 0.48.6 instance still rendered `forge_vad_neural_inference_seconds` as a Prometheus summary (quantiles), unaggregatable across instances. `describe_*!` HELP text travels through the `metrics` facade to whatever recorder is installed, but bucket registration is **exporter-side**: forge-media #102 could only export suggested-bucket consts, and `prometheus_builder()` never applied them. It now registers forge-engine's exported buckets for the only two forge histogram families the consumed forge crates emit — `forge_vad_neural_inference_seconds` and `forge_transcoding_duration_seconds` (the conference/webrtc/sdp histograms live in forge-conference and forge-api, which SiphonAI deliberately doesn't consume) — referencing the upstream consts directly so name and buckets track the pin by construction, with a rendered-output test alongside the #431 suite. DEPLOY.md's forge row now points at forge-media's `docs/METRICS.md` and names the two bucketed families.

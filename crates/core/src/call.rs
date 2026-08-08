@@ -3043,7 +3043,11 @@ mod recording_outcome_tests {
     /// #441: a finished recording reports its own result, whatever it was.
     #[test]
     fn finished_recording_reports_its_result() {
-        for r in [RecordingResult::Ok, RecordingResult::Degraded, RecordingResult::Failed] {
+        for r in [
+            RecordingResult::Ok,
+            RecordingResult::Degraded,
+            RecordingResult::Failed,
+        ] {
             assert_eq!(outcome(Some(summary(r)), false).recording_result(), Some(r));
         }
     }
@@ -3053,7 +3057,10 @@ mod recording_outcome_tests {
     /// recording and must not look identical to one that never was.
     #[test]
     fn blocked_announcement_reports_blocked() {
-        assert_eq!(outcome(None, true).recording_result(), Some(RecordingResult::Blocked));
+        assert_eq!(
+            outcome(None, true).recording_result(),
+            Some(RecordingResult::Blocked)
+        );
     }
 
     /// A call recording was never turned on for reports nothing — the CDR

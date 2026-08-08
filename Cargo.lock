@@ -3872,7 +3872,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3921,7 +3921,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-audit"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3937,7 +3937,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-bridge"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "base64",
  "bytes",
@@ -3959,7 +3959,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-cdr"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3976,7 +3976,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-config"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "regex",
  "serde",
@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-core"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4041,7 +4041,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-http"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "base64",
  "hmac 0.12.1",
@@ -4064,7 +4064,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-media-glue"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4089,7 +4089,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-protocol-testkit"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "anyhow",
  "clap",
@@ -4107,7 +4107,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-quality"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4125,7 +4125,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-recording"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "aes-gcm 0.10.3",
  "audiopus",
@@ -4139,7 +4139,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-routes"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "regex",
  "serde",
@@ -4151,7 +4151,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-security"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "schemars",
  "serde",
@@ -4161,7 +4161,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-sip-glue"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4188,7 +4188,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-stir-shaken"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "base64",
  "rcgen",
@@ -4206,7 +4206,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-telemetry"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "anyhow",
  "forge-engine",
@@ -4236,7 +4236,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-webhooks"
-version = "0.48.9"
+version = "0.48.10"
 dependencies = [
  "async-trait",
  "chrono",

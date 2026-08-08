@@ -76,11 +76,13 @@ pub const ROUTE_MATCH_TOTAL: &str = "siphon_ai_route_match_total";
 /// (`verstat_attest`/`verstat_passed`) and in traces.
 pub const VERSTAT_TOTAL: &str = "siphon_ai_verstat_total";
 
-/// Recordings finished, when `[recording]` is on. Labeled by `result`:
-/// `ok` (written cleanly), `degraded` (some 20 ms frames were dropped under
-/// writer back-pressure — the file is short, not corrupt), `failed` (an I/O
-/// error). Bounded cardinality (three values); the per-call recording path
-/// lives on the CDR (`recording_path`).
+/// Recordings finished (or refused), when `[recording]` is on. Labeled by
+/// `result`: `ok` (written cleanly), `degraded` (some 20 ms frames were
+/// dropped under writer back-pressure — the file is short, not corrupt),
+/// `failed` (an I/O error), `blocked` (a configured consent announcement
+/// could not be played, so capture never started — #440). Bounded
+/// cardinality (four values); the per-call outcome lives on the CDR
+/// (`recording_result`, `recording_path`).
 pub const RECORDINGS_TOTAL: &str = "siphon_ai_recordings_total";
 
 /// Recording uploads to object storage (`[recording.storage]`, 0.25.0)
@@ -641,7 +643,7 @@ pub fn register_descriptions() {
     );
     describe_counter!(
         RECORDINGS_TOTAL,
-        "Call recordings finished by result (ok, degraded, failed)."
+        "Call recordings by result (ok, degraded, failed, blocked)."
     );
     describe_counter!(
         RECORDING_UPLOADS_TOTAL,

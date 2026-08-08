@@ -886,8 +886,20 @@ touching the path:
   the outcome existed only in the process-wide metric, which cannot be
   attributed to a call, so a record naming a file that was never written
   was indistinguishable from one naming a good recording. `blocked` means
-  a configured `[recording.announcement]` could not be played, so capture
-  never started and no file exists (issue #440).
+  a configured `[recording.announcement]` could not be played for a call
+  that was actually going to record — `mode = "always"`, or an on-demand
+  call whose server sent `start_recording` (issue #446) — so capture
+  never started and no file exists (issue #440). An on-demand call with a
+  broken prompt that the server never asked to record stamps **no**
+  `recording_result` (there is no recording outcome to report), just the
+  `consent` block.
+
+  A call that ends — or loses its WS session — while the consent
+  announcement is still playing also stamps no `recording_result`
+  (issue #444): the `consent` block alone (`announced: false`) tells
+  that story. So the reconciliation reading is: `consent` present +
+  `recording_result` absent = the call ended before consent completed;
+  `recording_result: "blocked"` = the prompt itself failed.
 
 One optional park object appears when the call was parked at least once
 (added in 0.7.0; schema stays at version 1 — omitted when the call was
@@ -1200,7 +1212,7 @@ applied (and test-enforced) in our `prometheus_builder()` (issue #437).
 | `siphon_ai_sip_auth_total`              | counter   | `result=ok\|challenged\|failed\|stale` | Inbound digest-auth outcomes per challenged INVITE (0.19.0). Emitted only for sources that require `[sip.auth]`. `ok` = a valid `Authorization` verified; `challenged` = no credentials presented → `401` issued; `failed` = credentials presented but wrong (bad password / unknown user) → `401`; `stale` = a nonce-freshness rejection → `401 stale=true` — the nonce was TTL-expired **or** past its reuse window (`[sip.auth].nonce_reuse_window_secs`, #430); the credential is not implicated either way. A rising `failed` is a brute-force / misconfiguration signal — pair with the fail2ban recipe. A rising `stale` usually just means peers re-authenticate less often than the reuse window — raise the window if the extra 401 round-trips bother you. |
 | `siphon_ai_invite_admission_total`      | counter   | `result=accepted\|rate_limited\|dropped` | Inbound INVITE admission decisions (0.19.0). Emitted only when `[sip.admission]` is on. `accepted` = admitted; `rate_limited` = per-source rate trip or global `max_concurrent` cap → `503`; `dropped` = source flooding past `drop_after` → silently dropped (no response). A rising `dropped` means a sustained flood; `rate_limited` spikes with bursty peers or an undersized cap. |
 | `siphon_ai_invite_admission_sources`    | gauge     | —                                     | Distinct source IPs currently tracked by per-source admission (0.19.0). Bounded by `[sip.admission].max_sources`. |
-| `siphon_ai_recordings_total`            | counter   | `result=ok\|degraded\|failed\|blocked` | Recordings finished, when `[recording]` is on. `ok` = written cleanly; `degraded` = some 20 ms frames dropped under writer back-pressure (file is short, not corrupt); `failed` = an I/O error; `blocked` = a configured `[recording.announcement]` could not be played so capture never started (0.48.8, issue #440 — this path previously incremented nothing at all, making a broken prompt file silently stop a fleet from recording). Alert on `blocked` separately from `failed`: the first is a bad prompt or config, the second is disk. |
+| `siphon_ai_recordings_total`            | counter   | `result=ok\|degraded\|failed\|blocked` | Recordings finished, when `[recording]` is on. `ok` = written cleanly; `degraded` = some 20 ms frames dropped under writer back-pressure (file is short, not corrupt); `failed` = an I/O error; `blocked` = a configured `[recording.announcement]` could not be played so capture never started, for a call that was actually going to record — `mode = "always"`, or on-demand with a server `start_recording` (0.48.8, issue #440; scoped in issue #446 so a broken prompt on on-demand calls nobody records doesn't tick at 100% of call volume). Alert on `blocked` separately from `failed`: the first is a bad prompt or config, the second is disk. |
 | `siphon_ai_outbound_calls_total`        | counter   | `result=answered\|busy\|declined\|no_answer\|rejected\|unreachable\|failed` | Outbound calls placed (0.6.0). `answered` = 2xx + bridged; `busy` = 486/600; `declined` = 403/603; `no_answer` = 408/480/487; `rejected` = other non-2xx; `unreachable` = DNS/transport/timeout with no response; `failed` = local media setup error. Classifies call **setup** only — an answered leg's eventual termination cause lands on `siphon_ai_calls_total{cause}` (#373). |
 | `siphon_ai_transfers_total`             | counter   | `mode=blind\|attended`, `result=accepted\|rejected\|local_error` | REFER transfers attempted (0.6.1; also counts blind transfers, previously unmetered). `accepted` = 202 + call torn down; `rejected` = peer non-2xx; `local_error` = bad target / unknown consult call / dialog gone / send failure. |
 | `siphon_ai_outbound_audio_frames_dropped_total` | counter | —                             | Outbound WS-server audio frames evicted (oldest-first) by the 200 ms playout window (PROTOCOL.md §5.5, #366). A nonzero rate means a WS server is streaming faster than realtime — an unpaced TTS integration (the server SDKs pace correctly) or a hostile peer. Pair with `mark` on the server side for burst-safe timing. |

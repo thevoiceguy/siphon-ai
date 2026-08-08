@@ -34,7 +34,7 @@ pub use file::{FileFormat, FileSink, FileSinkError};
 pub use hep::HepCdrSink;
 pub use schema::{
     AudioInfo, CdrRecord, ConsentInfo, Direction, HoldInfo, ParkInfo, QualityInfo, ReconnectInfo,
-    TerminationCause, TerminationInfo, CDR_VERSION,
+    RecordingResult, TerminationCause, TerminationInfo, CDR_VERSION,
 };
 pub use sink::{CdrSink, CdrSinkHandle, MultiSink, NullSink};
 pub use webhook::{WebhookSink, WebhookSinkConfig};

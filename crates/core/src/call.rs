@@ -66,7 +66,7 @@ use siphon_ai_bridge::{
     BridgeIn, CallId, DisconnectReason, ErrorCode, OutgoingEvent, StartMsg, StopReason,
 };
 use siphon_ai_media_glue::{
-    AnnounceSource, MediaTap, MediaTapError, MohSource, QualityReport, QualitySummary,
+    AnnounceEnd, AnnounceSource, MediaTap, MediaTapError, MohSource, QualityReport, QualitySummary,
     RoomMembership, TapCommand, TapDisconnect,
 };
 
@@ -312,12 +312,15 @@ impl CallOutcome {
     /// `recording_result` field and the `siphon_ai_recordings_total`
     /// metric both report (#440, #441).
     ///
-    /// `Some` whenever the call was subject to recording at all: the
-    /// finished file's result when one was attempted, or
+    /// `Some` whenever a recording outcome exists to report: the
+    /// finished file's result when capture was attempted, or
     /// [`RecordingResult::Blocked`] when a consent announcement
-    /// fail-closed capture before it began. `None` means recording was
-    /// off for this call, or on-demand and never started — nothing to
-    /// report, and the CDR field is omitted.
+    /// fail-closed capture that was actually wanted (mode=always, or a
+    /// server `start_recording`, #446). `None` means recording was off
+    /// for this call, on-demand and never started, or the call ended /
+    /// lost its WS before the consent announcement completed (#444) —
+    /// in that last case the CDR `consent` block alone tells the story
+    /// (`announced: false`, no `recording_result`).
     pub fn recording_result(&self) -> Option<RecordingResult> {
         if let Some(rec) = self.recording.as_ref() {
             return Some(rec.result);
@@ -454,21 +457,23 @@ pub struct ConsentSummary {
 ///
 /// `Some` whenever consent entered into the call at all — the
 /// announcement played (`announced_ms`), the WS server reported consent
-/// (`consent_server`), or an announcement was configured and **could not**
-/// be played, which fail-closes recording (`announcement_blocked`).
+/// (`consent_server`), or an announcement was **configured**
+/// (`announce_configured`), whether it then fail-closed recording, was
+/// preempted, or was still playing when the call ended (#444).
 ///
 /// That last case is why this is a named function rather than an inline
 /// expression: it stamps `announced: false`, which is what
 /// `docs/CONFIG.md` has always documented, and it is the only thing
 /// separating "this call was never subject to recording" from "we meant
-/// to record it, the consent prompt failed, and we correctly recorded
-/// nothing" (#440).
+/// to announce, and no full announcement happened" — whether because
+/// the prompt failed (#440, `recording_result = blocked`) or because
+/// the call ended first (#444, no `recording_result` at all).
 fn consent_summary(
     announced_ms: Option<u64>,
     consent_server: Option<String>,
-    announcement_blocked: bool,
+    announce_configured: bool,
 ) -> Option<ConsentSummary> {
-    let signalled = announced_ms.is_some() || consent_server.is_some() || announcement_blocked;
+    let signalled = announced_ms.is_some() || consent_server.is_some() || announce_configured;
     if !signalled {
         return None;
     }
@@ -555,9 +560,20 @@ pub enum CallError {
     #[error("controller setup failed: {0}")]
     Setup(String),
 
-    /// A sub-task panicked. Surfaced as a [`tokio::task::JoinError`].
-    #[error("sub-task crashed: {0}")]
-    TaskJoin(#[from] tokio::task::JoinError),
+    /// A sub-task panicked. Surfaced as a [`tokio::task::JoinError`],
+    /// carrying the teardown facts the CDR still needs (#444): whether a
+    /// consent announcement had already fail-closed recording, and the
+    /// consent story so far. All the `TaskJoin` return sites are *after*
+    /// the `rec_blocked` setters, so without this the error-path CDR
+    /// serialized a fail-closed call identically to one never subject to
+    /// recording — exactly in the abnormal-teardown population where an
+    /// audit trail matters most.
+    #[error("sub-task crashed: {source}")]
+    TaskJoin {
+        source: tokio::task::JoinError,
+        recording_blocked: bool,
+        consent: Option<ConsentSummary>,
+    },
 }
 
 /// External handle to a running [`CallController`].
@@ -1016,10 +1032,24 @@ impl CallController {
         // played duration for the CDR consent stamp. `rec_blocked`
         // fail-closes recording when the prompt can't play.
         let mut announce_source: Option<Box<AnnounceSource>> = None;
-        let mut announce_done_rx: Option<tokio::sync::oneshot::Receiver<u64>> = None;
+        let mut announce_done_rx: Option<tokio::sync::oneshot::Receiver<AnnounceEnd>> = None;
         let mut announce_start_after = false;
         let mut rec_blocked = false;
         let mut announced_ms: Option<u64> = None;
+        // Whether a consent announcement was configured for this call at
+        // all — drives the CDR consent stamp (#444: a call that ends
+        // mid-prompt must still tell its consent story) independently of
+        // whether the prompt completed or fail-closed.
+        let mut announce_configured = false;
+        // on_demand only (#446): the prompt is unusable, but no recording
+        // has been requested — escalates to `rec_blocked` if and when the
+        // server sends `start_recording`, and stays a warning otherwise.
+        let mut announce_unusable = false;
+        // Whether capture was ever actually requested of the writer
+        // (auto-start, or a routed RecControl::Start). Gates the
+        // fabricated `Failed` summary at finalize (#444): a writer that
+        // was never asked to capture has no file to have failed.
+        let mut capture_requested = false;
         // Whether this call's recording is sealed at rest (0.24.0) — feeds
         // the CDR `recording_encrypted` flag.
         let mut rec_encrypted = false;
@@ -1054,6 +1084,7 @@ impl CallController {
             // capturing; the CDR consent stamp shows announced=false).
             let mut auto_start = setup.auto_start;
             if let Some(file) = &setup.announcement {
+                announce_configured = true;
                 match AnnounceSource::new(file, media_tap.sample_rate()) {
                     Ok(src) => {
                         announce_source = Some(Box::new(src));
@@ -1061,17 +1092,27 @@ impl CallController {
                         auto_start = false;
                     }
                     Err(err) => {
+                        // mode=always: this call WAS going to record →
+                        // fail-close as `blocked` now. on_demand (#446):
+                        // most calls never record, so a broken prompt is
+                        // only `blocked` if the server actually asks —
+                        // remember it and escalate at start_recording.
                         warn!(
                             call_id = %call_id,
                             file = %file.display(),
                             error = %err,
                             "recording announcement unusable; recording fail-closed for this call"
                         );
+                        if auto_start {
+                            rec_blocked = true;
+                        } else {
+                            announce_unusable = true;
+                        }
                         auto_start = false;
-                        rec_blocked = true;
                     }
                 }
             }
+            capture_requested = auto_start;
             let writer = RecordingWriter::new(setup.path, media_tap.sample_rate(), auto_start)
                 .with_encryption(setup.encryption)
                 .with_format(setup.format);
@@ -1168,9 +1209,15 @@ impl CallController {
             }) {
                 Ok(()) => announce_done_rx = Some(done_rx),
                 Err(e) => {
+                    // Same mode split as the setup-time failure (#446):
+                    // `announce_start_after` still equals mode=always here.
                     warn!(call_id = %call_id, error = %e,
                           "could not start announcement; recording fail-closed");
-                    rec_blocked = true;
+                    if announce_start_after {
+                        rec_blocked = true;
+                    } else {
+                        announce_unusable = true;
+                    }
                 }
             }
         }
@@ -1266,7 +1313,7 @@ impl CallController {
         // done-oneshot — or the fixed 30 s safety cap — completes the
         // deferred teardown. Same pinned-placeholder pattern as the
         // reconnect timers.
-        let mut ws_prompt_done_rx: Option<oneshot::Receiver<u64>> = None;
+        let mut ws_prompt_done_rx: Option<oneshot::Receiver<AnnounceEnd>> = None;
         let ws_prompt_deadline = tokio::time::sleep(Duration::from_secs(86_400));
         tokio::pin!(ws_prompt_deadline);
 
@@ -1392,6 +1439,13 @@ impl CallController {
                             if rec_blocked {
                                 warn!(call_id = %cid,
                                       "start_recording ignored: announcement failed (recording fail-closed)");
+                            } else if announce_unusable {
+                                // #446: the on_demand prompt failure only
+                                // becomes `blocked` now that the server
+                                // has actually asked for a recording.
+                                warn!(call_id = %cid,
+                                      "start_recording refused: announcement unusable (recording fail-closed)");
+                                rec_blocked = true;
                             } else if announce_done_rx.is_some() {
                                 // Capture starts only after the prompt —
                                 // remember the request and act on
@@ -1400,6 +1454,7 @@ impl CallController {
                                        "start_recording deferred until the announcement completes");
                                 announce_start_after = true;
                             } else {
+                                capture_requested = true;
                                 route_rec_control(&rec_ctrl_tx, RecControl::Start, "StartRecording", &cid);
                             }
                         }
@@ -2119,15 +2174,15 @@ impl CallController {
                 done = recv_announce_done(&mut ws_prompt_done_rx), if ws_prompt_done_rx.is_some() => {
                     ws_prompt_done_rx = None;
                     match done {
-                        Ok(ms) => {
+                        Ok(AnnounceEnd::Played { ms }) => {
                             info!(call_id = %call_id, ms_played = ms,
                                 "ws-failure prompt finished; tearing down");
                             metrics::counter!(WS_FAILURE_PROMPTS_TOTAL, "result" => "played")
                                 .increment(1);
                         }
-                        Err(_) => {
-                            // The tap dropped the done sender (it ended
-                            // mid-prompt) — teardown proceeds regardless.
+                        Ok(AnnounceEnd::CutShort { .. }) | Ok(AnnounceEnd::Preempted) | Err(_) => {
+                            // Cut short, replaced, or the tap dropped the
+                            // sender — teardown proceeds regardless.
                             debug!(call_id = %call_id, "ws-failure prompt ended early");
                             metrics::counter!(WS_FAILURE_PROMPTS_TOTAL, "result" => "cut_short")
                                 .increment(1);
@@ -2156,7 +2211,15 @@ impl CallController {
                         Ok(inner) => inner,
                         Err(join_err) => {
                             warn!(?join_err, "bridge task panicked");
-                            return Err(CallError::TaskJoin(join_err));
+                            return Err(CallError::TaskJoin {
+                                source: join_err,
+                                recording_blocked: rec_blocked,
+                                consent: consent_summary(
+                                    announced_ms,
+                                    consent_server.clone(),
+                                    announce_configured,
+                                ),
+                            });
                         }
                     };
                     // Remember the most recent disconnect reason for the
@@ -2261,7 +2324,15 @@ impl CallController {
                         Ok(inner) => tap_result = Some(inner),
                         Err(join_err) => {
                             warn!(?join_err, "tap task panicked");
-                            return Err(CallError::TaskJoin(join_err));
+                            return Err(CallError::TaskJoin {
+                                source: join_err,
+                                recording_blocked: rec_blocked,
+                                consent: consent_summary(
+                                    announced_ms,
+                                    consent_server.clone(),
+                                    announce_configured,
+                                ),
+                            });
                         }
                     }
                     // PROTOCOL.md §3.10 `rtp_timeout`: the media inactivity
@@ -2294,10 +2365,14 @@ impl CallController {
                 done = recv_announce_done(&mut announce_done_rx), if announce_done_rx.is_some() => {
                     announce_done_rx = None;
                     match done {
-                        Ok(ms) => {
+                        // A park/hold cut-short currently counts as
+                        // announced with the partial play time — #445
+                        // tracks that policy; the arm keeps it.
+                        Ok(AnnounceEnd::Played { ms }) | Ok(AnnounceEnd::CutShort { ms }) => {
                             info!(call_id = %call_id, announcement_ms = ms, "announcement complete");
                             announced_ms = Some(ms);
                             if announce_start_after {
+                                capture_requested = true;
                                 route_rec_control(
                                     &rec_ctrl_tx,
                                     RecControl::Start,
@@ -2306,12 +2381,26 @@ impl CallController {
                                 );
                             }
                         }
+                        Ok(AnnounceEnd::Preempted) => {
+                            // A newer announcement (the WS-failure
+                            // prompt) replaced the consent prompt — the
+                            // call is already in failure teardown. The
+                            // prompt didn't complete (announced stays
+                            // false) and capture never starts, but this
+                            // says nothing about the prompt *file*, so
+                            // it is not `blocked` (#444).
+                            info!(call_id = %call_id,
+                                  "consent announcement preempted; recording stays off");
+                        }
                         Err(_) => {
-                            // Tap dropped the channel (teardown race) —
-                            // fail-closed: no capture starts.
+                            // Tap dropped the channel (it died or is
+                            // tearing down) — fail-closed: no capture
+                            // starts. Not `blocked`: nothing failed
+                            // about the prompt itself (#444); the
+                            // consent stamp still records
+                            // announced=false via `announce_configured`.
                             warn!(call_id = %call_id,
                                   "announcement completion channel dropped; recording stays off");
-                            rec_blocked = true;
                         }
                     }
                 }
@@ -2409,7 +2498,17 @@ impl CallController {
             drop(control_out_tx);
             match tokio::time::timeout(Duration::from_millis(250), &mut bridge_task).await {
                 Ok(Ok(inner)) => bridge_result = Some(inner),
-                Ok(Err(join_err)) => return Err(CallError::TaskJoin(join_err)),
+                Ok(Err(join_err)) => {
+                    return Err(CallError::TaskJoin {
+                        source: join_err,
+                        recording_blocked: rec_blocked,
+                        consent: consent_summary(
+                            announced_ms,
+                            consent_server.clone(),
+                            announce_configured,
+                        ),
+                    })
+                }
                 Err(_) => {
                     warn!(call_id = %call_id, "bridge task did not exit within 250 ms; aborting");
                     bridge_task.abort();
@@ -2431,7 +2530,17 @@ impl CallController {
             // now, but give it a beat.
             match tokio::time::timeout(Duration::from_millis(250), &mut tap_task).await {
                 Ok(Ok(inner)) => tap_result = Some(inner),
-                Ok(Err(join_err)) => return Err(CallError::TaskJoin(join_err)),
+                Ok(Err(join_err)) => {
+                    return Err(CallError::TaskJoin {
+                        source: join_err,
+                        recording_blocked: rec_blocked,
+                        consent: consent_summary(
+                            announced_ms,
+                            consent_server.clone(),
+                            announce_configured,
+                        ),
+                    })
+                }
                 Err(_) => {
                     warn!(call_id = %call_id, "tap task did not exit within 250 ms; aborting");
                     tap_task.abort();
@@ -2441,6 +2550,23 @@ impl CallController {
         } else if !tap_task.is_finished() {
             if let Ok(inner) = (&mut tap_task).await {
                 tap_result = Some(inner);
+            }
+        }
+
+        // #444: the shutdown/BYE and tap-end arms sit before the
+        // announce-done arm in the biased select, so a call that ends
+        // mid-prompt breaks the loop with the completion unread. The tap
+        // has exited above — the oneshot is resolved either way — so read
+        // it now: a `Played` that raced the teardown still counts, and
+        // anything else leaves `announced` false, but with
+        // `announce_configured` the consent block is stamped regardless,
+        // instead of the call serializing like one never subject to
+        // recording. Capture never starts this late.
+        if let Some(mut rx) = announce_done_rx.take() {
+            if let Ok(AnnounceEnd::Played { ms }) = rx.try_recv() {
+                info!(call_id = %call_id, announcement_ms = ms,
+                      "announcement completed as the call ended");
+                announced_ms = Some(ms);
             }
         }
 
@@ -2484,9 +2610,15 @@ impl CallController {
                         encrypted: rec_encrypted,
                     })
                 }
+                // A writer that was never asked to capture has no file to
+                // have failed (#444): a panic or wedged finalize on an
+                // idle writer must not fabricate a `Failed` summary whose
+                // path names a file that was never created — that would
+                // route a blocked/never-started call into the
+                // `failed`-means-disk alert bucket.
                 Ok(Err(join_err)) => {
                     warn!(call_id = %call_id, error = %join_err, "recording task panicked");
-                    Some(RecordingSummary {
+                    capture_requested.then(|| RecordingSummary {
                         path: failed_path(),
                         result: RecordingResult::Failed,
                         encrypted: rec_encrypted,
@@ -2496,7 +2628,7 @@ impl CallController {
                     warn!(call_id = %call_id, "recording did not finalize within 500 ms; aborting");
                     rec_task.abort();
                     let _ = (&mut rec_task).await;
-                    Some(RecordingSummary {
+                    capture_requested.then(|| RecordingSummary {
                         path: failed_path(),
                         result: RecordingResult::Failed,
                         encrypted: rec_encrypted,
@@ -2509,9 +2641,10 @@ impl CallController {
 
         log_state(&call_id, CallState::Done);
 
-        // `rec_blocked` is set only by announcement failures, so it is
-        // exactly the "we meant to announce and couldn't" signal (#440).
-        let consent_summary = consent_summary(announced_ms, consent_server, rec_blocked);
+        // Stamped off `announce_configured`, not `rec_blocked` (#444): a
+        // call that ended mid-prompt fail-closed correctly but isn't
+        // `blocked` — the consent block alone tells that story.
+        let consent_summary = consent_summary(announced_ms, consent_server, announce_configured);
 
         // Latest quality state from the tap + the first session's
         // connect stamp. Omit the whole block when nothing measured —
@@ -2566,7 +2699,7 @@ fn start_ws_failure_prompt(
     tap_cmd_tx: &mpsc::Sender<TapCommand>,
     call_id: &CallId,
     failure: &'static str,
-) -> Option<oneshot::Receiver<u64>> {
+) -> Option<oneshot::Receiver<AnnounceEnd>> {
     let source = match AnnounceSource::new(prompt, sample_rate) {
         Ok(src) => src,
         Err(err) => {
@@ -2723,8 +2856,8 @@ fn route_rec_control(
 /// Pends forever when there's no channel (recording off, or the writer
 /// already ended), so the arm never busy-loops.
 async fn recv_announce_done(
-    rx: &mut Option<tokio::sync::oneshot::Receiver<u64>>,
-) -> Result<u64, tokio::sync::oneshot::error::RecvError> {
+    rx: &mut Option<tokio::sync::oneshot::Receiver<AnnounceEnd>>,
+) -> Result<AnnounceEnd, tokio::sync::oneshot::error::RecvError> {
     match rx {
         Some(r) => r.await,
         None => std::future::pending().await,
@@ -3070,9 +3203,11 @@ mod recording_outcome_tests {
         assert_eq!(outcome(None, false).recording_result(), None);
     }
 
-    /// If a file was produced its result wins: `rec_blocked` can be set by
-    /// a late teardown race (call.rs:2248) after capture already ran, and
-    /// the file's own outcome is the truthful one.
+    /// If a file was produced its result wins. The coexistence should be
+    /// impossible since #444 (`rec_blocked` is only ever set before any
+    /// capture is requested, and a blocked call's idle writer can no
+    /// longer fabricate a summary), so this pins the defensive tiebreak:
+    /// were both ever present, the file's own outcome is ground truth.
     #[test]
     fn real_recording_wins_over_blocked_flag() {
         assert_eq!(
@@ -3099,6 +3234,24 @@ mod recording_outcome_tests {
         let c = consent_summary(Some(1500), None, false).expect("consent block");
         assert!(c.announced);
         assert_eq!(c.announcement_ms, 1500);
+    }
+
+    /// #444: a call that ends while its consent announcement is still
+    /// playing stamps the consent block off `announce_configured` alone —
+    /// `announced: false`, no `blocked` implied. Together with
+    /// `recording_result` staying `None`, this is the wire shape for
+    /// "abandoned mid-prompt": consent block present, no result — no
+    /// longer indistinguishable from a call never subject to recording.
+    #[test]
+    fn call_ending_mid_prompt_still_stamps_consent() {
+        let c = consent_summary(None, None, true).expect("consent block must be stamped");
+        assert!(!c.announced);
+        assert_eq!(c.announcement_ms, 0);
+        assert_eq!(
+            outcome(None, false).recording_result(),
+            None,
+            "no blocked, no fabricated result — the consent block tells the story"
+        );
     }
 
     /// Server-reported consent alone is `announced: false` — the daemon

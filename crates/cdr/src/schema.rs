@@ -55,18 +55,21 @@
 //! the distinction. Same rationale as v2/v3/v5/v6 — a new cause value a
 //! strict exhaustive matcher can choke on.
 //!
-//! **Still v7 (0.48.8):** added the optional `recording_result` field
+//! **v8 (0.48.8):** added the optional `recording_result` field
 //! (`ok` / `degraded` / `failed` / `blocked`, issues #440 / #441) — the
 //! recording outcome reached `siphon_ai_recordings_total` and nothing
 //! else, so a record could name a `recording_path` for a file that was
-//! never written with no way to tell. Deliberately **not** a version
-//! bump: it is a lone additive-optional scalar, the `answered_at`
-//! treatment from v5 ("`answered_at` alone would be additive-optional"),
-//! and unlike v2/v3/v5/v6/v7 it introduces no new value into an existing
-//! enum that a strict exhaustive matcher could choke on — a consumer
-//! that has never seen the field cannot be matching on it. The CSV sink
-//! gains a 50th column, appended at the end per its documented
-//! append-only rule so position-keyed ingestors survive.
+//! never written with no way to tell. A lone additive-optional scalar
+//! would have ridden along unversioned under the `answered_at` rule from
+//! v5, but two things argue for the bump and they won: the **CSV sink
+//! gains a 50th column**, and while its append-only order keeps
+//! position-keyed ingestors working, a reader asserting an exact column
+//! count is a real consumer that breaks — CLAUDE.md §7.7's bar is
+//! "could break parsers", not "breaks the JSON shape". And the v4
+//! precedent (`quality`, additive-optional and bumped anyway) exists so
+//! consumers can **gate on the version instead of probing for the
+//! field**, which is exactly what a compliance export reconciling
+//! recordings wants to do here.
 //!
 //! ## What we record vs. what we don't
 //!
@@ -87,12 +90,13 @@ use serde::{Deserialize, Serialize};
 /// Schema version of the CDR record. Bump per CLAUDE.md §7.7
 /// whenever a change could break consumer parsers.
 ///
-/// v7 (0.45.0): adds the `ws_disconnect` [`TerminationCause`] variant
-/// (issue #369). A new cause value is why this bumps rather than riding
-/// as a silent addition — a strict consumer that exhaustively matches
-/// the v6 cause set will not recognise it, the same reasoning that
-/// drove v2, v3, v5 and v6.
-pub const CDR_VERSION: u32 = 7;
+/// v8 (0.48.8): adds the optional `recording_result` field (issues #440
+/// / #441) and, with it, a 50th CSV column. The JSON addition alone is
+/// additive-optional; the CSV width change is what could break a strict
+/// consumer, and gating on `version >= 8` is how a recording-reconciling
+/// consumer can tell whether a record is even capable of answering "did
+/// this recording land?" — the v4 (`quality`) rationale.
+pub const CDR_VERSION: u32 = 8;
 
 /// One call's complete record. Always serialised as a single JSON
 /// object on a single line for JSONL file sinks.
@@ -194,8 +198,8 @@ pub struct CdrRecord {
     /// field the ok/degraded/failed distinction existed only in the
     /// process-wide metric and could not be attributed to a call, so a
     /// consumer could not tell a good `recording_path` from one naming a
-    /// file that was never written. Additive optional scalar → CDR schema
-    /// version unchanged (the `answered_at` precedent from v5).
+    /// file that was never written. Gate on `version >= 8` rather than
+    /// probing for the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_result: Option<String>,
     /// `true` when the recording is sealed at rest under

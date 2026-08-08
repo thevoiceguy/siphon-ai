@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A consent announcement cut short by a hold or park now fails closed** (issue #445). Since 0.26.0, a `Park`/`Hold` arriving mid-prompt resolved the announcement with its partial play time, and the controller treated any completion as consent: `RecControl::Start` fired, audio was captured, and the CDR affirmatively stamped `consent { announced: true }` with the partial duration — possibly the incoherent `announced: true, announcement_ms: 0` when the cut landed inside the first 20 ms tick (an announce arriving while already held was "skipped" the same way). Reachable in production shapes: the `on_ws_failure` auto-park (the WS connects in parallel with the prompt), an early server `hold`, or an operator park landing during the announcement. A partially heard prompt is not consent — maintainer policy call on the issue's three options was **fail-closed**: capture does not start, `consent { announced: false }` is stamped, and the outcome follows the 0.48.9 rules — `recording_result = "blocked"` when the call was actually going to record (`mode = "always"`, or an on-demand `start_recording`), the #446 deferred escalation otherwise. The WARN log carries the partial `played_ms`. Operational corollary, now documented in RECORDING.md: a bot that holds or parks callers immediately after answer will fail-close its own recordings — let the prompt finish first. Wire shape: `AnnounceEnd::CutShort` (0.48.9) was built as the seam for exactly this decision; no protocol or schema change.
+
 ## [0.48.9] - 2026-08-08
 
 ### Fixed

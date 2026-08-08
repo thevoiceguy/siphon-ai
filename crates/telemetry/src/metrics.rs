@@ -80,7 +80,8 @@ pub const VERSTAT_TOTAL: &str = "siphon_ai_verstat_total";
 /// `result`: `ok` (written cleanly), `degraded` (some 20 ms frames were
 /// dropped under writer back-pressure — the file is short, not corrupt),
 /// `failed` (an I/O error), `blocked` (a configured consent announcement
-/// could not be played, so capture never started — #440). Bounded
+/// did not play to completion — unusable file (#440) or cut short by a
+/// hold/park (#445) — so capture never started). Bounded
 /// cardinality (four values); the per-call outcome lives on the CDR
 /// (`recording_result`, `recording_path`).
 pub const RECORDINGS_TOTAL: &str = "siphon_ai_recordings_total";

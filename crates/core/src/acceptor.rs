@@ -2545,6 +2545,10 @@ impl CallStart {
                 .as_ref()
                 .map(|r| r.path.display().to_string()),
             recording_encrypted: outcome.recording.as_ref().map(|r| r.encrypted),
+            // ok / degraded / failed / blocked — the same vocabulary as the
+            // metric, so a CDR consumer can tell a playable recording from
+            // a path that names a file which was never written (#441).
+            recording_result: outcome.recording_result().map(|r| r.as_str().to_string()),
             // Stamped after into_record by the upload-enqueue block (0.25.0).
             recording_url: None,
             park: outcome.park.map(|p| siphon_ai_cdr::ParkInfo {
@@ -2605,8 +2609,12 @@ pub(crate) struct CallTerminationView {
     pub(crate) bridge_detail: String,
     pub(crate) tap_detail: String,
     /// Recording outcome, when the call was recorded. Feeds the CDR
-    /// `recording_path` and the `siphon_ai_recordings_total` metric.
+    /// `recording_path`.
     pub(crate) recording: Option<RecordingSummary>,
+    /// A consent announcement fail-closed recording before capture began
+    /// (#440) — no file, but the call was still subject to recording.
+    /// With `recording`, feeds [`CallTerminationView::recording_result`].
+    pub(crate) recording_blocked: bool,
     /// Park accounting, when the call was parked at least once. Feeds
     /// the CDR `park { count, total_ms }`.
     pub(crate) park: Option<crate::call::ParkSummary>,
@@ -2630,6 +2638,7 @@ impl CallTerminationView {
                 cause: map_cause(o.termination),
                 bridge_detail: bridge_detail(o.bridge),
                 tap_detail: tap_detail(o.tap),
+                recording_blocked: o.recording_blocked,
                 recording: o.recording,
                 park: o.park,
                 hold: o.hold,
@@ -2645,6 +2654,7 @@ impl CallTerminationView {
                 bridge_detail: format!("controller error: {e}"),
                 tap_detail: String::new(),
                 recording: None,
+                recording_blocked: false,
                 park: None,
                 hold: None,
                 reconnect: None,
@@ -2652,6 +2662,19 @@ impl CallTerminationView {
                 quality: None,
             },
         }
+    }
+
+    /// The authoritative recording result for the CDR `recording_result`
+    /// field and the `siphon_ai_recordings_total` metric (#440, #441).
+    /// Mirrors [`CallOutcome::recording_result`].
+    pub(crate) fn recording_result(&self) -> Option<RecordingResult> {
+        if let Some(rec) = self.recording.as_ref() {
+            return Some(rec.result);
+        }
+        if self.recording_blocked {
+            return Some(RecordingResult::Blocked);
+        }
+        None
     }
 }
 
@@ -2774,6 +2797,7 @@ fn build_delayed_failure_cdr(
         recording_id: None,
         recording_path: None,
         recording_encrypted: None,
+        recording_result: None,
         recording_url: None,
         consent: None,
         park: None,
@@ -3715,9 +3739,12 @@ impl BridgingAcceptor {
                     (ended_at - call_start.started_at).num_milliseconds().max(0) as u64;
                 let duration_secs = duration_ms as f64 / 1000.0;
                 record_call_ended(view.cause, duration_secs);
-                if let Some(rec) = view.recording.as_ref() {
-                    metrics::counter!(RECORDINGS_TOTAL, "result" => rec.result.as_str())
-                        .increment(1);
+                // Includes `blocked`: a consent announcement that fails
+                // stops the recording before it starts, which produced no
+                // metric at all before #440 — a bad prompt file could
+                // silently stop a fleet recording with nothing to alert on.
+                if let Some(result) = view.recording_result() {
+                    metrics::counter!(RECORDINGS_TOTAL, "result" => result.as_str()).increment(1);
                 }
 
                 let end_event = WebhookEvent::CallEnd(CallEndEvent {

@@ -748,7 +748,7 @@ practice — restart is simpler).
 
 ```json
 {
-  "version": 7,
+  "version": 8,
   "call_id": "siphon-6ce27797cc0a4997b90cbae2f46ce7a4",
   "sip_call_id": "1-2651348@127.0.0.1",
   "started_at":  "2026-05-12T18:10:32.481Z",
@@ -819,12 +819,15 @@ Timer H), `"missing_sdp_answer"`, `"invalid_sdp_answer"`,
 an **empty `audio`** block (no codec was negotiated) and blank
 `bridge_disconnect` / `tap_disconnect`.
 
-The `version` integer is **7** as of 0.45.0 (the `ws_disconnect`
-cause; 6 in 0.41.x for `transfer`, 5 in 0.40.0 for `answered_at` +
-`caller_hangup`, 4 in 0.30.0 for the optional `quality` block, 3 in
-0.17.0 for `drain_forced`, 2 in 0.9.5 for the delayed-offer causes). It
-bumps on changes that could break a strict consumer. Adding a new
-optional *field* stays additive and does not bump.
+The `version` integer is **8** as of 0.48.8 (the `recording_result`
+field and its CSV column; 7 in 0.45.0 for the `ws_disconnect` cause, 6 in
+0.41.x for `transfer`, 5 in 0.40.0 for `answered_at` + `caller_hangup`, 4
+in 0.30.0 for the optional `quality` block, 3 in 0.17.0 for
+`drain_forced`, 2 in 0.9.5 for the delayed-offer causes). It bumps on
+changes that could break a strict consumer. Adding a new optional *field*
+to the JSON shape is additive on its own — v4 and v8 bumped anyway, the
+first so consumers could gate on the version rather than probe for the
+`quality` block, the second because the field also widens the CSV row.
 
 ### CSV format (`[cdr.file].format = "csv"`, 0.36.0)
 

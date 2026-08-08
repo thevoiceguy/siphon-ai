@@ -1041,10 +1041,12 @@ impl CallController {
         // mid-prompt must still tell its consent story) independently of
         // whether the prompt completed or fail-closed.
         let mut announce_configured = false;
-        // on_demand only (#446): the prompt is unusable, but no recording
-        // has been requested — escalates to `rec_blocked` if and when the
-        // server sends `start_recording`, and stays a warning otherwise.
-        let mut announce_unusable = false;
+        // on_demand only (#446, #445): the consent prompt did not (or
+        // cannot) complete — unusable file, couldn't start, or cut short
+        // by a hold/park — while no recording has been demanded.
+        // Escalates to `rec_blocked` if and when the server sends
+        // `start_recording`, and stays a warning otherwise.
+        let mut announce_incomplete = false;
         // Whether capture was ever actually requested of the writer
         // (auto-start, or a routed RecControl::Start). Gates the
         // fabricated `Failed` summary at finalize (#444): a writer that
@@ -1106,7 +1108,7 @@ impl CallController {
                         if auto_start {
                             rec_blocked = true;
                         } else {
-                            announce_unusable = true;
+                            announce_incomplete = true;
                         }
                         auto_start = false;
                     }
@@ -1216,7 +1218,7 @@ impl CallController {
                     if announce_start_after {
                         rec_blocked = true;
                     } else {
-                        announce_unusable = true;
+                        announce_incomplete = true;
                     }
                 }
             }
@@ -1439,12 +1441,13 @@ impl CallController {
                             if rec_blocked {
                                 warn!(call_id = %cid,
                                       "start_recording ignored: announcement failed (recording fail-closed)");
-                            } else if announce_unusable {
-                                // #446: the on_demand prompt failure only
-                                // becomes `blocked` now that the server
-                                // has actually asked for a recording.
+                            } else if announce_incomplete {
+                                // #446/#445: the on_demand prompt failure
+                                // (or cut-short) only becomes `blocked`
+                                // now that the server has actually asked
+                                // for a recording.
                                 warn!(call_id = %cid,
-                                      "start_recording refused: announcement unusable (recording fail-closed)");
+                                      "start_recording refused: consent announcement did not complete (recording fail-closed)");
                                 rec_blocked = true;
                             } else if announce_done_rx.is_some() {
                                 // Capture starts only after the prompt —
@@ -2365,10 +2368,7 @@ impl CallController {
                 done = recv_announce_done(&mut announce_done_rx), if announce_done_rx.is_some() => {
                     announce_done_rx = None;
                     match done {
-                        // A park/hold cut-short currently counts as
-                        // announced with the partial play time — #445
-                        // tracks that policy; the arm keeps it.
-                        Ok(AnnounceEnd::Played { ms }) | Ok(AnnounceEnd::CutShort { ms }) => {
+                        Ok(AnnounceEnd::Played { ms }) => {
                             info!(call_id = %call_id, announcement_ms = ms, "announcement complete");
                             announced_ms = Some(ms);
                             if announce_start_after {
@@ -2379,6 +2379,27 @@ impl CallController {
                                     "announcement-complete",
                                     &call_id,
                                 );
+                            }
+                        }
+                        // #445: fail-closed. A caller who heard `ms` of
+                        // the prompt has not been informed — capture must
+                        // not start, and `announced` stays false (the
+                        // consent block still stamps via
+                        // `announce_configured`). A park/hold
+                        // interrupting the prompt is a call event, not a
+                        // prompt failure, but the recording it prevents
+                        // is one the call was configured to make:
+                        // `blocked` when capture was already demanded
+                        // (mode=always, or a start_recording that arrived
+                        // mid-prompt); otherwise the #446 deferred
+                        // escalation — `blocked` only if the server asks.
+                        Ok(AnnounceEnd::CutShort { ms }) => {
+                            warn!(call_id = %call_id, played_ms = ms,
+                                  "consent announcement cut short; recording fail-closed");
+                            if announce_start_after {
+                                rec_blocked = true;
+                            } else {
+                                announce_incomplete = true;
                             }
                         }
                         Ok(AnnounceEnd::Preempted) => {

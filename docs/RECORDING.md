@@ -129,16 +129,20 @@ needed there (a `start_recording` on an already-recording call is a no-op).
   - `failed` — an I/O error (e.g. disk full); the file is incomplete or
     absent. `recording_path` still names where it was meant to land, so
     check `recording_result` before assuming a file is there.
-  - `blocked` — a configured `[recording.announcement]` could not be
-    played for a call that was actually going to record, so capture never
-    started and **no file exists** (0.48.8, issue #440). With
+  - `blocked` — a configured `[recording.announcement]` did not play **to
+    completion** for a call that was actually going to record, so capture
+    never started and **no file exists** (0.48.8, issue #440). Two ways
+    there: the prompt was unusable, or it was cut short by a hold or park
+    (issue #445 — a partially heard prompt is not consent, so the
+    recording fail-closes rather than capturing without the full
+    announcement; the WARN log carries the partial `played_ms`). With
     `mode = "on_demand"` this stamps only when the server actually sends
-    `start_recording` (issue #446) — a broken prompt on a call nobody
-    asked to record is a WARN, not a per-call `blocked`. The CDR stamps
-    `consent { announced: false }`, which is what distinguishes this from
-    a call that was never subject to recording at all. Alert on it
-    separately from `failed`: `blocked` is a bad prompt file or a bad
-    config push, `failed` is disk.
+    `start_recording` (issue #446) — an incomplete prompt on a call
+    nobody asked to record is a WARN, not a per-call `blocked`. The CDR
+    stamps `consent { announced: false }`, which is what distinguishes
+    this from a call that was never subject to recording at all. Alert on
+    it separately from `failed`: `blocked` is consent playback, `failed`
+    is disk.
   - *(no result)* with a `consent` block present — the call ended, or
     lost its WS session, before the consent announcement completed
     (issue #444). Recording correctly never started; there is no
@@ -178,9 +182,13 @@ call. A recording is always best-effort; it never degrades call quality.
   law (e.g. two-party-consent regions). SiphonAI gives you both halves of
   the machinery (0.26.0), but the *policy* is still yours:
   - **`[recording.announcement].file`** — the daemon plays the prompt to
-    the caller right after answer and starts capture only when it
-    finishes. Fail-closed: if the prompt can't play, the call is not
-    recorded. The CDR records `consent { announced, announcement_ms }`.
+    the caller right after answer and starts capture only when it plays
+    **to completion**. Fail-closed: if the prompt can't play — or is cut
+    short by a hold or park before finishing (#445) — the call is not
+    recorded; a partially heard prompt is not consent. The CDR records
+    `consent { announced, announcement_ms }`. Operational corollary: a
+    bot that holds or parks callers immediately after answer will
+    fail-close its own recordings — let the prompt finish first.
   - **`set_recording_consent`** (WS control, `docs/PROTOCOL.md` §4.7) —
     when your server captures consent itself (DTMF press-1, verbal yes),
     stamp the fact onto the CDR as `consent.server`. Pair with

@@ -515,8 +515,9 @@ pub enum AnnounceEnd {
     /// Reached EOF — the caller heard the full prompt (`ms` played).
     Played { ms: u64 },
     /// Cut short by a `Park`/`Hold`, or skipped outright while held —
-    /// `ms` of it played (0 for the skip). The consent gate currently
-    /// treats this as announced; #445 tracks that policy.
+    /// `ms` of it played (0 for the skip). The consent gate fails
+    /// closed on this (#445): a partially heard prompt is not consent,
+    /// so capture does not start and the CDR stamps `announced: false`.
     CutShort { ms: u64 },
     /// Replaced by a newer announcement before finishing (the
     /// WS-failure prompt preempting the consent prompt). The prompt did

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The 491-glare backoff for hold/resume re-INVITEs now follows RFC 3261 §14.1's role split** (issue #454). Both call directions retried after a fixed 250 ms, which sits inside the *non-owner's* 0–2 s band — correct for inbound legs (SiphonAI doesn't own the Call-ID there, verified live on 0.48.10), wrong for outbound legs, where SiphonAI **is** the Call-ID owner and the RFC prescribes 2.1–4.0 s. The two bands are disjoint on purpose — after a collision one side is guaranteed to re-offer first, so the glare cannot repeat — and on the outbound path that guarantee was forfeited: a peer retrying fast could collide a second time and spend the once-only retry, failing the hold (`hold_failed`; the call stays in its prior media state, so the blast radius was one unheld call — low severity, but the collision-avoidance guarantee is the whole point of the scheme). The backoff is now chosen from the role's band — outbound 2.1–4.0 s, inbound 0–2 s — and **randomised within it**, also per the RFC: the previous fixed value meant two SiphonAI instances glaring at each other would retry in permanent lockstep. Jitter comes from std's OS-seeded `RandomState` (no new dependency; desynchronisation is all §14.1's randomness buys). A unit test pins both bands, their disjointness, and that the value actually varies. The functional test plan's HOLD-04 row, which expected 2.1–4.0 s unconditionally, now states the per-role bands.
+
 ## [0.48.10] - 2026-08-08
 
 ### Fixed

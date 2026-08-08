@@ -194,14 +194,17 @@ pub struct CdrRecord {
     /// - `"blocked"` — a configured consent announcement could not be
     ///   played, so capture never started and no file exists (#440).
     ///
-    /// Omitted when the call was never subject to recording. Before this
-    /// field the ok/degraded/failed distinction existed only in the
+    /// Omitted when there is no recording outcome to report: recording
+    /// off for the call, on-demand and never started, or the call ended
+    /// before its consent announcement completed (#444) — in that last
+    /// case the `consent` block alone tells the story. Before this field
+    /// the ok/degraded/failed distinction existed only in the
     /// process-wide metric and could not be attributed to a call, so a
     /// consumer could not tell a good `recording_path` from one naming a
     /// file that was never written. Gate on `version >= 8` rather than
     /// probing for the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recording_result: Option<String>,
+    pub recording_result: Option<RecordingResult>,
     /// `true` when the recording is sealed at rest under
     /// `[recording.encryption]` (0.24.0) — the file at `recording_path` is
     /// a `.wava` envelope, not a playable WAV. Omitted when the call wasn't
@@ -421,6 +424,41 @@ pub struct TerminationInfo {
     /// Same shape, for the media tap.
     #[serde(default)]
     pub tap_disconnect: String,
+}
+
+/// How a recording finished (0.48.8, issues #440/#441) — the typed
+/// mirror of core's recording outcome, same vocabulary as the `result`
+/// label on `siphon_ai_recordings_total`. Stable snake_case strings on
+/// the wire, same mechanism as [`TerminationCause`] (#447): the closed
+/// vocabulary is enforced at the schema layer, and a new variant here
+/// is a schema-version conversation, not a silently absorbed string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingResult {
+    /// Written cleanly.
+    Ok,
+    /// Frames were dropped under writer back-pressure; the file at
+    /// `recording_path` is short, not corrupt.
+    Degraded,
+    /// An I/O error; the file is incomplete or absent.
+    Failed,
+    /// A configured consent announcement could not be played, so capture
+    /// never started and no file exists (#440). No `recording_id` /
+    /// `recording_path` accompany it.
+    Blocked,
+}
+
+impl RecordingResult {
+    /// The wire string — identical to the serde serialization, for the
+    /// CSV sink and anywhere a `&'static str` is needed.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecordingResult::Ok => "ok",
+            RecordingResult::Degraded => "degraded",
+            RecordingResult::Failed => "failed",
+            RecordingResult::Blocked => "blocked",
+        }
+    }
 }
 
 /// High-level cause classification mirroring
@@ -644,6 +682,27 @@ mod tests {
             v.get("answered_at").is_none(),
             "unanswered calls omit the field, not null it"
         );
+    }
+
+    /// #447: `recording_result` is a typed enum with the wire strings
+    /// pinned — the same mechanism as `TerminationCause`. The strings
+    /// are the metric's `result` label values; changing one is a
+    /// breaking change to every CDR consumer and dashboard.
+    #[test]
+    fn recording_result_wire_strings_are_pinned() {
+        use RecordingResult as R;
+        for (variant, wire) in [
+            (R::Ok, "ok"),
+            (R::Degraded, "degraded"),
+            (R::Failed, "failed"),
+            (R::Blocked, "blocked"),
+        ] {
+            let v = serde_json::to_value(variant).unwrap();
+            assert_eq!(v, serde_json::json!(wire));
+            assert_eq!(variant.as_str(), wire, "as_str must match serde");
+            let back: RecordingResult = serde_json::from_value(v).unwrap();
+            assert_eq!(back, variant);
+        }
     }
 
     /// `caller_hangup` is a distinct wire value, and matches the WS

@@ -2013,12 +2013,16 @@ async fn announce_started_while_parked_plays_then_moh_resumes() {
     .await
     .expect("announcement plays over parked MOH");
 
-    // EOF: done fires with the played length; MOH resumes after.
-    let ms = tokio::time::timeout(Duration::from_secs(2), done_rx)
+    // EOF: done fires Played with the full length; MOH resumes after.
+    let end = tokio::time::timeout(Duration::from_secs(2), done_rx)
         .await
         .expect("done in time")
         .expect("done sender kept");
-    assert_eq!(ms, 100, "5 × 20 ms frames");
+    assert_eq!(
+        end,
+        siphon_ai_media_glue::AnnounceEnd::Played { ms: 100 },
+        "5 × 20 ms frames, played to EOF"
+    );
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if let Some(OutboundMediaRequest::Audio(f)) =
@@ -2088,14 +2092,95 @@ async fn park_still_cuts_a_running_announcement() {
         .await
         .expect("send park");
 
-    let ms = tokio::time::timeout(Duration::from_secs(2), done_rx)
+    let end = tokio::time::timeout(Duration::from_secs(2), done_rx)
         .await
         .expect("done in time")
         .expect("done sender kept");
-    assert!(
-        ms < 5_000,
-        "park must cut the announcement short, got {ms} ms",
-    );
+    match end {
+        siphon_ai_media_glue::AnnounceEnd::CutShort { ms } => {
+            assert!(
+                ms < 5_000,
+                "park must cut the announcement short, got {ms} ms"
+            )
+        }
+        other => panic!("park cut-short must report CutShort, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+    drop(cmd_tx);
+    drop(_caller_rx);
+    drop(_playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+/// #444: a newer announcement (the WS-failure prompt) replacing a
+/// running one resolves the old `done` as `Preempted` instead of
+/// dropping the sender — a dropped sender reads as a play failure at
+/// the controller and used to stamp the call `blocked` during what was
+/// actually a WS outage.
+#[tokio::test]
+async fn announce_replacing_announce_resolves_old_as_preempted() {
+    use siphon_ai_media_glue::{AnnounceEnd, AnnounceSource, TapCommand};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(64, 64));
+    let call = CallId::new("announce-preempts-announce");
+    let tap = MediaTap::attach(
+        &manager,
+        &::std::sync::Arc::new(forge_core::EventBus::new()),
+        call.clone(),
+        8000,
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (_playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, _events_rx) = mpsc::channel::<siphon_ai_bridge::OutgoingEvent>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+    let dir = std::env::temp_dir().join(format!("siphon_apa_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Long consent prompt (5 s), then a short replacement mid-play.
+    let consent_wav = dir.join("consent.wav");
+    write_const_wav(&consent_wav, 8000, 8000 * 5, 3000);
+    let consent = AnnounceSource::new(&consent_wav, 8000).expect("prompt opens");
+    let (consent_done_tx, consent_done_rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(TapCommand::Announce {
+            source: Box::new(consent),
+            done: consent_done_tx,
+        })
+        .await
+        .expect("send consent announce");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let failure_wav = dir.join("failure.wav");
+    write_const_wav(&failure_wav, 8000, 800, 2000);
+    let failure = AnnounceSource::new(&failure_wav, 8000).expect("prompt opens");
+    let (failure_done_tx, failure_done_rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(TapCommand::Announce {
+            source: Box::new(failure),
+            done: failure_done_tx,
+        })
+        .await
+        .expect("send ws-failure announce");
+
+    // The old prompt's done resolves Preempted — not dropped, not Played.
+    let end = tokio::time::timeout(Duration::from_secs(2), consent_done_rx)
+        .await
+        .expect("done in time")
+        .expect("old sender must be resolved, not dropped");
+    assert_eq!(end, AnnounceEnd::Preempted);
+
+    // The replacement plays to EOF and reports Played normally.
+    let end = tokio::time::timeout(Duration::from_secs(2), failure_done_rx)
+        .await
+        .expect("done in time")
+        .expect("new sender kept");
+    assert_eq!(end, AnnounceEnd::Played { ms: 100 }, "5 × 20 ms frames");
 
     let _ = std::fs::remove_dir_all(&dir);
     drop(cmd_tx);

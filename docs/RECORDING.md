@@ -130,11 +130,20 @@ needed there (a `start_recording` on an already-recording call is a no-op).
     absent. `recording_path` still names where it was meant to land, so
     check `recording_result` before assuming a file is there.
   - `blocked` — a configured `[recording.announcement]` could not be
-    played, so capture never started and **no file exists** (0.48.8, issue
-    #440). The CDR stamps `consent { announced: false }`, which is what
-    distinguishes this from a call that was never subject to recording at
-    all. Alert on it separately from `failed`: `blocked` is a bad prompt
-    file or a bad config push, `failed` is disk.
+    played for a call that was actually going to record, so capture never
+    started and **no file exists** (0.48.8, issue #440). With
+    `mode = "on_demand"` this stamps only when the server actually sends
+    `start_recording` (issue #446) — a broken prompt on a call nobody
+    asked to record is a WARN, not a per-call `blocked`. The CDR stamps
+    `consent { announced: false }`, which is what distinguishes this from
+    a call that was never subject to recording at all. Alert on it
+    separately from `failed`: `blocked` is a bad prompt file or a bad
+    config push, `failed` is disk.
+  - *(no result)* with a `consent` block present — the call ended, or
+    lost its WS session, before the consent announcement completed
+    (issue #444). Recording correctly never started; there is no
+    recording outcome to report, and the consent block alone tells the
+    story.
 
 ---
 

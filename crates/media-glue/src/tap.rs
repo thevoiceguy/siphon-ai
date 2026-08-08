@@ -495,11 +495,34 @@ pub enum TapCommand {
     /// is drained-and-dropped (the bot can't talk over it). At EOF the
     /// elapsed milliseconds are reported on `done` and the direct
     /// caller↔WS pair resumes. A `Park`/`Hold` during the announcement
-    /// ends it early (reported as done).
+    /// ends it early (reported as [`AnnounceEnd::CutShort`]); a newer
+    /// `Announce` replaces it (the old `done` resolves
+    /// [`AnnounceEnd::Preempted`], #444).
     Announce {
         source: Box<crate::moh::AnnounceSource>,
-        done: tokio::sync::oneshot::Sender<u64>,
+        done: tokio::sync::oneshot::Sender<AnnounceEnd>,
     },
+}
+
+/// How a one-shot announcement ended, reported on
+/// [`TapCommand::Announce`]'s `done` channel (#444). The distinction
+/// matters to the recording consent gate: only `Played` proves the
+/// caller heard the whole prompt, and only a genuine play failure —
+/// which surfaces as the sender being dropped, never as a variant
+/// here — may fail-close recording as `blocked`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnounceEnd {
+    /// Reached EOF — the caller heard the full prompt (`ms` played).
+    Played { ms: u64 },
+    /// Cut short by a `Park`/`Hold`, or skipped outright while held —
+    /// `ms` of it played (0 for the skip). The consent gate currently
+    /// treats this as announced; #445 tracks that policy.
+    CutShort { ms: u64 },
+    /// Replaced by a newer announcement before finishing (the
+    /// WS-failure prompt preempting the consent prompt). The prompt did
+    /// not complete, and the replacement implies nothing about the
+    /// prompt file itself — this must **not** read as `blocked` (#444).
+    Preempted,
 }
 
 /// How the tap reacts to forge-vad `SpeechStarted` events. Mirrors
@@ -1247,7 +1270,7 @@ impl MediaTap {
         // `done` fired) at EOF or when park/hold preempts it.
         let mut announcing: Option<(
             Box<crate::moh::AnnounceSource>,
-            tokio::sync::oneshot::Sender<u64>,
+            tokio::sync::oneshot::Sender<AnnounceEnd>,
             u64,
         )> = None;
         // WS-reconnect survival (0.7.3). When `survive_ws_drop` is set and
@@ -2388,7 +2411,7 @@ impl MediaTap {
                             if let Some((_, done, frames)) = announcing.take() {
                                 debug!(call_id = %self.call_id,
                                        "announcement cut short by park");
-                                let _ = done.send(frames * 20);
+                                let _ = done.send(AnnounceEnd::CutShort { ms: frames * 20 });
                             }
                             parked = Some(*moh);
                             // Align the MOH cadence to now so the first
@@ -2448,7 +2471,7 @@ impl MediaTap {
                             if let Some((_, done, frames)) = announcing.take() {
                                 debug!(call_id = %self.call_id,
                                        "announcement cut short by hold");
-                                let _ = done.send(frames * 20);
+                                let _ = done.send(AnnounceEnd::CutShort { ms: frames * 20 });
                             }
                             held = Some(*moh);
                             // Align the MOH cadence to now (same as Park).
@@ -2463,7 +2486,7 @@ impl MediaTap {
                                 // prompt rather than queue it.
                                 debug!(call_id = %self.call_id,
                                        "announce skipped: call is held");
-                                let _ = done.send(0);
+                                let _ = done.send(AnnounceEnd::CutShort { ms: 0 });
                             } else {
                                 // Announce-over-park (0.34.0,
                                 // DESIGN_WS_FAILURE_PROMPT.md §3.3): an
@@ -2479,6 +2502,16 @@ impl MediaTap {
                                     over_moh = parked.is_some(),
                                     "announcement started",
                                 );
+                                // A prompt already playing is replaced —
+                                // resolve its `done` as Preempted rather
+                                // than dropping the sender, which the
+                                // controller would read as a play
+                                // failure (#444).
+                                if let Some((_, old_done, _)) = announcing.take() {
+                                    debug!(call_id = %self.call_id,
+                                           "announcement preempted by a newer announcement");
+                                    let _ = old_done.send(AnnounceEnd::Preempted);
+                                }
                                 announcing = Some((source, done, 0));
                                 moh_tick.reset();
                             }
@@ -2683,7 +2716,7 @@ impl MediaTap {
                                     if let Some((_, done, frames)) = announcing.take() {
                                         debug!(call_id = %self.call_id, ms = frames * 20,
                                                "announcement finished");
-                                        let _ = done.send(frames * 20);
+                                        let _ = done.send(AnnounceEnd::Played { ms: frames * 20 });
                                     }
                                 }
                             }

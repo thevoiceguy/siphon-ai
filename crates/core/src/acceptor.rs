@@ -2548,7 +2548,7 @@ impl CallStart {
             // ok / degraded / failed / blocked — the same vocabulary as the
             // metric, so a CDR consumer can tell a playable recording from
             // a path that names a file which was never written (#441).
-            recording_result: outcome.recording_result().map(|r| r.as_str().to_string()),
+            recording_result: outcome.recording_result.map(map_recording_result),
             // Stamped after into_record by the upload-enqueue block (0.25.0).
             recording_url: None,
             park: outcome.park.map(|p| siphon_ai_cdr::ParkInfo {
@@ -2608,13 +2608,15 @@ pub(crate) struct CallTerminationView {
     pub(crate) cause: CdrTerminationCause,
     pub(crate) bridge_detail: String,
     pub(crate) tap_detail: String,
-    /// Recording outcome, when the call was recorded. Feeds the CDR
-    /// `recording_path`.
+    /// Recording outcome, when a recording file was attempted. Feeds the
+    /// CDR `recording_id`/`recording_path`/`recording_encrypted`.
     pub(crate) recording: Option<RecordingSummary>,
-    /// A consent announcement fail-closed recording before capture began
-    /// (#440) — no file, but the call was still subject to recording.
-    /// With `recording`, feeds [`CallTerminationView::recording_result`].
-    pub(crate) recording_blocked: bool,
+    /// The authoritative recording result for the CDR `recording_result`
+    /// field and the `siphon_ai_recordings_total` metric (#440, #441).
+    /// Resolved exactly once, in [`Self::from_run_result`], via
+    /// [`CallOutcome::recording_result`] — the single copy of the
+    /// file-wins-over-blocked precedence rule (#447).
+    pub(crate) recording_result: Option<RecordingResult>,
     /// Park accounting, when the call was parked at least once. Feeds
     /// the CDR `park { count, total_ms }`.
     pub(crate) park: Option<crate::call::ParkSummary>,
@@ -2634,47 +2636,53 @@ pub(crate) struct CallTerminationView {
 impl CallTerminationView {
     pub(crate) fn from_run_result(result: Result<CallOutcome, crate::call::CallError>) -> Self {
         match result {
-            Ok(o) => Self {
-                cause: map_cause(o.termination),
-                bridge_detail: bridge_detail(o.bridge),
-                tap_detail: tap_detail(o.tap),
-                recording_blocked: o.recording_blocked,
-                recording: o.recording,
-                park: o.park,
-                hold: o.hold,
-                reconnect: o.reconnect,
-                consent: o.consent,
-                quality: o.quality,
-            },
-            Err(e) => Self {
-                // Treat a panic / join error as "bridge ended" —
-                // the call did end, and the cause string surfaces
-                // the underlying error for diagnostics.
-                cause: CdrTerminationCause::BridgeEnded,
-                bridge_detail: format!("controller error: {e}"),
-                tap_detail: String::new(),
-                recording: None,
-                recording_blocked: false,
-                park: None,
-                hold: None,
-                reconnect: None,
-                consent: None,
-                quality: None,
-            },
+            Ok(o) => {
+                let recording_result = o.recording_result();
+                Self {
+                    cause: map_cause(o.termination),
+                    bridge_detail: bridge_detail(o.bridge),
+                    tap_detail: tap_detail(o.tap),
+                    recording_result,
+                    recording: o.recording,
+                    park: o.park,
+                    hold: o.hold,
+                    reconnect: o.reconnect,
+                    consent: o.consent,
+                    quality: o.quality,
+                }
+            }
+            Err(e) => {
+                // A crashed controller still owes the CDR its recording
+                // audit trail (#444): `TaskJoin` carries the fail-close
+                // flag and consent story salvaged at the return site.
+                let (recording_result, consent) = match &e {
+                    crate::call::CallError::TaskJoin {
+                        recording_blocked,
+                        consent,
+                        ..
+                    } => (
+                        recording_blocked.then_some(RecordingResult::Blocked),
+                        consent.clone(),
+                    ),
+                    crate::call::CallError::Setup(_) => (None, None),
+                };
+                Self {
+                    // Treat a panic / join error as "bridge ended" —
+                    // the call did end, and the cause string surfaces
+                    // the underlying error for diagnostics.
+                    cause: CdrTerminationCause::BridgeEnded,
+                    bridge_detail: format!("controller error: {e}"),
+                    tap_detail: String::new(),
+                    recording: None,
+                    recording_result,
+                    park: None,
+                    hold: None,
+                    reconnect: None,
+                    consent,
+                    quality: None,
+                }
+            }
         }
-    }
-
-    /// The authoritative recording result for the CDR `recording_result`
-    /// field and the `siphon_ai_recordings_total` metric (#440, #441).
-    /// Mirrors [`CallOutcome::recording_result`].
-    pub(crate) fn recording_result(&self) -> Option<RecordingResult> {
-        if let Some(rec) = self.recording.as_ref() {
-            return Some(rec.result);
-        }
-        if self.recording_blocked {
-            return Some(RecordingResult::Blocked);
-        }
-        None
     }
 }
 
@@ -2685,6 +2693,18 @@ impl CallTerminationView {
 fn record_prepare_outcome(elapsed: std::time::Duration, ok: bool) {
     let result = if ok { "ok" } else { "error" };
     metrics::histogram!(SDP_NEGOTIATE_SECONDS, "result" => result).record(elapsed.as_secs_f64());
+}
+
+/// Map core's recording outcome to the CDR schema's typed mirror (#447)
+/// — identical wire strings by construction; both sides pin
+/// `ok`/`degraded`/`failed`/`blocked` in tests.
+pub(crate) fn map_recording_result(r: RecordingResult) -> siphon_ai_cdr::RecordingResult {
+    match r {
+        RecordingResult::Ok => siphon_ai_cdr::RecordingResult::Ok,
+        RecordingResult::Degraded => siphon_ai_cdr::RecordingResult::Degraded,
+        RecordingResult::Failed => siphon_ai_cdr::RecordingResult::Failed,
+        RecordingResult::Blocked => siphon_ai_cdr::RecordingResult::Blocked,
+    }
 }
 
 /// Map a CDR termination cause to a stable wire string for the
@@ -3743,7 +3763,7 @@ impl BridgingAcceptor {
                 // stops the recording before it starts, which produced no
                 // metric at all before #440 — a bad prompt file could
                 // silently stop a fleet recording with nothing to alert on.
-                if let Some(result) = view.recording_result() {
+                if let Some(result) = view.recording_result {
                     metrics::counter!(RECORDINGS_TOTAL, "result" => result.as_str()).increment(1);
                 }
 
@@ -4858,6 +4878,44 @@ mod tests {
     use sip_core::{Headers as SipHeaders, Method, Request, RequestLine, SipUri};
     use siphon_ai_media_glue::{AnswerOutcome, Codec};
     use siphon_ai_routes::load_from_toml;
+
+    /// #444: a controller that crashes after its consent announcement
+    /// fail-closed recording must not lose the audit trail — the Err-path
+    /// view still reports `blocked` and the salvaged consent block, so
+    /// the error-path CDR stays distinguishable from a call never
+    /// subject to recording.
+    #[tokio::test]
+    async fn err_path_view_keeps_blocked_and_consent() {
+        let join_err = tokio::spawn(async { panic!("boom") })
+            .await
+            .expect_err("must be a join error");
+        let consent = Some(crate::call::ConsentSummary {
+            announced: false,
+            announcement_ms: 0,
+            server: None,
+        });
+        let view = CallTerminationView::from_run_result(Err(crate::call::CallError::TaskJoin {
+            source: join_err,
+            recording_blocked: true,
+            consent: consent.clone(),
+        }));
+        assert_eq!(view.recording_result, Some(RecordingResult::Blocked));
+        assert_eq!(view.consent, consent);
+        assert_eq!(view.cause, CdrTerminationCause::BridgeEnded);
+
+        // A crash with nothing to salvage stays empty — no phantom
+        // blocked on calls that never had an announcement.
+        let join_err = tokio::spawn(async { panic!("boom") })
+            .await
+            .expect_err("must be a join error");
+        let view = CallTerminationView::from_run_result(Err(crate::call::CallError::TaskJoin {
+            source: join_err,
+            recording_blocked: false,
+            consent: None,
+        }));
+        assert_eq!(view.recording_result, None);
+        assert_eq!(view.consent, None);
+    }
 
     #[test]
     fn drain_forced_termination_maps_and_labels() {

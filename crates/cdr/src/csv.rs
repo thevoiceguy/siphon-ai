@@ -187,7 +187,7 @@ pub fn record_to_row(r: &CdrRecord) -> String {
     // the other `recording_*` columns for the same append-only reason
     // (#441).
     if let Some(v) = &r.recording_result {
-        push_field(&mut o, v);
+        push_field(&mut o, v.as_str());
     }
 
     o
@@ -301,7 +301,7 @@ mod tests {
         r.recording_id = Some("siphon-7f3a".into());
         r.recording_path = Some("/var/rec/siphon-7f3a.wava".into());
         r.recording_encrypted = Some(true);
-        r.recording_result = Some("ok".into());
+        r.recording_result = Some(crate::schema::RecordingResult::Ok);
         r.recording_url = Some("s3://bucket/siphon-7f3a.wava".into());
         r.consent = Some(ConsentInfo {
             announced: true,
@@ -373,11 +373,12 @@ mod tests {
     /// written — the whole point of the field.
     #[test]
     fn recording_result_renders_every_outcome() {
-        for outcome in ["ok", "degraded", "failed", "blocked"] {
+        use crate::schema::RecordingResult as R;
+        for outcome in [R::Ok, R::Degraded, R::Failed, R::Blocked] {
             let mut r = sample();
             r.recording_path = Some("/var/rec/siphon-7f3a.wav".into());
-            r.recording_result = Some(outcome.into());
-            assert_eq!(column(&r, "recording_result"), outcome);
+            r.recording_result = Some(outcome);
+            assert_eq!(column(&r, "recording_result"), outcome.as_str());
         }
     }
 

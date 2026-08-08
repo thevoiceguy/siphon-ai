@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.8] - 2026-08-08
+
 ### Fixed
 
 - **A recording that fail-closes on its consent announcement now says so on the CDR** (issue #440). `[recording.announcement]` is a fail-closed control: if the prompt can't play, the call doesn't record. That part worked on the mainline path (edge caveats found by post-merge review are tracked in #444/#445/#446). What didn't was the record of it — `docs/CONFIG.md` promised the call "shows up as `consent.announced = false`" and the code comment beside the fail-close said the same, but the consent block was gated on the two things that hadn't happened (an announcement having played, or the server having reported consent), so it was omitted entirely. A call whose consent prompt failed serialized identically to a call recording was never turned on for, which is exactly the distinction a recording-consent audit needs; the only trace was a WARN line. The block is now stamped `{ announced: false, announcement_ms: 0 }` whenever an announcement was configured and couldn't be played. The path also incremented **no metric at all** — the recording never finished because it never started — so a bad prompt file pushed to a fleet would silently stop it recording with nothing to alert on; `siphon_ai_recordings_total` gains a `result="blocked"` value, deliberately distinct from `failed` so a bad prompt and a bad disk stay separately alertable.

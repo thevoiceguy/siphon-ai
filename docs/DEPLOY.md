@@ -867,8 +867,13 @@ entirely when verification is disabled):
 and `verstat_passed: false` is a call that asserted full attestation but
 failed verification.
 
-Optional recording fields appear when the call was recorded (added in
-0.5.0; schema unchanged — all omitted when recording is off):
+Optional recording fields appear when the call was subject to recording
+(`recording_id`/`recording_path` added in 0.5.0; `recording_result` bumps
+the schema to v8 — all omitted when recording is off). They are **not**
+co-present: a `blocked` call carries `recording_result` (and the `consent`
+block) but no `recording_id`/`recording_path`, since no file was ever
+created — gate on `version >= 8`, then check `recording_result`, before
+touching the path:
 
 - `recording_id` — identifies the recording (equals `call_id` in this
   release).

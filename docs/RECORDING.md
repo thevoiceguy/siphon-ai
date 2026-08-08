@@ -109,11 +109,14 @@ needed there (a `start_recording` on an already-recording call is a no-op).
 
 ## 4. Observability
 
-- **CDR** (`docs/DEPLOY.md`): a recorded call's CDR carries `recording_id`,
-  `recording_path` and `recording_result`, plus `recording_encrypted: true`
-  when the file is a sealed `.wava` (§8). All are omitted when the call
-  wasn't recorded. `recording_result` arrived in CDR **v8** (0.48.8) —
-  gate on `version >= 8` rather than probing for it.
+- **CDR** (`docs/DEPLOY.md`): a call subject to recording carries
+  `recording_result`; when a recording file was actually attempted it also
+  carries `recording_id` and `recording_path`, plus
+  `recording_encrypted: true` when the file is a sealed `.wava` (§8). A
+  `blocked` call has `recording_result` alone — no id, no path, no file.
+  All are omitted when the call wasn't subject to recording at all.
+  `recording_result` arrived in CDR **v8** (0.48.8) — gate on
+  `version >= 8` rather than probing for it.
 - **Metric:** `siphon_ai_recordings_total{result="ok"|"degraded"|"failed"|"blocked"}`
   ticks once per call that was subject to recording. The CDR's
   `recording_result` carries the same value per call (0.48.8, issue #441) —

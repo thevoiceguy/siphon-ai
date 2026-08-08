@@ -746,8 +746,10 @@ async fn run_call(
     drop(call_handle); // stop keepalives / session-timer tasks
 
     let view = CallTerminationView::from_run_result(run_result);
-    if let Some(rec) = view.recording.as_ref() {
-        metrics::counter!(RECORDINGS_TOTAL, "result" => rec.result.as_str()).increment(1);
+    // Mirrors the inbound acceptor: includes `blocked`, the consent
+    // fail-close that produced no metric at all before #440.
+    if let Some(result) = view.recording_result() {
+        metrics::counter!(RECORDINGS_TOTAL, "result" => result.as_str()).increment(1);
     }
     let ended_at = Utc::now();
     let mut record = build_outbound_record(&ctx, &sip_call_id, audio, &ws_url, ended_at, &view);
@@ -849,6 +851,8 @@ fn build_outbound_record(
             .as_ref()
             .map(|r| r.path.display().to_string()),
         recording_encrypted: view.recording.as_ref().map(|r| r.encrypted),
+        // ok / degraded / failed / blocked — mirrors the inbound CDR (#441).
+        recording_result: view.recording_result().map(|r| r.as_str().to_string()),
         recording_url: None,
         consent: view.consent.as_ref().map(|c| siphon_ai_cdr::ConsentInfo {
             announced: c.announced,
@@ -916,6 +920,7 @@ mod tests {
             bridge_detail: "stop_sent".into(),
             tap_detail: "controller_hung_up".into(),
             recording: None,
+            recording_blocked: false,
             park: None,
             hold: None,
             reconnect: None,

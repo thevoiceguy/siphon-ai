@@ -55,6 +55,19 @@
 //! the distinction. Same rationale as v2/v3/v5/v6 — a new cause value a
 //! strict exhaustive matcher can choke on.
 //!
+//! **Still v7 (0.48.8):** added the optional `recording_result` field
+//! (`ok` / `degraded` / `failed` / `blocked`, issues #440 / #441) — the
+//! recording outcome reached `siphon_ai_recordings_total` and nothing
+//! else, so a record could name a `recording_path` for a file that was
+//! never written with no way to tell. Deliberately **not** a version
+//! bump: it is a lone additive-optional scalar, the `answered_at`
+//! treatment from v5 ("`answered_at` alone would be additive-optional"),
+//! and unlike v2/v3/v5/v6/v7 it introduces no new value into an existing
+//! enum that a strict exhaustive matcher could choke on — a consumer
+//! that has never seen the field cannot be matching on it. The CSV sink
+//! gains a 50th column, appended at the end per its documented
+//! append-only rule so position-keyed ingestors survive.
+//!
 //! ## What we record vs. what we don't
 //!
 //! - **From / To** users only — full SIP URIs are recorded as the
@@ -64,7 +77,9 @@
 //!   type are flat fields; the raw SDP would balloon the record and
 //!   isn't operator-readable.
 //! - **No call audio** — the record carries a `recording_path` *pointer*
-//!   when recording is on (`[recording]`), never the audio itself.
+//!   when recording is on (`[recording]`), never the audio itself. The
+//!   pointer names where the recording was written; `recording_result`
+//!   says whether anything usable landed there.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -158,9 +173,31 @@ pub struct CdrRecord {
     /// field → CDR schema stays at version 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_id: Option<String>,
-    /// Filesystem path of the recording, when one was written.
+    /// Filesystem path the recording was written to. Present whenever a
+    /// recording was attempted — including a `degraded` file (short, not
+    /// corrupt) and a `failed` one, where the file on disk may be
+    /// incomplete or missing entirely. Read [`CdrRecord::recording_result`]
+    /// before treating this as a path to a playable file (#441).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_path: Option<String>,
+    /// How the recording finished (0.48.8, issue #441) — the same
+    /// vocabulary as the `result` label on `siphon_ai_recordings_total`:
+    ///
+    /// - `"ok"` — written cleanly.
+    /// - `"degraded"` — frames were dropped under writer back-pressure;
+    ///   the file at `recording_path` is short, not corrupt.
+    /// - `"failed"` — an I/O error; the file is incomplete or absent.
+    /// - `"blocked"` — a configured consent announcement could not be
+    ///   played, so capture never started and no file exists (#440).
+    ///
+    /// Omitted when the call was never subject to recording. Before this
+    /// field the ok/degraded/failed distinction existed only in the
+    /// process-wide metric and could not be attributed to a call, so a
+    /// consumer could not tell a good `recording_path` from one naming a
+    /// file that was never written. Additive optional scalar → CDR schema
+    /// version unchanged (the `answered_at` precedent from v5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_result: Option<String>,
     /// `true` when the recording is sealed at rest under
     /// `[recording.encryption]` (0.24.0) — the file at `recording_path` is
     /// a `.wava` envelope, not a playable WAV. Omitted when the call wasn't
@@ -176,8 +213,11 @@ pub struct CdrRecord {
     pub recording_url: Option<String>,
 
     /// Recording-consent audit trail (0.26.0), present when a "this call
-    /// is recorded" announcement played and/or the WS server reported
-    /// captured consent (`set_recording_consent`). Omitted otherwise.
+    /// is recorded" announcement played, the WS server reported captured
+    /// consent (`set_recording_consent`), or a configured announcement
+    /// could not be played and recording fail-closed — that last case
+    /// stamps `announced: false` (0.48.8, issue #440). Omitted only when
+    /// consent never entered into the call at all.
     /// Additive optional field → CDR schema version unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consent: Option<ConsentInfo>,
@@ -213,7 +253,10 @@ pub struct CdrRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsentInfo {
     /// The daemon played the `[recording.announcement]` file to the
-    /// caller before capture started.
+    /// caller before capture started. `false` when an announcement was
+    /// configured but could not be played — recording fail-closed for
+    /// that call and `recording_result` is `"blocked"` (#440) — or when
+    /// only the WS server reported consent.
     pub announced: bool,
     /// Announcement duration in milliseconds (0 when `announced` is
     /// false).
@@ -489,6 +532,7 @@ mod tests {
             recording_id: None,
             recording_path: None,
             recording_encrypted: None,
+            recording_result: None,
             recording_url: None,
             consent: None,
             park: None,

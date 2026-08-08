@@ -274,8 +274,15 @@ pub struct CallOutcome {
     pub tap: Option<Result<TapDisconnect, MediaTapError>>,
     /// Recording outcome, `Some` when the call was recorded (or recording was
     /// attempted). `None` when recording was off, or on-demand and never
-    /// started. Feeds the CDR `recording_path` and the recordings metric.
+    /// started. Feeds the CDR `recording_path`.
     pub recording: Option<RecordingSummary>,
+    /// A configured consent announcement could not be played, so recording
+    /// fail-closed before capture began (issue #440). No `recording`
+    /// summary exists in that case — there is no file — but the call is
+    /// still one that *should* have recorded, which is what the CDR
+    /// `consent { announced: false }` stamp and the
+    /// `recordings_total{result="blocked"}` tick record.
+    pub recording_blocked: bool,
     /// Park outcome, `Some` when the call was parked at least once.
     /// Feeds the CDR `park { count, total_ms }`. `None` for a call that
     /// was never parked (the field is omitted from the CDR then).
@@ -290,13 +297,36 @@ pub struct CallOutcome {
     /// reconnected (the field is omitted then).
     pub reconnect: Option<ReconnectSummary>,
     /// Recording-consent audit trail (0.26.0), `Some` when an
-    /// announcement played or the server reported consent. Feeds the CDR
+    /// announcement played, the server reported consent, or an
+    /// announcement failed and fail-closed recording (#440). Feeds the CDR
     /// `consent { announced, announcement_ms, server }`.
     pub consent: Option<ConsentSummary>,
     /// Per-call quality summary (0.30.0), `Some` when the call produced
     /// any quality signal. Feeds the CDR `quality` block. `None` for
     /// calls that never went active (the field is omitted then).
     pub quality: Option<QualityOutcome>,
+}
+
+impl CallOutcome {
+    /// The authoritative recording result for this call — what the CDR
+    /// `recording_result` field and the `siphon_ai_recordings_total`
+    /// metric both report (#440, #441).
+    ///
+    /// `Some` whenever the call was subject to recording at all: the
+    /// finished file's result when one was attempted, or
+    /// [`RecordingResult::Blocked`] when a consent announcement
+    /// fail-closed capture before it began. `None` means recording was
+    /// off for this call, or on-demand and never started — nothing to
+    /// report, and the CDR field is omitted.
+    pub fn recording_result(&self) -> Option<RecordingResult> {
+        if let Some(rec) = self.recording.as_ref() {
+            return Some(rec.result);
+        }
+        if self.recording_blocked {
+            return Some(RecordingResult::Blocked);
+        }
+        None
+    }
 }
 
 /// Per-call quality outcome surfaced on [`CallOutcome`] → CDR (0.30.0).
@@ -420,6 +450,35 @@ pub struct ConsentSummary {
     pub server: Option<String>,
 }
 
+/// Build the CDR consent stamp for a finished call.
+///
+/// `Some` whenever consent entered into the call at all — the
+/// announcement played (`announced_ms`), the WS server reported consent
+/// (`consent_server`), or an announcement was configured and **could not**
+/// be played, which fail-closes recording (`announcement_blocked`).
+///
+/// That last case is why this is a named function rather than an inline
+/// expression: it stamps `announced: false`, which is what
+/// `docs/CONFIG.md` has always documented, and it is the only thing
+/// separating "this call was never subject to recording" from "we meant
+/// to record it, the consent prompt failed, and we correctly recorded
+/// nothing" (#440).
+fn consent_summary(
+    announced_ms: Option<u64>,
+    consent_server: Option<String>,
+    announcement_blocked: bool,
+) -> Option<ConsentSummary> {
+    let signalled = announced_ms.is_some() || consent_server.is_some() || announcement_blocked;
+    if !signalled {
+        return None;
+    }
+    Some(ConsentSummary {
+        announced: announced_ms.is_some(),
+        announcement_ms: announced_ms.unwrap_or(0),
+        server: consent_server,
+    })
+}
+
 /// Per-call park outcome surfaced on [`CallOutcome`] → CDR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParkSummary {
@@ -460,7 +519,8 @@ pub struct RecordingSummary {
     pub encrypted: bool,
 }
 
-/// How a recording finished — the `result` label on `siphon_ai_recordings_total`.
+/// How a recording finished — the `result` label on
+/// `siphon_ai_recordings_total` and the CDR `recording_result` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingResult {
     /// Written cleanly.
@@ -470,6 +530,11 @@ pub enum RecordingResult {
     Degraded,
     /// An I/O error; the recording is incomplete or absent.
     Failed,
+    /// A configured consent announcement could not be played, so capture
+    /// never started (issue #440). No file exists. Distinct from `Failed`
+    /// so a broken prompt file and a broken disk stay separately
+    /// alertable.
+    Blocked,
 }
 
 impl RecordingResult {
@@ -478,6 +543,7 @@ impl RecordingResult {
             RecordingResult::Ok => "ok",
             RecordingResult::Degraded => "degraded",
             RecordingResult::Failed => "failed",
+            RecordingResult::Blocked => "blocked",
         }
     }
 }
@@ -2443,12 +2509,9 @@ impl CallController {
 
         log_state(&call_id, CallState::Done);
 
-        let consent_summary =
-            (announced_ms.is_some() || consent_server.is_some()).then(|| ConsentSummary {
-                announced: announced_ms.is_some(),
-                announcement_ms: announced_ms.unwrap_or(0),
-                server: consent_server,
-            });
+        // `rec_blocked` is set only by announcement failures, so it is
+        // exactly the "we meant to announce and couldn't" signal (#440).
+        let consent_summary = consent_summary(announced_ms, consent_server, rec_blocked);
 
         // Latest quality state from the tap + the first session's
         // connect stamp. Omit the whole block when nothing measured —
@@ -2461,6 +2524,7 @@ impl CallController {
             bridge: bridge_result,
             tap: tap_result,
             recording: recording_summary,
+            recording_blocked: rec_blocked,
             park: park_summary,
             hold: hold_summary,
             reconnect: reconnect_summary,
@@ -2933,5 +2997,125 @@ mod bridge_termination_tests {
                 "classification diverged from reconnect eligibility for {o:?}",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod recording_outcome_tests {
+    use super::*;
+
+    fn outcome(recording: Option<RecordingSummary>, recording_blocked: bool) -> CallOutcome {
+        CallOutcome {
+            call_id: CallId("test".into()),
+            termination: CallTermination::CallerHangup,
+            bridge: None,
+            tap: None,
+            recording,
+            recording_blocked,
+            park: None,
+            hold: None,
+            reconnect: None,
+            consent: None,
+            quality: None,
+        }
+    }
+
+    fn summary(result: RecordingResult) -> RecordingSummary {
+        RecordingSummary {
+            path: std::path::PathBuf::from("/var/rec/test.wav"),
+            result,
+            encrypted: false,
+        }
+    }
+
+    /// These strings are the `result` label on
+    /// `siphon_ai_recordings_total` *and* the CDR `recording_result`
+    /// value — dashboards and CDR consumers both key on them, so
+    /// renaming one is a breaking change, not a refactor.
+    #[test]
+    fn result_wire_strings_are_stable() {
+        assert_eq!(RecordingResult::Ok.as_str(), "ok");
+        assert_eq!(RecordingResult::Degraded.as_str(), "degraded");
+        assert_eq!(RecordingResult::Failed.as_str(), "failed");
+        assert_eq!(RecordingResult::Blocked.as_str(), "blocked");
+    }
+
+    /// #441: a finished recording reports its own result, whatever it was.
+    #[test]
+    fn finished_recording_reports_its_result() {
+        for r in [
+            RecordingResult::Ok,
+            RecordingResult::Degraded,
+            RecordingResult::Failed,
+        ] {
+            assert_eq!(outcome(Some(summary(r)), false).recording_result(), Some(r));
+        }
+    }
+
+    /// #440: an announcement that fail-closes produces no file at all, so
+    /// there is no `RecordingSummary` — but the call was still subject to
+    /// recording and must not look identical to one that never was.
+    #[test]
+    fn blocked_announcement_reports_blocked() {
+        assert_eq!(
+            outcome(None, true).recording_result(),
+            Some(RecordingResult::Blocked)
+        );
+    }
+
+    /// A call recording was never turned on for reports nothing — the CDR
+    /// field is omitted and the metric doesn't tick.
+    #[test]
+    fn no_recording_reports_nothing() {
+        assert_eq!(outcome(None, false).recording_result(), None);
+    }
+
+    /// If a file was produced its result wins: `rec_blocked` can be set by
+    /// a late teardown race (call.rs:2248) after capture already ran, and
+    /// the file's own outcome is the truthful one.
+    #[test]
+    fn real_recording_wins_over_blocked_flag() {
+        assert_eq!(
+            outcome(Some(summary(RecordingResult::Ok)), true).recording_result(),
+            Some(RecordingResult::Ok)
+        );
+    }
+
+    /// #440: the regression this fix exists for — an announcement that
+    /// couldn't play used to leave the CDR with no `consent` block at
+    /// all, indistinguishable from a call recording never applied to,
+    /// even though CONFIG.md documented `announced: false`.
+    #[test]
+    fn blocked_announcement_stamps_announced_false() {
+        let c = consent_summary(None, None, true).expect("consent block must be stamped");
+        assert!(!c.announced);
+        assert_eq!(c.announcement_ms, 0);
+        assert_eq!(c.server, None);
+    }
+
+    /// A played announcement stamps its measured duration.
+    #[test]
+    fn played_announcement_stamps_duration() {
+        let c = consent_summary(Some(1500), None, false).expect("consent block");
+        assert!(c.announced);
+        assert_eq!(c.announcement_ms, 1500);
+    }
+
+    /// Server-reported consent alone is `announced: false` — the daemon
+    /// played nothing — but still stamps the note.
+    #[test]
+    fn server_consent_alone_is_not_announced() {
+        let c = consent_summary(None, Some("dtmf-1".into()), false).expect("consent block");
+        assert!(!c.announced);
+        assert_eq!(c.announcement_ms, 0);
+        assert_eq!(c.server.as_deref(), Some("dtmf-1"));
+    }
+
+    /// No announcement, no server note, nothing blocked → no block at
+    /// all. This is the case that must stay distinguishable from
+    /// `blocked_announcement_stamps_announced_false`.
+    #[test]
+    fn no_consent_signal_omits_the_block() {
+        assert_eq!(consent_summary(None, None, false), None);
     }
 }

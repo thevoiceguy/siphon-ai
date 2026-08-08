@@ -38,12 +38,12 @@ quality_rx_packets_out_of_order,quality_rx_packets_duplicate,\
 quality_mos_estimate_min,quality_mos_estimate_avg,\
 quality_tx_packets_sent,quality_tx_octets_sent,\
 quality_tx_packets_lost_reported,\
-answered_at";
+answered_at,recording_result";
 
 /// Number of columns in [`HEADER`] (and every row). Only asserted in
 /// tests — production code appends by name, not position.
 #[cfg(test)]
-pub(crate) const COLUMNS: usize = 49;
+pub(crate) const COLUMNS: usize = 50;
 
 /// RFC 4180 field escaping: quote when the value contains a comma,
 /// quote, or line break; double embedded quotes.
@@ -173,14 +173,21 @@ pub fn record_to_row(r: &CdrRecord) -> String {
     cell!(opt o, q.and_then(|q| q.tx_packets_sent));
     cell!(opt o, q.and_then(|q| q.tx_octets_sent));
     cell!(opt o, q.and_then(|q| q.tx_packets_lost_reported));
-    // Last column: no trailing comma. Appended at the end rather than
-    // beside `ended_at` because HEADER order is append-only (v5, #331).
+    // Appended at the end rather than beside `ended_at` because HEADER
+    // order is append-only (v5, #331).
     if let Some(v) = r.answered_at {
         let _ = write!(
             o,
             "{}",
             v.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         );
+    }
+    o.push(',');
+    // Last column: no trailing comma. Appended rather than slotted beside
+    // the other `recording_*` columns for the same append-only reason
+    // (#441).
+    if let Some(v) = &r.recording_result {
+        push_field(&mut o, v);
     }
 
     o
@@ -226,6 +233,7 @@ mod tests {
             recording_id: None,
             recording_path: None,
             recording_encrypted: None,
+            recording_result: None,
             recording_url: None,
             consent: None,
             park: None,
@@ -293,6 +301,7 @@ mod tests {
         r.recording_id = Some("siphon-7f3a".into());
         r.recording_path = Some("/var/rec/siphon-7f3a.wava".into());
         r.recording_encrypted = Some(true);
+        r.recording_result = Some("ok".into());
         r.recording_url = Some("s3://bucket/siphon-7f3a.wava".into());
         r.consent = Some(ConsentInfo {
             announced: true,
@@ -347,6 +356,39 @@ mod tests {
         assert_eq!(get("quality_barge_in_count"), "3");
         assert_eq!(get("quality_avg_rtcp_rtt_ms"), "", "unmeasured → empty");
         assert_eq!(get("quality_mos_estimate_avg"), "4.3");
+        assert_eq!(get("recording_result"), "ok");
+    }
+
+    /// Value of one named column of a rendered row.
+    fn column(r: &CdrRecord, name: &str) -> String {
+        let header: Vec<&str> = HEADER.split(',').collect();
+        let i = header.iter().position(|h| *h == name).expect(name);
+        let fields = split(&record_to_row(r));
+        assert_eq!(fields.len(), COLUMNS, "row width must match the header");
+        fields[i].clone()
+    }
+
+    /// #441: the CSV column has to distinguish a recording that landed
+    /// from one whose `recording_path` names a file that was never
+    /// written — the whole point of the field.
+    #[test]
+    fn recording_result_renders_every_outcome() {
+        for outcome in ["ok", "degraded", "failed", "blocked"] {
+            let mut r = sample();
+            r.recording_path = Some("/var/rec/siphon-7f3a.wav".into());
+            r.recording_result = Some(outcome.into());
+            assert_eq!(column(&r, "recording_result"), outcome);
+        }
+    }
+
+    /// A call that was never subject to recording leaves the cell empty
+    /// rather than inventing an outcome — "absent ≠ zero", same as every
+    /// other optional column.
+    #[test]
+    fn recording_result_absent_renders_empty_cell() {
+        let r = sample();
+        assert!(r.recording_result.is_none());
+        assert_eq!(column(&r, "recording_result"), "");
     }
 
     #[test]

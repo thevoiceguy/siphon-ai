@@ -230,6 +230,7 @@ mod tests {
             recording_id: None,
             recording_path: None,
             recording_encrypted: None,
+            recording_result: None,
             recording_url: None,
             consent: None,
             park: None,

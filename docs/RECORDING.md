@@ -109,18 +109,28 @@ needed there (a `start_recording` on an already-recording call is a no-op).
 
 ## 4. Observability
 
-- **CDR** (`docs/DEPLOY.md`): a recorded call's CDR carries `recording_id`
-  and `recording_path`, plus `recording_encrypted: true` when the file is a
-  sealed `.wava` (§8). All are omitted when the call wasn't recorded —
-  additive fields, no CDR version bump.
-- **Metric:** `siphon_ai_recordings_total{result="ok"|"degraded"|"failed"}`
-  ticks once per recorded call.
+- **CDR** (`docs/DEPLOY.md`): a recorded call's CDR carries `recording_id`,
+  `recording_path` and `recording_result`, plus `recording_encrypted: true`
+  when the file is a sealed `.wava` (§8). All are omitted when the call
+  wasn't recorded — additive fields, no CDR version bump.
+- **Metric:** `siphon_ai_recordings_total{result="ok"|"degraded"|"failed"|"blocked"}`
+  ticks once per call that was subject to recording. The CDR's
+  `recording_result` carries the same value per call (0.48.8, issue #441) —
+  before it, this distinction lived only in the process-wide metric and
+  could not be tied back to a call.
   - `ok` — written cleanly.
   - `degraded` — some 20 ms frames were dropped under writer back-pressure;
     the file is **short, not corrupt** (see §5). `recording_path` is still
     on the CDR.
   - `failed` — an I/O error (e.g. disk full); the file is incomplete or
-    absent.
+    absent. `recording_path` still names where it was meant to land, so
+    check `recording_result` before assuming a file is there.
+  - `blocked` — a configured `[recording.announcement]` could not be
+    played, so capture never started and **no file exists** (0.48.8, issue
+    #440). The CDR stamps `consent { announced: false }`, which is what
+    distinguishes this from a call that was never subject to recording at
+    all. Alert on it separately from `failed`: `blocked` is a bad prompt
+    file or a bad config push, `failed` is disk.
 
 ---
 

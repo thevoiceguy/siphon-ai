@@ -601,15 +601,21 @@ mod tests {
     }
 
     #[test]
-    fn version_field_is_present_and_is_7() {
-        // Bumped to 7 in 0.45.0 (the `ws_disconnect` termination cause —
-        // issue #369). Was 6 in 0.41.x (`transfer` — issue #356), 5 in
-        // 0.40.0 (`answered_at` + `caller_hangup`), 4 in 0.30.0 (the
-        // `quality` block), 3 in 0.17.0 (`drain_forced`) and 2 in 0.9.5
+    fn version_field_is_present_and_is_8() {
+        // Bumped to 8 in 0.48.8 (the optional `recording_result` field and
+        // the 50th CSV column that comes with it — issues #440 / #441).
+        // Was 7 in 0.45.0 (the `ws_disconnect` termination cause — issue
+        // #369), 6 in 0.41.x (`transfer` — issue #356), 5 in 0.40.0
+        // (`answered_at` + `caller_hangup`), 4 in 0.30.0 (the `quality`
+        // block), 3 in 0.17.0 (`drain_forced`) and 2 in 0.9.5
         // (delayed-offer failure causes).
-        assert_eq!(CDR_VERSION, 7);
+        //
+        // The literal is duplicated here on purpose: this test is the
+        // tripwire that makes a version bump a deliberate, reviewed act
+        // rather than something that rides along with a field addition.
+        assert_eq!(CDR_VERSION, 8);
         let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
-        assert_eq!(v["version"], serde_json::json!(7));
+        assert_eq!(v["version"], serde_json::json!(8));
     }
 
     /// `answered_at` is what makes connected duration derivable; absent

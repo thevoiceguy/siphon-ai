@@ -10,7 +10,17 @@ Two SIPp scenarios that validate the Week-5 stability acceptance bar
 
 Both write SIPp's per-scenario logs alongside the XML; both expect the
 daemon under test to be running on `127.0.0.1:5060` with a route that
-accepts any inbound INVITE (the shipped `configs/local-dev.toml` works).
+accepts any inbound INVITE.
+
+> **Size `rtp_port_range` first.** Every active call holds two UDP ports
+> (RTP + RTCP), so the range is a hard concurrency cap independent of load.
+> The shipped `configs/local-dev.toml` uses `[40000, 40100]` — 100 ports,
+> so **50 concurrent calls** — and `concurrent_burst_500.xml` will exhaust
+> it at call 51 and report failures that look like the daemon falling over.
+> For the 500-call burst you need at least `[40000, 42000]`. See
+> `LOAD_TEST_PLAN.md` §1 for this and the three other settings
+> (admission control, the inactivity watchdog, and the WS server's own
+> ceiling) that will otherwise invalidate a run.
 
 ## Prerequisites
 

@@ -215,7 +215,7 @@ Much of this is testable **offline** via `siphon-ai route-test` (no call). Match
 | HOLD-01 | `hold`/`resume` (bot-initiated) | 🔵 | `held`/`resumed` after re-INVITE 2xx; MOH to caller; `holds_total{ok}`; CDR `hold{count,total_ms}` |
 | HOLD-02 | double-hold / resume-not-held | 🔵 | idempotent no-op, call survives |
 | HOLD-03 | hold while in conference / peer-held | 🔵 | rejected `hold_failed`, no stacking |
-| HOLD-04 | 491 glare | 🟣 | backoff 2.1–4.0s, retry once, else `hold_failed` stays sendrecv |
+| HOLD-04 | 491 glare | 🟣 | backoff randomised per RFC 3261 §14.1 role (#454): inbound (not Call-ID owner) 0–2 s, outbound (owner) 2.1–4.0 s; retry once, else `hold_failed` stays sendrecv |
 | HOLD-05 | peer-initiated hold | 🔵 | `BridgeOut::hold{direction}` / `resume` (distinct from `held`/`resumed`) |
 
 ### 3.5 Park / retrieve — **P1**, 🔵 (needs inbound + a WS endpoint; no 2nd phone)

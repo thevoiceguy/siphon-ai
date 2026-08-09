@@ -63,7 +63,7 @@ use std::time::{Duration, Instant};
 
 use siphon_ai_bridge::{
     connect_and_run, connect_and_run_with_ready, BridgeChannels, BridgeConfig, BridgeError,
-    BridgeIn, CallId, DisconnectReason, ErrorCode, OutgoingEvent, StartMsg, StopReason,
+    BridgeIn, CallId, Direction, DisconnectReason, ErrorCode, OutgoingEvent, StartMsg, StopReason,
 };
 use siphon_ai_media_glue::{
     AnnounceEnd, AnnounceSource, MediaTap, MediaTapError, MohSource, QualityReport, QualitySummary,
@@ -942,6 +942,11 @@ impl CallController {
             ws_failure_prompt,
         } = cfg;
 
+        // The call's direction picks the RFC 3261 §14.1 glare-backoff
+        // band for hold/resume re-INVITEs (#454); captured before
+        // `start` is consumed by the bridge plumbing below.
+        let call_direction = start.direction;
+
         // W3C trace propagation (0.23.0): render this `run` span — the
         // call's trace root — as `traceparent`/`tracestate` and stamp it
         // onto `start`; the bridge sends it as upgrade headers and the
@@ -1273,8 +1278,9 @@ impl CallController {
         let mut held_since: Option<Instant> = None;
         // Re-INVITE glare backoff (RFC 3261 §14.1): if the peer sends
         // its own re-INVITE at the same moment, our offer draws a 491 —
-        // we wait this long, then retry once.
-        const HOLD_GLARE_BACKOFF: Duration = Duration::from_millis(250);
+        // we wait a role-dependent random interval (see
+        // `glare_backoff`), then retry once. Sampled fresh at each
+        // hold/resume command site (#454).
         // How long to wait for the tap to acknowledge a Hold command
         // (#403 — it refuses when the call is in a conference room).
         // The tap answers from its select loop, so this is effectively
@@ -1593,7 +1599,7 @@ impl CallController {
                                         match drive_hold_reinvite(
                                             hctx,
                                             &hctx.hold_offer_sdp,
-                                            HOLD_GLARE_BACKOFF,
+                                            glare_backoff(call_direction),
                                         )
                                         .await
                                         {
@@ -1638,7 +1644,7 @@ impl CallController {
                                 match drive_hold_reinvite(
                                     hctx,
                                     &hctx.resume_offer_sdp,
-                                    HOLD_GLARE_BACKOFF,
+                                    glare_backoff(call_direction),
                                 )
                                 .await
                                 {
@@ -3008,6 +3014,33 @@ async fn run_transfer_inner(
     }
 }
 
+/// RFC 3261 §14.1 backoff for a re-INVITE that drew a 491, split by
+/// role exactly as the RFC prescribes (#454): the **owner of the
+/// Call-ID** — our outbound legs, which originated the dialog — retries
+/// in 2.1–4.0 s; the non-owner — inbound legs — in 0–2 s. The bands are
+/// disjoint on purpose: after a collision one side is guaranteed to
+/// retry before the other can re-offer, so the glare cannot repeat and
+/// spend the once-only retry in [`drive_hold_reinvite`]. The value is
+/// randomised within the band, also per the RFC — a fixed value would
+/// put two glaring SiphonAI instances in permanent lockstep.
+///
+/// Jitter source: std's `RandomState`, seeded from OS entropy per
+/// process — dependency-free, and desynchronisation is all §14.1's
+/// randomness buys (nothing secret rides on it).
+fn glare_backoff(direction: Direction) -> Duration {
+    use std::hash::{BuildHasher, Hasher};
+    let jitter = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    let (base_ms, span_ms) = match direction {
+        // Call-ID owner: 2.1–4.0 s.
+        Direction::Outbound => (2_100, 1_900),
+        // Not the owner: 0–2 s.
+        Direction::Inbound => (0, 2_000),
+    };
+    Duration::from_millis(base_ms + jitter % span_ms)
+}
+
 /// Drive one bot-initiated hold/resume re-INVITE with `offer_sdp` (our
 /// cached media with the direction flipped — `a=sendonly` to hold,
 /// `a=sendrecv` to resume), reusing the inbound TCP/TLS connection when
@@ -3247,6 +3280,37 @@ mod recording_outcome_tests {
         assert!(!c.announced);
         assert_eq!(c.announcement_ms, 0);
         assert_eq!(c.server, None);
+    }
+
+    /// #454: the 491-glare backoff follows RFC 3261 §14.1's role split —
+    /// the Call-ID owner (outbound legs) retries in 2.1–4.0 s, the
+    /// non-owner (inbound) in 0–2 s. The bands must stay disjoint (that
+    /// is the RFC's collision-avoidance guarantee: one side always
+    /// re-offers first) and the value must actually vary (a fixed value
+    /// would put two glaring instances in lockstep).
+    #[test]
+    fn glare_backoff_bands_follow_rfc3261_roles() {
+        let mut inbound_seen = std::collections::HashSet::new();
+        let mut outbound_seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let inbound = glare_backoff(Direction::Inbound).as_millis() as u64;
+            let outbound = glare_backoff(Direction::Outbound).as_millis() as u64;
+            assert!(inbound < 2_000, "non-owner band is 0–2 s, got {inbound} ms");
+            assert!(
+                (2_100..4_000).contains(&outbound),
+                "owner band is 2.1–4.0 s, got {outbound} ms"
+            );
+            assert!(
+                inbound < outbound,
+                "bands must be disjoint — the owner always backs off longer"
+            );
+            inbound_seen.insert(inbound);
+            outbound_seen.insert(outbound);
+        }
+        assert!(
+            inbound_seen.len() > 1 && outbound_seen.len() > 1,
+            "backoff must be randomised within the band, not fixed"
+        );
     }
 
     /// A played announcement stamps its measured duration.

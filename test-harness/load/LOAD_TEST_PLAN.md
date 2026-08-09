@@ -455,3 +455,120 @@ RTP port range caps concurrency at range/2 — size it for your target.
 
 That is more credible than a single large loopback number, precisely
 because it shows the difference between the three is understood.
+
+---
+
+## 11. The reference call — a human canary at full load
+
+Stage the load from FreeSWITCH (§10.2), then place **one more call from a
+real phone over the Twilio trunk** and use it normally while the box is
+saturated.
+
+Everything in §§3–6 is an aggregate: p50 and p95 across every call. None of
+it answers the question a customer actually asks — *does the 501st caller
+notice?* A percentile can sit inside SLO while individual calls stutter, and
+a human on a live call detects one-way audio, choppiness, delay and a
+sluggish bot in seconds. This is also, by a wide margin, the cheapest test
+in this document: a few minutes of one PSTN call, against the hundreds of
+dollars a full carrier ramp would cost.
+
+It is a **canary, not a benchmark**. The 500 are the load; call 501 is the
+probe.
+
+### 11.1 Why it earns its place
+
+- **It measures the experience, not the distribution.** The only test here
+  whose output is "a person could not tell the box was busy."
+- **It audits the metrics.** If the CDR for call 501 reports MOS 4.2 while
+  the recording is audibly choppy, the quality estimator is wrong — a
+  finding worth more than the capacity number, since observability is one
+  of this project's main claims. The converse is equally useful: MOS 3.6
+  that sounds fine tells you the estimator is conservative.
+- **It exercises a second path under load.** The 500 arrive over the LAN in
+  plaintext; call 501 arrives over the public PSTN with TLS + SRTP through
+  a real carrier SBC. Neither §10.2 nor §10.3 covers that combination.
+- **It produces the demo asset.** A clean recording of a real call made
+  while 500 others were active is more persuasive to a sceptical reader
+  than any table in §7.
+
+### 11.2 Make it objective, not "sounded fine"
+
+The failure mode of this test is a subjective verdict nobody can check.
+Three things fix that.
+
+**Record call 501 — and only call 501.** Recording all 500 turns the run
+into a disk-I/O benchmark (§7.2). Use a route override keyed on your
+mobile number, with global recording off:
+
+```toml
+[recording]
+mode = "off"
+dir  = "/var/lib/siphon-ai/recordings"
+
+[[route]]
+name = "reference-call"
+[route.match]
+from_user = "+1XXXXXXXXXX"        # your handset
+[route.recording]
+mode = "always"                    # strict override — verified, RC-03
+```
+
+**Speak a fixed script** so dropouts are detectable afterwards rather than
+remembered. Counting `one … twenty` at a steady pace works: every gap,
+clip, or repeat is visible in the waveform and countable.
+
+**Run it as an A/B.** Place the identical call with the load **off**, then
+again at full load, and compare:
+
+| Compare | Idle | Loaded |
+|---|---|---|
+| CDR `quality.first_audio_out_ms` | | |
+| CDR `quality.avg_jitter_ms` / `max_jitter_ms` | | |
+| CDR `quality.avg_packet_loss_ratio` | | |
+| CDR `quality.mos_estimate_min` / `_avg` | | |
+| `sdp_negotiate_seconds` for this call | | |
+| Recording: dropouts, clipped words, silence gaps | | |
+| Subjective: 1–5, and *what* was wrong | | |
+
+`first_audio_out_ms` is the one to watch hardest — for a voice-AI bridge
+it is the "does the bot answer instantly" number, and it is the first thing
+that degrades under scheduler pressure.
+
+### 11.3 The ladder version
+
+If time allows, place the reference call at **0 / 100 / 250 / 400 / 500**
+concurrent with the same spoken script each time. That produces a
+perceptual curve alongside the metric curve, and lets you say where quality
+*starts* to degrade rather than only where it breaks. Very little
+telephony infrastructure publishes anything like it.
+
+### 11.4 Traps specific to this test
+
+- **Size the RTP range for 501, not 500.** With `[40000, 41002]` (501
+  pairs) exactly, the 500 staged calls leave one pair and any teardown
+  churn takes it. If your own call is rejected, that is a §1.1 port result,
+  not a quality result. Give it real headroom.
+- **Admission control will reject the human too.** If §6.4's
+  `max_concurrent` is still set from the degradation test, call 501 is the
+  one that gets the 503. Clear it first — or set it *deliberately* to 500
+  and confirm your call is refused cleanly, which is its own useful result.
+- **Don't leave prod's `mode = "always"` on.** Recording 500 concurrent
+  calls is a different experiment.
+- **Keep the WS server honest.** Whatever answers call 501 must not be the
+  same saturated Python echo server carrying the other 500 (§1.4), or you
+  are hearing its scheduling, not the bridge's.
+- **Capture the call_id.** Note it from `GET /admin/v1/calls` while the call
+  is up, so the CDR, the recording and the HEP chunks can all be pulled for
+  that exact call afterwards.
+
+### 11.5 Pass criteria
+
+The reference call at full load holds every §4 SLO **and** is subjectively
+indistinguishable from the idle A/B — no audible dropouts, no one-way
+audio, no added delay, and `first_audio_out_ms` within ~20% of idle.
+
+If it passes, the honest headline is not a number at all:
+
+> *A live PSTN call placed while 500 concurrent calls were active was
+> indistinguishable from an idle one — same MOS, same first-audio latency,
+> no audible degradation.*

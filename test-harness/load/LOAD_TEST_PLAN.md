@@ -26,7 +26,7 @@ cap that has nothing to do with load:
 |---|---|---|
 | `[40000, 40100]` — shipped `configs/local-dev.toml` | 100 | **50** |
 | `[40000, 40500]` — typical production | 500 | **250** |
-| `[40000, 42000]` — needed for a 500-call test | 2000 | **1000** |
+| `[40000, 42000]` — shipped `configs/soak.toml`, sized for the 500-call test | 2000 | **1000** |
 
 **The `concurrent_burst_500.xml` scenario cannot pass with the config the
 README points at** — it exhausts ports at 50 calls and reports failures that
@@ -57,7 +57,8 @@ inbound RTP. A soak that doesn't stream real audio dies at the 60-second
 mark and looks like a stability bug. Either stream a pcap (preferred — it
 exercises the jitter buffer and codec path, which is most of the per-call
 CPU) or set `inactivity_timeout_secs = 0` and label the run
-**signalling-only**.
+**signalling-only**. The shipped `configs/soak.toml` disables it (and
+omits `[sip.admission]` entirely, per §1.2).
 
 ### 1.4 The WS server is probably your bottleneck, not the bridge
 

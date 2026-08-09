@@ -9,9 +9,11 @@ user_agent = "SiphonAI/soak"
 [media]
 codecs = ["pcma", "pcmu"]
 dtmf = "rfc2833"
-# 500 calls × 2 ports each = 1000. Widen the range so the burst
-# scenario doesn't 503 on port-pool exhaustion.
-rtp_port_range = [40000, 41100]
+# 500 calls × 2 ports each = 1000, doubled per LOAD_TEST_PLAN.md §1.1's
+# sizing rule (2 × target concurrency, plus headroom for calls in
+# teardown, which hold their ports briefly) — and §11's human reference
+# call is call number 501. 2000 ports → 1000 concurrent calls.
+rtp_port_range = [40000, 42000]
 # Disabled for the burst (no RTP flowing); the long_call scenario
 # streams PCMA so the watchdog would never fire anyway.
 inactivity_timeout_secs = 0

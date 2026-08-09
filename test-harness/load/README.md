@@ -10,14 +10,20 @@ Two SIPp scenarios that validate the Week-5 stability acceptance bar
 
 Both write SIPp's per-scenario logs alongside the XML; both expect the
 daemon under test to be running on `127.0.0.1:5060` with a route that
-accepts any inbound INVITE.
+accepts any inbound INVITE. **Use the shipped `configs/soak.toml`** —
+it listens on 5060 with a 2000-port RTP range and the inactivity
+watchdog disabled. `configs/local-dev.toml` fails all three ways: it
+listens on **5070** (every SIPp command below targets 5060), its port
+range caps at 50 concurrent calls, and its default 60 s watchdog reaps
+the burst's signalling-only calls at the one-minute mark.
 
 > **Size `rtp_port_range` first.** Every active call holds two UDP ports
 > (RTP + RTCP), so the range is a hard concurrency cap independent of load.
 > The shipped `configs/local-dev.toml` uses `[40000, 40100]` — 100 ports,
 > so **50 concurrent calls** — and `concurrent_burst_500.xml` will exhaust
 > it at call 51 and report failures that look like the daemon falling over.
-> For the 500-call burst you need at least `[40000, 42000]`. See
+> For the 500-call burst you need at least `[40000, 42000]` — which is
+> what `configs/soak.toml` ships. See
 > `LOAD_TEST_PLAN.md` §1 for this and the three other settings
 > (admission control, the inactivity watchdog, and the WS server's own
 > ceiling) that will otherwise invalidate a run.
@@ -30,6 +36,11 @@ sudo apt install sip-tester           # or `brew install sipp` on macOS
 
 # Daemon
 cargo build -p siphon-ai --release
+
+# File descriptors — each call ≈ 4 (SIP share + RTP + RTCP + WS), so the
+# 500-burst blows through the default 1024. Raise it in the shell that
+# runs the daemon AND the one that runs SIPp.
+ulimit -n 65536
 
 # An echo WS server on :8765
 cd examples/echo-ws-server-python && pip install -r requirements.txt
@@ -63,8 +74,7 @@ full hour.
 
 ```sh
 # Start the daemon (terminal A)
-SIPHON_AI_CONFIG=configs/local-dev.toml \
-    cargo run -p siphon-ai --release -- --config $SIPHON_AI_CONFIG
+cargo run -p siphon-ai --release -- --config configs/soak.toml
 
 # Drive the soak (terminal B)
 sipp -sf test-harness/load/long_call_1h.xml \

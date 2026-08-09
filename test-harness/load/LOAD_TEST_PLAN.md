@@ -275,7 +275,183 @@ claims we haven't tested:
 
 - **Multi-node / horizontal scaling** — untested; the architecture forbids
   shared call state, but that isn't the same as measured.
-- **TLS + SRTP under load** — the ramp above is plaintext loopback. Expect a
-  real cost; measure it before quoting a secure-trunk number.
+- **TLS + SRTP under load** — §§3–6 are plaintext loopback. §10 tier 2
+  closes this; don't quote a secure-trunk number until it's run.
 - **Mid-call WS reconnect** — post-v1, and not exercised here.
 - **Sustained multi-hour behaviour** beyond the 1-hour soak.
+
+---
+
+## 10. Beyond loopback — a three-tier ladder
+
+§§3–6 run SIPp against the daemon on one box, over `127.0.0.1`, in
+plaintext. That is the right way to find a ceiling — free, unlimited,
+deterministic, repeatable — but it leaves three things unmeasured that a
+real deployment always has: **a network**, **crypto**, and **a real SIP
+stack on the far end**.
+
+Each tier below costs more than the one above it and answers a question the
+one above it cannot. Run them in order; do not skip to tier 3.
+
+| Tier | Generator | Cost | Answers |
+|---|---|---|---|
+| 1 | SIPp, same box, loopback | free | **Where is the ceiling?** |
+| 2 | FreeSWITCH, separate box, TLS+SRTP | free | **What do the network and crypto cost?** |
+| 3 | Twilio, live trunk | £/$ per minute | **Does a real carrier agree?** |
+
+### 10.1 The generator must not live on the box under test
+
+Tier 1 measures the daemon *and* SIPp on the same 4 vCPU. Above a few
+hundred calls SIPp's own RTP work competes for the cores you are trying to
+measure, and the knee you find is the pair's knee, not the daemon's.
+
+Moving the generator to a second box fixes three things at once: the
+measurement stops being contended, real UDP crosses a NIC and the kernel
+network stack (so `net.core.rmem_max` starts to matter), and the far end
+becomes something other than the same process family.
+
+**Rule, same as §1.4:** whatever generates load must be proven *not* to be
+the constraint. Record the generator box's CPU in every row. If it is above
+~70% while the daemon under test is below it, the run is void.
+
+### 10.2 Tier 2 — FreeSWITCH as the load generator
+
+This is the highest-value addition and it costs nothing but a second VM.
+FreeSWITCH is a real SIP stack, so unlike a SIPp scenario it exercises
+genuine SDP negotiation, real re-INVITE and dialog behaviour, and real RTP
+timing — and it can hold hundreds of concurrent calls while playing actual
+media.
+
+**Topology**
+
+```
+┌────────────────────┐        SIP/TLS + SRTP        ┌────────────────────┐
+│  Box B  (generator)│ ───────────────────────────► │  Box A  (under test)│
+│  FreeSWITCH        │        real RTP over LAN     │  siphon-ai 4 vCPU  │
+└────────────────────┘                              └──────────┬─────────┘
+                                                               │ WS
+                                                    ┌──────────▼─────────┐
+                                                    │ Box C: WS sink     │
+                                                    └────────────────────┘
+```
+
+Put the WS server on Box C (or at least off Box A) for the same reason —
+§1.4 applies to every tier.
+
+**Raise FreeSWITCH's own limits first.** FS will throttle before the bridge
+does and you will publish FS's ceiling by mistake — the tier-2 version of
+the §1.4 trap. In `autoload_configs/switch.conf.xml`:
+
+```xml
+<param name="max-sessions"        value="3000"/>   <!-- default 1000 -->
+<param name="sessions-per-second" value="200"/>    <!-- default 30   -->
+```
+
+And FS has the **same two-ports-per-call arithmetic** as §1.1 — size its
+RTP range to at least `2 × target_concurrency`:
+
+```xml
+<param name="rtp-start-port" value="20000"/>
+<param name="rtp-end-port"   value="24000"/>       <!-- 2000 calls -->
+```
+
+**Driving the calls.** Use `bgapi` so originates don't serialise, pace the
+loop to control cps, and use `endless_playback` so media keeps flowing for
+the whole hold (a plain `playback` ends with the file and then the §1.3
+inactivity watchdog reaps the call):
+
+```sh
+#!/usr/bin/env bash
+# ramp.sh <concurrency> <cps> <hold_seconds>
+CONC=${1:-100}; CPS=${2:-10}; HOLD=${3:-300}
+TARGET="sip:9000@BOX_A_IP:5060"          # or ;transport=tls for the secure run
+MEDIA="/usr/share/freeswitch/sounds/tone.wav"
+
+for i in $(seq 1 "$CONC"); do
+  fs_cli -x "bgapi originate {ignore_early_media=true,\
+origination_caller_id_number=1000}sofia/external/$TARGET \
+&endless_playback($MEDIA)" >/dev/null
+  sleep "$(python3 -c "print(1/$CPS)")"
+done
+
+sleep "$HOLD"
+fs_cli -x "hupall NORMAL_CLEARING"        # bounded teardown, then run §6.3
+```
+
+Watch on Box B — if either climbs, FS is the constraint:
+
+```sh
+fs_cli -x "show channels count"      # should equal your target concurrency
+fs_cli -x "status"                   # session count / peak / rate
+```
+
+**What tier 2 adds over tier 1**
+
+- **TLS + SRTP cost.** Point the FS gateway at `;transport=tls` with SRTP
+  required and rerun the §4 ramp. Publish the delta — this is the number
+  §9 says we must not quote without measuring, and it is the posture every
+  real trunk uses.
+- **Real network impairment.** Add loss/jitter/latency on Box B and watch
+  the daemon's own quality metrics respond, which is also a live test of
+  whether those metrics are trustworthy:
+
+  ```sh
+  sudo tc qdisc add dev eth0 root netem delay 20ms 5ms loss 0.5%
+  sudo tc qdisc del dev eth0 root          # remove afterwards
+  ```
+
+  Reproducible impairment is something a real carrier can never give you.
+- **A real stack on the far end**, so codec negotiation, re-INVITEs and
+  RTCP come from an implementation that isn't ours.
+
+**Pass criteria:** the §4 SLOs, plus the honest expectation that MOS will
+be *below* the loopback figure. Quote the impaired MOS, not the 4.4 that
+loopback produces — it is the credible number.
+
+### 10.3 Tier 3 — a live Twilio validation run
+
+**Twilio cannot find your ceiling, and should not be asked to.** Two
+reasons:
+
+1. Elastic SIP Trunking has per-account concurrent-channel and CPS caps.
+   A ramp will be shedding on their side while the box idles — you would be
+   measuring and publishing *their* throttle.
+2. Sudden high-volume origination is the signature of toll fraud. **Open a
+   support ticket before running anything**, say it is a scheduled load
+   test, and get your actual channel/CPS limits in writing. Losing the trunk
+   costs far more than this test is worth.
+
+What a carrier uniquely adds is a **real SBC and the public internet**.
+Both are per-call constants, not scaling properties — which is why a small
+run is enough.
+
+**The run:** 15 minutes at **30–50 concurrent**, after tiers 1 and 2. Only
+capture the deltas: per-call CPU against the tier-2 TLS+SRTP figure, MOS
+distribution against the netem figure, and carrier setup latency
+(`sdp_negotiate_seconds` p95).
+
+**Cost model:** `concurrent × minutes × per-minute rate × legs`. Both legs
+count if you trombone through Twilio to reach your own DID. The shape
+matters more than the rate: a 15-minute run at 50 concurrent is ~750
+call-minutes — tens of dollars. A 1-hour soak at 200 concurrent is 12,000+
+call-minutes — hundreds. **Run the ramp, skip the soak.** Tier 2 already
+covers soak for free.
+
+**Two operational notes:** the trunk is IP-ACL authorised on a single
+source IP, so this shares an authorisation path with production traffic —
+run it when prod can tolerate noise. And Twilio's own concurrency cap
+should be recorded next to the result, so nobody reads a Twilio number as
+the daemon's ceiling.
+
+### 10.4 The claim these three tiers earn
+
+```
+N concurrent calls on 4 vCPU (SIPp loopback, G.711, plaintext, no recording).
+Validated from a separate FreeSWITCH box over TLS + SRTP at M concurrent:
++x% CPU per call, MOS p50 y.yy under 20 ms / 0.5% netem impairment.
+Confirmed against a live Twilio trunk at 50 concurrent: setup p95 z ms.
+RTP port range caps concurrency at range/2 — size it for your target.
+```
+
+That is more credible than a single large loopback number, precisely
+because it shows the difference between the three is understood.

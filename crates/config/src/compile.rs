@@ -634,6 +634,16 @@ pub struct SipConfig {
     /// disables the idle close. Wired to `sip_transport::set_established_idle_timeout`
     /// at startup. UDP is unaffected.
     pub tcp_idle_timeout_secs: u64,
+    /// Per-source-IP inbound UDP datagram cap (`[sip].udp_rate_limit_pps`,
+    /// 0.48.11). Default 200; `0` disables. Wired to
+    /// `sip_transport::set_udp_rate_limit` at startup — once-only, so a
+    /// config reload cannot change it.
+    pub udp_rate_limit_pps: u32,
+    /// Per-source-IP inbound SIP-message cap for TCP/TLS/WS
+    /// (`[sip].stream_rate_limit_fps`, 0.48.11). Default 200; `0`
+    /// disables. Wired to `sip_transport::set_stream_rate_limit` at
+    /// startup — once-only, so a config reload cannot change it.
+    pub stream_rate_limit_fps: u32,
     /// CRLF keepalive interval (seconds) for established inbound
     /// SIP-over-TCP/TLS connections (`[sip].tcp_keepalive_interval_secs`).
     /// Default 0 = off. Wired to `sip_transport::set_stream_keepalive_interval`
@@ -766,6 +776,17 @@ pub enum CompileError {
 
     #[error("[sip].transports must be non-empty")]
     NoTransports,
+
+    /// The upstream token bucket rejects anything above
+    /// `MAX_REQUESTS_PER_WINDOW`, and it does so when the limiter is
+    /// built — which is after the listeners are up. Caught here so an
+    /// unusable value fails at load instead (CLAUDE.md §4.6).
+    #[error("[sip].{key} = {value} is out of range; expected 0 (disable) to {max}")]
+    RateLimitOutOfRange {
+        key: &'static str,
+        value: u32,
+        max: u32,
+    },
 
     #[error("[sip].transports has unknown entry {0:?}; expected udp / tcp / tls")]
     UnknownTransport(String),
@@ -1602,6 +1623,16 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
         auth,
         admission,
         tcp_idle_timeout_secs: raw.tcp_idle_timeout_secs.unwrap_or(1800),
+        // 200 matches siphon-rs's own default, so an unset config keeps
+        // the pre-0.48.11 behaviour exactly.
+        udp_rate_limit_pps: validate_rate_limit(
+            "udp_rate_limit_pps",
+            raw.udp_rate_limit_pps.unwrap_or(200),
+        )?,
+        stream_rate_limit_fps: validate_rate_limit(
+            "stream_rate_limit_fps",
+            raw.stream_rate_limit_fps.unwrap_or(200),
+        )?,
         tcp_keepalive_interval_secs: raw.tcp_keepalive_interval_secs.unwrap_or(0),
         tls_server_name,
     })
@@ -2322,6 +2353,28 @@ fn compile_outbound(
         rate_limit_per_sec,
         gateways: compiled,
     })
+}
+
+/// Bound an ingress rate limit to what `sip_ratelimit::RateLimitConfig`
+/// will actually accept, so a bad value is a startup error rather than a
+/// panic once the first packet arrives.
+///
+/// `0` is legal and means "disable this limiter" — it maps to
+/// `RateLimitConfig::disabled()`, not to `new(0, _)`, which the upstream
+/// constructor rejects outright.
+fn validate_rate_limit(key: &'static str, value: u32) -> Result<u32, CompileError> {
+    /// Mirrors `sip_ratelimit::MAX_REQUESTS_PER_WINDOW`, which is private
+    /// upstream. A drift here surfaces as a startup error naming the real
+    /// bound, not as a wrong-looking limit.
+    const MAX: u32 = 1_000_000;
+    if value > MAX {
+        return Err(CompileError::RateLimitOutOfRange {
+            key,
+            value,
+            max: MAX,
+        });
+    }
+    Ok(value)
 }
 
 fn validate_gateway_from(from: &str, gateway: &str) -> Result<(), CompileError> {

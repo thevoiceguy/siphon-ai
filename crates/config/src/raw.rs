@@ -259,6 +259,27 @@ pub struct RawSip {
     /// UDP is connectionless and unaffected.
     #[serde(default)]
     pub tcp_keepalive_interval_secs: Option<u64>,
+    /// Maximum inbound UDP **datagrams** per second from a single source
+    /// IP before the transport drops them (0.48.11). Default 200; `0`
+    /// disables the limiter.
+    ///
+    /// This is a transport-layer packet cap that sits **below**
+    /// `[sip.admission]` — it applies even with admission control off,
+    /// and it counts every datagram, not every call. At the default it
+    /// begins to bite around 50–65 calls/sec from one source IP, which
+    /// is a realistic trunk load, so raise it before load-testing from a
+    /// single generator. Drops are counted by
+    /// `siphon_ai_sip_rate_limited_total{transport="udp"}`.
+    #[serde(default)]
+    pub udp_rate_limit_pps: Option<u32>,
+    /// Maximum inbound SIP **messages** per second from a single source
+    /// IP across TCP/TLS/WS (0.48.11). Default 200; `0` disables the
+    /// limiter. Evaluated after framing, so one completed SIP message is
+    /// one unit — unlike `udp_rate_limit_pps`, which counts datagrams.
+    /// Drops are counted by `siphon_ai_sip_rate_limited_total` under the
+    /// matching `transport` label.
+    #[serde(default)]
+    pub stream_rate_limit_fps: Option<u32>,
     /// TLS reference identity for client-side dials whose SNI would
     /// otherwise be an IP literal — e.g. an in-dialog request on an
     /// inbound leg re-dialed to a Record-Route hop the carrier wrote

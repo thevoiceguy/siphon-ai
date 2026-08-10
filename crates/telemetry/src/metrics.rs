@@ -93,6 +93,24 @@ pub const RECORDINGS_TOTAL: &str = "siphon_ai_recordings_total";
 /// upload worker in `siphon-ai-http`.
 pub const RECORDING_UPLOADS_TOTAL: &str = "siphon_ai_recording_uploads_total";
 
+/// Inbound SIP packets/frames dropped by siphon-rs's per-source-IP
+/// ingress rate limit (`[sip].udp_rate_limit_pps` /
+/// `stream_rate_limit_fps`, 0.48.11), labeled by `transport`
+/// (`udp`, `tcp`, `tls`, `ws`, `wss`, `sctp`, `tls_sctp`).
+///
+/// This limiter sits **below** `[sip.admission]` and applies even when
+/// admission control is disabled — the drop happens in the transport
+/// before the packet is parsed or counted as received, so without this
+/// counter the traffic is simply gone. It was invisible until 0.48.11
+/// (#459): the cap was a hard-coded 200/sec that dropped SIP with no
+/// metric at all.
+///
+/// The source IP is deliberately **not** a label — it is unbounded
+/// cardinality (trivially so on UDP, where the source is spoofable).
+/// The throttled `sip_transport` WARN names the peer when you need to
+/// know which one.
+pub const SIP_RATE_LIMITED_TOTAL: &str = "siphon_ai_sip_rate_limited_total";
+
 /// HEP3 packets the sink has successfully written to the wire
 /// (`[hep]`, 0.12.0). Mirrors `hep_rs::UdpHepSink::sent()`, which the
 /// sampler in `crate::hep` republishes; the sink owns the count
@@ -689,6 +707,10 @@ pub fn register_descriptions() {
         "Recording uploads to object storage by result (ok, failed, dropped)."
     );
     describe_counter!(
+        SIP_RATE_LIMITED_TOTAL,
+        "Inbound SIP packets/frames dropped by the per-source-IP ingress rate limit, by transport. Sits below [sip.admission] and applies even when admission control is off."
+    );
+    describe_counter!(
         HEP_PACKETS_SENT_TOTAL,
         "HEP3 packets written to the wire (wire-level success only; an unreachable collector is not counted here — see the throttled hep_rs::udp WARN)."
     );
@@ -1011,6 +1033,7 @@ pub const ALL_COUNTERS: &[&str] = &[
     VERSTAT_TOTAL,
     RECORDINGS_TOTAL,
     RECORDING_UPLOADS_TOTAL,
+    SIP_RATE_LIMITED_TOTAL,
     HEP_PACKETS_SENT_TOTAL,
     HEP_PACKETS_DROPPED_TOTAL,
     REGISTER_ATTEMPTS_TOTAL,

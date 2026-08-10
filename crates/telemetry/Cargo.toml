@@ -42,6 +42,11 @@ tokio-rustls.workspace                = true
 hep-rs       = { workspace = true }
 sip-hep      = { workspace = true }
 forge-hep    = { workspace = true }
+# The transport observability seam (siphon-rs). We implement
+# `TransportMetrics` here so ingress rate-limit drops — which the
+# transport discards before its own receive counter — reach the
+# Prometheus registry. Already in the build graph via sip-transport.
+sip-observe  = { workspace = true }
 # Only for the exported metric-name/bucket consts in
 # `forge_engine::metrics` (#437): the embedded forge crates emit through
 # our recorder, and their histograms need exporter-side bucket

@@ -3106,3 +3106,59 @@ __ROUTE_VAD__
     assert!(msg.contains("route"), "{msg}");
     assert!(msg.contains("silero"), "{msg}");
 }
+
+/// #459: an unset config must keep the pre-0.48.11 cap exactly, or a
+/// dep bump silently changes every deployment's ingress behaviour.
+#[test]
+fn ingress_rate_limits_default_to_200() {
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
+    let cfg = load_from_str_with_env(toml, &MapEnv::new([])).expect("compiles");
+    assert_eq!(cfg.sip.udp_rate_limit_pps, 200);
+    assert_eq!(cfg.sip.stream_rate_limit_fps, 200);
+}
+
+#[test]
+fn ingress_rate_limits_custom_and_zero() {
+    for (val, want) in [("2000", 2000u32), ("0", 0)] {
+        let toml = format!(
+            r#"
+[sip]
+listen = "127.0.0.1:5060"
+udp_rate_limit_pps = {val}
+stream_rate_limit_fps = {val}
+
+[bridge]
+ws_url = "wss://x/y"
+"#
+        );
+        let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+        assert_eq!(cfg.sip.udp_rate_limit_pps, want);
+        assert_eq!(cfg.sip.stream_rate_limit_fps, want);
+    }
+}
+
+/// The upstream bucket rejects out-of-range values when it is built,
+/// which is after the listeners are up. Fail at load instead.
+#[test]
+fn ingress_rate_limit_out_of_range_fails_at_load() {
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+udp_rate_limit_pps = 2000000
+
+[bridge]
+ws_url = "wss://x/y"
+"#;
+    let err = load_from_str_with_env(toml, &MapEnv::new([])).expect_err("must not compile");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("udp_rate_limit_pps") && msg.contains("1000000"),
+        "error should name the key and the real bound; got {msg:?}"
+    );
+}

@@ -33,6 +33,7 @@ untouched production daemon on `:5060`.
 | First audio out (p95) | **19 ms**, identical at every concurrency from 25 to 250 |
 | 60-min soak at 200 | RSS +1.3 MB, fds and threads immovable, **zero call drops** |
 | Behaviour past the cap | **503 shed, exact, admitted calls unaffected** |
+| Cost of turning features on | HEP **free**; recording **+81%** CPU/call; neural VAD **+191%** (§7.2) |
 
 **250 and 75 cps are floors, not ceilings.** The ramp ended where the plan
 said to stop, with two-thirds of the CPU idle and quality flat. The rate ramp
@@ -148,6 +149,79 @@ At 10k calls/day this projects to ~60–100 MB/day — a restart-or-exhaust
 trajectory over weeks, not a cosmetic issue. This is separate from, and on top
 of, the legitimate ~0.23 MB/call high-water pooling.
 
+## §7.2 — feature cost deltas
+
+Each variant is one fixed reference point — **200 concurrent, 10 cps, 4-minute
+hold** — with the daemon restarted between variants and one knob changed at a
+time. §7.2 asks for a re-ramp per feature; the delta a full ramp yields is the
+same one a single point at 80% of the knee gives, and anything that moves the
+knee moves CPU-per-call here first.
+
+| Variant | CPU/call | vs baseline | CPU (4 vCPU) | RSS | MOS min/avg | Loss | first audio p95 |
+|---|---|---|---|---|---|---|---|
+| **baseline** (G.711, energy VAD) | 0.54 %/core | — | 27.0% | 56.8 MB | 4.428 / 4.436 | 0 | 19 ms |
+| `[recording] mode="always"` | 0.98 %/core | **+81%** | 48.9% | 86.2 MB | 3.530 / 4.420 | 0.00169 | 19 ms |
+| `[hep] enabled=true` | 0.54 %/core | **+1%** | 27.2% | 53.6 MB | 4.429 / 4.436 | 0 | 19 ms |
+| `vad="neural"` | 1.57 %/core | **+191%** | **78.4%** | **330.9 MB** | 4.266 / 4.412 | 0.00240 | **198 ms** |
+
+All four ran 200/200 calls with zero failed setups and `caller_hangup` on every
+termination. Read the rows as costs, not as knees.
+
+**Recording — +81% CPU, and it is the first thing here that touches media.**
+Mean CPU nearly doubles and the peak is burstier still (319.6% of one core
+against baseline's 117.2%), consistent with WAV writer flushes rather than
+steady load. It is also the only variant to lose packets at a rate the CDRs
+notice: 4,014 lost of 2.37M (0.169%) and a MOS floor of 3.530 against
+baseline's 4.428. Both stay inside §4's SLOs — loss ≤ 1%, MOS *p50* ≥ 4.0, and
+the average holds at 4.420 — so this is not a failure, but "recording is free"
+is not supportable either. 200 four-minute calls wrote 1.2 GB. Recording to the
+same spindle as anything latency-sensitive deserves thought.
+
+**HEP — free, but only the half this rig can exercise.** +1% CPU is inside
+sampling noise, and quality is unchanged. The caveat matters: the sink received
+1,480 packets across 200 calls, ≈7.4 per call, which is SIP plus one CDR chunk
+per call and essentially no RTCP. **SIPp's `rtpstream` sends no RTCP**, so the
+per-RTCP-event UDP fan-out that §7.2 expected to be the cost was never
+generated. What is measured here is that HEP's SIP + log + CDR path is free.
+The RTCP path is untested and this number must not be quoted as if it covered
+it — a real endpoint sending RR every 5 s over a 4-minute call would multiply
+the packet count by roughly an order of magnitude.
+
+No drop-rate line accompanies this row because **there is no metric to read**:
+`siphon_ai_hep_*` is documented in five places and exported nowhere
+([#460](https://github.com/thevoiceguy/siphon-ai/issues/460)). The plan's §8
+trap that HEP-on runs "need their own drop-rate line" is currently impossible
+to satisfy.
+
+**Neural VAD — the most expensive feature by a wide margin, as §7.2 predicted.**
+Nearly triple the per-call CPU and ~6× the per-call memory. At 200 concurrent it
+draws 78.4% of all four cores, which is §4's ≤80% headroom SLO almost exactly,
+and quality degrades the way saturation predicts: first audio p95 goes 19 ms →
+198 ms (max 373), loss appears, the MOS floor drops to 4.266. **At 25 concurrent
+the same build is clean** — first audio p95 18 ms, MOS min 4.432 — so this is
+saturation, not an inherent latency cost of the model.
+
+The knee therefore moves: **≥250 concurrent on energy VAD, below 200 on
+neural**, on this hardware. Two measurements worth carrying separately, both
+taken at 25 concurrent where nothing contends:
+
+- **CPU: +1.47 %/core per call** attributable to the model — ~470 µs per 32 ms
+  window, against the ~60–80 µs `docs/CONFIG.md` quotes
+  ([#461](https://github.com/thevoiceguy/siphon-ai/issues/461)).
+- **Memory: ~1.6 MB/call**, against energy's ~0.79 MB/call. The cost is *per
+  call*, not a one-time model load, and the model loads on the **first call**,
+  not at startup — an idle neural-VAD daemon sits at 14.6 MB and tells you
+  nothing about its footprint.
+
+### Not run
+
+- **`[recording.storage]` upload** — §7.2 asks for the effect on teardown
+  latency. RC-08 proved the upload path works, including spool durability
+  across a daemon restart, but it has never been run under load.
+- **Opus** — the rig cannot generate it. `call_with_audio.xml` replays a PCMU
+  pcap through SIPp's `rtpstream`; an Opus row needs an Opus pcap and an SDP
+  offer to match, which is a rig change rather than a run.
+
 ## Corrections this run forced back into the plan
 
 - **§4/§5 setup-latency SLO moved 250 ms → 200 ms.** `SDP_NEGOTIATE_BUCKETS`
@@ -161,10 +235,21 @@ of, the legitimate ~0.23 MB/call high-water pooling.
 - **§6.3's RSS criterion rewritten.** "Within 10% of idle" can never hold for
   pools sized to peak concurrency; it was replaced with the two tests that
   actually separate pooling from a leak.
+- **§7.2 no longer demands a full re-ramp per feature** — a single reference
+  point at 80% of the knee yields the same delta in a fraction of the time —
+  and now says to take the *marginal* cost at low concurrency, because at 80%
+  of the knee contention understates per-call cost and overstates latency
+  impact. Neural VAD measured +1.03 %/core at 200 concurrent and +1.47 at 25.
+- **§7.2's "watch HEP drop metrics" and §8's HEP drop-rate trap are struck.**
+  No such metric exists (#460).
+- **§7.2 gained the caveat that a loopback generator cannot price HEP's RTCP
+  fan-out**, because SIPp sends no RTCP.
 
 ## Not measured
 
 Multi-node scaling; TLS + SRTP; any network path (all loopback); mid-call WS
-reconnect; anything beyond one hour; the feature-cost deltas in §7.2
-(recording, HEP, neural VAD, Opus) — all still to run. `siphon_ai_calls_active`
-does not exist until the first call, so alerts on it must handle `absent()`.
+reconnect; anything beyond one hour. Of §7.2's feature deltas, recording, HEP
+and neural VAD are measured above; **Opus and `[recording.storage]` under load
+are not**. `siphon_ai_calls_active` does not exist until the first call, so
+alerts on it must handle `absent()`; `siphon_ai_hep_*` does not exist at all
+(#460).

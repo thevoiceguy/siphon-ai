@@ -295,9 +295,32 @@ it is the part nobody else publishes:
 |---|---|---|
 | `[recording] mode="always"` | disk I/O + a writer task per call | knee drops from N to M (−x%) |
 | `[recording.storage]` upload | teardown-time spool + background upload | effect on teardown latency |
-| `[hep] enabled` | UDP fan-out per SIP/RTCP event | knee delta; watch HEP drop metrics |
+| `[hep] enabled` | UDP fan-out per SIP/RTCP event | knee delta; ~~watch HEP drop metrics~~ — **no `siphon_ai_hep_*` metric exists (#460)** |
 | `[route.media] vad="neural"` | Silero inference per frame | knee delta — expect this to be the most expensive |
 | Opus instead of G.711 | encode/decode per frame | knee delta |
+
+**A full re-ramp per feature is not required.** Six steps × five features is
+~2.5 hours to produce a delta that one fixed point already gives. Run every
+variant at a single reference point — **80% of the baseline knee**, which §4
+already has a clean row for — restart the daemon between variants, and change
+one knob at a time. Anything that moves the knee moves CPU-per-call there
+first. Reserve the full ramp for a feature whose cost turns out to be
+non-linear in concurrency.
+
+**Measure the marginal cost away from saturation.** At 80% of the knee an
+expensive feature is contending for CPU, which *understates* its per-call cost
+as fixed overhead amortises and *overstates* its latency impact. Neural VAD
+measured +1.03 %/core per call at 200 concurrent but +1.47 at 25, and its
+first-audio p95 was 198 ms at 200 against 18 ms at 25 — same build, same
+config. Publish the low-concurrency number as the cost and the
+high-concurrency number as the capacity consequence; they are different
+claims.
+
+**A loopback generator cannot exercise the HEP RTCP path.** SIPp's `rtpstream`
+sends no RTCP, so `[hep] enabled` ships SIP, log and CDR chunks only —
+≈7 packets per call instead of the per-RTCP-event fan-out this row is meant to
+price. Do not publish a HEP cost as if it covered RTCP until §10's tier 2 runs
+it with a real endpoint.
 
 ### 7.3 Publish the limits too
 
@@ -317,9 +340,11 @@ us the first time someone hits the wall and reports it as a bug.
   it exits. Use `python3 -u` when tailing a running test.
 - **Prod ships `[recording] mode = "always"`.** If you load-test against a
   production-shaped config you are measuring the recorder's disk I/O.
-- **HEP `queue_capacity` defaults to 256.** Under load it drops by design;
-  that's `siphon_ai_hep_*` moving, not a bug — but it does mean HEP-on runs
-  need their own drop-rate line in the results.
+- **HEP `queue_capacity` defaults to 256.** Under load it drops by design —
+  but you cannot see it happen. `siphon_ai_hep_*` is documented in five places
+  and exported nowhere (#460), and a dead collector produces no metric, no log
+  line and no `/ready` change. A HEP-on run currently has no drop-rate line
+  available to it; say so rather than reporting zero drops.
 - **Re-sample a gauge before calling it stale.** Sampling in the same breath
   as the event that clears it produces phantom leaks.
 

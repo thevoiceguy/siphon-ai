@@ -130,7 +130,16 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # main branch and replace the rev hashes here (see CLAUDE.md §7.5).
 
 # siphon-rs — RFC 3261 SIP stack.
-# Bumped 2026-08-05 `74b903b9afe7` → `daee496e1a17` = siphon-rs #87.
+# Bumped 2026-08-10 `daee496e1a17` → `9ae6ce2cee5a` = siphon-rs #89.
+# #89: the per-source ingress packet cap (200/sec, UDP datagrams and
+# stream frames) becomes observable and configurable — it was a
+# hard-coded constant that dropped SIP before the receive counter, with
+# a warning carrying no count, and could be neither raised nor disabled
+# (siphon-ai #459). Adds `set_udp_rate_limit` / `set_stream_rate_limit`
+# and a `TransportMetrics::on_rate_limited` hook; the limiters move onto
+# sip-ratelimit token buckets. Defaults are unchanged (200/sec, burst
+# 200, 60s idle TTL) so capacity numbers carry over.
+# (Prior: `daee496e1a17` = siphon-rs #87.)
 # #87: sip-auth discriminates a nonce reuse-window rejection (correct
 # digest, known valid nonce, >max_request_age since its last successful
 # auth — rejected before the digest is compared) from a credential
@@ -151,24 +160,31 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 #  `6fd432270bb8` = #67 dialog_manager share, siphon-ai #324;
 #  `fcaff011f9c6` = #65 invite_with_from, siphon-ai #316;
 #  `3a4fc312ade3` = #64 TLS-SNI-is-hostname, siphon-ai #312.)
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ae6ce2cee5a" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ae6ce2cee5a" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ae6ce2cee5a", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ae6ce2cee5a" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ae6ce2cee5a" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ae6ce2cee5a" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ae6ce2cee5a" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ae6ce2cee5a" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ae6ce2cee5a" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
 # (distinct from forge-media's pinned sip-sdp). Used by the outbound
 # delayed-offer answer generator to hand the UAC a SessionDescription it
 # accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ae6ce2cee5a" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ae6ce2cee5a" }
+# sip-observe — the transport-layer observability seam. We implement its
+# `TransportMetrics` trait in siphon-ai-telemetry and install it with
+# `set_transport_metrics`, which is the only way to see ingress
+# rate-limit drops: the hook is defaulted to a no-op upstream, so an
+# embedder that installs nothing (as we did until 0.48.11) silently gets
+# the `NoopTransportMetrics` fallback (siphon-ai #459).
+sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ae6ce2cee5a" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "daee496e1a17" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ae6ce2cee5a" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #

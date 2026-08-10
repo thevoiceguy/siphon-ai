@@ -692,6 +692,32 @@ impl Runtime {
         let routing_handler = Arc::new(routing_handler_builder);
 
         // ─── SIP transports + transaction manager ──────────────────
+        // Per-source-IP ingress rate limits (siphon-rs #89). These are the
+        // transport's own packet/frame caps: they sit BELOW
+        // `[sip.admission]` and apply even with admission control off, and
+        // a dropped packet never becomes a SIP message — so without the
+        // metrics install below, the traffic vanishes with no trace
+        // (#459). Both setters are once-per-process and only take effect
+        // before the first packet, hence here rather than on reload.
+        //
+        // Installing our TransportMetrics is what makes the drops
+        // countable at all: `on_rate_limited` is defaulted to a no-op
+        // upstream, so an embedder that installs nothing gets the Noop
+        // fallback and sees nothing.
+        if !siphon_ai_telemetry::install_transport_metrics() {
+            debug!("transport metrics already installed; keeping the existing implementation");
+        }
+        apply_ingress_rate_limit(
+            "udp_rate_limit_pps",
+            sip.udp_rate_limit_pps,
+            sip_transport::set_udp_rate_limit,
+        );
+        apply_ingress_rate_limit(
+            "stream_rate_limit_fps",
+            sip.stream_rate_limit_fps,
+            sip_transport::set_stream_rate_limit,
+        );
+
         // Established-connection idle timeout for inbound SIP-over-TCP/TLS.
         // A SIP trunk (e.g. CUCM) keeps its signaling connection open for a
         // call's whole life while sending no SIP — RTP is out-of-band — so
@@ -2464,6 +2490,49 @@ fn build_outbound_uac(
     builder
         .build()
         .map_err(|e| anyhow!("outbound UAC build: {e}"))
+}
+
+/// Apply one per-source ingress rate limit, logging what took effect.
+///
+/// `0` disables the limiter outright. Any other value is a per-second
+/// cap with an equal burst — `RateLimitConfig::new(n, 1)` sets
+/// `burst_capacity = n`, which preserves the pre-0.48.11 behaviour of a
+/// 1-second window rather than becoming a smooth drip.
+///
+/// The setter returns `false` if the limiter was already initialised —
+/// either a second `Runtime` in one process (tests), or a packet that
+/// arrived first. Both mean the configured value did NOT take effect, so
+/// this warns rather than staying quiet: silently running at a different
+/// cap than the config states is exactly the failure #459 was about. The
+/// range was validated at config load, so the `expect` is unreachable
+/// for any config that got this far.
+fn apply_ingress_rate_limit(
+    key: &'static str,
+    value: u32,
+    set: impl FnOnce(sip_transport::RateLimitConfig) -> bool,
+) {
+    let config = if value == 0 {
+        sip_transport::RateLimitConfig::disabled()
+    } else {
+        sip_transport::RateLimitConfig::new(value, 1)
+            .expect("[sip] rate limit validated at config load")
+    };
+    if !set(config) {
+        warn!(
+            key,
+            value, "ingress rate limit already initialised; configured value NOT applied"
+        );
+        return;
+    }
+    if value == 0 {
+        info!(key, "per-source SIP ingress rate limit disabled");
+    } else {
+        info!(
+            key,
+            per_sec = value,
+            "per-source SIP ingress rate limit set (applies below [sip.admission])"
+        );
+    }
 }
 
 fn rtp_port_pool(media: &MediaConfig) -> Result<PortPoolConfig> {

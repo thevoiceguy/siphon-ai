@@ -27,6 +27,7 @@ pub mod log_filter;
 pub mod metrics;
 pub mod otel;
 pub mod readiness;
+pub mod transport;
 
 pub use admin::{
     AddParticipantRequest, AdminCallRegistry, AdminConference, AdminOutbound, AdminPark,
@@ -58,3 +59,4 @@ pub use metrics::{
 };
 pub use metrics_exporter_prometheus::PrometheusHandle;
 pub use readiness::ReadinessFlag;
+pub use transport::{install as install_transport_metrics, SiphonTransportMetrics};

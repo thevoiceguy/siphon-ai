@@ -835,6 +835,14 @@ pub struct RawCdrWebhook {
     /// retried by a background worker that survives restarts.
     #[serde(default)]
     pub spool_dir: Option<String>,
+    /// How long a spooled delivery may keep failing before it is
+    /// discarded, in seconds (0.48.12). Default 259200 (72 h); `0`
+    /// never discards on age, leaving the per-sink file cap as the only
+    /// bound. This is the deployment's tolerance for a receiver outage
+    /// — a receiver down longer than this loses whatever aged out while
+    /// it was away (siphon-ai #467).
+    #[serde(default)]
+    pub spool_max_age_secs: Option<u64>,
     #[serde(default)]
     pub retry_max: Option<u32>,
     #[serde(default)]
@@ -940,6 +948,14 @@ pub struct RawWebhooks {
     /// retried by a background worker that survives restarts.
     #[serde(default)]
     pub spool_dir: Option<String>,
+    /// How long a spooled delivery may keep failing before it is
+    /// discarded, in seconds (0.48.12). Default 259200 (72 h); `0`
+    /// never discards on age, leaving the per-sink file cap as the only
+    /// bound. This is the deployment's tolerance for a receiver outage
+    /// — a receiver down longer than this loses whatever aged out while
+    /// it was away (siphon-ai #467).
+    #[serde(default)]
+    pub spool_max_age_secs: Option<u64>,
     /// Allowlist of event types to deliver. Empty / unset = all.
     /// Valid values today: `"call_start"`, `"call_end"`. Unknown
     /// names are accepted but never match (no events from them).
@@ -1009,6 +1025,14 @@ pub struct RawAuditWebhook {
     /// retried by a background worker that survives restarts.
     #[serde(default)]
     pub spool_dir: Option<String>,
+    /// How long a spooled delivery may keep failing before it is
+    /// discarded, in seconds (0.48.12). Default 259200 (72 h); `0`
+    /// never discards on age, leaving the per-sink file cap as the only
+    /// bound. This is the deployment's tolerance for a receiver outage
+    /// — a receiver down longer than this loses whatever aged out while
+    /// it was away (siphon-ai #467).
+    #[serde(default)]
+    pub spool_max_age_secs: Option<u64>,
     #[serde(default)]
     pub retry_max: Option<u32>,
     #[serde(default)]
@@ -1072,6 +1096,14 @@ pub struct RawQualityWebhook {
     /// retried by a background worker that survives restarts.
     #[serde(default)]
     pub spool_dir: Option<String>,
+    /// How long a spooled delivery may keep failing before it is
+    /// discarded, in seconds (0.48.12). Default 259200 (72 h); `0`
+    /// never discards on age, leaving the per-sink file cap as the only
+    /// bound. This is the deployment's tolerance for a receiver outage
+    /// — a receiver down longer than this loses whatever aged out while
+    /// it was away (siphon-ai #467).
+    #[serde(default)]
+    pub spool_max_age_secs: Option<u64>,
     #[serde(default)]
     pub retry_max: Option<u32>,
     #[serde(default)]

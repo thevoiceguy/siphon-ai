@@ -801,7 +801,7 @@ pub fn register_descriptions() {
     describe_gauge!(
         WEBHOOK_SPOOL_DEPTH,
         Unit::Count,
-        "Webhook/CDR deliveries waiting in the durable spool, by sink (lifecycle, cdr)."
+        "Deliveries waiting in the durable spool, by sink (lifecycle, cdr, audit, quality)."
     );
     describe_gauge!(
         RECORDING_UPLOAD_SPOOL_DEPTH,
@@ -924,7 +924,7 @@ pub fn register_descriptions() {
     );
     describe_counter!(
         WEBHOOK_DELIVERIES_TOTAL,
-        "Outbound webhook/CDR deliveries by sink (lifecycle, cdr) and result (delivered, rejected, dropped)."
+        "Outbound deliveries by sink (lifecycle, cdr, audit, quality) and result (delivered, rejected, dropped, spooled)."
     );
     describe_counter!(
         WEBHOOK_DELIVERY_ATTEMPTS_TOTAL,

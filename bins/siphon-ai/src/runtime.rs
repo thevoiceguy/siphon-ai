@@ -2098,6 +2098,7 @@ pub(crate) fn build_webhook_sink(cfg: WebhooksConfig) -> Result<WebhookSinkHandl
         secret: cfg.secret,
         spool_dir: cfg.spool_dir,
         retry_max: cfg.retry_max,
+        spool_max_age_secs: cfg.spool_max_age_secs,
         timeout_ms: cfg.timeout.as_millis() as u64,
     })
     .map_err(|e| anyhow!("lifecycle webhook client build failed: {e}"))?;
@@ -2179,6 +2180,7 @@ pub(crate) async fn build_audit_sink(cfg: &AuditConfig) -> Result<AuditSinkHandl
             secret: webhook_cfg.secret.clone(),
             spool_dir: webhook_cfg.spool_dir.clone(),
             retry_max: webhook_cfg.retry_max,
+            spool_max_age_secs: webhook_cfg.spool_max_age_secs,
             timeout_ms: webhook_cfg.timeout.as_millis() as u64,
         })
         .map_err(|e| anyhow!("audit webhook client build failed: {e}"))?;
@@ -2229,6 +2231,7 @@ pub(crate) async fn build_quality_sink(
             secret: webhook_cfg.secret.clone(),
             spool_dir: webhook_cfg.spool_dir.clone(),
             retry_max: webhook_cfg.retry_max,
+            spool_max_age_secs: webhook_cfg.spool_max_age_secs,
             timeout_ms: webhook_cfg.timeout.as_millis() as u64,
         })
         .map_err(|e| anyhow!("quality webhook client build failed: {e}"))?;
@@ -2269,6 +2272,7 @@ fn build_cdr_webhook_sink(cfg: &CdrWebhookConfig) -> Result<CdrSinkHandle> {
         secret: cfg.secret.clone(),
         spool_dir: cfg.spool_dir.clone(),
         retry_max: cfg.retry_max,
+        spool_max_age_secs: cfg.spool_max_age_secs,
         timeout_ms: cfg.timeout.as_millis() as u64,
     })
     .map_err(|e| anyhow!("CDR webhook client build failed: {e}"))?;

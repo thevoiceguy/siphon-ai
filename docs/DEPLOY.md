@@ -1152,9 +1152,23 @@ Set `spool_dir` to make delivery durable. A delivery that exhausts the
 in-memory budget is written to that directory and re-attempted by a
 background worker; the worker resumes pending entries after a daemon
 **restart**. The happy path is unchanged (no disk I/O — entries are only
-written on failure). Entries are retried oldest-first with capped backoff;
-a `4xx` rejection or a poison entry that never succeeds is eventually
-discarded (with a metric). The directory is created and write-probed at
+written on failure). Entries are retried oldest-first with capped backoff (10 s
+doubling to a 5-minute ceiling). A `4xx` rejection is discarded on the
+first attempt — that is the receiver telling you the payload is bad.
+
+**Durability has a horizon.** An entry that keeps failing is discarded
+once it is older than `spool_max_age_secs` (default 72 h; `0` disables
+the age check entirely). That value is your tolerance for a *receiver
+outage*: if the receiver is down longer, the events that age out while
+it is away are lost, counted as
+`siphon_ai_webhook_deliveries_total{result="dropped"}` and logged with
+`spooled delivery exceeded spool_max_age_secs`. Set `0` for a stream
+that must not lose records — an audit sink in particular — and rely on
+the file cap instead.
+
+Before 0.48.12 the horizon was a hard-coded 100 drain attempts, which
+the backoff turned into exactly 8 hours, undocumented and
+unconfigurable (#467). The directory is created and write-probed at
 startup, so a bad path fails the daemon loudly rather than at the first
 failed delivery. Bound disk with the per-sink file cap (a full spool drops
 the newest delivery rather than evicting an already-persisted one).

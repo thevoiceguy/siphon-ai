@@ -3162,3 +3162,31 @@ ws_url = "wss://x/y"
         "error should name the key and the real bound; got {msg:?}"
     );
 }
+
+/// #467: the spool's outage budget must be settable, and must default
+/// to something an operator can survive a weekend with.
+#[test]
+fn spool_max_age_defaults_and_overrides() {
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[webhooks]
+enabled = true
+url = "http://127.0.0.1:9/hook"
+spool_dir = "/tmp/siphon-test-spool"
+"#;
+    let cfg = load_from_str_with_env(toml, &MapEnv::new([])).expect("compiles");
+    assert_eq!(cfg.webhooks.spool_max_age_secs, 72 * 60 * 60);
+
+    // 0 = never discard on age (the audit-grade setting).
+    let toml = toml.replace(
+        "spool_dir = \"/tmp/siphon-test-spool\"",
+        "spool_dir = \"/tmp/siphon-test-spool\"\nspool_max_age_secs = 0",
+    );
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    assert_eq!(cfg.webhooks.spool_max_age_secs, 0);
+}

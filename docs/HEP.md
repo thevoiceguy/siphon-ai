@@ -45,13 +45,52 @@ threads together into one call view.
 HEP emission must never block the audio path (CLAUDE.md §4.7). Concretely:
 
 - Sink methods are non-blocking. A full queue drops the packet and ticks
-  `siphon_ai_hep_packets_dropped_total`.
-- An unreachable collector flips `siphon_ai_hep_collector_up` to `0`; the
-  next successful send flips it back.
-- The daemon does NOT log every drop. One warning per minute max if drops
-  are happening. (CLAUDE.md §4.7.)
+  `siphon_ai_hep_packets_dropped_total{reason="queue_full"}`.
+- The daemon does NOT log every drop or every failed send. One warning per
+  minute max, from the `hep_rs::udp` target. (CLAUDE.md §4.7.)
 - The audio path never calls into the sink synchronously — forge's RTCP
   recv loop queues and returns; a worker task handles the actual UDP send.
+
+### What the metrics can and cannot tell you
+
+Two series are exported, both mirrored every 10 s from the sink's own
+counters (they live upstream because SIP chunks come from `sip-hep` and
+RTCP/QoS from `forge-hep`, neither of which passes through siphon-ai):
+
+| Metric | Means |
+|---|---|
+| `siphon_ai_hep_packets_sent_total` | packets written to the wire |
+| `siphon_ai_hep_packets_dropped_total{reason="queue_full"}` | producer dropped on a full `[hep].queue_capacity` |
+
+Both exist on `/metrics` from startup, before any call — so an alert can
+be written against them directly rather than having to tolerate an absent
+series.
+
+**Neither one detects an unreachable collector.** `sent` counts wire-level
+success, so a collector that is up but discarding — a black-holing NAT, a
+heplify-server that isn't writing to storage — still counts as sent. And a
+*refused* send is counted in neither series: it is not a queue-full drop,
+and it never reached the wire. That failure is reported by a log line, not
+a metric:
+
+```
+WARN hep_rs::udp: HEP UDP send failed; further failures suppressed until
+     throttle elapses collector=127.0.0.1:9060 error=Connection refused
+```
+
+**Alert on that line.** It is tempting to alert instead on
+`siphon_ai_hep_packets_sent_total` going flat, and that does not work: the
+sink writes to a *connected* UDP socket, so the refusal comes back as
+`ECONNREFUSED` on the *next* send — one send consumes the queued ICMP
+error, the following one finds the queue empty and succeeds. Measured
+against a dead collector on the same host, the counter kept climbing at
+almost exactly **half** rate (35 of ~70 attempted) rather than stopping. A
+remote collector that black-holes without returning ICMP counts 100%. A
+halving is not something a threshold can distinguish from a quiet period.
+
+There is deliberately no `siphon_ai_hep_collector_up` — the sink has no
+send-failure counter to build one from, and a gauge derived by guesswork
+would be worse than none (siphon-ai #460).
 
 ## Configuration
 
@@ -137,14 +176,31 @@ sipp -sf test-harness/sipp-scenarios/basic_call_then_bye.xml \
 The call appears in the Homer UI within a few seconds. If it doesn't,
 work the diagnostics in order:
 
-1. `siphon_ai_hep_collector_up` from `/metrics` — `0` means the daemon
-   can't reach the collector. Check the address, firewall, and whether
-   heplify-server is listening on 9060/udp.
-2. `siphon_ai_hep_packets_sent_total` — should tick on every call.
-3. `heplify_*` metrics from heplify-server's own `/metrics` — confirms
-   packets arrived.
-4. Postgres `hep_proto_1_default` table — `SELECT count(*)` shows whether
+1. The startup line — `HEP3 shipping active (...) collector=... capture_id=...`.
+   No line means `[hep].enabled` is false or the config never loaded, and
+   nothing below will tell you anything.
+2. `journalctl -u siphon-ai | grep hep_rs` — a `HEP UDP send failed ...
+   Connection refused` warning means the daemon is emitting and the
+   collector is not listening. Check the address, the firewall, and
+   whether heplify-server is bound to 9060/udp. This is the check that
+   replaces a `collector_up` gauge, so do it before the metrics below.
+3. `siphon_ai_hep_packets_sent_total` from `/metrics` — should climb on
+   every call. Dead flat while calls are being handled, with no warning
+   from step 2, means nothing is being *emitted* (wrong `[hep]` config)
+   rather than nothing being delivered. Note this only distinguishes
+   "emitting nothing" from "emitting" — a collector that is down still
+   moves this counter (see above), so it cannot stand in for step 2.
+4. `siphon_ai_hep_packets_dropped_total{reason="queue_full"}` — climbing
+   means `[hep].queue_capacity` (default 256) is too small for the call
+   rate. Packets are being lost before the wire; raise it.
+5. `heplify_*` metrics from heplify-server's own `/metrics` — confirms
+   packets arrived. If step 3 climbs and this doesn't, the loss is on the
+   network path, not in siphon-ai.
+6. Postgres `hep_proto_1_default` table — `SELECT count(*)` shows whether
    SIP chunks landed in storage.
+
+Steps 2 and 3 together are the substitute for the `collector_up` gauge
+this daemon does not have; see the section above for why.
 
 ## Adding new emissions
 

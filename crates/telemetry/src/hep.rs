@@ -17,9 +17,21 @@
 //! than duplicating the packet-composition here.
 //!
 //! Per CLAUDE.md §4.7 emission is best-effort, never blocking. The
-//! underlying `UdpHepSink` drops on full and the drop counter is
-//! surfaced via metrics so operators see degradation without the
-//! call path stalling.
+//! underlying `UdpHepSink` drops on a full queue and counts it; a
+//! sampler task here mirrors that count — and the wire-send count —
+//! into [`HEP_PACKETS_DROPPED_TOTAL`] and [`HEP_PACKETS_SENT_TOTAL`]
+//! so operators see degradation without the call path stalling.
+//!
+//! **What the metrics cannot tell you.** `sent` counts wire-level
+//! success, so a collector that is up but discarding still counts;
+//! and an *unreachable* collector is counted nowhere — the send
+//! failure is detected inside the upstream worker, which has no
+//! counter for it, so those packets are neither `sent` nor
+//! `dropped`. The signal for that case is the upstream throttled
+//! `hep_rs::udp` WARN, which is why `hep_rs` must stay in the
+//! daemon's default log filter (`bins/siphon-ai/src/main.rs`). A
+//! `collector_up` gauge would need a send-failure counter added to
+//! `hep-rs` — deliberately not faked here (siphon-ai #460).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -28,9 +40,12 @@ use std::time::SystemTime;
 use hep_rs::{
     HepPacket, HepProtocol, HepSinkHandle, IpProto, UdpHepSink, UdpHepSinkConfig, UdpHepSinkError,
 };
+use metrics::counter;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tracing::warn;
+
+use crate::metrics::{HEP_PACKETS_DROPPED_TOTAL, HEP_PACKETS_SENT_TOTAL};
 
 /// Telemetry-owned HEP plumbing. Holds the shared `Arc<dyn HepSink>`
 /// for both the sip-hep / forge-hep emitters and SiphonAI's own
@@ -60,6 +75,42 @@ pub struct HepWorkerHandle {
     /// `UdpHepSink` method, so the worker owner holds its own clone.
     sink: UdpHepSink,
     worker: Option<JoinHandle<()>>,
+    /// Periodic mirror of the sink's internal counters into the
+    /// Prometheus registry. See [`sample_counters`].
+    sampler: Option<JoinHandle<()>>,
+}
+
+/// How often [`sample_counters`] mirrors `hep-rs`'s atomics into the
+/// metrics registry. HEP volume is a few packets per call, so the
+/// series only needs to be fresher than a scrape interval; 10 s keeps
+/// the task's cost to two atomic loads per tick while staying well
+/// inside the shortest scrape anyone sensibly configures.
+const HEP_METRICS_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Mirror `hep-rs`'s counters into the metrics registry.
+///
+/// The counts live upstream because SIP chunks are emitted by
+/// `sip-hep` and RTCP/QoS by `forge-hep` — neither passes through this
+/// crate, so there is no local call site to instrument. `absolute`
+/// rather than `increment` because both upstream values are monotonic
+/// totals: mirroring them directly cannot drift, whereas a delta
+/// computed here would double-count on any missed tick.
+fn publish_counters(sink: &UdpHepSink) {
+    counter!(HEP_PACKETS_SENT_TOTAL).absolute(sink.sent());
+    counter!(HEP_PACKETS_DROPPED_TOTAL, "reason" => "queue_full").absolute(sink.drops());
+}
+
+/// Republish [`publish_counters`] every
+/// [`HEP_METRICS_SAMPLE_INTERVAL`] until cancelled.
+async fn sample_counters(sink: UdpHepSink) {
+    let mut ticker = tokio::time::interval(HEP_METRICS_SAMPLE_INTERVAL);
+    // The first tick completes immediately; skip rather than burst if
+    // the runtime ever stalls us past a whole interval.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        publish_counters(&sink);
+    }
 }
 
 /// How long to wait for the HEP worker to flush its queue on shutdown
@@ -82,11 +133,26 @@ impl HepWorkerHandle {
     /// the channel never closes on its own; `UdpHepSink::shutdown`
     /// closes the *receiver* instead, which drains regardless.
     pub async fn shutdown(mut self) {
+        // Stop the periodic sampler first: the authoritative final
+        // publish happens below, after the drain, and a tick landing
+        // mid-drain would only be superseded.
+        if let Some(sampler) = self.sampler.take() {
+            sampler.abort();
+        }
         let Some(worker) = self.worker.take() else {
+            // Nothing to drain, but the counters may still have moved
+            // since the last tick.
+            publish_counters(&self.sink);
             return;
         };
         self.sink.shutdown();
-        match tokio::time::timeout(HEP_DRAIN_GRACE, worker).await {
+        let drained = tokio::time::timeout(HEP_DRAIN_GRACE, worker).await;
+        // Publish after the drain so the last packets — including the
+        // drain-forced calls' CDR chunks, and any `send` that raced
+        // the channel close and counted as a drop — are represented in
+        // the final scrape rather than lost with the process.
+        publish_counters(&self.sink);
+        match drained {
             Ok(_) => {}
             Err(_) => {
                 // The worker didn't finish flushing in time — almost
@@ -164,9 +230,19 @@ impl HepTelemetry {
             capture_password,
             node_id,
         };
+        // Publish once before anything can be emitted, so both series
+        // exist on `/metrics` from startup. The `metrics` facade
+        // registers lazily — without this an alert on
+        // `siphon_ai_hep_packets_dropped_total` would have to survive
+        // the series being *absent* until the first drop, which is
+        // exactly when nobody is looking at it.
+        publish_counters(&shutdown_sink);
+        let sampler = tokio::spawn(sample_counters(shutdown_sink.clone()));
+
         let worker_handle = HepWorkerHandle {
             sink: shutdown_sink,
             worker: Some(worker),
+            sampler: Some(sampler),
         };
         Ok((telemetry, worker_handle))
     }
@@ -316,5 +392,89 @@ mod tests {
             Some("abc-123@pbx.example.com")
         );
         assert_eq!(pkt.payload, payload);
+    }
+
+    /// Render `/metrics` under a per-test recorder, the same way
+    /// `crate::metrics`' own tests do.
+    fn rendered<F: FnOnce()>(f: F) -> String {
+        let recorder = crate::metrics::prometheus_builder()
+            .expect("builder")
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            crate::metrics::register_descriptions();
+            f();
+        });
+        handle.render()
+    }
+
+    fn probe_packet() -> HepPacket {
+        let zero = unspecified_addr();
+        HepPacket {
+            capture_id: 1,
+            capture_password: None,
+            protocol: HepProtocol::Log,
+            transport: IpProto::Udp,
+            src: zero,
+            dst: zero,
+            timestamp: SystemTime::now(),
+            correlation_id: None,
+            payload: b"probe".to_vec(),
+        }
+    }
+
+    /// #460: both series must exist before the first packet, so an
+    /// alert can be written against them directly instead of having to
+    /// tolerate an absent series until something goes wrong.
+    #[tokio::test]
+    async fn counters_are_published_from_startup() {
+        // Collector address is never listened on — nothing here needs
+        // delivery, only the counters.
+        let cfg = UdpHepSinkConfig::new("127.0.0.1:1".parse().unwrap());
+        let (sink, _worker) = UdpHepSink::start(cfg).await.expect("sink starts");
+
+        let out = rendered(|| publish_counters(&sink));
+
+        assert!(
+            out.contains("siphon_ai_hep_packets_sent_total 0"),
+            "sent must be present and zero at startup; got:\n{out}"
+        );
+        assert!(
+            out.contains(r#"siphon_ai_hep_packets_dropped_total{reason="queue_full"} 0"#),
+            "queue_full drops must be present and zero at startup; got:\n{out}"
+        );
+        assert!(
+            out.contains("# HELP siphon_ai_hep_packets_sent_total"),
+            "HELP text must be registered; got:\n{out}"
+        );
+    }
+
+    /// A full queue is the one failure these metrics genuinely
+    /// observe, so pin that it reaches the registry rather than only
+    /// hep-rs's private atomic.
+    #[tokio::test]
+    async fn queue_full_drops_reach_the_registry() {
+        let mut cfg = UdpHepSinkConfig::new("127.0.0.1:1".parse().unwrap());
+        cfg.queue_capacity = 1;
+        let (sink, worker) = UdpHepSink::start(cfg).await.expect("sink starts");
+        // Hold the worker off the queue so `try_send` has to hit a full
+        // channel: never polled, so nothing is drained.
+        drop(worker);
+
+        for _ in 0..64 {
+            sink.send(probe_packet());
+        }
+
+        assert!(sink.drops() > 0, "expected the bounded queue to overflow");
+        let out = rendered(|| publish_counters(&sink));
+        let expected = format!(
+            r#"siphon_ai_hep_packets_dropped_total{{reason="queue_full"}} {}"#,
+            sink.drops()
+        );
+        assert!(
+            out.contains(&expected),
+            "registry must mirror the sink's drop count exactly; \
+             wanted {expected:?} in:\n{out}"
+        );
     }
 }

@@ -562,13 +562,23 @@ fn print_check_summary(path: &Path, config: &Config) {
 ///
 /// The leading bare `warn` is a global floor, and it is the whole
 /// point of this directive's shape. Without it `EnvFilter` treats the
-/// list as an allowlist and *discards every unlisted target entirely*
-/// — which silently swallowed `hep_rs`'s "collector unreachable"
-/// warning (#460) along with 38 other `warn!`/`error!` sites across
-/// first-party crates nobody had remembered to add. A floor makes the
-/// filter fail-safe: a new crate, or a dependency, can never be
-/// silently muted; it can only be turned *up* from warn by naming it
-/// below.
+/// list as an allowlist and *discards every unlisted target entirely*.
+///
+/// `EnvFilter` matches targets by **prefix**, so `siphon_ai=info`
+/// already covers every first-party `siphon_ai_*` crate — those were
+/// never muted. What the old allowlist did drop was everything whose
+/// target matched no listed prefix: `hep_rs`, and the siphon-rs crates
+/// that aren't `sip_uas` / `sip_transaction` / `sip_transport`
+/// (`sip_uac`, `sip_dialog`, `sip_auth`, …), plus every third-party
+/// dependency. Two of those matter in practice, confirmed against
+/// production on 0.48.11: `hep_rs`'s "collector unreachable" warning
+/// (#460) and `sip_uac`'s registration-auth warnings both went from
+/// **zero** log lines in three days to firing normally once the floor
+/// was in place.
+///
+/// A floor makes the filter fail-safe: a new crate, or a dependency,
+/// can never be silently muted; it can only be turned *up* from warn
+/// by naming it below.
 ///
 /// Upstream `sip_*` / `forge*` / `hep_rs` no longer need explicit
 /// entries — the floor already puts them exactly where their old
@@ -750,14 +760,18 @@ mod tests {
              got {out:?}"
         );
 
-        // Same guarantee for a crate that doesn't exist yet: the floor
-        // has to be categorical, not a longer allowlist.
+        // Same guarantee for a dependency nobody listed. Note the
+        // target deliberately does NOT begin with `siphon_ai`:
+        // `EnvFilter` matches by prefix, so a hypothetical
+        // `siphon_ai_new_crate` would already be covered by the
+        // `siphon_ai=info` directive and would prove nothing. The
+        // floor is what covers everything else.
         let out = survives(DEFAULT_LOG_FILTER, || {
-            tracing::error!(target: "siphon_ai_not_yet_written", "boom");
+            tracing::error!(target: "some_unlisted_dependency", "boom");
         });
         assert!(
             out.contains("boom"),
-            "a new crate must not be silently muted by omission; got {out:?}"
+            "an unlisted dependency must not be silently muted; got {out:?}"
         );
     }
 

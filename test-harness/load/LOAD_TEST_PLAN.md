@@ -50,6 +50,22 @@ interfering: `siphon_ai_invite_admission_total{result="rate_limited"}` and
 `{result="dropped"}` must both be **0** at the end of every run. Admission
 behaviour is tested deliberately in §6, not accidentally in §4.
 
+**And there is a second limiter that disabling `[sip.admission]` does not
+touch.** siphon-rs's UDP transport carries a hard-coded per-source packet
+cap (`UDP_RATE_LIMIT_PPS = 200` in `crates/sip-transport/src/lib.rs`) that
+silently drops SIP packets from any single source IP above 200 pps. It is
+**not configurable** and appears nowhere in `docs/CONFIG.md`. At roughly
+four SIP packets per call it starts biting near 50–65 cps from one
+generator, which is squarely inside the range §5 asks you to test.
+
+Two things follow. When a run near or above ~50 cps shows odd
+retransmissions or timeouts, `grep 'UDP per-source rate limit exceeded'`
+the daemon log before blaming the bridge. And treat the count you find as
+a floor, not a measure: the warning fires only on the *first* packet over
+the limit in each one-second window, and **no metric counts the dropped
+packets at all** — so the log tells you in how many distinct seconds the
+cap was breached, and nothing tells you how much SIP was discarded.
+
 ### 1.3 The inactivity watchdog kills silent calls
 
 `[media].inactivity_timeout_secs` (default 60) tears down a call with no
@@ -115,8 +131,8 @@ Run a single 60-second call with audio. Record:
 | CPU % of one core | `pidstat -p <pid> 5` |
 | fds held | `ls /proc/<pid>/fd \| wc -l` |
 | Threads | `ls /proc/<pid>/task \| wc -l` |
-| Jitter / loss / MOS | `siphon_ai_rtp_jitter_ms`, `rtp_packet_loss_ratio`, `rtp_mos_estimate` |
-| Setup latency | `siphon_ai_sdp_negotiate_seconds`, `siphon_ai_ws_connect_seconds` |
+| Jitter / loss / MOS | `siphon_ai_rtp_rx_jitter_ms`, `siphon_ai_rtp_mos_estimate`; **loss only from the CDR** |
+| Setup latency | `siphon_ai_sdp_negotiate_seconds` (`ws_connect_seconds` is **not exported** — verified absent in 0.48.10) |
 
 **Pass:** call completes, MOS ≥ 4.0 on loopback, loss ≈ 0, CDR written with
 `cause=caller_hangup`. Per-call RSS and CPU become the denominators for
@@ -140,12 +156,22 @@ Per-step SLO — all must hold for the full 5 minutes:
 | SLO | Threshold |
 |---|---|
 | Setup success | 100% reach `200 OK`; `invites_total` == `calls_total` |
-| Media quality | `rtp_mos_estimate` p50 ≥ 4.0, `rtp_packet_loss_ratio` p95 ≤ 0.01 |
-| Jitter | `rtp_jitter_ms` p95 ≤ 30 ms |
-| Playout | `siphon_ai_outbound_audio_frames_dropped_total` stays 0 |
-| Setup latency | `sdp_negotiate_seconds` p95 ≤ 250 ms |
+| Media quality | `siphon_ai_rtp_mos_estimate` p50 ≥ 4.0; loss p95 ≤ 0.01 **from the CDR** — `rtp_packet_loss_ratio` does not exist |
+| Jitter | `siphon_ai_rtp_rx_jitter_ms` p95 ≤ 30 ms (**not** `rtp_jitter_ms`) |
+| Playout | ~~`siphon_ai_outbound_audio_frames_dropped_total`~~ — **no such metric; this SLO has no data source** |
+| Setup latency | `sdp_negotiate_seconds` p95 ≤ 200 ms (see note) |
 | Headroom | bridge CPU ≤ 80% of total cores; RSS not growing within the step |
 | Not port-capped | concurrency < `rtp_port_range / 2` (else you measured §1.1) |
+
+**Why 200 ms and not a rounder 250.** `SDP_NEGOTIATE_BUCKETS`
+(`crates/telemetry/src/metrics.rs`) tops out at a finite `0.2` — above that
+the only bucket is `+Inf`. A threshold of 250 ms would sit in the blind
+spot where the histogram can no longer say *how far* over you are, so the
+criterion could be satisfied but never falsified. 200 ms is the highest
+real bucket edge, which makes it the highest threshold this metric can
+actually adjudicate. If a 250 ms bar is ever genuinely wanted, add `0.25`
+and `0.5` to the bucket list first and document the new series in
+`docs/DEPLOY.md` — don't just change the number here.
 
 **Record the knee** as *"N concurrent calls, 4 vCPU, G.711, no recording,
 MOS p50 x.xx, CPU y%"*. That sentence is the deliverable.
@@ -161,9 +187,15 @@ Hold concurrency at **50% of the knee**, then push setup rate: 10 → 25 → 50
 → 75 cps, one minute each.
 
 **Pass:** no 5xx, no SIP retransmissions, `sdp_negotiate_seconds` p95 ≤
-250 ms, and `invite_admission_total{rate_limited}` == 0. **Report the cps at
-which p95 setup latency first exceeds 250 ms** — that's the honest number,
-not the point where calls start failing.
+200 ms (§4's note explains the bound), and
+`invite_admission_total{rate_limited}` == 0. **Report the cps at which p95
+setup latency first exceeds 200 ms** — that's the honest number, not the
+point where calls start failing.
+
+If the ramp finishes without ever crossing it, say so in exactly those
+terms: *"p95 stayed at X ms through 75 cps"*. That is a floor on the setup
+rate, not a measured ceiling, and the two must not be published as if they
+were the same claim.
 
 ---
 
@@ -199,6 +231,30 @@ ps -o rss= -p <pid>                 # within ~10% of pre-load idle
 **Pass:** every counter returns to its idle value. A gauge that doesn't come
 back down is a leak, and it matters more than the peak number.
 
+**RSS is the exception, and "within ~10% of idle" is the wrong test for
+it.** The daemon sizes its buffer pools to the highest concurrency it has
+ever seen and keeps them — the necessary price of allocating nothing in the
+frame loop (CLAUDE.md §4.3). RSS therefore *never* returns to idle after
+load, so that criterion fails on every run that did any work, while a real
+leak hides inside the failure. Measured here: ~0.23 MB per call of
+high-water pool, which is bounded and legitimate.
+
+Use these two instead, which separate the pool from an actual leak:
+
+1. **Repeat the peak step.** Run the same concurrency twice and require RSS
+   not to grow materially the second time. Pool sizing is already paid;
+   growth here is not. Make it thousands of calls, not hundreds — at a few
+   KB/call, 250 calls moves RSS ~1.5 MB and is easily dismissed as noise.
+2. **Vary calls independently of concurrency.** Run many short calls at
+   *low* concurrency (§5's rate steps do this naturally). Any growth there
+   cannot be pool sizing, because concurrency never exceeded the existing
+   high-water mark. Divide by completed calls to get bytes-per-call.
+
+A per-frame leak is ruled out separately by §6.2/§6.1: a 60-minute soak
+puts tens of millions of frames through a couple of hundred calls, so flat
+RSS across the hour means the hot path is clean whatever the per-call
+figure says.
+
 ### 6.4 Degradation past the ceiling
 
 **How it fails is more important than where.** Set
@@ -223,7 +279,7 @@ not.
 | Version | `siphon-ai --version` |
 | Codec / posture | G.711 µ-law, no recording, no HEP, energy VAD |
 | **Sustained concurrent calls** | N (quality SLOs held 60 min) |
-| **Setup rate** | N cps at p95 ≤ 250 ms |
+| **Setup rate** | N cps at p95 ≤ 200 ms |
 | CPU at sustained load | x% of 4 cores |
 | RSS at sustained load | N MB (flat over 60 min) |
 | MOS p50 / loss p95 / jitter p95 | x.xx / x.xxx / x ms |

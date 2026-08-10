@@ -9,6 +9,7 @@ pub mod acceptor;
 pub mod call;
 pub mod conference;
 pub mod conference_admin;
+pub mod dialog_reaper;
 pub mod hold;
 pub mod outbound;
 pub mod outbound_service;

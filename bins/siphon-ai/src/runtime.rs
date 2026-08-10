@@ -901,10 +901,19 @@ impl Runtime {
         // and the outbound service (writer, below). With [outbound] off it
         // stays empty and attended transfers fail gracefully.
         let consult_registry = ConsultRegistry::new();
+        // Reclaims each finished call's dialog from the shared store.
+        // Without it the store grows for the process's lifetime and
+        // eventually hits sip-dialog's MAX_CONFIRMED_DIALOGS, after
+        // which `insert` fails silently and in-dialog requests stop
+        // matching (#458). Sweeper stops when the acceptor drops its
+        // handle at shutdown.
+        let (dialog_reaper, _dialog_reaper_task) =
+            siphon_ai_core::dialog_reaper::DialogReaper::spawn(Arc::clone(&dialog_manager));
         acceptor.install_transfer(
             Arc::clone(&transfer_uac),
             dialog_manager,
             consult_registry.clone(),
+            dialog_reaper,
         );
 
         // ─── Per-registration UAC drive tasks ──────────────────────

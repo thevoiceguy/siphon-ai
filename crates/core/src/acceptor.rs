@@ -2066,6 +2066,11 @@ pub struct BridgingAcceptor {
 struct InstalledTransfer {
     uac: Arc<IntegratedUAC>,
     dialog_manager: Arc<DialogManager>,
+    /// Retires each finished call's dialog so the shared store doesn't
+    /// grow for the process's lifetime (#458). Lives here because it
+    /// shares `dialog_manager`'s lifecycle exactly — installed with it,
+    /// so the two can never be out of sync.
+    reaper: crate::dialog_reaper::DialogReaper,
     /// Attended-transfer consult lookup (DEV_PLAN_0.6.1 §2.1). Empty
     /// (every lookup misses) when `[outbound]` is disabled — attended
     /// transfers then fail gracefully with `TransferFailed`.
@@ -2138,6 +2143,8 @@ impl DialogFlow {
 struct TeardownContext {
     uac: Arc<IntegratedUAC>,
     dialog_manager: Arc<DialogManager>,
+    /// See [`InstalledTransfer::reaper`].
+    reaper: crate::dialog_reaper::DialogReaper,
     /// `Some` on TCP/TLS dialogs: the BYE goes out via
     /// [`IntegratedUAC::bye_via_flow`] over the inbound connection
     /// instead of a DNS-resolved fresh one the dispatcher would
@@ -2335,6 +2342,7 @@ impl BridgingAcceptor {
         uac: Arc<IntegratedUAC>,
         dialog_manager: Arc<DialogManager>,
         consult_registry: ConsultRegistry,
+        reaper: crate::dialog_reaper::DialogReaper,
     ) {
         let shares_store = uac
             .dialog_manager()
@@ -2349,6 +2357,7 @@ impl BridgingAcceptor {
             .set(InstalledTransfer {
                 uac,
                 dialog_manager,
+                reaper,
                 consult_registry,
             })
             .map_err(|_| ())
@@ -3614,6 +3623,10 @@ impl BridgingAcceptor {
         // `dialog_handles` to drive teardown. Stopping the timer is
         // the cleanup task's job below.
         let dialog_flow = accepted.as_ref().and_then(|a| a.flow.clone());
+        // Every accepted call has a confirmed dialog in the shared
+        // store; the session-timer key below only exists when RFC 4028
+        // negotiated one, so it can't stand in for this (#458).
+        let accepted_dialog_id = accepted.as_ref().map(|a| a.dialog.id().clone());
         let session_timer_key = match accepted.as_ref() {
             Some(AcceptedSession {
                 dialog,
@@ -3704,11 +3717,13 @@ impl BridgingAcceptor {
         let teardown = self.transfer.get().map(|t| TeardownContext {
             uac: Arc::clone(&t.uac),
             dialog_manager: Arc::clone(&t.dialog_manager),
+            reaper: t.reaper.clone(),
             flow: dialog_flow,
         });
         let session_timer_manager = Arc::clone(&self.session_timer_manager);
         let dialog_handles = Arc::clone(&self.dialog_handles);
         let cleanup_session_timer_key = session_timer_key;
+        let cleanup_dialog_id = accepted_dialog_id;
 
         // Link the controller task to the accept span so the whole call —
         // INVITE handling, the controller, the WS bridge and media — is one
@@ -3739,6 +3754,13 @@ impl BridgingAcceptor {
                 if !cleanup_handle.remote_bye_received() {
                     send_outbound_bye(teardown.as_ref(), &sip_call_id, bridge_call_id.as_str())
                         .await;
+                }
+                // Retire the dialog now that the BYE exchange is done.
+                // Removal is deferred by the reaper's grace window, so a
+                // BYE retransmit arriving after this still matches —
+                // same hazard the ordering above guards against (#458).
+                if let (Some(t), Some(dialog_id)) = (teardown.as_ref(), cleanup_dialog_id) {
+                    t.reaper.retire(dialog_id);
                 }
                 // `registry` deregistration is deferred to the very end,
                 // after the CDR is durably written — see the note at that

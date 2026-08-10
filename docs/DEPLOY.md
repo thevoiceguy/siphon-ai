@@ -1183,8 +1183,21 @@ Quick check that emission is live:
 curl -s http://localhost:9091/metrics | grep siphon_ai_hep
 ```
 
-`siphon_ai_hep_collector_up` should be `1`; `siphon_ai_hep_packets_sent_total`
-should be incrementing across calls.
+`siphon_ai_hep_packets_sent_total` should be incrementing across calls, and
+`siphon_ai_hep_packets_dropped_total{reason="queue_full"}` should stay flat.
+Both series exist from startup, before the first call.
+
+Note that **neither proves the collector is receiving**: `sent` counts
+wire-level success, so a black-holing NAT still counts. A collector that is
+down shows up as a throttled warning instead —
+
+```sh
+journalctl -u siphon-ai | grep hep_rs
+# WARN hep_rs::udp: HEP UDP send failed ... error=Connection refused
+```
+
+— which is why there is no `siphon_ai_hep_collector_up` gauge. `docs/HEP.md`
+has the full diagnostic order.
 
 ## Metrics
 
@@ -1263,6 +1276,8 @@ applied (and test-enforced) in our `prometheus_builder()` (issue #437).
 | `siphon_ai_recording_uploads_total`     | counter   | `result`                              | Recording uploads to object storage (0.25.0): `ok` (durable), `failed` (will retry), `dropped` (retry budget exhausted / recording gone — stays local-only). |
 | `siphon_ai_recording_upload_spool_depth`| gauge     | —                                     | Recording uploads waiting in `[recording.storage].spool_dir`. Healthy = 0; rising means the object store is unreachable. |
 | `siphon_ai_recording_upload_seconds`    | histogram | —                                     | Wall-time of one successful recording upload. |
+| `siphon_ai_hep_packets_sent_total`      | counter   | —                                     | HEP3 packets written to the wire (`[hep]`). Mirrored every 10 s from the sink's own counter, so it lags a scrape slightly; present from startup. **Wire-level success only, and not a liveness signal** — a black-holing NAT or a heplify-server that isn't storing still counts here, and against a *dead* collector the counter keeps climbing at roughly half rate (connected-UDP reports the refusal on the following send, so alternate sends succeed). Alert on the `hep_rs::udp` WARN for that; see `docs/HEP.md`. |
+| `siphon_ai_hep_packets_dropped_total`   | counter   | `reason=queue_full`                   | HEP3 packets the producer dropped before the wire because `[hep].queue_capacity` (default 256) was full — the daemon emitting faster than the worker ships, per CLAUDE.md §4.7. Sustained movement means raise the capacity; it does **not** mean the collector is down. One label value today; `collector_down` would need a send-failure counter in `hep-rs` (#460). |
 | `siphon_ai_webhook_delivery_seconds`    | histogram | `sink`                                | Delivery latency in seconds, accepted → 2xx (0.11.0). Includes spool dwell, so a slow/recovered receiver shows as a fat tail. Buckets 5 ms – 30 s. |
 | `siphon_ai_draining`                    | gauge     | —                                     | `1` while the daemon is draining for shutdown (0.17.0, `[shutdown]`), `0` otherwise. Set the instant a SIGTERM/SIGINT drain begins — new INVITEs are then `503`'d and `/ready` reports not-ready. A scraper that catches `1` knows the pod is going away. |
 | `siphon_ai_drain_seconds`               | histogram | —                                     | How long the shutdown drain took (0.17.0): drain start → registry empty or the `[shutdown].drain_timeout_secs` deadline. Observed once per process lifetime, so only a scrape catching the dying pod (or a push gateway) sees it. Buckets 0.1 s – 120 s. A value near the timeout means calls didn't finish in the window. |

@@ -557,13 +557,43 @@ fn print_check_summary(path: &Path, config: &Config) {
     }
 }
 
+/// The daemon's built-in log filter, used when neither `--log` nor
+/// `RUST_LOG` supplies one.
+///
+/// The leading bare `warn` is a global floor, and it is the whole
+/// point of this directive's shape. Without it `EnvFilter` treats the
+/// list as an allowlist and *discards every unlisted target entirely*
+/// — which silently swallowed `hep_rs`'s "collector unreachable"
+/// warning (#460) along with 38 other `warn!`/`error!` sites across
+/// first-party crates nobody had remembered to add. A floor makes the
+/// filter fail-safe: a new crate, or a dependency, can never be
+/// silently muted; it can only be turned *up* from warn by naming it
+/// below.
+///
+/// Upstream `sip_*` / `forge*` / `hep_rs` no longer need explicit
+/// entries — the floor already puts them exactly where their old
+/// `=warn` directives did, without the drift risk of a list.
+const DEFAULT_LOG_FILTER: &str = "warn,\
+     siphon_ai=info,siphon_ai_core=info,siphon_ai_media_glue=info,\
+     siphon_ai_sip_glue=info,siphon_ai_bridge=info,siphon_ai_routes=info,\
+     siphon_ai_config=info,siphon_ai_telemetry=info,siphon_ai_cdr=info,\
+     siphon_ai_http=info,siphon_ai_recording=info,siphon_ai_audit=info,\
+     siphon_ai_quality=info,siphon_ai_webhooks=info,siphon_ai_security=info,\
+     siphon_ai_stir_shaken=info";
+
 /// Initialise the global tracing subscriber and return a reload
 /// handle the admin endpoint uses to swap the filter at runtime.
 ///
 /// Order of precedence for the filter: `--log` flag > `RUST_LOG` env
-/// var > built-in default. The default filter pulls siphon-ai
-/// crates in at `info` and silences busy upstream logs that don't
-/// add operator value at default verbosity.
+/// var > built-in default. The default filter puts a `warn` floor
+/// under everything — so no crate's warnings can be lost by omission
+/// — and lifts the siphon-ai crates to `info` on top of it.
+///
+/// Note the precedence is *replace*, not merge: a `--log` or
+/// `RUST_LOG` value supplies the whole directive, floor included. An
+/// operator narrowing to one target (`RUST_LOG=siphon_ai_core=debug`)
+/// therefore also drops the floor and mutes everything else — add a
+/// leading `warn,` to keep it.
 ///
 /// Implementation note: we build the subscriber as
 /// `Registry → reload(EnvFilter) → fmt-layer` rather than the
@@ -571,10 +601,7 @@ fn print_check_summary(path: &Path, config: &Config) {
 /// shorthand doesn't expose a reload handle. The layered form is
 /// the canonical way to make `EnvFilter` mutable at runtime.
 fn init_tracing(cli_filter: Option<&str>) -> (LogFilterHandle, OtelActivation) {
-    const DEFAULT: &str = "siphon_ai=info,siphon_ai_core=info,siphon_ai_media_glue=info,\
-         siphon_ai_sip_glue=info,siphon_ai_bridge=info,siphon_ai_routes=info,\
-         siphon_ai_config=info,sip_uas=warn,sip_transaction=warn,\
-         sip_transport=warn,forge=warn";
+    const DEFAULT: &str = DEFAULT_LOG_FILTER;
 
     let env_filter = match cli_filter {
         Some(f) => EnvFilter::try_new(f).unwrap_or_else(|_| EnvFilter::new(DEFAULT)),
@@ -651,5 +678,105 @@ async fn shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
         info!("received Ctrl-C");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    use super::DEFAULT_LOG_FILTER;
+    use tracing_subscriber::fmt::MakeWriter;
+    use tracing_subscriber::EnvFilter;
+
+    /// Collects formatted events so a test can assert on what a
+    /// subscriber actually emitted.
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Buffer {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("buffer poisoned")).into_owned()
+        }
+    }
+
+    impl io::Write for Buffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("buffer poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for Buffer {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Emit one event under `directive` and report whether it survived
+    /// the filter. Drives a real subscriber rather than inspecting the
+    /// directive string — the string is what regressed in #460, so it
+    /// cannot also be the oracle.
+    fn survives(directive: &str, emit: impl FnOnce()) -> String {
+        let buf = Buffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::try_new(directive).expect("directive parses"))
+            .with_writer(buf.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, emit);
+        buf.contents()
+    }
+
+    /// #460: the default filter was an allowlist with no global level,
+    /// so `EnvFilter` discarded every unlisted target outright — which
+    /// is how `hep_rs`'s "collector unreachable" warning went missing
+    /// for several releases while the daemon looked healthy.
+    #[test]
+    fn default_filter_passes_warnings_from_unlisted_targets() {
+        let out = survives(DEFAULT_LOG_FILTER, || {
+            tracing::warn!(target: "hep_rs::udp", "HEP UDP send failed");
+        });
+        assert!(
+            out.contains("HEP UDP send failed"),
+            "a WARN from an unlisted target must still reach the sink; \
+             got {out:?}"
+        );
+
+        // Same guarantee for a crate that doesn't exist yet: the floor
+        // has to be categorical, not a longer allowlist.
+        let out = survives(DEFAULT_LOG_FILTER, || {
+            tracing::error!(target: "siphon_ai_not_yet_written", "boom");
+        });
+        assert!(
+            out.contains("boom"),
+            "a new crate must not be silently muted by omission; got {out:?}"
+        );
+    }
+
+    /// The floor is a floor, not a ceiling: first-party crates still
+    /// get `info`, and the upstream chatter the old directive muted
+    /// stays muted at that level.
+    #[test]
+    fn default_filter_keeps_info_for_first_party_and_mutes_upstream_info() {
+        let out = survives(DEFAULT_LOG_FILTER, || {
+            tracing::info!(target: "siphon_ai_core", "call started");
+        });
+        assert!(out.contains("call started"), "got {out:?}");
+
+        let out = survives(DEFAULT_LOG_FILTER, || {
+            tracing::info!(target: "sip_transport", "chatty");
+        });
+        assert!(
+            !out.contains("chatty"),
+            "upstream INFO should stay below the warn floor; got {out:?}"
+        );
     }
 }

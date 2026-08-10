@@ -93,6 +93,44 @@ pub const RECORDINGS_TOTAL: &str = "siphon_ai_recordings_total";
 /// upload worker in `siphon-ai-http`.
 pub const RECORDING_UPLOADS_TOTAL: &str = "siphon_ai_recording_uploads_total";
 
+/// HEP3 packets the sink has successfully written to the wire
+/// (`[hep]`, 0.12.0). Mirrors `hep_rs::UdpHepSink::sent()`, which the
+/// sampler in `crate::hep` republishes; the sink owns the count
+/// because SIP and RTCP chunks are emitted by `sip-hep` and
+/// `forge-hep` respectively and never pass through this crate.
+///
+/// **Wire-level success only, and a weak liveness signal.** A
+/// collector that is up but silently discarding — a black-holing NAT,
+/// a heplify-server not writing to storage — still counts here.
+/// Unreachable-collector failures count *nowhere*: they are neither
+/// `sent` nor [`HEP_PACKETS_DROPPED_TOTAL`], because the failure is
+/// detected inside the upstream worker, which has no counter for it.
+///
+/// Do **not** read "stops climbing" as "collector down". The sink
+/// writes to a *connected* UDP socket, so a refused datagram is
+/// reported as `ECONNREFUSED` on the *following* send — the queued
+/// ICMP error is consumed by one send and the next finds the queue
+/// empty and succeeds. Measured against a dead local collector this
+/// counter therefore keeps climbing at almost exactly **half** rate
+/// (35 of ~70 attempted, 0.48.10), not zero. A remote collector that
+/// black-holes without ICMP at all counts 100%. The signal for a dead
+/// collector is the throttled `hep_rs::udp` WARN, not this metric.
+/// See `docs/HEP.md`.
+pub const HEP_PACKETS_SENT_TOTAL: &str = "siphon_ai_hep_packets_sent_total";
+
+/// HEP3 packets dropped before reaching the wire (`[hep]`, 0.12.0),
+/// labeled by `reason`. Currently one value — `queue_full`, from
+/// `hep_rs::UdpHepSink::drops()`: the producer's `try_send` found the
+/// bounded queue (`[hep].queue_capacity`, default 256) full and
+/// discarded the packet rather than block, per CLAUDE.md §4.7.
+///
+/// Sustained movement here means the queue is too small for the call
+/// rate, not that the collector is down. `reason` is a label rather
+/// than a bare counter so a future `collector_down` value can join it
+/// without a rename — that one needs a send-failure counter added to
+/// `hep-rs` first (siphon-ai #460).
+pub const HEP_PACKETS_DROPPED_TOTAL: &str = "siphon_ai_hep_packets_dropped_total";
+
 /// REGISTER attempts the daemon has driven. Labeled by `name`
 /// (the `[[register]].name`) and `outcome`:
 /// `registered` / `auth_failed` / `transport_error` / `timeout` /
@@ -651,6 +689,14 @@ pub fn register_descriptions() {
         "Recording uploads to object storage by result (ok, failed, dropped)."
     );
     describe_counter!(
+        HEP_PACKETS_SENT_TOTAL,
+        "HEP3 packets written to the wire (wire-level success only; an unreachable collector is not counted here — see the throttled hep_rs::udp WARN)."
+    );
+    describe_counter!(
+        HEP_PACKETS_DROPPED_TOTAL,
+        "HEP3 packets dropped before the wire, by reason (queue_full)."
+    );
+    describe_counter!(
         REGISTER_ATTEMPTS_TOTAL,
         "REGISTER attempts by [[register]].name and outcome."
     );
@@ -965,6 +1011,8 @@ pub const ALL_COUNTERS: &[&str] = &[
     VERSTAT_TOTAL,
     RECORDINGS_TOTAL,
     RECORDING_UPLOADS_TOTAL,
+    HEP_PACKETS_SENT_TOTAL,
+    HEP_PACKETS_DROPPED_TOTAL,
     REGISTER_ATTEMPTS_TOTAL,
     REGISTER_ADMIN_TRIGGERS_TOTAL,
     OUTBOUND_CALLS_TOTAL,

@@ -399,6 +399,20 @@ pub const ADMIN_TLS_RELOAD_ATTEMPTS_TOTAL: &str = "siphon_ai_admin_tls_reload_at
 /// `OUTBOUND_CALLS_ACTIVE`.
 pub const CALLS_ACTIVE: &str = "siphon_ai_calls_active";
 
+/// SIP dialogs currently held in the shared `DialogManager`
+/// (0.48.13). Sampled by the dialog reaper each sweep, so it is
+/// self-correcting rather than incremented/decremented in pairs.
+///
+/// This should track `siphon_ai_calls_active` closely, lagging it by
+/// the reaper's grace window — a confirmed dialog outlives its call
+/// briefly so a retransmitted BYE still matches. **A value that climbs
+/// with cumulative calls instead of settling is the signature of
+/// siphon-ai #458**, where dialogs were inserted per call and never
+/// removed; unchecked it reaches `sip-dialog`'s hard
+/// `MAX_CONFIRMED_DIALOGS = 10_000`, after which `DialogManager::insert`
+/// fails and in-dialog requests stop matching.
+pub const DIALOGS_ACTIVE: &str = "siphon_ai_dialogs_active";
+
 /// Currently in-flight outbound calls (0.6.0) — incremented when an
 /// originate is admitted, decremented when the call settles (answered+ended,
 /// or failed to connect). Compare with `[outbound].max_concurrent`.
@@ -772,6 +786,10 @@ pub fn register_descriptions() {
         "WS reconnect episodes mid-call, by result (recovered, exhausted)."
     );
     describe_gauge!(
+        DIALOGS_ACTIVE,
+        "SIP dialogs held in the shared DialogManager. Tracks calls_active, lagging it by the reaper grace window; unbounded growth is issue #458."
+    );
+    describe_gauge!(
         CALLS_ACTIVE,
         Unit::Count,
         "Currently-running per-call controllers."
@@ -1071,6 +1089,7 @@ pub const ALL_COUNTERS: &[&str] = &[
 /// Every gauge this module declares. See [`ALL_COUNTERS`].
 pub const ALL_GAUGES: &[&str] = &[
     CALLS_ACTIVE,
+    DIALOGS_ACTIVE,
     OUTBOUND_CALLS_ACTIVE,
     REGISTER_STATE,
     CONFERENCES_ACTIVE,

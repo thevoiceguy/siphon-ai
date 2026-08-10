@@ -69,10 +69,24 @@ const DRAIN_INTERVAL: Duration = Duration::from_secs(10);
 /// already-durable deliveries.
 const DEFAULT_SPOOL_MAX_FILES: usize = 10_000;
 
-/// After this many drain re-attempts a spooled delivery is treated as a
-/// poison entry: removed and counted `dropped`, so one permanently-bad
-/// payload can't retry forever.
-const MAX_DRAIN_ATTEMPTS: u32 = 100;
+/// Default tolerance for a receiver outage: how long a spooled delivery
+/// may keep failing before it is discarded. 72 h so an outage that
+/// starts on a Friday evening is still recoverable on Monday morning.
+///
+/// This replaced a hard-coded cap of 100 drain re-attempts (#467). With
+/// the capped backoff below, 100 attempts worked out to *exactly* 8
+/// hours — short enough that an unnoticed overnight outage silently
+/// destroyed audit records, and expressed in a unit no operator could
+/// reason about without summing the backoff series by hand.
+///
+/// The cap was described as poison-entry defence, but nothing on the
+/// drain path distinguishes a bad payload from an unreachable receiver:
+/// both surface as [`Attempt::Transient`]. Genuine poison — a payload
+/// the receiver actively refuses — is a `4xx`, which is
+/// [`Attempt::Rejected`] and removed on the first attempt, so that case
+/// was already covered without a time bound. What remains is an outage
+/// budget, which is what this constant now is.
+pub const DEFAULT_SPOOL_MAX_AGE_SECS: u64 = 72 * 60 * 60;
 
 /// Which sink a [`RetryingPoster`] serves. Used purely as the bounded
 /// `sink` metric label (three values) so lifecycle-webhook, CDR, and
@@ -158,6 +172,14 @@ pub struct PosterConfig {
     /// persisted here and re-attempted by a background drain worker
     /// that survives restarts. Created + write-probed at build time.
     pub spool_dir: Option<PathBuf>,
+    /// How long a spooled delivery may keep failing before it is
+    /// discarded, in seconds. `0` ⇒ never discard on age (the spool's
+    /// file cap is then the only bound).
+    ///
+    /// This is the deployment's tolerance for a receiver outage: a
+    /// receiver down for longer than this loses the events that aged
+    /// out while it was away. See [`DEFAULT_SPOOL_MAX_AGE_SECS`].
+    pub spool_max_age_secs: u64,
     /// Which sink this poster serves (the `sink` metric label).
     pub sink: SinkKind,
 }
@@ -177,6 +199,8 @@ pub struct RetryingPoster {
     secret: Option<Vec<u8>>,
     /// Durable spool dir, validated at build time. `None` ⇒ no spool.
     spool_dir: Option<PathBuf>,
+    /// Outage budget for spooled entries, in seconds; `0` ⇒ unbounded.
+    spool_max_age_secs: u64,
     sink: SinkKind,
 }
 
@@ -198,6 +222,7 @@ impl RetryingPoster {
             timeout_ms,
             secret,
             spool_dir,
+            spool_max_age_secs,
             sink,
         } = config;
         if let Some(dir) = spool_dir.as_deref() {
@@ -216,6 +241,7 @@ impl RetryingPoster {
             retry_max,
             secret: secret.filter(|s| !s.is_empty()).map(String::into_bytes),
             spool_dir,
+            spool_max_age_secs,
             sink,
         })
     }
@@ -421,8 +447,8 @@ impl RetryingPoster {
 
     /// One drain pass over the spool: re-attempt every due entry,
     /// oldest first. Delivered → removed; rejected (4xx) → removed;
-    /// transient → reschedule with backoff (or drop after
-    /// [`MAX_DRAIN_ATTEMPTS`]). Resumes pre-existing entries on the
+    /// transient → reschedule with backoff (or drop once older than
+    /// `spool_max_age_secs`). Resumes pre-existing entries on the
     /// first pass after a restart. Private; the worker loop and tests
     /// call it.
     async fn drain_once(&self, dir: &Path) {
@@ -439,6 +465,7 @@ impl RetryingPoster {
         metrics::gauge!(SPOOL_DEPTH, "sink" => sink).set(paths.len() as f64);
         paths.sort(); // zero-padded created_at prefix ⇒ oldest first
         let now = unix_secs();
+        let max_age = self.spool_max_age_secs;
         for path in paths {
             let bytes = match tokio::fs::read(&path).await {
                 Ok(b) => b,
@@ -472,11 +499,26 @@ impl RetryingPoster {
                 }
                 Attempt::Transient => {
                     env.attempts += 1;
-                    if env.attempts >= MAX_DRAIN_ATTEMPTS {
+                    // Age, not attempt count: the question an operator
+                    // asks is "how long an outage do we survive", and
+                    // `created_at` answers it directly across restarts.
+                    let age = now.saturating_sub(env.created_at);
+                    if max_age != 0 && age >= max_age {
                         let _ = tokio::fs::remove_file(&path).await;
                         metrics::counter!(DELIVERIES_TOTAL, "sink" => sink, "result" => "dropped")
                             .increment(1);
-                        warn!(sink, event_id = %env.id, attempts = env.attempts, "spooled delivery exceeded max attempts; dropped");
+                        // Name the limit that fired. The old line said
+                        // "max attempts" while every sink also has a
+                        // configured `retry_max`, which is a different
+                        // counter at a different layer (#467).
+                        warn!(
+                            sink,
+                            event_id = %env.id,
+                            age_secs = age,
+                            spool_max_age_secs = max_age,
+                            drain_attempts = env.attempts,
+                            "spooled delivery exceeded spool_max_age_secs; dropped"
+                        );
                     } else {
                         env.next_attempt_at = now + drain_backoff_secs(env.attempts);
                         if let Err(e) = write_envelope(dir, &env).await {
@@ -689,6 +731,7 @@ mod tests {
             timeout_ms: 1000,
             secret: secret.map(str::to_string),
             spool_dir: None,
+            spool_max_age_secs: DEFAULT_SPOOL_MAX_AGE_SECS,
             sink: SinkKind::Lifecycle,
         })
         .unwrap()
@@ -697,6 +740,15 @@ mod tests {
     /// Build a poster with a spool dir (no auto drain worker — tests
     /// call `drain_once` directly for determinism).
     fn spooling_poster(url: String, retry_max: u32, dir: PathBuf) -> RetryingPoster {
+        spooling_poster_with_age(url, retry_max, dir, DEFAULT_SPOOL_MAX_AGE_SECS)
+    }
+
+    fn spooling_poster_with_age(
+        url: String,
+        retry_max: u32,
+        dir: PathBuf,
+        spool_max_age_secs: u64,
+    ) -> RetryingPoster {
         RetryingPoster::new(PosterConfig {
             url,
             auth_header: None,
@@ -704,6 +756,7 @@ mod tests {
             timeout_ms: 1000,
             secret: None,
             spool_dir: Some(dir),
+            spool_max_age_secs,
             sink: SinkKind::Cdr,
         })
         .unwrap()
@@ -947,6 +1000,101 @@ mod tests {
         );
     }
 
+    /// #467: the old cap was 100 drain attempts, which the capped
+    /// backoff turned into exactly 8 hours — long enough to look
+    /// durable, short enough to destroy audit records over a quiet
+    /// night. The horizon is now wall-clock and configurable.
+    #[tokio::test]
+    async fn spooled_entry_older_than_max_age_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Recorder::new(vec![500, 500]);
+        let url = spawn_server(Arc::clone(&rec)).await;
+        // 60 s budget; the entry is then back-dated past it.
+        let poster = spooling_poster_with_age(url, 0, dir.path().to_path_buf(), 60);
+
+        poster.post(&sample("c-old"), log("c-old")).await;
+        let files = list_spool_files(dir.path()).await.unwrap();
+        assert_eq!(files.len(), 1);
+
+        // Age the entry rather than sleeping: rewrite created_at to
+        // 10 minutes ago and clear next_attempt_at so it is due.
+        let bytes = tokio::fs::read(&files[0]).await.unwrap();
+        let mut env: SpoolEnvelope = serde_json::from_slice(&bytes).unwrap();
+        env.created_at = unix_secs().saturating_sub(600);
+        env.next_attempt_at = 0;
+        tokio::fs::remove_file(&files[0]).await.unwrap();
+        write_envelope(dir.path(), &env).await.unwrap();
+
+        poster.drain_once(dir.path()).await;
+        assert!(
+            list_spool_files(dir.path()).await.unwrap().is_empty(),
+            "entry past spool_max_age_secs is discarded"
+        );
+    }
+
+    /// A young entry keeps its place no matter how many times it has
+    /// failed — the whole point of moving off an attempt counter.
+    #[tokio::test]
+    async fn many_failed_attempts_do_not_drop_a_young_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Recorder::new(vec![500; 8]);
+        let url = spawn_server(Arc::clone(&rec)).await;
+        let poster = spooling_poster_with_age(url, 0, dir.path().to_path_buf(), 3600);
+
+        poster.post(&sample("c-young"), log("c-young")).await;
+
+        // Far more failures than the old 100-attempt cap would need to
+        // be meaningful, with the clock barely moving.
+        for _ in 0..6 {
+            let files = list_spool_files(dir.path()).await.unwrap();
+            assert_eq!(files.len(), 1, "entry must survive repeated failure");
+            let bytes = tokio::fs::read(&files[0]).await.unwrap();
+            let mut env: SpoolEnvelope = serde_json::from_slice(&bytes).unwrap();
+            env.next_attempt_at = 0; // make it due again immediately
+            tokio::fs::write(&files[0], serde_json::to_vec(&env).unwrap())
+                .await
+                .unwrap();
+            poster.drain_once(dir.path()).await;
+        }
+
+        let files = list_spool_files(dir.path()).await.unwrap();
+        assert_eq!(files.len(), 1, "still spooled, awaiting the receiver");
+        let bytes = tokio::fs::read(&files[0]).await.unwrap();
+        let env: SpoolEnvelope = serde_json::from_slice(&bytes).unwrap();
+        assert!(env.attempts >= 6, "attempts counted: {}", env.attempts);
+    }
+
+    /// `0` means "never discard on age" — the file cap is then the only
+    /// bound, which is what an audit deployment that must not lose
+    /// records will set.
+    #[tokio::test]
+    async fn max_age_zero_never_drops_on_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Recorder::new(vec![500, 500]);
+        let url = spawn_server(Arc::clone(&rec)).await;
+        let poster = spooling_poster_with_age(url, 0, dir.path().to_path_buf(), 0);
+
+        poster.post(&sample("c-forever"), log("c-forever")).await;
+        let files = list_spool_files(dir.path()).await.unwrap();
+        let bytes = tokio::fs::read(&files[0]).await.unwrap();
+        let mut env: SpoolEnvelope = serde_json::from_slice(&bytes).unwrap();
+        // Ancient by any standard. The spool filename embeds
+        // `created_at`, so re-spool under the correct name rather than
+        // rewriting in place — otherwise the reschedule writes a second
+        // file and the count assertion below measures the wrong thing.
+        env.created_at = 1;
+        env.next_attempt_at = 0;
+        tokio::fs::remove_file(&files[0]).await.unwrap();
+        write_envelope(dir.path(), &env).await.unwrap();
+
+        poster.drain_once(dir.path()).await;
+        assert_eq!(
+            list_spool_files(dir.path()).await.unwrap().len(),
+            1,
+            "spool_max_age_secs = 0 must never discard on age"
+        );
+    }
+
     #[tokio::test]
     async fn bad_spool_dir_fails_at_build() {
         // A spool path under a file (not a dir) can't be created →
@@ -960,6 +1108,7 @@ mod tests {
             timeout_ms: 1000,
             secret: None,
             spool_dir: Some(bad),
+            spool_max_age_secs: DEFAULT_SPOOL_MAX_AGE_SECS,
             sink: SinkKind::Cdr,
         });
         assert!(matches!(err, Err(BuildError::Spool { .. })));

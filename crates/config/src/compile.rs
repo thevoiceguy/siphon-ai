@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use siphon_ai_bridge::normalize_auth_header;
 use siphon_ai_core::BridgeDefaults;
+use siphon_ai_http::DEFAULT_SPOOL_MAX_AGE_SECS;
 use siphon_ai_media_glue::Codec;
 use siphon_ai_routes::{compile as compile_routes, RawRouteFile, RouteSet};
 use thiserror::Error;
@@ -424,6 +425,9 @@ pub struct WebhooksConfig {
     pub secret: Option<String>,
     /// Durable spool directory. `None` ⇒ best-effort delivery.
     pub spool_dir: Option<String>,
+    /// Outage budget for spooled deliveries, in seconds (0.48.12).
+    /// `0` ⇒ never discard on age. See `docs/CONFIG.md`; #467.
+    pub spool_max_age_secs: u64,
     /// Empty = deliver everything; non-empty = allowlist filter.
     pub events: Vec<String>,
     pub retry_max: u32,
@@ -520,6 +524,9 @@ pub struct CdrWebhookConfig {
     pub secret: Option<String>,
     /// Durable spool directory. `None` ⇒ best-effort delivery.
     pub spool_dir: Option<String>,
+    /// Outage budget for spooled deliveries, in seconds (0.48.12).
+    /// `0` ⇒ never discard on age. See `docs/CONFIG.md`; #467.
+    pub spool_max_age_secs: u64,
     pub retry_max: u32,
     pub timeout: Duration,
 }
@@ -551,6 +558,9 @@ pub struct AuditWebhookConfig {
     pub secret: Option<String>,
     /// Durable spool directory. `None` ⇒ best-effort delivery.
     pub spool_dir: Option<String>,
+    /// Outage budget for spooled deliveries, in seconds (0.48.12).
+    /// `0` ⇒ never discard on age. See `docs/CONFIG.md`; #467.
+    pub spool_max_age_secs: u64,
     pub retry_max: u32,
     pub timeout: Duration,
 }
@@ -582,6 +592,9 @@ pub struct QualityWebhookConfig {
     pub secret: Option<String>,
     /// Durable spool directory. `None` ⇒ best-effort delivery.
     pub spool_dir: Option<String>,
+    /// Outage budget for spooled deliveries, in seconds (0.48.12).
+    /// `0` ⇒ never discard on age. See `docs/CONFIG.md`; #467.
+    pub spool_max_age_secs: u64,
     pub retry_max: u32,
     pub timeout: Duration,
 }
@@ -2774,6 +2787,7 @@ fn compile_webhooks(raw: RawWebhooks) -> Result<WebhooksConfig, CompileError> {
         spool_dir: raw.spool_dir.filter(|s| !s.is_empty()),
         events: raw.events.unwrap_or_default(),
         retry_max: raw.retry_max.unwrap_or(3),
+        spool_max_age_secs: raw.spool_max_age_secs.unwrap_or(DEFAULT_SPOOL_MAX_AGE_SECS),
         timeout: Duration::from_millis(raw.timeout_ms.unwrap_or(5000)),
     })
 }
@@ -3310,6 +3324,10 @@ fn compile_cdr(raw: RawCdr) -> Result<CdrConfig, CompileError> {
             secret: raw.webhook.secret.filter(|s| !s.is_empty()),
             spool_dir: raw.webhook.spool_dir.filter(|s| !s.is_empty()),
             retry_max: raw.webhook.retry_max.unwrap_or(3),
+            spool_max_age_secs: raw
+                .webhook
+                .spool_max_age_secs
+                .unwrap_or(DEFAULT_SPOOL_MAX_AGE_SECS),
             timeout: Duration::from_millis(raw.webhook.timeout_ms.unwrap_or(5000)),
         })
     } else {
@@ -3358,6 +3376,10 @@ fn compile_audit(raw: crate::raw::RawAudit) -> Result<AuditConfig, CompileError>
             secret: raw.webhook.secret.filter(|s| !s.is_empty()),
             spool_dir: raw.webhook.spool_dir.filter(|s| !s.is_empty()),
             retry_max: raw.webhook.retry_max.unwrap_or(3),
+            spool_max_age_secs: raw
+                .webhook
+                .spool_max_age_secs
+                .unwrap_or(DEFAULT_SPOOL_MAX_AGE_SECS),
             timeout: Duration::from_millis(raw.webhook.timeout_ms.unwrap_or(5000)),
         })
     } else {
@@ -3416,6 +3438,10 @@ fn compile_quality(raw: crate::raw::RawQuality) -> Result<QualityConfig, Compile
             secret: raw.webhook.secret.filter(|s| !s.is_empty()),
             spool_dir: raw.webhook.spool_dir.filter(|s| !s.is_empty()),
             retry_max: raw.webhook.retry_max.unwrap_or(3),
+            spool_max_age_secs: raw
+                .webhook
+                .spool_max_age_secs
+                .unwrap_or(DEFAULT_SPOOL_MAX_AGE_SECS),
             timeout: Duration::from_millis(raw.webhook.timeout_ms.unwrap_or(5000)),
         })
     } else {

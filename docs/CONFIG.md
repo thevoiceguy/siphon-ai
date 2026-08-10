@@ -925,7 +925,8 @@ first request.
 | `secret`      | string   | unset                  | HMAC-SHA256 signing secret (0.11.0). When set, every POST carries `X-SiphonAI-Signature` for authenticity + replay protection. `${VAR}` expansion works; never logged. See `docs/DEPLOY.md` → *Webhook delivery: signing, idempotency, durability*. |
 | `spool_dir`   | path     | unset                  | Durable retry spool directory (0.11.0). When set, a delivery that exhausts `retry_max` is persisted here and re-delivered by a background worker that survives restarts. Unset ⇒ best-effort (dropped after `retry_max`). Created + write-probed at startup (fail-loud). `${VAR}` expansion works. |
 | `events`      | string[] | all                    | Allowlist. Valid today: `"call_start"`, `"call_end"`, `"registration_state_changed"`, `"outbound_initiated"`, `"outbound_answered"`, `"outbound_failed"`, `"conference_created"`, `"conference_ended"`, `"call_parked"`, `"call_retrieved"`, `"park_timeout"`, `"recording_uploaded"`. |
-| `retry_max`   | integer  | `3`                    | In-memory retries before spooling (or dropping). |
+| `retry_max`   | integer  | `3`                    | In-memory retries before spooling (or dropping). **Not** the spool's own limit — see `spool_max_age_secs`. |
+| `spool_max_age_secs` | integer | `259200` (72 h) | How long a spooled delivery may keep failing before it is discarded (0.48.12). This is the deployment's **tolerance for a receiver outage**: a receiver down longer than this loses whatever aged out while it was away. `0` never discards on age, leaving the per-sink file cap (10,000 entries; a full spool drops the *newest* delivery rather than evicting a persisted one) as the only bound — the right setting for an audit stream that must not lose records. Before 0.48.12 this was a hard-coded cap of 100 drain attempts which, with the capped backoff, worked out to exactly 8 hours ([#467](https://github.com/thevoiceguy/siphon-ai/issues/467)). Note this is a *different* limit from `retry_max`, which counts in-memory retries **before** spooling. |
 | `timeout_ms`  | integer  | `5000`                 | |
 
 Every delivery — webhook **and** CDR — also carries `X-SiphonAI-Event-Id`
@@ -979,7 +980,8 @@ timeout_ms  = 5000
 | `webhook.auth_header`| string   | unset          | Sent verbatim. `${VAR}` / `${file:}` / `${cred:}` expansion works. |
 | `webhook.secret`     | string   | unset          | HMAC-SHA256 signing secret → `X-SiphonAI-Signature`. **Recommended** — the signature is what makes the stream tamper-evident. Unsigned logs a startup warning. |
 | `webhook.spool_dir`  | path     | unset          | Durable retry spool (survives restarts). Unset ⇒ best-effort. Created + write-probed at startup. |
-| `webhook.retry_max`  | integer  | `3`            | In-memory retries before spooling / dropping. |
+| `webhook.retry_max`  | integer  | `3`            | In-memory retries before spooling / dropping. **Not** the spool's own limit — see `webhook.spool_max_age_secs`. |
+| `webhook.spool_max_age_secs` | integer | `259200` (72 h) | How long a spooled delivery may keep failing before it is discarded (0.48.12). This is the deployment's **tolerance for a receiver outage**: a receiver down longer than this loses whatever aged out while it was away. `0` never discards on age, leaving the per-sink file cap (10,000 entries; a full spool drops the *newest* delivery rather than evicting a persisted one) as the only bound — the right setting for an audit stream that must not lose records. Before 0.48.12 this was a hard-coded cap of 100 drain attempts which, with the capped backoff, worked out to exactly 8 hours ([#467](https://github.com/thevoiceguy/siphon-ai/issues/467)). Note this is a *different* limit from `retry_max`, which counts in-memory retries **before** spooling. |
 | `webhook.timeout_ms` | integer  | `5000`         | Per-attempt timeout. |
 
 **What is (and isn't) recorded, by design:** the stream captures the
@@ -1038,7 +1040,8 @@ timeout_ms  = 5000
 | `webhook.auth_header`| string  | unset          | Sent verbatim. `${VAR}` / `${file:}` / `${cred:}` expansion works. |
 | `webhook.secret`     | string  | unset          | HMAC-SHA256 signing secret → `X-SiphonAI-Signature`. Unset ⇒ unsigned deliveries. |
 | `webhook.spool_dir`  | path    | unset          | Durable retry spool (survives restarts). Unset ⇒ best-effort. |
-| `webhook.retry_max`  | integer | `3`            | In-memory retries before spooling / dropping. |
+| `webhook.retry_max`  | integer | `3`            | In-memory retries before spooling / dropping. **Not** the spool's own limit — see `webhook.spool_max_age_secs`. |
+| `webhook.spool_max_age_secs` | integer | `259200` (72 h) | How long a spooled delivery may keep failing before it is discarded (0.48.12). This is the deployment's **tolerance for a receiver outage**: a receiver down longer than this loses whatever aged out while it was away. `0` never discards on age, leaving the per-sink file cap (10,000 entries; a full spool drops the *newest* delivery rather than evicting a persisted one) as the only bound — the right setting for an audit stream that must not lose records. Before 0.48.12 this was a hard-coded cap of 100 drain attempts which, with the capped backoff, worked out to exactly 8 hours ([#467](https://github.com/thevoiceguy/siphon-ai/issues/467)). Note this is a *different* limit from `retry_max`, which counts in-memory retries **before** spooling. |
 | `webhook.timeout_ms` | integer | `5000`         | Per-attempt timeout. |
 
 Records with nothing measured are skipped (early ticks before the first

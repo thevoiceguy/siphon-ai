@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use siphon_ai_http::{
     BuildError, PostLog, PosterConfig, RetryingPoster, SinkKind, DEFAULT_RETRY_MAX,
-    DEFAULT_TIMEOUT_MS,
+    DEFAULT_SPOOL_MAX_AGE_SECS, DEFAULT_TIMEOUT_MS,
 };
 
 use crate::schema::CdrRecord;
@@ -53,6 +53,10 @@ pub struct WebhookSinkConfig {
     /// don't retry."
     #[serde(default = "default_retry_max")]
     pub retry_max: u32,
+    /// Outage budget for spooled deliveries, in seconds. `0` ⇒ never
+    /// discard on age. Forwarded to `PosterConfig` (siphon-ai #467).
+    #[serde(default = "default_spool_max_age_secs")]
+    pub spool_max_age_secs: u64,
     /// Per-attempt timeout. Total worst-case time for one record is
     /// roughly `(retry_max + 1) * timeout_ms` plus backoff sleeps.
     #[serde(default = "default_timeout_ms")]
@@ -65,6 +69,9 @@ fn default_retry_max() -> u32 {
 fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
 }
+fn default_spool_max_age_secs() -> u64 {
+    DEFAULT_SPOOL_MAX_AGE_SECS
+}
 
 impl WebhookSinkConfig {
     pub fn new(url: impl Into<String>) -> Self {
@@ -75,6 +82,7 @@ impl WebhookSinkConfig {
             spool_dir: None,
             retry_max: DEFAULT_RETRY_MAX,
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            spool_max_age_secs: DEFAULT_SPOOL_MAX_AGE_SECS,
         }
     }
 }
@@ -97,6 +105,7 @@ impl WebhookSink {
             timeout_ms: config.timeout_ms,
             secret: config.secret,
             spool_dir: config.spool_dir.map(PathBuf::from),
+            spool_max_age_secs: config.spool_max_age_secs,
             sink: SinkKind::Cdr,
         })?;
         // Start the drain worker once, on the single poster we build.

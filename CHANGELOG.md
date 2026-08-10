@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.13] - 2026-08-10
+
 ### Fixed
 
 - **Finished calls no longer leave their SIP dialog in the shared store forever** (issue #458). `sip-uas` inserts one confirmed dialog per accepted INVITE and siphon-ai never removed it, so `DialogManager` grew for the life of the process — the per-call RSS growth reported against 0.48.10. **The memory was the smaller half of the problem:** `sip-dialog` caps the store at `MAX_CONFIRMED_DIALOGS = 10_000` and `sip-uas` discards the resulting `insert` error (`let _ = ...`), so a daemon past ten thousand cumulative calls silently stops tracking new dialogs altogether — and in-dialog requests (BYE, re-INVITE, the post-REFER NOTIFY, transfer) resolve through exactly that store. At 10k calls/day that is a one-day fuse on a busy node, and nothing in the daemon reported it. Located with a `dhat` heap profile diffing a 100-call run against an 800-call run at constant concurrency: `DialogManager::insert` ← `sip_uas::accept_invite_with_session_timer` ← `BridgingAcceptor::on_matched`, ~976 B/call, with the retained dialog's contact URI and two transaction-metrics `String`s never freed alongside it. Ruled out on the way: metrics cardinality (series count flat at 60 across 4,000 calls), the call registry (empty after every batch), multi-arena glibc fragmentation (`MALLOC_ARENA_MAX=2` was marginally *worse*), untrimmed heap (aggressive `MALLOC_TRIM_THRESHOLD_` changed nothing), and the transaction map (genuinely bounded — it evicts oldest at `max_server_transactions`).

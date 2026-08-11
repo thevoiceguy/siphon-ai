@@ -86,7 +86,8 @@ ceiling.
 Mitigate all three ways:
 
 1. Use the Node echo server, or a trivial WS sink that discards audio and
-   sends silence.
+   sends silence. **Pace whatever you use against a monotonic origin**
+   (`target = t0 + n × 20 ms`), never a bare `setInterval` — see §8.
 2. Run the WS server **on a different box**, or at minimum pin it to its own
    core and measure its CPU separately.
 3. Record both processes' CPU in every result row. If the WS server is above
@@ -220,9 +221,27 @@ timing. Record the RSS curve, then interpret it with §6.3's reuse test.
 
 ### 6.2 Long-call soak — 1 call, 1 hour (`long_call_1h.xml`)
 
-**Pass:** audio still flowing at minute 59; RSS within ±10 MB; no clock
-drift (RTP timestamp advance matches wall clock within a few ms over the
-hour); MOS unchanged from minute 1.
+**Pass:** audio still flowing at minute 59; RSS within ±10 MB; MOS
+unchanged from minute 1 (the *minimum* across the hour is the honest
+statistic — an average hides a bad minute); and no **accumulating** clock
+drift.
+
+**State the drift criterion as a rate, not an absolute.** "Within a few ms
+over the hour" is tighter than a userspace generator can resolve: stamping
+arrival times once per 20 ms drain iteration puts ±20 ms of noise on every
+sample. What distinguishes a healthy clock from a broken one is not the size
+of the offset but whether it *grows*: plot RTP timestamp advance against wall
+clock every 30 s and require the residual to stay in a band rather than trend.
+Measured on 0.48.13: −99.9 ms over 3,599.9 s (**28 ppm**, inside crystal
+tolerance) wandering in an ~80 ms band with no trend.
+
+> **Pace the WS sink against a monotonic origin, or you will measure the
+> sink.** `setInterval(…, 20)` in Node fires at *at least* 20 ms, so the sink
+> feeds slower than realtime and the daemon can only play out what it is
+> given. That alone produced an apparent **−0.62% daemon clock error** that
+> vanished (to −0.044%) when the sink was corrected to
+> `target = t0 + n × 20 ms`. It also cost the §6.1 soak 0.7% of its expected
+> tx packet count, which read as the bridge dropping frames. See §8.
 
 ### 6.3 Leak audit — after every phase above
 
@@ -249,8 +268,8 @@ trim them back: measured on 0.48.13, a drained-to-idle daemon held 90.2 MB
 of which 76.7 MB was `RssAnon` in two mmap'd secondary arenas, and it stayed
 there for ten hours. RSS therefore *never* returns to idle after load, so
 that criterion fails on every run that did any work, while a real leak hides
-inside the failure. Measured steady state: **0.38 MB per call** at 200
-concurrent, bounded and reused (test 1 below).
+inside the failure. Measured at 200 concurrent: **0.43 MB per call** at two
+hours and still creeping, bounded and reused (test 1 below).
 
 Use these three instead, which separate the pool from an actual leak:
 
@@ -278,12 +297,14 @@ direction. Growth is bursty arena expansion, so a flat hour can hide churn
 and a +37 MB hour can be a daemon whose live set never moved. Test 1 is what
 answers the question.
 
-**Report the plateau, not the warm-up.** Per-call memory keeps climbing for
-roughly *fifty* minutes at a fixed concurrency before it settles: measured
-~0.2 MB/call plus ~5 MB fixed at fifteen minutes, against **0.38 MB/call**
-after an hour at 200 concurrent. Five-minute ramp steps therefore understate
-steady-state memory by about 60%, and that is the number an operator would
-otherwise size on.
+**Report the long-run figure, and do not assume it has converged.** Per-call
+memory climbs for *hours* at a fixed concurrency. Measured at 200 concurrent:
+~0.2 MB/call plus ~5 MB fixed at fifteen minutes, 0.40 MB/call at one hour,
+**0.43 MB/call at two** — hour 2 still added 6 MB after hour 1 added 42. The
+deceleration is sharp and the memory is reusable, but nothing has been
+observed actually stopping. Five-minute ramp steps understate the two-hour
+figure by roughly half. Quote the duration alongside the number, and if you
+need a hard capacity figure, measure over the duration you intend to run.
 
 ### 6.4 Degradation past the ceiling
 
@@ -362,6 +383,16 @@ us the first time someone hits the wall and reports it as a bug.
 
 ## 8. Known traps (learned the hard way)
 
+- **A WS sink paced with `setInterval` under-runs realtime, and the daemon
+  inherits it.** Node timers fire at *at least* their interval, so a 20 ms
+  `setInterval` feeds fewer than 50 frames/sec; the bridge plays out what it
+  is given, so the deficit appears in *its* numbers. Measured cost: a −0.62%
+  apparent clock-rate error (gone at −0.044% once the sink corrected against
+  a monotonic origin) and 0.7% of the soak's expected tx packet count, which
+  read as the bridge dropping frames. Pace with
+  `target = t0 + n × 20 ms; setTimeout(tick, target - now)`. **No tx-rate or
+  timing number measured through an uncorrected sink is worth quoting** — CPU
+  and RSS work is unaffected.
 - **Check the daemon actually started.** `Address in use` from a leftover
   instance produces failures that look exactly like load failures.
 - **`gh`-style exit codes**: `cmd | tail; echo $?` reports *tail's* status.

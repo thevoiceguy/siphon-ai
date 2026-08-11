@@ -44,7 +44,8 @@ limiter that does not apply to UDP.
 | Jitter p95 / MOS p50 / loss | **≤ 20 ms** / **> 4.4** / **0** | identical |
 | First audio out (p95) | **19 ms**, flat from 25 to 250 concurrent | identical |
 | 60-min soak at 200 | zero drops, fds/threads immovable, **all 200 torn down on BYE** | teardown anomaly **resolved** |
-| Memory at 200 concurrent | **0.38 MB/call** at steady state (~50 min to reach) | 0.23 MB/call at 5 min — *understated* |
+| Long call (1 × 1 h) | zero loss, MOS min 4.4378, **28 ppm clock drift, non-accumulating** | not run on 0.48.10 |
+| Memory at 200 concurrent | **0.43 MB/call** at two hours, still creeping | 0.23 MB/call at 5 min — *understated* |
 | Per-completed-call RSS growth | **gone** (#458 fixed) | was 6–10 KB/call |
 | Behaviour past the cap | **503 shed, exact, admitted calls unaffected** | identical |
 
@@ -117,12 +118,57 @@ all 200 tore down on BYE, and the criterion passes outright.
 Only the RSS criterion fails, and it fails for a reason that is not a defect
 in the daemon. That is the subject of §6.3.
 
+## §6.2 — long-call soak, 1 call for 1 hour
+
+| Criterion | Threshold | Result |
+|---|---|---|
+| Audio still flowing at minute 59 | — | **yes** — 179,884 packets received, last at 3,599.9 s |
+| RSS | ±10 MB | **+4.1 MB** (15.4 → 19.5) |
+| MOS unchanged from minute 1 | — | **min 4.4378 / avg 4.4400** over the whole hour |
+| Clock drift | RTP timestamp advance matches wall clock | **−99.9 ms over 3,599.9 s = 28 ppm**, non-accumulating — see below |
+
+Zero packets lost, zero out-of-order, zero duplicated, jitter pinned at 2.0 ms
+avg and max, first audio out 9 ms, terminated `caller_hangup`. Because the
+MOS *minimum* across the hour is 4.4378 against an average of 4.4400, quality
+never degraded at any point — which is the question "unchanged from minute 1"
+is really asking.
+
+**Drift needs its own paragraph, because the first measurement was wrong and
+the rig was at fault.** Measured against the plan's reference WS sink, the
+daemon's RTP timestamps advanced only 44.66 s across 45 s of wall clock — a
+−0.62% rate error that would be a serious defect. It is not the daemon.
+`ws_sink.mjs` paces with `setInterval(…, 20)`, and Node timers fire at *at
+least* 20 ms, so the sink feeds slower than realtime and **the daemon can only
+play out what it is given**. Swapping in a sink that corrects against a
+monotonic origin, on the same build and the same call:
+
+| Sink pacing | Drift over 45 s |
+|---|---|
+| `setInterval(20)` | **−280 ms** (−0.62%) |
+| corrected to a monotonic origin | **−20 ms** (−0.044%) |
+
+Over the full hour with the corrected sink the total is **−99.9 ms**, and the
+per-30-second series wanders inside an ~80 ms band (−42 ms, −80, −80, −82,
+−100, −122, −120, −120, −121, −100) rather than accumulating. A real clock-rate
+error would grow monotonically into seconds across an hour; this does not. The
+residual 28 ppm is well inside crystal tolerance and, since both ends are the
+same machine, is more plausibly the measurement than the clock: arrival times
+are stamped once per 20 ms drain iteration, so the rig cannot resolve the "few
+ms" the plan asks for.
+
+**This retro-explains the §6.1 tx count.** The soak's CDR reported 178,740
+packets sent against 180,000 expected — 0.7% short, which read as the daemon
+dropping frames. The same call through the corrected sink sends 179,876 of
+180,000 (**49.95 fps against 49.65**). The shortfall was the harness, not the
+bridge. **No tx-rate or timing figure measured through `ws_sink.mjs` should be
+quoted**, here or in `RESULTS-0.48.10.md`.
+
 ## §6.3 — what RSS actually does
 
 The soak's +36.8 MB was worth chasing down, because on its face it looks like
 a per-frame leak: concurrency was pinned at 200 for the whole hour with **zero
 call churn**, so nothing that grows can be blamed on completed calls (#458,
-fixed in 0.48.13). Five measurements, all on this hardware:
+fixed in 0.48.13). Seven measurements, all on this hardware:
 
 | Measurement | Daemon | Result |
 |---|---|---|
@@ -131,6 +177,7 @@ fixed in 0.48.13). Five measurements, all on this hardware:
 | 200 calls × 15 min, fresh | 0.48.13 | 60.0 MB (**+2.9 MB** after warm-up) |
 | 200 calls × 15 min, fresh | 0.48.10 | 69.0 MB (**+16.9 MB** after warm-up) |
 | 200 calls × 60 min, fresh (the soak) | 0.48.13 | 90.2 MB (**+36.8 MB**) |
+| 200 calls × **120 min**, fresh | 0.48.13 | 101.8 MB (hour 1 **+42.4**, hour 2 **+6.0**) |
 | **200 calls × 15 min into the already-loaded 90.2 MB process** | 0.48.13 | **92.4 MB (+2.2 MB)** |
 
 **It is not a leak.** The last row is the test that settles it. The soak
@@ -163,12 +210,30 @@ Two hypotheses were tested and killed:
 ### What to budget
 
 Per-call memory is **~0.2 MB/call plus ~5 MB fixed** at 15 minutes — a linear
-fit through the 50-call and 200-call arms — but the steady-state figure after
-an hour at 200 concurrent is **0.38 MB/call**. The 5-minute-per-step figures
-in `RESULTS-0.48.10.md` (~0.23 MB/call) are the *warm-up* number, and they
-understate the plateau by about 60%. Size on the plateau: ~110 MB at 250
-concurrent, which is nothing on any real box — the point is not the magnitude
-but that the smaller number is the one an operator would otherwise quote.
+fit through the 50-call and 200-call arms — and it keeps climbing for a long
+time after that. A dedicated **two-hour** run at 200 concurrent:
+
+| Elapsed | RSS | |
+|---|---|---|
+| 1 min | 53.7 MB | |
+| 5 min | 60.0 MB | the figure a §4-style ramp step would record |
+| 15 min | 67.7 MB | |
+| 30 min | 92.4 MB | |
+| **60 min** | **95.8 MB** | hour 1: **+42.4 MB** |
+| 90 min | 98.2 MB | |
+| **120 min** | **101.8 MB** | hour 2: **+6.0 MB** |
+
+Growth in hour 2 is **seven times slower** than in hour 1, which is the shape
+you would expect of arena fragmentation approaching a ceiling — but it has not
+stopped. **At two hours this is 0.43 MB/call, and still creeping.** Budget
+**~0.45 MB/call at 200 concurrent** (~125 MB at 250) and treat it as a soft
+floor rather than a converged number; if you need a hard figure, measure over
+the duration you actually intend to run.
+
+The 5-minute-per-step figures in `RESULTS-0.48.10.md` (~0.23 MB/call) are the
+*warm-up* number and understate this by roughly half. The magnitude is nothing
+on any real box — the point is that the smaller number is the one an operator
+would otherwise quote.
 
 **0.48.13 is strictly better than 0.48.10 here**, which is the opposite of
 what the soak's raw number suggests: matched fresh 15-minute arms at 200
@@ -205,15 +270,15 @@ Clean shed at a known cap, identical to 0.48.10.
 
 ## Not measured
 
-- **§6.2 long-call soak** (1 call, 1 hour) — not run this pass.
 - **§7.2 feature-cost deltas** — not re-run; the 0.48.10 figures stand
   (recording +81% CPU, neural VAD +191%, HEP free).
-- **Playout SLO** — still no data source. `outbound_audio_frames_dropped_total`
-  exists in the code but is not exported unless it increments, so "zero
-  dropped" and "not instrumented" are indistinguishable. Unverified, not
-  passed — unchanged from 0.48.10.
-- **A second hour at 200 concurrent.** The plateau is inferred from the soak
-  flattening at 90.1–90.2 MB over its final six minutes, holding that value
-  for ten idle hours, and absorbing a full second load for +2.2 MB. That is
-  strong, but it is not the same as having watched hour two.
+- **Playout SLO** — unverified on this run, for the third time, and now fixed
+  for the next one. `outbound_audio_frames_dropped_total` existed in the code
+  but was not exported until it first incremented, so "zero dropped" and "not
+  instrumented" were indistinguishable ([#474](https://github.com/thevoiceguy/siphon-ai/issues/474)).
+  The counter is published at zero from startup as of the commit after
+  0.48.13, so the next tier-1 run can assert this SLO rather than skip it.
+- **Convergence.** Hour 2 of the two-hour run still added 6 MB. Growth is
+  decelerating sharply and the reuse test says the memory is reusable, but
+  nothing here shows it actually stopping, and no run has gone past two hours.
 - **Tier 2 / tier 3** — generator on its own box, TLS/SRTP, real carrier.

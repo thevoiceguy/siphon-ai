@@ -52,6 +52,7 @@ use std::time::Duration;
 use forge_core::{AudioCodec, AudioFormat};
 use forge_injection::{AudioSource, ToneGenerator};
 use forge_mixer::AudioMixer;
+use siphon_ai_telemetry::metrics as telemetry_metrics;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
@@ -97,13 +98,16 @@ const LEAVE_TONE_HZ: f32 = 440.0;
 /// Bridge call ids are `siphon-…`, so this can't collide.
 const TONE_PARTICIPANT: &str = "__room_tone__";
 
-/// Metric names. Literals must match the consts in
-/// `siphon-ai-telemetry::metrics` (same pattern as
-/// `siphon_ai_rtp_rtt_ms`).
-const METRIC_CONFERENCES_ACTIVE: &str = "siphon_ai_conferences_active";
-const METRIC_PARTICIPANTS: &str = "siphon_ai_conference_participants";
-const METRIC_TICK_LAG: &str = "siphon_ai_room_tick_lag_seconds";
-const METRIC_FRAMES_DROPPED: &str = "siphon_ai_room_frames_dropped_total";
+/// Metric names, aliased from the telemetry crate's constants rather
+/// than re-spelled here (#474). These used to be literals with a
+/// comment asking the reader to keep them in step with
+/// `siphon-ai-telemetry::metrics`; nothing enforced it, and a rename
+/// there would have left this crate emitting the old name with nothing
+/// failing to compile.
+const METRIC_CONFERENCES_ACTIVE: &str = telemetry_metrics::CONFERENCES_ACTIVE;
+const METRIC_PARTICIPANTS: &str = telemetry_metrics::CONFERENCE_PARTICIPANTS;
+const METRIC_TICK_LAG: &str = telemetry_metrics::ROOM_TICK_LAG_SECONDS;
+const METRIC_FRAMES_DROPPED: &str = telemetry_metrics::ROOM_FRAMES_DROPPED_TOTAL;
 
 /// Why a join was refused. The WS surface (chunk 2) maps these onto
 /// `error { code: "conference_failed" }` details.

@@ -44,7 +44,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use metrics::{describe_counter, describe_gauge, describe_histogram, Unit};
+use metrics::{counter, describe_counter, describe_gauge, describe_histogram, Unit};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use thiserror::Error;
 
@@ -686,6 +686,7 @@ pub fn install_recorder() -> Result<PrometheusHandle, InitError> {
         .install_recorder()
         .map_err(|e| InitError::Install(e.to_string()))?;
     register_descriptions();
+    publish_zero_baselines();
     *guard = Some(handle.clone());
     Ok(handle)
 }
@@ -960,6 +961,35 @@ pub fn register_descriptions() {
     );
 }
 
+/// Publish a zero for the counters whose *healthy* value is zero, so
+/// that "nothing has gone wrong" is a fact you can read rather than an
+/// absence you have to infer (siphon-ai #474).
+///
+/// `describe_*!` only registers `# HELP`; a series does not exist until
+/// something increments it. For most counters that is fine — nobody
+/// alerts on the absence of `transfers_total`, and `absent()` covers
+/// it. It is not fine when zero is the good value and any movement is
+/// the alert, because then "no data" and "healthy" render identically
+/// and the transition you care about is the one you cannot see. That
+/// is what made the load plan's Playout SLO unverifiable across two
+/// tier-1 runs: `outbound_audio_frames_dropped_total` was simply
+/// missing from `/metrics` on every clean run.
+///
+/// Same fix as [`crate::transport`] applies to
+/// [`SIP_RATE_LIMITED_TOTAL`] (#464).
+///
+/// **Unlabeled counters only.** Publishing a labeled series means
+/// choosing which label values exist before anything has happened —
+/// `ROOM_FRAMES_DROPPED_TOTAL` would need a `stage` × `side` matrix —
+/// and inventing series that may never apply is worse than the absence
+/// this fixes. Labeled drop counters are published by the code that
+/// owns their label space, the way the HEP sampler does.
+///
+/// Public so tests can call it inside a `with_local_recorder` scope.
+pub fn publish_zero_baselines() {
+    counter!(OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL).absolute(0);
+}
+
 /// Buckets for `ws_connect_seconds`. The first bucket (25ms) catches
 /// the typical healthy local-network handshake; the last (30s)
 /// captures pathological hangs that would otherwise make our
@@ -1167,6 +1197,42 @@ mod tests {
                 "missing HELP for {name} in:\n{out}"
             );
         }
+    }
+
+    /// #474: a counter whose healthy value is zero has to be *present*
+    /// at zero, or a clean run and an uninstrumented build render the
+    /// same and the SLO built on it can never be asserted.
+    #[test]
+    fn zero_is_good_counters_are_published_before_anything_goes_wrong() {
+        // Guard: describing a metric must not be enough to create the
+        // series. If this ever stops holding, the assertion below would
+        // pass for free and prove nothing.
+        let bare = with_recorder(|| {});
+        assert!(
+            !bare.contains(OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL),
+            "describe_* alone created {OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL}; \
+             this test no longer proves anything:\n{bare}"
+        );
+
+        let out = with_recorder(publish_zero_baselines);
+        assert!(
+            out.contains(&format!("{OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL} 0")),
+            "expected a zero baseline for {OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL} in:\n{out}"
+        );
+    }
+
+    /// The baseline must not clobber a real count — `absolute(0)` runs
+    /// at install, before any call exists, but a later increment wins.
+    #[test]
+    fn zero_baseline_does_not_suppress_real_drops() {
+        let out = with_recorder(|| {
+            publish_zero_baselines();
+            counter!(OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL).increment(7);
+        });
+        assert!(
+            out.contains(&format!("{OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL} 7")),
+            "expected 7 after the baseline in:\n{out}"
+        );
     }
 
     #[test]

@@ -10,12 +10,10 @@ nothing here is a claim about a network, crypto, or a real carrier.
 > that memory is flat, and the per-call figures below are warm-up numbers that
 > understate steady state by ~60%. (2) §5's 626 failures at 75 cps do not occur
 > with the pps cap disabled, so the "generator-side, not a bridge limit"
-> attribution is unconfirmed. (3) §7.2's neural-VAD memory figures are wrong and
-> contradict each other — "~6× the per-call memory" below against the "~1.6 vs
-> ~0.79 MB/call" bullet, which is 2×. Both per-call numbers are taken at 25
-> concurrent, where energy's cost is mostly fixed overhead divided by a small
-> N; the real ratio at 200 concurrent is ~8.8× per call. See
-> [#472](https://github.com/thevoiceguy/siphon-ai/issues/472). Everything else
+> attribution is unconfirmed. (3) §7.2's neural-VAD memory
+> comparison was wrong — "~2× the memory per call" was a 25-concurrent artifact,
+> and the real figure is ~8.8× per call at 200. **Corrected in place below**
+> ([#472](https://github.com/thevoiceguy/siphon-ai/issues/472)). Everything else
 > here still stands.
 
 ## Environment
@@ -208,7 +206,7 @@ trap that HEP-on runs "need their own drop-rate line" is currently impossible
 to satisfy.
 
 **Neural VAD — the most expensive feature by a wide margin, as §7.2 predicted.**
-Nearly triple the per-call CPU and ~6× the per-call memory. At 200 concurrent it
+Nearly triple the per-call CPU, and ~6× the *total* RSS at 200 concurrent (330.9 vs 56.8 MB). Per call the gap is wider still — see the corrected figures below. At 200 concurrent it
 draws 78.4% of all four cores, which is §4's ≤80% headroom SLO almost exactly,
 and quality degrades the way saturation predicts: first audio p95 goes 19 ms →
 198 ms (max 373), loss appears, the MOS floor drops to 4.266. **At 25 concurrent
@@ -222,10 +220,21 @@ taken at 25 concurrent where nothing contends:
 - **CPU: +1.47 %/core per call** attributable to the model — ~470 µs per 32 ms
   window, against the ~60–80 µs `docs/CONFIG.md` quotes
   ([#461](https://github.com/thevoiceguy/siphon-ai/issues/461)).
-- **Memory: ~1.6 MB/call**, against energy's ~0.79 MB/call. The cost is *per
-  call*, not a one-time model load, and the model loads on the **first call**,
-  not at startup — an idle neural-VAD daemon sits at 14.6 MB and tells you
-  nothing about its footprint.
+- **Memory: ~1.6 MB/call.** The cost is *per call*, not a one-time model load,
+  and the model loads on the **first call**, not at startup — an idle
+  neural-VAD daemon sits at 14.6 MB and tells you nothing about its footprint.
+
+  > **Correction ([#472](https://github.com/thevoiceguy/siphon-ai/issues/472)).**
+  > This bullet originally compared the figure above against "energy's ~0.79
+  > MB/call" and the headline read that as ~2×. Both per-call numbers were taken
+  > at 25 concurrent, where energy's cost is mostly *fixed* overhead divided by a
+  > small N rather than a marginal per-call cost. Apply the same formula to the
+  > 200-concurrent column of the table above and energy is 0.199 MB/call against
+  > neural's 1.50 — **7.5×, not 2×**. Re-measured on 0.48.13 the ratio is 6.5× at
+  > 25 concurrent and 8.8× at 200. Neural's per-call cost is near-constant with
+  > concurrency; energy's is not, so any single-concurrency ratio between them is
+  > an artifact of the N you picked. Size on the delta (**~1.9 MB/call**) and the
+  > totals at a stated concurrency.
 
 ### Not run
 

@@ -205,10 +205,18 @@ Three separate questions. Run them in this order.
 
 ### 6.1 Sustained soak — 60 min at 80% of the knee
 
-**Pass:** RSS flat within ±10 MB after a 5-minute warm-up; fd count flat;
-thread count flat; zero unexplained call terminations
+**Pass:** fd count flat; thread count flat; `dialogs_active` returns to 0
+after the grace window; zero unexplained call terminations
 (`calls_total{cause}` should show only your own teardowns); quality SLOs
 from §4 still met at minute 59.
+
+**RSS is deliberately not a criterion here** — put it through §6.3 instead.
+A soak is the *worst* place to judge memory: growth arrives in bursts
+(measured: flat for eight minutes, then +4 MB in sixty seconds, then flat
+again, with no correlate in CPU or load), so whether an hour looks flat or
+looks like +37 MB depends on how many bursts happened to land in it. Two
+matched 15-minute runs of identical work differed by 14 MB on nothing but
+timing. Record the RSS curve, then interpret it with §6.3's reuse test.
 
 ### 6.2 Long-call soak — 1 call, 1 hour (`long_call_1h.xml`)
 
@@ -232,28 +240,50 @@ ps -o rss= -p <pid>                 # within ~10% of pre-load idle
 back down is a leak, and it matters more than the peak number.
 
 **RSS is the exception, and "within ~10% of idle" is the wrong test for
-it.** The daemon sizes its buffer pools to the highest concurrency it has
-ever seen and keeps them — the necessary price of allocating nothing in the
-frame loop (CLAUDE.md §4.3). RSS therefore *never* returns to idle after
-load, so that criterion fails on every run that did any work, while a real
-leak hides inside the failure. Measured here: ~0.23 MB per call of
-high-water pool, which is bounded and legitimate.
+it.** Two things keep it high, and neither is a leak. The daemon sizes its
+buffer pools to the highest concurrency it has ever seen and keeps them —
+the necessary price of allocating nothing in the frame loop (CLAUDE.md
+§4.3). On top of that, sustained per-frame churn (~10,000 alloc/free pairs
+per second at 200 calls) ratchets glibc's arenas upward, and glibc does not
+trim them back: measured on 0.48.13, a drained-to-idle daemon held 90.2 MB
+of which 76.7 MB was `RssAnon` in two mmap'd secondary arenas, and it stayed
+there for ten hours. RSS therefore *never* returns to idle after load, so
+that criterion fails on every run that did any work, while a real leak hides
+inside the failure. Measured steady state: **0.38 MB per call** at 200
+concurrent, bounded and reused (test 1 below).
 
-Use these two instead, which separate the pool from an actual leak:
+Use these three instead, which separate the pool from an actual leak:
 
-1. **Repeat the peak step.** Run the same concurrency twice and require RSS
+1. **Re-load the same process** (start here — it is the decisive one). Take a
+   daemon that has already been through a full load and drained to idle, and
+   put an *identical* load through it again. Free-but-untrimmed arena gets
+   handed straight back to the new calls; a leak cannot be, so it must
+   allocate on top. Measured on 0.48.13: a daemon idling at 90.2 MB after
+   200 calls × 60 min absorbed a second 200-call load for **+2.2 MB**, where
+   a fresh daemon needed ~45 MB for the same work. That is a bounded,
+   reused working set — and it is a fifteen-minute test.
+2. **Repeat the peak step.** Run the same concurrency twice and require RSS
    not to grow materially the second time. Pool sizing is already paid;
    growth here is not. Make it thousands of calls, not hundreds — at a few
    KB/call, 250 calls moves RSS ~1.5 MB and is easily dismissed as noise.
-2. **Vary calls independently of concurrency.** Run many short calls at
+3. **Vary calls independently of concurrency.** Run many short calls at
    *low* concurrency (§5's rate steps do this naturally). Any growth there
    cannot be pool sizing, because concurrency never exceeded the existing
    high-water mark. Divide by completed calls to get bytes-per-call.
 
-A per-frame leak is ruled out separately by §6.2/§6.1: a 60-minute soak
-puts tens of millions of frames through a couple of hundred calls, so flat
-RSS across the hour means the hot path is clean whatever the per-call
-figure says.
+**Do not infer the hot path from whether the soak's RSS looked flat.** The
+tempting reading — tens of millions of frames through a couple of hundred
+calls, so flat RSS means a clean frame loop — does not hold in either
+direction. Growth is bursty arena expansion, so a flat hour can hide churn
+and a +37 MB hour can be a daemon whose live set never moved. Test 1 is what
+answers the question.
+
+**Report the plateau, not the warm-up.** Per-call memory keeps climbing for
+roughly *fifty* minutes at a fixed concurrency before it settles: measured
+~0.2 MB/call plus ~5 MB fixed at fifteen minutes, against **0.38 MB/call**
+after an hour at 200 concurrent. Five-minute ramp steps therefore understate
+steady-state memory by about 60%, and that is the number an operator would
+otherwise size on.
 
 ### 6.4 Degradation past the ceiling
 

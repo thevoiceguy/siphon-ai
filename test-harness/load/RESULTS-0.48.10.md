@@ -4,6 +4,20 @@ Executed against `LOAD_TEST_PLAN.md` on 2026-08-10. Tier 1 only (SIPp on the
 same box, loopback, plaintext) — §10's tier 2 and tier 3 are **not** run, so
 nothing here is a claim about a network, crypto, or a real carrier.
 
+> **Superseded in two places by `RESULTS-0.48.13.md`.** (1) §6.1's "RSS +1.3 MB
+> over the hour" was measured on a process already at 137 MB, whose allocator
+> had free pool enough to absorb an hour of churn invisibly; it is not evidence
+> that memory is flat, and the per-call figures below are warm-up numbers that
+> understate steady state by ~60%. (2) §5's 626 failures at 75 cps do not occur
+> with the pps cap disabled, so the "generator-side, not a bridge limit"
+> attribution is unconfirmed. (3) §7.2's neural-VAD memory figures are wrong and
+> contradict each other — "~6× the per-call memory" below against the "~1.6 vs
+> ~0.79 MB/call" bullet, which is 2×. Both per-call numbers are taken at 25
+> concurrent, where energy's cost is mostly fixed overhead divided by a small
+> N; the real ratio at 200 concurrent is ~8.8× per call. See
+> [#472](https://github.com/thevoiceguy/siphon-ai/issues/472). Everything else
+> here still stands.
+
 ## Environment
 
 | | |

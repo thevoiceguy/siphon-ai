@@ -20,6 +20,12 @@ metrics.workspace     = true
 # Sibling SiphonAI crates
 siphon-ai-bridge.workspace = true
 siphon-ai-recording.workspace = true
+# For the metric-name constants only (siphon-ai #474): this crate emits
+# metrics the telemetry crate declares and documents, and a literal at
+# the emit site can drift from the constant without anything failing to
+# compile. Same edge `core` already has for DIALOGS_ACTIVE; telemetry
+# does not depend on this crate, so there is no cycle.
+siphon-ai-telemetry.workspace = true
 
 # Upstream media stack
 forge-core.workspace   = true

@@ -63,6 +63,13 @@ use std::time::{Duration, Instant};
 use crate::idle::{IdleDetector, IdleEvent};
 use crate::room::{RoomEvent, RoomMembership, RoomSender};
 use crate::rtp_stats::{QualityReport, RtpStatsTracker, RxStats, TxStats};
+// Metric names come from the crate that declares and documents them, so
+// a rename cannot leave this crate emitting the old one (#474).
+use siphon_ai_telemetry::metrics::{
+    BARGE_IN_DECISIONS_TOTAL, BARGE_IN_DECISION_SECONDS, DEAD_AIR_EVENTS_TOTAL,
+    OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL, RTP_JITTER_MS, RTP_MOS_ESTIMATE, RTP_PACKET_LOSS_RATIO,
+    RTP_RTT_MS, RTP_RX_JITTER_MS, SILENCE_EVENTS_TOTAL,
+};
 
 use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, EventBus, ForgeError, ForgeEvent};
 use forge_dtmf::DtmfDigit;
@@ -189,7 +196,7 @@ impl OutboundQueue {
             }
         }
         if dropped > 0 {
-            metrics::counter!("siphon_ai_outbound_audio_frames_dropped_total").increment(dropped);
+            metrics::counter!(OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL).increment(dropped);
             if !self.dropped_warned {
                 self.dropped_warned = true;
                 warn!(
@@ -880,9 +887,8 @@ impl MediaTap {
         outcome: &'static str,
         is_barge_in: bool,
     ) {
-        metrics::counter!("siphon_ai_barge_in_decisions_total", "outcome" => outcome).increment(1);
-        metrics::histogram!("siphon_ai_barge_in_decision_seconds")
-            .record(armed_at.elapsed().as_secs_f64());
+        metrics::counter!(BARGE_IN_DECISIONS_TOTAL, "outcome" => outcome).increment(1);
+        metrics::histogram!(BARGE_IN_DECISION_SECONDS).record(armed_at.elapsed().as_secs_f64());
         if is_barge_in {
             self.barge_in_count += 1;
             self.publish_quality();
@@ -2599,14 +2605,14 @@ impl MediaTap {
                     for ev in self.idle_detector.poll(now) {
                         let out = match ev {
                             IdleEvent::SilenceDetected { duration_ms } => {
-                                metrics::counter!("siphon_ai_silence_events_total").increment(1);
+                                metrics::counter!(SILENCE_EVENTS_TOTAL).increment(1);
                                 OutgoingEvent::SilenceDetected {
                                     duration_ms,
                                     at: now,
                                 }
                             }
                             IdleEvent::DeadAirDetected { duration_ms } => {
-                                metrics::counter!("siphon_ai_dead_air_events_total").increment(1);
+                                metrics::counter!(DEAD_AIR_EVENTS_TOTAL).increment(1);
                                 OutgoingEvent::DeadAirDetected {
                                     duration_ms,
                                     at: now,
@@ -2632,20 +2638,20 @@ impl MediaTap {
                 _ = rtp_stats_tick.tick(), if self.rtp_stats.is_active() => {
                     let snap = self.rtp_stats.snapshot();
                     if let Some(j) = snap.jitter_ms {
-                        metrics::histogram!("siphon_ai_rtp_jitter_ms").record(j as f64);
+                        metrics::histogram!(RTP_JITTER_MS).record(j as f64);
                     }
                     if let Some(l) = snap.packet_loss_ratio {
-                        metrics::histogram!("siphon_ai_rtp_packet_loss_ratio").record(l as f64);
+                        metrics::histogram!(RTP_PACKET_LOSS_RATIO).record(l as f64);
                     }
                     if let Some(r) = snap.rtt_ms {
-                        metrics::histogram!("siphon_ai_rtp_rtt_ms").record(r as f64);
+                        metrics::histogram!(RTP_RTT_MS).record(r as f64);
                     }
                     if let Some(rx) = &snap.rx {
-                        metrics::histogram!("siphon_ai_rtp_rx_jitter_ms")
+                        metrics::histogram!(RTP_RX_JITTER_MS)
                             .record(rx.jitter_ms as f64);
                     }
                     if let Some(m) = snap.mos_estimate {
-                        metrics::histogram!("siphon_ai_rtp_mos_estimate").record(m as f64);
+                        metrics::histogram!(RTP_MOS_ESTIMATE).record(m as f64);
                     }
                     let out = OutgoingEvent::RtpStats {
                         jitter_ms: snap.jitter_ms,

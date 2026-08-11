@@ -48,6 +48,9 @@ use sip_transaction::{ServerTransactionHandle, TransportContext};
 use sip_uas::integrated::{IntegratedUAS, UasRequestHandler};
 use sip_uas::UserAgentServer;
 use siphon_ai_routes::{CompiledRoute, RouteSet};
+// Metric names from the crate that declares them — see the note in
+// media-glue's tap.rs (#474).
+use siphon_ai_telemetry::metrics::{INVITE_ADMISSION_SOURCES, NOTIFY_TOTAL};
 use tracing::{debug, info, instrument, warn};
 
 use crate::dialog::{
@@ -471,7 +474,7 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
             489 => "bad_event",
             _ => "bad_request",
         };
-        metrics::counter!("siphon_ai_notify_total", "result" => result).increment(1);
+        metrics::counter!(NOTIFY_TOTAL, "result" => result).increment(1);
         debug!(
             sip_call_id = request.headers().get("Call-ID").unwrap_or(""),
             event = request.headers().get("Event").unwrap_or(""),
@@ -526,8 +529,7 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                 "result" => decision.metric_result(),
             )
             .increment(1);
-            metrics::gauge!("siphon_ai_invite_admission_sources")
-                .set(admission.source_count() as f64);
+            metrics::gauge!(INVITE_ADMISSION_SOURCES).set(admission.source_count() as f64);
             match decision {
                 crate::admission::AdmissionDecision::Accept => {}
                 crate::admission::AdmissionDecision::Reject503 => {

@@ -24,6 +24,8 @@ arc-swap = "1"
 # Internal
 siphon-ai-audit.workspace  = true
 siphon-ai-routes.workspace = true
+# Metric-name constants only — see the note in media-glue (#474).
+siphon-ai-telemetry.workspace = true
 
 # Upstream SIP stack
 sip-core.workspace        = true

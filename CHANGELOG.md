@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.14] - 2026-08-12
+
 ### Changed
 
 - **Bumped siphon-rs `9ae6ce2cee5a` → `b71a75f1eacf`**, picking up two fixes to issues this project filed: **#91** keys the ingress rate-limit warning throttle by source IP (a process-wide static meant a multi-source flood named one peer and hid the rest, siphon-ai's siphon-rs#90), and **#94** schedules UAC session refreshes at `Session-Expires/2` instead of `max(90, se/2)` with an immediate first tick (siphon-rs#92). No glue changes were needed. Verified with the full workspace suite plus the SIPp signalling regression: 35 of 38 scenarios pass, and the same three — `outbound_uas_answer`, `attended_transfer`, `barge_in_pause` — fail identically on `main` before the bump, so they are pre-existing on this host (two need capabilities/services the box doesn't grant; the harness also collides with a running daemon on `:9091` until pointed elsewhere). **Two of those three were the harness, not the host** — see the bump below.

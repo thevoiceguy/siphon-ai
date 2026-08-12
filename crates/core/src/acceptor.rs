@@ -46,8 +46,10 @@
 //!
 //! - **Reliable provisionals (PRACK) / early media.** See the
 //!   `CallProgressMode` notes below — "Flavour C" is not built.
-//! - **UAS-initiated RFC 4028 session refreshes** — we negotiate
-//!   timers but never take the refresher role ourselves.
+//! - **UAS-initiated RFC 4028 session refreshes** — on inbound legs we
+//!   negotiate timers but never take the refresher role ourselves.
+//!   (Outbound legs do refresh when the callee nominates us, #477 —
+//!   see `outbound_service`.)
 //! - **Mid-call codec renegotiation** — a peer re-INVITE that
 //!   changes the codec set is answered with the original codec.
 //! - **Delayed-offer edge cases** — in-dialog transfer/hold on
@@ -2097,10 +2099,13 @@ impl SessionTimers {
     /// Arm an expiry for `dialog_id`, shutting `handle` down if the
     /// deadline passes.
     ///
-    /// `is_refresher` is hardcoded `false`: siphon-ai never initiates a
-    /// refresh, so this is only ever a deadline after which we reclaim
-    /// the leg — never a request to be woken at the half-way point. If
-    /// that ever changes, this is the line to revisit.
+    /// `is_refresher` is hardcoded `false` even for the outbound legs we
+    /// do refresh (#477): the flag only decides whether the *manager*
+    /// wakes us at the half-way point, and those refreshes are driven by
+    /// the caller's own `interval_at` through `DialogControl` instead. So
+    /// what this arms is always a deadline after which we reclaim the leg
+    /// — for a leg we refresh, the backstop for a refresh that fails.
+    /// A refresh that succeeds pushes it out via [`Self::refreshed`].
     pub fn arm(
         &self,
         dialog_id: DialogId,

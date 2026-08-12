@@ -2083,6 +2083,49 @@ struct InstalledTransfer {
 /// negotiated successfully on this INVITE. Tests that drive
 /// `run_call` directly (without the full acceptor flow) pass
 /// `None` for the outer Option and skip session-timer wiring.
+/// Arm and disarm the shared RFC 4028 expiry for a single dialog.
+///
+/// Cheap to clone; hand one to any subsystem that establishes dialogs of
+/// its own. Obtained from [`BridgingAcceptor::session_timers`].
+#[derive(Clone)]
+pub struct SessionTimers {
+    manager: Arc<SessionTimerManager>,
+    handles: Arc<RwLock<HashMap<DialogId, crate::call::CallHandle>>>,
+}
+
+impl SessionTimers {
+    /// Arm an expiry for `dialog_id`, shutting `handle` down if the
+    /// deadline passes.
+    ///
+    /// `is_refresher` is hardcoded `false`: siphon-ai never initiates a
+    /// refresh, so this is only ever a deadline after which we reclaim
+    /// the leg — never a request to be woken at the half-way point. If
+    /// that ever changes, this is the line to revisit.
+    pub fn arm(
+        &self,
+        dialog_id: DialogId,
+        session_expires: Duration,
+        handle: crate::call::CallHandle,
+    ) {
+        self.handles.write().insert(dialog_id.clone(), handle);
+        self.manager.start_timer(dialog_id, session_expires, false);
+    }
+
+    /// Stop the expiry and drop the handle. Ordering matters and
+    /// mirrors the inbound teardown: stop the timer *before* dropping
+    /// the handle, so a `SessionExpired` racing teardown cannot find an
+    /// entry pointing at a controller that has already gone.
+    pub fn disarm(&self, dialog_id: &DialogId) {
+        self.manager.stop_timer(dialog_id);
+        self.handles.write().remove(dialog_id);
+    }
+
+    /// Whether a timer is currently armed — test seam.
+    pub fn is_armed(&self, dialog_id: &DialogId) -> bool {
+        self.manager.has_timer(dialog_id)
+    }
+}
+
 pub struct AcceptedSession {
     pub dialog: sip_dialog::Dialog,
     pub timer: Option<NegotiatedSessionTimer>,
@@ -2392,6 +2435,24 @@ impl BridgingAcceptor {
     /// one from `[sip].min_session_expires_secs` and
     /// `[sip].preferred_session_expires_secs` at startup; tests
     /// override it for focused coverage.
+    /// A handle onto the shared RFC 4028 expiry, for legs this acceptor
+    /// did not create (#477).
+    ///
+    /// The manager and its dialog→handle map live here because the
+    /// inbound path created them *and* because the fan-out task that
+    /// turns `SessionExpired` into a controller shutdown is owned by
+    /// this acceptor. An outbound leg needs the same expiry, and it
+    /// must not stand up a second manager to get it: `subscribe()` is
+    /// one-shot upstream (last subscriber wins), so a second manager
+    /// would mean a second fan-out task and one of them silently
+    /// receiving nothing.
+    pub fn session_timers(&self) -> SessionTimers {
+        SessionTimers {
+            manager: Arc::clone(&self.session_timer_manager),
+            handles: Arc::clone(&self.dialog_handles),
+        }
+    }
+
     pub fn with_session_timer_policy(mut self, policy: SessionTimerPolicy) -> Self {
         self.session_timer_policy = policy;
         self
@@ -4895,6 +4956,42 @@ fn delayed_answer_cdr_cause(e: &SetupError) -> CdrTerminationCause {
 
 #[cfg(test)]
 mod tests {
+    /// #477: an outbound leg has no session-timer handling of its own,
+    /// so it borrows the inbound acceptor's. Arming must make the dialog
+    /// expirable and disarming must leave nothing behind — a stale entry
+    /// would have `SessionExpired` shutting down a controller that has
+    /// already gone.
+    #[tokio::test]
+    async fn session_timers_arm_then_disarm_leaves_nothing_behind() {
+        let timers = SessionTimers {
+            manager: Arc::new(SessionTimerManager::new()),
+            handles: Arc::new(RwLock::new(HashMap::new())),
+        };
+        let dialog = crate::registry::test_support::consult_dialog("cid-477", "lt", "rt");
+        let id = dialog.id().clone();
+
+        assert!(!timers.is_armed(&id), "nothing armed before we ask");
+
+        timers.arm(
+            id.clone(),
+            Duration::from_secs(120),
+            crate::call::test_handle("outbound-477"),
+        );
+        assert!(timers.is_armed(&id), "expiry must be live after arm");
+        assert!(
+            timers.handles.read().contains_key(&id),
+            "the fan-out task resolves SessionExpired through this map; \
+             without an entry the timer fires into nothing"
+        );
+
+        timers.disarm(&id);
+        assert!(!timers.is_armed(&id), "expiry must be gone after disarm");
+        assert!(
+            timers.handles.read().is_empty(),
+            "a leftover handle outlives its controller"
+        );
+    }
+
     use super::*;
     use bytes::Bytes;
     use sip_core::{Headers as SipHeaders, Method, Request, RequestLine, SipUri};

@@ -123,6 +123,10 @@ pub struct OutboundService {
     /// teardown enqueue.
     recording_upload: Option<std::sync::Arc<siphon_ai_http::upload::UploadSettings>>,
     /// The daemon-wide graceful-shutdown flag (0.41.0). While draining,
+    /// Shared RFC 4028 expiry from the inbound acceptor (#477). `None`
+    /// leaves outbound legs with no session-timer handling, exactly as
+    /// before — the daemon wires it, tests generally don't.
+    session_timers: Option<crate::acceptor::SessionTimers>,
     /// `originate` refuses new calls with [`OriginateRejection::Draining`]
     /// — the same `DrainFlag` the inbound acceptor consults to 503 new
     /// INVITEs. `None` in tests / when the runtime never installs one, in
@@ -156,8 +160,22 @@ impl OutboundService {
             moh_file: None,
             recording: RecordingConfig::default(),
             recording_upload: None,
+            session_timers: None,
             drain: None,
         }
+    }
+
+    /// Share the inbound acceptor's RFC 4028 expiry so outbound legs get
+    /// the same deadline handling (#477).
+    ///
+    /// Without this an outbound leg has no session-timer behaviour at
+    /// all: a callee that negotiates a timer in its 2xx and then gives up
+    /// at the deadline leaves us holding the call open indefinitely.
+    /// SiphonAI never initiates a refresh, so this arms an expiry only —
+    /// it does not make us the refresher.
+    pub fn with_session_timers(mut self, timers: crate::acceptor::SessionTimers) -> Self {
+        self.session_timers = Some(timers);
+        self
     }
 
     /// Share the daemon's graceful-shutdown flag so origination is
@@ -363,6 +381,7 @@ impl OutboundOriginateHandle for OutboundService {
         let cdr_sink = Arc::clone(&self.cdr_sink);
         let webhook_sink = Arc::clone(&self.webhook_sink);
         let consult_registry = self.consult_registry.clone();
+        let session_timers = self.session_timers.clone();
         let conference = self.conference.clone();
         let control_registry = self.control_registry.clone();
         let call_registry = self.call_registry.clone();
@@ -443,6 +462,7 @@ impl OutboundOriginateHandle for OutboundService {
                         call_registry,
                         park,
                         srtp_requested,
+                        session_timers,
                         ws_reconnect_enabled,
                         ws_reconnect_max,
                         ws_reconnect_moh_file,
@@ -526,6 +546,10 @@ struct OutboundCallContext {
     /// Whether this gateway offered SRTP (`[[gateway]].srtp != off`), so the
     /// answered-call path can record `encrypted` vs `downgraded`.
     srtp_requested: bool,
+    /// Shared RFC 4028 expiry (#477). `None` when the daemon didn't wire
+    /// one — the outbound path then behaves exactly as it did before,
+    /// which is what every existing test expects.
+    session_timers: Option<crate::acceptor::SessionTimers>,
     /// WS reconnect (0.7.3), from the daemon `[bridge]` defaults — outbound
     /// legs reconnect the same way inbound does (the drive is bridge-generic).
     ws_reconnect_enabled: bool,
@@ -558,12 +582,12 @@ async fn run_call(
         dialog,
         call_handle,
         call_id,
-        // TODO(#477): arm a defensive expiry from this, so a leg the callee
-        // has already given up on is reclaimed rather than held open. Read
-        // and logged at answer time in `outbound::place`; not yet acted on.
-        session_timer: _,
+        session_timer,
     } = call;
     let sip_call_id = dialog.id().call_id().to_string();
+    // Captured before `dialog` is moved into `shared_dialog` below; the
+    // RFC 4028 expiry is keyed by it (#477).
+    let outbound_dialog_id = dialog.id().clone();
     // Answered and bridged → this leg joins the shared active-call gauge,
     // which the inbound path steps up at accept. Setup-phase outbound legs
     // stay on `siphon_ai_outbound_calls_active` only; without this, an
@@ -695,6 +719,26 @@ async fn run_call(
     // `cleanup_handle`; `CallHandle` is cheap (Arc-of-Notify +
     // Arc-of-AtomicBool).
     let cleanup_handle = handle.clone();
+    // #477: the callee is running a clock against this dialog and we never
+    // refresh, so arm the same expiry the inbound path uses. Without it a
+    // callee that gives up at its deadline leaves us holding a leg — and
+    // its billing — open indefinitely. Nothing is armed when the callee
+    // negotiated no timer, which is the common case.
+    let armed_timer = match (ctx.session_timers.as_ref(), session_timer.as_ref()) {
+        (Some(timers), Some(negotiated)) => {
+            let dialog_id = outbound_dialog_id.clone();
+            let expires = std::time::Duration::from_secs(u64::from(negotiated.delta_seconds()));
+            timers.arm(dialog_id.clone(), expires, cleanup_handle.clone());
+            info!(
+                session_expires_secs = negotiated.delta_seconds(),
+                refresher = ?negotiated.refresher(),
+                "armed RFC 4028 expiry on outbound leg; we do not refresh, \
+                 so the call ends at this deadline unless the callee refreshes"
+            );
+            Some((timers.clone(), dialog_id))
+        }
+        _ => None,
+    };
     // Reachable by the admin conference API for this leg's lifetime.
     // Carries the SIP Call-ID + direction for the `GET /admin/v1/calls`
     // listing (issue #311).
@@ -737,6 +781,12 @@ async fn run_call(
     // did. It went unnoticed because until the dialog-store fix above,
     // a far-end BYE was answered 481 and never reached the controller
     // at all, so this branch was unreachable in the case that needs it.
+    // Disarm before teardown for the same reason the inbound path does:
+    // a `SessionExpired` racing the controller's exit would otherwise try
+    // to shut down a controller that has already gone.
+    if let Some((timers, dialog_id)) = armed_timer.as_ref() {
+        timers.disarm(dialog_id);
+    }
     if !cleanup_handle.remote_bye_received() {
         // Resolve the dialog as it stands now — any hold/resume re-INVITE
         // has advanced its local CSeq, and the BYE must continue that
@@ -913,6 +963,7 @@ mod tests {
             call_registry: CallRegistry::new(),
             park: None,
             srtp_requested: false,
+            session_timers: None,
             ws_reconnect_enabled: false,
             ws_reconnect_max: std::time::Duration::from_secs(30),
             ws_reconnect_moh_file: None,

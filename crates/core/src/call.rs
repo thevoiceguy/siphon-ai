@@ -3094,6 +3094,17 @@ async fn drive_hold_reinvite(
     }
 }
 
+/// A bare [`CallHandle`] for tests in sibling modules (its constructor is
+/// private to this one). The channel receivers are dropped, so this is for
+/// tests that care about the handle's identity or flags, not its traffic.
+#[cfg(test)]
+pub(crate) fn test_handle(call_id: &str) -> CallHandle {
+    let (be_tx, _be_rx) = mpsc::channel(1);
+    let (conf_tx, _conf_rx) = mpsc::channel(1);
+    let (park_tx, _park_rx) = mpsc::channel(1);
+    CallHandle::new(CallId(call_id.into()), be_tx, conf_tx, park_tx)
+}
+
 #[cfg(test)]
 mod handle_tests {
     use super::*;

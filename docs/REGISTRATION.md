@@ -285,6 +285,30 @@ Treats SiphonAI as a "Third-Party SIP Device (Advanced)". Gotchas:
 Treats us as a regular gateway endpoint. Set the gateway's `username` to the
 `[[register]].username` and `password` to the `[[register]].password`.
 
+`mod_sofia` pushes an unsolicited MWI `NOTIFY` (`Event: message-summary`) at
+the account immediately after every successful REGISTER when that account has
+a mailbox — so at your refresh rate, indefinitely. SiphonAI answers `200 OK`
+and discards it (a bridge has no mailbox to display) and scores it
+`siphon_ai_notify_total{result="ignored"}`. Nothing to do; see
+[MWI pushes](#mwi-pushes-from-the-registrar) below.
+
+## MWI pushes from the registrar
+
+Registering to a mailbox-enabled PBX means receiving its message-waiting
+notifications. FreeSWITCH and Asterisk both send an unsolicited
+`NOTIFY Event: message-summary` (RFC 3842) after each REGISTER, carrying a
+`Messages-Waiting: no` body and usually `Subscription-State: terminated`.
+
+SiphonAI absorbs them: `200 OK`, no WS surfacing, no action, counted as
+`siphon_ai_notify_total{result="ignored"}`. Expect that counter to track your
+REGISTER rate one-for-one — on a 120 s registration refreshed at 60 s, one per
+minute forever. That is healthy.
+
+What is *not* healthy is `result="bad_event"`, which means a peer sent an
+event package SiphonAI does not implement (`dialog`, `presence`, …) and got a
+`489 Bad Event`. MWI used to land in that same bucket, so `bad_event` climbed
+on every registered node and could not be alerted on (issue #486).
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Check |
@@ -294,3 +318,4 @@ Treats us as a regular gateway endpoint. Set the gateway's `username` to the
 | `outcome="auth_failed"` after one attempt | Wrong `password` or `realm` | Compare the digest challenge details in tracing (`RUST_LOG=sip_auth=debug`) against the PBX config |
 | Refresh hits `transport_error` after a long-running success | Registrar restarted and lost our binding; or NAT mapping expired | The exponential backoff will retry; if it persists, shorten `expires_secs` so refresh runs more often |
 | Inbound INVITEs from the PBX get `register_source = "trunk"` instead of the registration name | Source IP/port doesn't match what `[[register]].server`/`port` resolved to | Confirm the PBX sends INVITEs from the same address it accepts REGISTERs on |
+| `siphon_ai_notify_total{result="ignored"}` climbs at the REGISTER rate | The registrar pushes MWI after each REGISTER — normal, absorbed | Nothing to do; see [MWI pushes](#mwi-pushes-from-the-registrar). Only `result="bad_event"` is actionable |

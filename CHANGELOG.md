@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A registrar's unsolicited MWI no longer reads as a protocol fault** (issue #486). A PBX we register to pushes `NOTIFY Event: message-summary` (RFC 3842) at the account immediately after every successful REGISTER — the default for FreeSWITCH and Asterisk when the account has a mailbox — and SiphonAI answered every one with `489 Bad Event`, because `dispatch_notify` supported exactly one package (`refer`, for post-REFER progress). RFC-defensible in isolation, but it meant `siphon_ai_notify_total{result="bad_event"}` climbed at the registration refresh rate on a perfectly healthy daemon: measured on the production node at **one per minute, ~1,440/day, indefinitely** (100% of NOTIFYs received — 38 of 38 in the sampled window — were this one shape from the registrar). The counter therefore could not distinguish a healthy node from a broken one, and a genuinely unexpected event package landed in the same bucket, invisible. Same defect class as #474 in 0.48.14: there a counter that was always absent, here one that is always climbing.
+  - MWI is now absorbed — `200 OK`, discarded, no WS surfacing — which is what every hard phone on that PBX already does, and what a bridge with no mailbox to display should do. Scored **`result="ignored"`**, deliberately *not* folded into `accepted`, so absorbed MWI stays distinguishable from post-REFER transfer progress (the two now share a `200`, so the label is the only thing that separates them — there is a test pinning exactly that). `bad_event` goes back to meaning what its name says and should sit at zero.
+  - **Not conditioned on `Subscription-State: terminated`.** SiphonAI never sends a `message-summary` SUBSCRIBE, so every MWI NOTIFY it can receive is unsolicited by construction; gating on `terminated` (the flavour FreeSWITCH stamps) would re-open the same noise against a PBX that uses `active`.
+  - **`message-summary` is deliberately absent from `Allow-Events`**, which still advertises `refer` alone. That header states what we would accept a SUBSCRIBE for, and there is no subscription state machine here — absorbing an unsolicited push is the narrower claim, and conflating the two would invite the registrar to establish MWI subscription state we cannot honour.
+  - The `result` label now travels with the response out of `dispatch_notify` instead of being recovered from the status code, which had become ambiguous once two distinct outcomes both answered `200`. Documented in `docs/DEPLOY.md` (metric row) and `docs/REGISTRATION.md` (new "MWI pushes from the registrar" section, a FreeSWITCH vendor note, and a troubleshooting row).
+
 ## [0.48.14] - 2026-08-12
 
 ### Changed

@@ -2120,6 +2120,17 @@ impl SessionTimers {
         self.handles.write().remove(dialog_id);
     }
 
+    /// Push the deadline out again after a successful refresh (#477).
+    ///
+    /// Needed whenever we are the refresher: the expiry we armed is a
+    /// backstop against *our own* refresh failing, so a refresh that
+    /// succeeds has to reset it or the backstop kills the very call it
+    /// is protecting.
+    pub fn refreshed(&self, dialog_id: &DialogId, session_expires: Duration) {
+        self.manager
+            .refresh_timer(dialog_id.clone(), session_expires, false);
+    }
+
     /// Whether a timer is currently armed — test seam.
     pub fn is_armed(&self, dialog_id: &DialogId) -> bool {
         self.manager.has_timer(dialog_id)
@@ -4983,6 +4994,13 @@ mod tests {
             "the fan-out task resolves SessionExpired through this map; \
              without an entry the timer fires into nothing"
         );
+
+        // A successful refresh must push the deadline out. The expiry is a
+        // backstop against our own refresh loop failing (#477 option B);
+        // if a success didn't reset it, the backstop would kill the very
+        // call it exists to protect.
+        timers.refreshed(&id, Duration::from_secs(600));
+        assert!(timers.is_armed(&id), "still armed, with a later deadline");
 
         timers.disarm(&id);
         assert!(!timers.is_armed(&id), "expiry must be gone after disarm");

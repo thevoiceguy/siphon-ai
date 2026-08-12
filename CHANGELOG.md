@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.15] - 2026-08-12
+
 ### Fixed
 
 - **A registrar's unsolicited MWI no longer reads as a protocol fault** (issue #486). A PBX we register to pushes `NOTIFY Event: message-summary` (RFC 3842) at the account immediately after every successful REGISTER — the default for FreeSWITCH and Asterisk when the account has a mailbox — and SiphonAI answered every one with `489 Bad Event`, because `dispatch_notify` supported exactly one package (`refer`, for post-REFER progress). RFC-defensible in isolation, but it meant `siphon_ai_notify_total{result="bad_event"}` climbed at the registration refresh rate on a perfectly healthy daemon: measured on the production node at **one per minute, ~1,440/day, indefinitely** (100% of NOTIFYs received — 38 of 38 in the sampled window — were this one shape from the registrar). The counter therefore could not distinguish a healthy node from a broken one, and a genuinely unexpected event package landed in the same bucket, invisible. Same defect class as #474 in 0.48.14: there a counter that was always absent, here one that is always climbing.

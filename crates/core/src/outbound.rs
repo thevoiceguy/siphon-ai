@@ -382,11 +382,11 @@ pub struct OutboundOriginator {
 /// We never put `Supported: timer` in an outbound INVITE, so a compliant
 /// callee may not nominate us as refresher (RFC 4028 §7.1) and will refresh
 /// the session itself. A non-compliant one — or an SBC that rewrites the
-/// header — can still answer `refresher=uac`, and since siphon-ai does not
-/// initiate refreshes that session will never be refreshed by anyone. Either
-/// way the callee is running a clock against this dialog, and reading it is
-/// what lets us drop the leg when it does rather than holding it open
-/// forever.
+/// header — can still answer `refresher=uac`, and we then refresh at half
+/// the interval rather than let the deadline take the call (#477, in
+/// `outbound_service`). Either way the callee is running a clock against
+/// this dialog, and reading it is what lets us keep the leg alive or drop
+/// it when the clock runs out, rather than holding it open forever.
 ///
 /// Parsing is upstream's (`sip_core::SessionExpires`), which also enforces
 /// the 90 s floor and the 24 h ceiling. Accepts the compact form `x`.
@@ -911,16 +911,16 @@ mod tests {
         assert_eq!(t.delta_seconds(), 1800);
         assert_eq!(t.refresher(), Some(sip_core::RefresherRole::Uas));
 
-        // The hostile shape this issue is about: the callee nominates *us*,
-        // and we never refresh, so nobody will. Reproduced against a real
-        // daemon in #477.
+        // The shape this issue is about: the callee nominates *us*. Nobody
+        // refreshed it before #477; this is now the case that starts the
+        // refresh task. Reproduced against a real daemon in #477.
         let t = callee_session_timer(Some("90;refresher=uac"), None).expect("parsed");
         assert_eq!(t.delta_seconds(), 90);
         assert_eq!(t.refresher(), Some(sip_core::RefresherRole::Uac));
 
         // No refresher parameter at all is legal; RFC 4028 leaves the role
-        // to be inferred, and we treat it the same either way because we
-        // only ever arm an expiry.
+        // to be inferred, and we arm an expiry without refreshing — only an
+        // explicit `refresher=uac` puts us in the refresher role.
         let t = callee_session_timer(Some("600"), None).expect("parsed");
         assert_eq!(t.delta_seconds(), 600);
         assert_eq!(t.refresher(), None);

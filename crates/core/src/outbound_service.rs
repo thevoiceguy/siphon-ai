@@ -171,8 +171,11 @@ impl OutboundService {
     /// Without this an outbound leg has no session-timer behaviour at
     /// all: a callee that negotiates a timer in its 2xx and then gives up
     /// at the deadline leaves us holding the call open indefinitely.
-    /// SiphonAI never initiates a refresh, so this arms an expiry only —
-    /// it does not make us the refresher.
+    /// This handle is the expiry half only. Taking the refresher role when
+    /// the callee nominates us (`refresher=uac`) is separate, driven from
+    /// `run_call` below, and reports success back through
+    /// [`crate::acceptor::SessionTimers::refreshed`] — the armed expiry
+    /// stays underneath as the backstop for a refresh that fails.
     pub fn with_session_timers(mut self, timers: crate::acceptor::SessionTimers) -> Self {
         self.session_timers = Some(timers);
         self

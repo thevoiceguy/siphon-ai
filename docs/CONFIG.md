@@ -101,12 +101,13 @@ credentials. Resolved secret values are never logged.
 | `stream_rate_limit_fps` | integer | `200` | Same cap for **TCP/TLS/WS**, evaluated after framing so one completed **SIP message** is one unit (contrast `udp_rate_limit_pps`, which counts datagrams). `0` disables. Applied once at startup; a reload cannot change it. |
 | `tls_server_name` | string | unset | TLS reference identity (certificate hostname) for client-side dials whose SNI would otherwise be an **IP literal** — e.g. an in-dialog request (hold re-INVITE, REFER, BYE) on an inbound leg whose TLS connection idle-closed, re-dialed to a Record-Route hop the carrier wrote by IP. Carrier certs carry no IP SANs, so that dial fails certificate verification without this. Set it to the trunk's hostname (e.g. `example.pstn.twilio.com`). Hostname dial targets and non-TLS transports are never affected. Must be a DNS name — an IP literal or empty value fails at load. Gateways and registrations don't need it: their `proxy`/`server` hostname is used automatically. |
 
-> **Session timers (RFC 4028): the peer refreshes, always.** SiphonAI
-> nominates the **caller** as refresher on every inbound call, overriding
-> `refresher=uas` if the peer asks for it, because it does not initiate
-> refreshes itself. In practice that is what a gateway-style UAS is expected
+> **Session timers (RFC 4028): on an inbound call, the peer refreshes.**
+> SiphonAI nominates the **caller** as refresher on every inbound call,
+> overriding `refresher=uas` if the peer asks for it, and never refreshes an
+> inbound leg itself. In practice that is what a gateway-style UAS is expected
 > to do, and it is the configuration the two knobs above tune — there is no
-> setting that makes SiphonAI the refresher.
+> setting that makes SiphonAI the refresher of an inbound call. **Outbound
+> legs are not covered by this rule** — see the outbound paragraph below.
 >
 > The consequence worth knowing before you debug it at 3 a.m.: **a peer that
 > negotiates a session timer and then stops refreshing loses the call at the

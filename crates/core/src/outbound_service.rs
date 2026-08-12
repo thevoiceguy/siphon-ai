@@ -35,6 +35,7 @@ use siphon_ai_media_glue::{
 use siphon_ai_telemetry::{
     OriginateRejection, OriginateRequest, OutboundOriginateHandle, CALLS_ACTIVE,
     OUTBOUND_CALLS_ACTIVE, OUTBOUND_CALLS_TOTAL, OUTBOUND_SRTP_TOTAL, RECORDINGS_TOTAL,
+    SESSION_REFRESH_STOPPED_TOTAL, SESSION_REFRESH_TOTAL,
 };
 use siphon_ai_webhooks::{
     CallEndEvent, OutboundAnsweredEvent, OutboundFailedEvent, OutboundInitiatedEvent, WebhookEvent,
@@ -57,6 +58,81 @@ use crate::park::ParkContext;
 use crate::registry::{CallControlRegistry, CallEntry, CallRegistry, ConsultRegistry};
 use crate::transfer::{DialogControl, DialogSource, TransferContext};
 use siphon_ai_recording::{RecordingConfig, RecordingMode, RecordingSetup};
+
+/// Consecutive failed RFC 4028 refreshes before the outbound refresh
+/// loop stops trying (#484).
+///
+/// **Two, not upstream's three, because three can never be reached.**
+/// Refreshes run at `Session-Expires/2` while the armed expiry sits a
+/// full `Session-Expires` past the last *successful* one, so at most two
+/// attempts fit inside a dying session: on a 90 s timer refreshed at 45 s,
+/// a failure at t=45 leaves exactly one more attempt at t=90 — which is
+/// the deadline itself. A threshold of three would mean the loop never
+/// announces giving up, because the expiry always tears the call down
+/// first, which is precisely the silence this change exists to remove.
+///
+/// Stopping early costs nothing: the call ends at the same deadline
+/// either way. What changes is that it ends having *said* why.
+const MAX_CONSECUTIVE_SESSION_REFRESH_FAILURES: u32 = 2;
+
+/// What one refresh attempt means for the loop (#484).
+///
+/// Split out from the spawned task for the same reason upstream split
+/// its own (siphon-rs #98): the policy is the part worth testing, and
+/// testing it inside the task would mean fabricating a UAC and a live
+/// dialog to assert a match arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshStep {
+    /// 2xx — push the armed expiry out and reset the failure count.
+    Refreshed,
+    /// The dialog is gone: the peer answered `408`/`481`, or the call was
+    /// torn down under us mid-refresh. Terminal on the first occurrence
+    /// whatever the threshold — retrying cannot bring a dead dialog back
+    /// (RFC 3261 §12.2.1.2), it just burns CSeqs against it.
+    DialogGone,
+    /// A non-2xx final response. The peer answered and refused (`422`
+    /// Session Interval Too Small, `503`, …) — counts as a failure.
+    /// Before #484 these were indistinguishable from success in the
+    /// metrics, and upstream had the same gap (siphon-rs #93).
+    Rejected,
+    /// No usable response at all — timeout or transport error.
+    Failed,
+}
+
+impl RefreshStep {
+    /// `code` is `None` when there was no usable response (timeout,
+    /// transport error — *and* `408`/`481`, see below).
+    ///
+    /// `dialog_terminated` is the dialog's state *after* the attempt, and
+    /// it is what identifies a dead dialog — not the response code.
+    /// `apply_in_dialog_response` maps `408`/`481` to `Err`, so they never
+    /// arrive here as a code at all; what they leave behind is a
+    /// terminated dialog. Matching on the code looked right and was dead
+    /// code — a live 481 came back as
+    /// `Err("Received 481 for in-dialog …")` and was counted as an
+    /// ordinary failure that retried. Reading the state also catches an
+    /// owner that hung up while a refresh was in flight.
+    fn classify(code: Option<u16>, dialog_terminated: bool) -> Self {
+        match code {
+            Some(c) if (200..300).contains(&c) => Self::Refreshed,
+            _ if dialog_terminated => Self::DialogGone,
+            Some(_) => Self::Rejected,
+            None => Self::Failed,
+        }
+    }
+
+    /// The `result` label for `siphon_ai_session_refresh_total`.
+    ///
+    /// `DialogGone` scores `rejected`: the peer did answer — `481` — even
+    /// though the API surfaces that as an `Err`.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Refreshed => "ok",
+            Self::DialogGone | Self::Rejected => "rejected",
+            Self::Failed => "failed",
+        }
+    }
+}
 
 /// One configured outbound gateway, ready to dial. Built by the daemon from a
 /// compiled `[[gateway]]` (the `siphon-ai-config::Gateway`) plus a per-gateway
@@ -761,13 +837,24 @@ async fn run_call(
     // through `DialogControl` — resolve, send, commit — is the same path
     // bot-initiated hold uses, and keeps the sequence honest.
     //
-    // That clone bug is fixed upstream as of the `b9f5a3bf66f2` pin
-    // (siphon-rs #96), and #98 adds a `session_timer_state()` channel that
-    // reports a refresh loop giving up — the one thing this hand-rolled task
-    // does not surface. Switching to it is worth doing on its own merits, but
-    // it is a behaviour change to every outbound leg and wants its own live
-    // verification, so it stays deliberate rather than incidental to a pin
-    // bump. TODO(#484): evaluate moving to the upstream timer.
+    // Upstream fixed the clone in siphon-rs #96, but that is still not
+    // *our* dialog: `OutboundCall::dialog` is a snapshot taken at answer
+    // time (`outbound.rs`, `handle.dialog.read().await.clone()`) and moved
+    // into `shared_dialog` below, while `start_session_timer` advances
+    // `CallHandle::dialog`. Two objects, diverging from the first CSeq
+    // either one consumes — so switching to it would put refreshes on one
+    // dialog and the teardown BYE on the other, which is #353 again.
+    // Unifying them is a real refactor of `DialogSource::Direct` (sync
+    // `parking_lot::Mutex` → the upstream async lock, across hold, resume,
+    // REFER, park and teardown) and is tracked separately in #484.
+    //
+    // What #98 *did* expose is that this loop had no failure signal at all:
+    // it retried forever at the same cadence, warned, and told no one. Its
+    // semantics are ported here instead (#484) — consecutive-failure
+    // counting, 408/481 terminal on first occurrence, a give-up threshold,
+    // and a metric per outcome. Like upstream, giving up does not BYE the
+    // call: the armed expiry below ends it at the deadline, and whether to
+    // hang up sooner is the application's decision (RFC 4028 §10).
     let refresh_task = match (armed_timer.as_ref(), session_timer.as_ref()) {
         (Some((timers, dialog_id)), Some(negotiated))
             if negotiated.refresher() == Some(sip_core::RefresherRole::Uac) =>
@@ -794,41 +881,95 @@ async fn run_call(
             Some(tokio::spawn(async move {
                 let mut ticker =
                     tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                let mut consecutive: u32 = 0;
                 loop {
                     ticker.tick().await;
                     let Some(mut dialog) = control.resolve() else {
+                        // The leg's dialog handle is gone — teardown got
+                        // here first. Not a refresh failure, but the
+                        // session is unrefreshed from here on, so it is
+                        // still reported.
                         debug!(sip_call_id = %log_call_id, "dialog gone; stopping session refresh");
+                        metrics::counter!(SESSION_REFRESH_STOPPED_TOTAL, "reason" => "unresolvable")
+                            .increment(1);
                         return;
                     };
-                    match uac
+                    let outcome = uac
                         .refresh_session(&mut dialog, se, "uac", false, Some(&offer_sdp))
-                        .await
-                    {
-                        Ok(resp) if (200..300).contains(&resp.code()) => {
+                        .await;
+                    // Commit whenever the peer answered at all: the
+                    // request consumed a CSeq on our dialog whatever the
+                    // response said, and the teardown BYE has to continue
+                    // from it (issue #353).
+                    let code = match &outcome {
+                        Ok(resp) => {
                             control.commit(&dialog);
+                            Some(resp.code())
+                        }
+                        Err(_) => None,
+                    };
+                    let step = RefreshStep::classify(
+                        code,
+                        dialog.state() == sip_dialog::DialogStateType::Terminated,
+                    );
+                    metrics::counter!(SESSION_REFRESH_TOTAL, "result" => step.label()).increment(1);
+                    match step {
+                        RefreshStep::Refreshed => {
                             // Our expiry is a backstop against this loop
                             // failing; a success has to push it out or it
                             // kills the call it is protecting.
                             timers.refreshed(&dialog_id, expires);
+                            consecutive = 0;
                             debug!(
                                 sip_call_id = %log_call_id,
                                 session_expires_secs = se,
                                 "RFC 4028 session refreshed"
                             );
                         }
-                        Ok(resp) => {
-                            control.commit(&dialog);
+                        RefreshStep::DialogGone => {
+                            metrics::counter!(SESSION_REFRESH_STOPPED_TOTAL, "reason" => "dialog_gone")
+                                .increment(1);
+                            // `code` is normally absent here: a 408/481
+                            // surfaces as `Err`, so the detail worth
+                            // printing is the error, not a `0`.
                             warn!(
                                 sip_call_id = %log_call_id,
-                                code = resp.code(),
+                                code,
+                                error = ?outcome.as_ref().err(),
+                                "session refresh says the dialog is gone; nothing is refreshing \
+                                 this session now and the armed expiry will end the call"
+                            );
+                            return;
+                        }
+                        RefreshStep::Rejected => {
+                            consecutive += 1;
+                            warn!(
+                                sip_call_id = %log_call_id,
+                                code,
+                                consecutive,
                                 "session refresh rejected; the armed expiry will end the call"
                             );
                         }
-                        Err(e) => warn!(
+                        RefreshStep::Failed => {
+                            consecutive += 1;
+                            warn!(
+                                sip_call_id = %log_call_id,
+                                error = ?outcome.as_ref().err(),
+                                consecutive,
+                                "session refresh failed; the armed expiry will end the call"
+                            );
+                        }
+                    }
+                    if consecutive >= MAX_CONSECUTIVE_SESSION_REFRESH_FAILURES {
+                        metrics::counter!(SESSION_REFRESH_STOPPED_TOTAL, "reason" => "exhausted")
+                            .increment(1);
+                        warn!(
                             sip_call_id = %log_call_id,
-                            error = %e,
-                            "session refresh failed; the armed expiry will end the call"
-                        ),
+                            consecutive,
+                            "giving up on refreshing this session; nothing is keeping it alive \
+                             and the armed expiry will end the call at its deadline"
+                        );
+                        return;
                     }
                 }
             }))
@@ -1042,6 +1183,102 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use siphon_ai_cdr::TerminationCause as CdrTerminationCause;
+
+    /// A 2xx is the only outcome that keeps the session alive, and the
+    /// only one that resets the failure count.
+    #[test]
+    fn a_2xx_refresh_is_the_only_success() {
+        for code in [200, 202, 299] {
+            let step = RefreshStep::classify(Some(code), false);
+            assert_eq!(step, RefreshStep::Refreshed);
+            assert_eq!(step.label(), "ok");
+        }
+    }
+
+    /// #484 / siphon-rs #93: a non-2xx *answer* is a failure, not health.
+    /// `apply_in_dialog_response` returns `Ok` for these, so before this
+    /// they were scored identically to a successful refresh while the
+    /// session was left to expire.
+    #[test]
+    fn a_non_2xx_answer_counts_as_a_failure() {
+        for code in [422, 480, 503, 603] {
+            let step = RefreshStep::classify(Some(code), false);
+            assert_eq!(step, RefreshStep::Rejected, "code {code}");
+            assert_eq!(step.label(), "rejected");
+        }
+    }
+
+    /// A dead dialog is identified by the dialog's **state**, not by the
+    /// response code — because `408`/`481` never arrive as a code.
+    /// `apply_in_dialog_response` maps them to `Err` and terminates the
+    /// dialog on the way through.
+    ///
+    /// This is a regression test for a real miss: the first cut matched
+    /// `Some(408) | Some(481)`, which live traffic never produced. A 481
+    /// from the peer surfaced as `Err("Received 481 for in-dialog …")`,
+    /// was scored an ordinary failure, and the loop retried a dialog the
+    /// peer had already declared dead.
+    #[test]
+    fn dialog_gone_is_read_from_the_dialog_not_the_code() {
+        // What a live 481/408 actually looks like: no code, dead dialog.
+        assert_eq!(RefreshStep::classify(None, true), RefreshStep::DialogGone);
+        // The code alone must not decide it…
+        assert_ne!(
+            RefreshStep::classify(Some(481), false),
+            RefreshStep::DialogGone
+        );
+        // …and a terminated dialog is terminal however the attempt ended.
+        assert_eq!(
+            RefreshStep::classify(Some(503), true),
+            RefreshStep::DialogGone
+        );
+        // Distinct from an ordinary rejection, which retries.
+        assert_ne!(
+            RefreshStep::classify(None, true),
+            RefreshStep::classify(Some(503), false)
+        );
+    }
+
+    /// A 2xx wins over the state check: a refresh that succeeded is a
+    /// success even if teardown terminated the dialog immediately after.
+    #[test]
+    fn a_successful_refresh_is_not_reclassified_by_teardown() {
+        assert_eq!(
+            RefreshStep::classify(Some(200), true),
+            RefreshStep::Refreshed
+        );
+    }
+
+    /// No response and a live dialog — timeout or transport error.
+    #[test]
+    fn no_response_is_a_failure() {
+        let step = RefreshStep::classify(None, false);
+        assert_eq!(step, RefreshStep::Failed);
+        assert_eq!(step.label(), "failed");
+    }
+
+    /// The give-up threshold has to be reachable before the armed expiry
+    /// ends the call, or the loop never announces that it stopped — the
+    /// exact silence #484 exists to remove.
+    ///
+    /// Refreshes run at `Session-Expires/2`; the expiry sits one full
+    /// `Session-Expires` past the last success. So the attempts that fit
+    /// inside a dying session is `se / (se/2)` = 2, independent of the
+    /// negotiated value. Raising the threshold to upstream's default of 3
+    /// would make it unreachable — this test is here to say so out loud
+    /// if someone tries.
+    #[test]
+    fn the_give_up_threshold_is_reachable_before_the_expiry() {
+        for se in [90u32, 120, 600, 1800, 3600] {
+            let period = se / 2;
+            let attempts_before_deadline = se / period;
+            assert_eq!(attempts_before_deadline, 2, "se={se}");
+            assert!(
+                MAX_CONSECUTIVE_SESSION_REFRESH_FAILURES <= attempts_before_deadline,
+                "threshold {MAX_CONSECUTIVE_SESSION_REFRESH_FAILURES} unreachable at se={se}"
+            );
+        }
+    }
 
     #[test]
     fn outbound_record_carries_direction_gateway_and_termination() {

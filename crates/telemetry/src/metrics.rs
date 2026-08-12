@@ -361,6 +361,32 @@ pub const INVITE_ADMISSION_TOTAL: &str = "siphon_ai_invite_admission_total";
 /// once-per-REGISTER MWI stops burying it.
 pub const NOTIFY_TOTAL: &str = "siphon_ai_notify_total";
 
+/// RFC 4028 session refreshes SiphonAI sent on an outbound leg it was
+/// nominated to refresh (#484). Labeled by `result`: `ok` (2xx — the
+/// armed expiry is pushed out), `rejected` (a non-2xx final response;
+/// the peer answered and refused, e.g. `422`/`503`), `failed` (no usable
+/// response at all — timeout or transport error).
+///
+/// Only outbound legs can increment this: SiphonAI never refreshes an
+/// inbound leg, it nominates the caller (see `docs/CONFIG.md`). A leg
+/// whose callee did not nominate us never refreshes either, so on most
+/// deployments this metric stays absent rather than zero.
+pub const SESSION_REFRESH_TOTAL: &str = "siphon_ai_session_refresh_total";
+
+/// Outbound session-refresh loops that stopped while the call was still
+/// up (#484). Labeled by `reason`: `dialog_gone` (the peer answered
+/// `408`/`481` — the dialog does not exist and retrying cannot bring it
+/// back, RFC 3261 §12.2.1.2, terminal on first occurrence), `exhausted`
+/// (consecutive failures hit the give-up threshold), `unresolvable` (the
+/// local dialog handle disappeared under us).
+///
+/// **This is the alertable one.** Every increment means nothing is
+/// keeping that session alive any more, so the armed RFC 4028 expiry
+/// will end the call at its deadline. The refresh loop deliberately does
+/// not BYE the call itself (RFC 4028 §10 suggests it, but that is the
+/// application's call) — it stops and says so.
+pub const SESSION_REFRESH_STOPPED_TOTAL: &str = "siphon_ai_session_refresh_stopped_total";
+
 /// Quality-history records emitted through the `[quality]` sinks
 /// (0.31.0). Labeled by `kind`: `interval` / `final`. Records skipped
 /// as empty don't count. Literal must match the call site in
@@ -890,6 +916,14 @@ pub fn register_descriptions() {
         "Inbound NOTIFYs answered, by result (accepted, ignored, bad_event, bad_request)."
     );
     describe_counter!(
+        SESSION_REFRESH_TOTAL,
+        "RFC 4028 session refreshes sent on outbound legs, by result (ok, rejected, failed)."
+    );
+    describe_counter!(
+        SESSION_REFRESH_STOPPED_TOTAL,
+        "Outbound session-refresh loops that gave up while the call was still up, by reason (dialog_gone, exhausted, unresolvable)."
+    );
+    describe_counter!(
         QUALITY_RECORDS_TOTAL,
         "Quality-history records emitted through the [quality] sinks, by kind (interval, final)."
     );
@@ -1114,6 +1148,8 @@ pub const ALL_COUNTERS: &[&str] = &[
     SIP_AUTH_TOTAL,
     INVITE_ADMISSION_TOTAL,
     NOTIFY_TOTAL,
+    SESSION_REFRESH_TOTAL,
+    SESSION_REFRESH_STOPPED_TOTAL,
     QUALITY_RECORDS_TOTAL,
     SILENCE_EVENTS_TOTAL,
     DEAD_AIR_EVENTS_TOTAL,

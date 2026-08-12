@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use forge_core::{CallId, ParticipantId};
 use forge_sdp::SessionDescriptionExt as _;
-use sip_core::SipUri;
+use sip_core::{SessionExpires, SipUri};
 // The SAME sip-sdp sip-uac's SdpAnswerGenerator speaks — distinct from
 // forge-media's pinned sip-sdp (whose `SessionDescription` is a different
 // type to cargo). We parse our media-glue answer text into this so the UAC
@@ -377,6 +377,23 @@ pub struct OutboundOriginator {
     delayed_registry: DelayedOfferRegistry,
 }
 
+/// The RFC 4028 timer the **callee** imposed in its 2xx, if any (#477).
+///
+/// We never put `Supported: timer` in an outbound INVITE, so a compliant
+/// callee may not nominate us as refresher (RFC 4028 §7.1) and will refresh
+/// the session itself. A non-compliant one — or an SBC that rewrites the
+/// header — can still answer `refresher=uac`, and since siphon-ai does not
+/// initiate refreshes that session will never be refreshed by anyone. Either
+/// way the callee is running a clock against this dialog, and reading it is
+/// what lets us drop the leg when it does rather than holding it open
+/// forever.
+///
+/// Parsing is upstream's (`sip_core::SessionExpires`), which also enforces
+/// the 90 s floor and the 24 h ceiling. Accepts the compact form `x`.
+fn callee_session_timer(hdr: Option<&str>, compact: Option<&str>) -> Option<SessionExpires> {
+    hdr.or(compact).and_then(SessionExpires::parse)
+}
+
 /// An established outbound call: the bound media plus the confirmed SIP
 /// dialog. Hand `accepted.session` / `accepted.tap` to a `CallController`,
 /// and call [`OutboundOriginator::hangup`] once it returns.
@@ -389,6 +406,10 @@ pub struct OutboundCall {
     /// The forge session / bridge call id, for tearing the media session
     /// down at the end of the call.
     pub call_id: CallId,
+    /// The RFC 4028 timer the callee imposed in its 2xx, if it sent one
+    /// (#477). `None` when the callee negotiated no timer, which is the
+    /// common case since we do not advertise `Supported: timer`.
+    pub session_timer: Option<SessionExpires>,
 }
 
 impl std::fmt::Debug for OutboundCall {
@@ -522,12 +543,28 @@ impl OutboundOriginator {
         let accepted = self.media.apply_answer(offer, &answer_sdp, tap).await?;
         let dialog = handle.dialog.read().await.clone();
 
+        let session_timer = callee_session_timer(
+            response
+                .headers()
+                .get_smol("Session-Expires")
+                .map(|v| v.as_str()),
+            response.headers().get_smol("x").map(|v| v.as_str()),
+        );
+        if let Some(t) = session_timer.as_ref() {
+            info!(
+                session_expires_secs = t.delta_seconds(),
+                refresher = ?t.refresher(),
+                "callee imposed an RFC 4028 session timer"
+            );
+        }
+
         info!(code, "outbound call answered and media bridged");
         Ok(OutboundCall {
             accepted,
             dialog,
             call_handle: handle,
             call_id,
+            session_timer,
         })
     }
 
@@ -677,6 +714,21 @@ impl OutboundOriginator {
             srtp_exchange,
         };
 
+        let session_timer = callee_session_timer(
+            response
+                .headers()
+                .get_smol("Session-Expires")
+                .map(|v| v.as_str()),
+            response.headers().get_smol("x").map(|v| v.as_str()),
+        );
+        if let Some(t) = session_timer.as_ref() {
+            info!(
+                session_expires_secs = t.delta_seconds(),
+                refresher = ?t.refresher(),
+                "callee imposed an RFC 4028 session timer"
+            );
+        }
+
         info!(
             code,
             srtp = accepted.srtp_profile.is_some(),
@@ -687,6 +739,7 @@ impl OutboundOriginator {
             dialog,
             call_handle: handle,
             call_id,
+            session_timer,
         })
     }
 
@@ -845,6 +898,49 @@ impl TokenBucket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callee_session_timer_reads_what_a_callee_imposes() {
+        // The common case: no timer at all, because we never advertise
+        // Supported: timer and a compliant callee therefore leaves it off.
+        assert!(callee_session_timer(None, None).is_none());
+
+        // A callee that refreshes itself — the compliant shape when the
+        // UAC did not advertise support (RFC 4028 §7.1).
+        let t = callee_session_timer(Some("1800;refresher=uas"), None).expect("parsed");
+        assert_eq!(t.delta_seconds(), 1800);
+        assert_eq!(t.refresher(), Some(sip_core::RefresherRole::Uas));
+
+        // The hostile shape this issue is about: the callee nominates *us*,
+        // and we never refresh, so nobody will. Reproduced against a real
+        // daemon in #477.
+        let t = callee_session_timer(Some("90;refresher=uac"), None).expect("parsed");
+        assert_eq!(t.delta_seconds(), 90);
+        assert_eq!(t.refresher(), Some(sip_core::RefresherRole::Uac));
+
+        // No refresher parameter at all is legal; RFC 4028 leaves the role
+        // to be inferred, and we treat it the same either way because we
+        // only ever arm an expiry.
+        let t = callee_session_timer(Some("600"), None).expect("parsed");
+        assert_eq!(t.delta_seconds(), 600);
+        assert_eq!(t.refresher(), None);
+
+        // Compact form `x`, used only when the long header is absent.
+        let t = callee_session_timer(None, Some("300;refresher=uas")).expect("parsed");
+        assert_eq!(t.delta_seconds(), 300);
+        assert_eq!(
+            callee_session_timer(Some("1800"), Some("300")).map(|t| t.delta_seconds()),
+            Some(1800),
+            "the long form wins when both are present"
+        );
+
+        // Junk must not arm anything. Upstream also rejects below the 90 s
+        // floor, which matters: a bogus tiny value would otherwise have us
+        // tearing down healthy calls.
+        assert!(callee_session_timer(Some(""), None).is_none());
+        assert!(callee_session_timer(Some("not-a-number"), None).is_none());
+        assert!(callee_session_timer(Some("10"), None).is_none());
+    }
 
     #[test]
     fn classify_failure_maps_sip_codes() {

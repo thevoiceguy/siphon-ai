@@ -1005,6 +1005,12 @@ impl Runtime {
                 outbound_webhook_sink,
                 consult_registry.clone(),
             );
+            // Outbound legs arm the same RFC 4028 expiry the inbound path
+            // uses (#477). SiphonAI never initiates a refresh, so this is
+            // a deadline only: it reclaims a leg whose callee negotiated a
+            // timer and then stopped refreshing, instead of holding the
+            // call — and its billing — open indefinitely.
+            service = service.with_session_timers(acceptor.session_timers());
             // Outbound bots can join conferences too (§9.1 — a room is
             // composed of any active calls). Share the same registries.
             service = service.with_control_registry(control_registry.clone());

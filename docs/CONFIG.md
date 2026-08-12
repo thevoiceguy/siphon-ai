@@ -119,8 +119,16 @@ credentials. Resolved secret values are never logged.
 > exactly the same number of seconds are this, not a media fault.
 >
 > A peer that never offers `Supported: timer` negotiates no timer at all and
-> is never expired on these grounds. **Outbound legs do not negotiate session
-> timers** ([#477](https://github.com/thevoiceguy/siphon-ai/issues/477)).
+> is never expired on these grounds.
+>
+> **Outbound legs behave the same way, defensively.** SiphonAI does not put
+> `Supported: timer` in an outbound INVITE, so a compliant callee may not
+> nominate us as refresher and refreshes the session itself. If the callee
+> puts a `Session-Expires` in its 2xx anyway, we arm the same expiry against
+> that dialog and hang up at the deadline — because a callee running a clock
+> we cannot refresh will drop the call there regardless, and holding the leg
+> (and its billing) open past that point helps nobody. The two knobs above are
+> inbound-only; the outbound deadline is whatever the callee asked for.
 
 ### `[sip.tls]`
 

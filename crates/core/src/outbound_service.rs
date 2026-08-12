@@ -558,6 +558,10 @@ async fn run_call(
         dialog,
         call_handle,
         call_id,
+        // TODO(#477): arm a defensive expiry from this, so a leg the callee
+        // has already given up on is reclaimed rather than held open. Read
+        // and logged at answer time in `outbound::place`; not yet acted on.
+        session_timer: _,
     } = call;
     let sip_call_id = dialog.id().call_id().to_string();
     // Answered and bridged → this leg joins the shared active-call gauge,

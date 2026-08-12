@@ -350,9 +350,15 @@ pub const INVITE_ADMISSION_TOTAL: &str = "siphon_ai_invite_admission_total";
 
 /// Inbound NOTIFYs answered (#357). Labeled by `result`: `accepted`
 /// (`Event: refer` post-REFER progress, RFC 3515 — 200 and dropped),
-/// `bad_event` (an event package we don't implement → `489`),
-/// `bad_request` (no `Event` header → `400`). Literal must match the
-/// call site in `siphon-ai-sip-glue::handler`.
+/// `ignored` (`Event: message-summary` — a registrar's unsolicited MWI
+/// push, absorbed with 200 and no action, #486), `bad_event` (an event
+/// package we don't implement → `489`), `bad_request` (no `Event`
+/// header → `400`). Literal must match the call site in
+/// `siphon-ai-sip-glue::handler`.
+///
+/// `bad_event` is the actionable one and is meant to stay at zero:
+/// MWI was split out to `ignored` precisely so a registered node's
+/// once-per-REGISTER MWI stops burying it.
 pub const NOTIFY_TOTAL: &str = "siphon_ai_notify_total";
 
 /// Quality-history records emitted through the `[quality]` sinks
@@ -881,7 +887,7 @@ pub fn register_descriptions() {
     );
     describe_counter!(
         NOTIFY_TOTAL,
-        "Inbound NOTIFYs answered, by result (accepted, bad_event, bad_request)."
+        "Inbound NOTIFYs answered, by result (accepted, ignored, bad_event, bad_request)."
     );
     describe_counter!(
         QUALITY_RECORDS_TOTAL,

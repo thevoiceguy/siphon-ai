@@ -178,6 +178,25 @@ const SUPPORTED_METHODS: &[&str] = &["INVITE", "ACK", "BYE", "CANCEL", "OPTIONS"
 /// tore the dialog down, so a dialog-scoped responder would 481 the
 /// very message this exists to accept.
 ///
+/// `Event: message-summary` is absorbed with `200 OK` and no further
+/// action (issue #486). A PBX we register to pushes unsolicited MWI
+/// (RFC 3842) at the account after every REGISTER — FreeSWITCH and
+/// Asterisk both do by default when the account has a mailbox — so on
+/// a registered node this arrives once per registration refresh,
+/// forever. Answering `489` was RFC-defensible but made
+/// `siphon_ai_notify_total{result="bad_event"}` climb on a perfectly
+/// healthy daemon, burying the genuinely unexpected package it exists
+/// to reveal. A bridge has no mailbox to display, so the honest
+/// handling is the one every hard phone on that PBX already performs:
+/// take it and drop it. Counted `ignored`, not `accepted`, so absorbed
+/// MWI stays distinguishable from post-REFER transfer progress.
+///
+/// Deliberately not conditioned on `Subscription-State: terminated`:
+/// SiphonAI never sends a `message-summary` SUBSCRIBE, so *every* MWI
+/// NOTIFY it can receive is unsolicited by construction, whichever
+/// state flavour the PBX stamps on it. Gating on `terminated` would
+/// re-open the same noise against a PBX that uses `active`.
+///
 /// Anything else follows RFC 6665: an event package we don't support
 /// gets `489 Bad Event` (with `Allow-Events` naming what we do
 /// support, §4.4.1), and a NOTIFY with no `Event` header at all is
@@ -186,7 +205,7 @@ const SUPPORTED_METHODS: &[&str] = &["INVITE", "ACK", "BYE", "CANCEL", "OPTIONS"
 ///
 /// Pure / synchronous, like [`dispatch_invite`], so unit tests can
 /// exercise the decision without a transaction manager.
-pub fn dispatch_notify(request: &Request) -> Response {
+pub fn dispatch_notify(request: &Request) -> NotifyDisposition {
     // "o" is the compact form of Event (RFC 6665 §8.1).
     let event = request
         .headers()
@@ -196,15 +215,43 @@ pub fn dispatch_notify(request: &Request) -> Response {
         Some(value) => {
             let package = value.split(';').next().unwrap_or("").trim();
             if package.eq_ignore_ascii_case("refer") {
-                UserAgentServer::create_response(request, 200, "OK")
+                NotifyDisposition {
+                    response: UserAgentServer::create_response(request, 200, "OK"),
+                    result: "accepted",
+                }
+            } else if package.eq_ignore_ascii_case("message-summary") {
+                NotifyDisposition {
+                    response: UserAgentServer::create_response(request, 200, "OK"),
+                    result: "ignored",
+                }
             } else {
                 let mut response = UserAgentServer::create_response(request, 489, "Bad Event");
                 let _ = response.headers_mut().set_or_push("Allow-Events", "refer");
-                response
+                NotifyDisposition {
+                    response,
+                    result: "bad_event",
+                }
             }
         }
-        None => UserAgentServer::create_response(request, 400, "Bad Request"),
+        None => NotifyDisposition {
+            response: UserAgentServer::create_response(request, 400, "Bad Request"),
+            result: "bad_request",
+        },
     }
+}
+
+/// What [`dispatch_notify`] decided: the response to send, and the
+/// `result` label to score it under.
+///
+/// The label travels with the response rather than being recovered
+/// from its status code, because the code alone is now ambiguous —
+/// refer progress and absorbed MWI are both `200`, and only the
+/// decision site knows which is which.
+pub struct NotifyDisposition {
+    pub response: Response,
+    /// `result` label for [`NOTIFY_TOTAL`]. One of `accepted`,
+    /// `ignored`, `bad_event`, `bad_request`.
+    pub result: &'static str,
 }
 
 /// One routed INVITE handed to the acceptor.
@@ -458,27 +505,23 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
     }
 
     /// Refer-progress NOTIFYs (post-REFER, RFC 3515 implicit
-    /// subscription) are accepted and dropped; see [`dispatch_notify`]
-    /// for the full decision table. No transport context on this hook,
-    /// so no `fill_response` — same as the upstream default it
-    /// replaces.
+    /// subscription) are accepted and dropped, and a PBX's unsolicited
+    /// MWI is absorbed; see [`dispatch_notify`] for the full decision
+    /// table. No transport context on this hook, so no `fill_response`
+    /// — same as the upstream default it replaces.
     #[instrument(skip_all, fields(method = "NOTIFY"))]
     async fn on_notify(
         &self,
         request: &Request,
         handle: ServerTransactionHandle,
     ) -> anyhow::Result<()> {
-        let response = dispatch_notify(request);
-        let result = match response.code() {
-            200 => "accepted",
-            489 => "bad_event",
-            _ => "bad_request",
-        };
+        let NotifyDisposition { response, result } = dispatch_notify(request);
         metrics::counter!(NOTIFY_TOTAL, "result" => result).increment(1);
         debug!(
             sip_call_id = request.headers().get("Call-ID").unwrap_or(""),
             event = request.headers().get("Event").unwrap_or(""),
             code = response.code(),
+            result,
             "NOTIFY answered"
         );
         handle.send_final(response).await;
@@ -837,33 +880,99 @@ mod tests {
     /// is accepted, not 405'd (PROTOCOL.md §4.4, RFC 3515 §2.4.4).
     #[test]
     fn refer_notify_is_accepted_with_200() {
-        assert_eq!(dispatch_notify(&notify(Some("refer"))).code(), 200);
+        let d = dispatch_notify(&notify(Some("refer")));
+        assert_eq!(d.response.code(), 200);
+        assert_eq!(d.result, "accepted");
     }
 
     /// The refer subscription may carry an `id` parameter (RFC 3515
     /// §2.4.6) — only the event package token decides.
     #[test]
     fn refer_notify_with_id_param_is_accepted() {
+        let d = dispatch_notify(&notify(Some("refer;id=93809824")));
+        assert_eq!(d.response.code(), 200);
+        assert_eq!(d.result, "accepted");
+    }
+
+    /// #486: a PBX we register to pushes unsolicited MWI at the account
+    /// after every REGISTER (RFC 3842). Absorb it — a bridge has no
+    /// mailbox — rather than 489 once a minute forever.
+    #[test]
+    fn mwi_notify_is_absorbed_with_200() {
+        let d = dispatch_notify(&notify(Some("message-summary")));
+        assert_eq!(d.response.code(), 200);
+        assert_eq!(d.result, "ignored");
+    }
+
+    /// Absorbed MWI must not read as refer progress: the two share a
+    /// `200`, so only the `result` label separates "a transfer is
+    /// progressing" from "the PBX said the mailbox is empty".
+    #[test]
+    fn mwi_is_scored_apart_from_refer_progress() {
+        let mwi = dispatch_notify(&notify(Some("message-summary")));
+        let refer = dispatch_notify(&notify(Some("refer")));
+        assert_eq!(mwi.response.code(), refer.response.code());
+        assert_ne!(mwi.result, refer.result);
+    }
+
+    /// Not gated on `Subscription-State: terminated` — we never send a
+    /// `message-summary` SUBSCRIBE, so every flavour of MWI NOTIFY is
+    /// unsolicited by construction. FreeSWITCH stamps
+    /// `terminated;reason=noresource`; a PBX using `active` gets the
+    /// same treatment instead of re-opening the #486 noise.
+    #[test]
+    fn mwi_is_absorbed_whatever_the_subscription_state() {
+        for state in ["terminated;reason=noresource", "active;expires=3600"] {
+            let mut req = notify(Some("message-summary"));
+            req.headers_mut().push("Subscription-State", state).unwrap();
+            let d = dispatch_notify(&req);
+            assert_eq!(d.response.code(), 200, "state {state}");
+            assert_eq!(d.result, "ignored", "state {state}");
+        }
+    }
+
+    /// The package token decides, and it is case-insensitive (RFC 6665
+    /// §8.2.1) — `Message-Summary` is the same package.
+    #[test]
+    fn mwi_package_match_is_case_insensitive() {
         assert_eq!(
-            dispatch_notify(&notify(Some("refer;id=93809824"))).code(),
-            200
+            dispatch_notify(&notify(Some("Message-Summary"))).result,
+            "ignored"
         );
     }
 
     /// An event package we don't support is a Bad Event, not a Method
     /// Not Allowed — NOTIFY itself is in our Allow set now. The 489
-    /// names what we do support (RFC 6665 §4.4.1).
+    /// names what we do support (RFC 6665 §4.4.1). Absorbing MWI must
+    /// not soften this: an unknown package is still refused, which is
+    /// the whole point of keeping `bad_event` meaningful.
     #[test]
     fn non_refer_notify_is_489_bad_event_with_allow_events() {
-        let resp = dispatch_notify(&notify(Some("talk")));
-        assert_eq!(resp.code(), 489);
-        assert_eq!(resp.headers().get("Allow-Events"), Some("refer"));
+        for package in ["talk", "dialog", "presence"] {
+            let d = dispatch_notify(&notify(Some(package)));
+            assert_eq!(d.response.code(), 489, "package {package}");
+            assert_eq!(d.response.headers().get("Allow-Events"), Some("refer"));
+            assert_eq!(d.result, "bad_event", "package {package}");
+        }
+    }
+
+    /// `Allow-Events` advertises what we would accept a SUBSCRIBE for.
+    /// Absorbing an unsolicited push is a narrower claim than offering
+    /// a subscription, so `message-summary` deliberately stays out of
+    /// it — otherwise the PBX is invited to establish real MWI
+    /// subscription state we have no machinery for.
+    #[test]
+    fn mwi_absorption_does_not_advertise_a_subscription() {
+        let d = dispatch_notify(&notify(Some("dialog")));
+        assert_eq!(d.response.headers().get("Allow-Events"), Some("refer"));
     }
 
     /// A NOTIFY with no Event header is malformed (RFC 6665 §8.2.3).
     #[test]
     fn notify_without_event_is_400() {
-        assert_eq!(dispatch_notify(&notify(None)).code(), 400);
+        let d = dispatch_notify(&notify(None));
+        assert_eq!(d.response.code(), 400);
+        assert_eq!(d.result, "bad_request");
     }
 
     /// NOTIFY must be advertised in `Allow` now that we answer it —

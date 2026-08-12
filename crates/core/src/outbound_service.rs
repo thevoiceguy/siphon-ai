@@ -755,11 +755,19 @@ async fn run_call(
     // callee is willing to keep it alive.
     //
     // Deliberately not upstream's `CallHandle::start_session_timer`: it
-    // refreshes a *clone* of the dialog, so the CSeq it advances never
-    // reaches ours, and the teardown BYE would then reuse a consumed CSeq
+    // refreshed a *clone* of the dialog, so the CSeq it advanced never
+    // reached ours, and the teardown BYE would then reuse a consumed CSeq
     // and get 408'd by a record-routing carrier (issue #353). Driving it
     // through `DialogControl` — resolve, send, commit — is the same path
     // bot-initiated hold uses, and keeps the sequence honest.
+    //
+    // That clone bug is fixed upstream as of the `b9f5a3bf66f2` pin
+    // (siphon-rs #96), and #98 adds a `session_timer_state()` channel that
+    // reports a refresh loop giving up — the one thing this hand-rolled task
+    // does not surface. Switching to it is worth doing on its own merits, but
+    // it is a behaviour change to every outbound leg and wants its own live
+    // verification, so it stays deliberate rather than incidental to a pin
+    // bump. TODO(#484): evaluate moving to the upstream timer.
     let refresh_task = match (armed_timer.as_ref(), session_timer.as_ref()) {
         (Some((timers, dialog_id)), Some(negotiated))
             if negotiated.refresher() == Some(sip_core::RefresherRole::Uac) =>

@@ -121,14 +121,16 @@ credentials. Resolved secret values are never logged.
 > A peer that never offers `Supported: timer` negotiates no timer at all and
 > is never expired on these grounds.
 >
-> **Outbound legs behave the same way, defensively.** SiphonAI does not put
-> `Supported: timer` in an outbound INVITE, so a compliant callee may not
-> nominate us as refresher and refreshes the session itself. If the callee
-> puts a `Session-Expires` in its 2xx anyway, we arm the same expiry against
-> that dialog and hang up at the deadline — because a callee running a clock
-> we cannot refresh will drop the call there regardless, and holding the leg
-> (and its billing) open past that point helps nobody. The two knobs above are
-> inbound-only; the outbound deadline is whatever the callee asked for.
+> **Outbound legs honour whatever the callee asks for.** SiphonAI does not put
+> `Supported: timer` in an outbound INVITE, so a compliant callee refreshes the
+> session itself; we arm an expiry against that dialog and end the call at the
+> deadline if the refreshes stop. If the callee instead nominates *us*
+> (`refresher=uac` — non-compliant when we never advertised support, but SBCs
+> do it), **we refresh at half the interval** with a re-INVITE and the call
+> survives; the expiry stays armed underneath as the backstop for a refresh
+> that fails. Either way nothing holds a leg open past the deadline its callee
+> is enforcing. The two knobs above are inbound-only — the outbound interval is
+> whatever the callee asked for.
 
 ### `[sip.tls]`
 

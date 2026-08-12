@@ -40,7 +40,7 @@ use siphon_ai_webhooks::{
     CallEndEvent, OutboundAnsweredEvent, OutboundFailedEvent, OutboundInitiatedEvent, WebhookEvent,
     WebhookSinkHandle, WEBHOOK_VERSION,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::acceptor::{
     barge_in_to_tap_action, build_outbound_start_msg, record_call_ended, termination_label,
@@ -729,13 +729,98 @@ async fn run_call(
             let dialog_id = outbound_dialog_id.clone();
             let expires = std::time::Duration::from_secs(u64::from(negotiated.delta_seconds()));
             timers.arm(dialog_id.clone(), expires, cleanup_handle.clone());
+            let we_refresh = negotiated.refresher() == Some(sip_core::RefresherRole::Uac);
             info!(
                 session_expires_secs = negotiated.delta_seconds(),
                 refresher = ?negotiated.refresher(),
-                "armed RFC 4028 expiry on outbound leg; we do not refresh, \
-                 so the call ends at this deadline unless the callee refreshes"
+                we_refresh,
+                "armed RFC 4028 expiry on outbound leg; {}",
+                if we_refresh {
+                    "we refresh at half the interval and this is the backstop if that fails"
+                } else {
+                    "the callee refreshes and the call ends at this deadline if it stops"
+                }
             );
             Some((timers.clone(), dialog_id))
+        }
+        _ => None,
+    };
+
+    // #477 option B: if the callee nominated *us* as refresher, actually
+    // refresh. Without this the expiry above is all that happens and the
+    // call dies at the deadline — correct, but a needless loss when the
+    // callee is willing to keep it alive.
+    //
+    // Deliberately not upstream's `CallHandle::start_session_timer`: it
+    // refreshes a *clone* of the dialog, so the CSeq it advances never
+    // reaches ours, and the teardown BYE would then reuse a consumed CSeq
+    // and get 408'd by a record-routing carrier (issue #353). Driving it
+    // through `DialogControl` — resolve, send, commit — is the same path
+    // bot-initiated hold uses, and keeps the sequence honest.
+    let refresh_task = match (armed_timer.as_ref(), session_timer.as_ref()) {
+        (Some((timers, dialog_id)), Some(negotiated))
+            if negotiated.refresher() == Some(sip_core::RefresherRole::Uac) =>
+        {
+            let control = DialogControl {
+                uac: originator.uac(),
+                source: DialogSource::Direct {
+                    sip_call_id: sip_call_id.clone(),
+                    dialog: shared_dialog.clone(),
+                },
+                flow: None,
+            };
+            let uac = originator.uac();
+            let timers = timers.clone();
+            let dialog_id = dialog_id.clone();
+            let se = negotiated.delta_seconds();
+            let expires = std::time::Duration::from_secs(u64::from(se));
+            // RFC 4028 §10: refresh at half the interval. `interval_at`
+            // rather than `interval` so the first one lands at se/2 and
+            // not immediately (the mistake upstream made, siphon-rs#92).
+            let period = expires / 2;
+            let offer_sdp = accepted.offer_sdp.clone();
+            let log_call_id = sip_call_id.clone();
+            Some(tokio::spawn(async move {
+                let mut ticker =
+                    tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                loop {
+                    ticker.tick().await;
+                    let Some(mut dialog) = control.resolve() else {
+                        debug!(sip_call_id = %log_call_id, "dialog gone; stopping session refresh");
+                        return;
+                    };
+                    match uac
+                        .refresh_session(&mut dialog, se, "uac", false, Some(&offer_sdp))
+                        .await
+                    {
+                        Ok(resp) if (200..300).contains(&resp.code()) => {
+                            control.commit(&dialog);
+                            // Our expiry is a backstop against this loop
+                            // failing; a success has to push it out or it
+                            // kills the call it is protecting.
+                            timers.refreshed(&dialog_id, expires);
+                            debug!(
+                                sip_call_id = %log_call_id,
+                                session_expires_secs = se,
+                                "RFC 4028 session refreshed"
+                            );
+                        }
+                        Ok(resp) => {
+                            control.commit(&dialog);
+                            warn!(
+                                sip_call_id = %log_call_id,
+                                code = resp.code(),
+                                "session refresh rejected; the armed expiry will end the call"
+                            );
+                        }
+                        Err(e) => warn!(
+                            sip_call_id = %log_call_id,
+                            error = %e,
+                            "session refresh failed; the armed expiry will end the call"
+                        ),
+                    }
+                }
+            }))
         }
         _ => None,
     };
@@ -784,6 +869,9 @@ async fn run_call(
     // Disarm before teardown for the same reason the inbound path does:
     // a `SessionExpired` racing the controller's exit would otherwise try
     // to shut down a controller that has already gone.
+    if let Some(task) = refresh_task {
+        task.abort();
+    }
     if let Some((timers, dialog_id)) = armed_timer.as_ref() {
         timers.disarm(dialog_id);
     }

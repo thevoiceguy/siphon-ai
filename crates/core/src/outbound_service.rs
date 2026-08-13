@@ -896,7 +896,21 @@ async fn run_call(
     // dialog and the teardown BYE on the other, which is #353 again.
     // Unifying them is a real refactor of `DialogSource::Direct` (sync
     // `parking_lot::Mutex` → the upstream async lock, across hold, resume,
-    // REFER, park and teardown) and is tracked separately in #484.
+    // REFER, park and teardown).
+    //
+    // That was #484, closed as not worth doing. The decisive reason is
+    // below this one: `start_session_timer` takes no SDP body and passes
+    // `None`, so its refreshes are **offerless**. That makes the peer the
+    // offerer in its 200 OK, and the answer owed in the ACK would be
+    // synthesised by upstream from `UACConfig::local_audio_port` — not
+    // from the forge session that owns this call's RTP port — or omitted
+    // entirely. Silent one-way audio every `Session-Expires/2`, on a
+    // healthy call. Adopting the upstream timer needs an upstream API
+    // that can carry this leg's offer, before the dialog refactor is even
+    // worth starting. The CSeq hazard that used to argue for unifying is
+    // gone from both ends anyway: `DialogSource::reserve_cseq` (#490) and
+    // siphon-rs#100 both reserve before sending, so the two dialogs are
+    // safe — merely duplicated.
     //
     // What #98 *did* expose is that this loop had no failure signal at all:
     // it retried forever at the same cadence, warned, and told no one. Its

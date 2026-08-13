@@ -112,11 +112,13 @@ impl DialogSource {
     /// the response, so between send and answer the shared dialog still
     /// reads the *pre-request* number, and anything else on this leg
     /// picks it up. The teardown BYE did exactly that: the RFC 4028
-    /// refresh loop ticks at `Session-Expires/2` while the armed expiry
-    /// sits at `Session-Expires`, so on a leg whose refreshes are being
-    /// rejected the tick and the expiry fire together — measured 564 µs
+    /// refresh loop ticked at `Session-Expires/2` while the armed expiry
+    /// sat at `Session-Expires`, so on a leg whose refreshes were being
+    /// rejected the tick and the expiry fired together — measured 564 µs
     /// apart — and the BYE went out carrying the in-flight re-INVITE's
-    /// CSeq. A peer entitled to reject that BYE leaves the leg, and its
+    /// CSeq. (`SESSION_REFRESH_GUARD` has since pulled the ticks clear
+    /// of the deadline; this reservation is what keeps the sequence
+    /// correct whenever two requests do overlap.) A peer entitled to reject that BYE leaves the leg, and its
     /// billing, up at the far end: the leak #480 armed the expiry to
     /// close.
     ///

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The outbound session-timer arming log no longer describes a cadence it does not use.** It read *"we refresh at half the interval"*, which #490 made wrong in the same release that shipped it — refreshes run a five-second guard ahead of the half-way point. It now logs `refresh_period_secs`, computed by the same function the loop schedules from, so the line cannot drift from the code again; the prose says "we refresh on that period" and the two branches (we-refresh vs callee-refreshes) are split so only the relevant one carries the field. `docs/CONFIG.md` and `docs/DEPLOY.md` were already corrected in #490 — this was the one place left saying the old thing, and the tense of `reserve_cseq`'s doc comment is fixed with it.
+
 ## [0.48.16] - 2026-08-13
 
 ### Fixed

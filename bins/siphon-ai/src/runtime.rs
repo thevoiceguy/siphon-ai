@@ -2747,15 +2747,26 @@ async fn handle_packet(
             let key = sip_transaction::TransactionKey::new(branch, sip_core::Method::Invite, true);
             transaction_mgr.ack_received(&key).await;
         }
-        // An early-offer ACK carries no SDP and needs no application
-        // handling — clearing the timer above is all there is to do. A
-        // **delayed-offer** ACK carries the peer's SDP answer, which the
-        // UAS must see (`on_ack` → finalize the call); fall through to
-        // dispatch for those. (`receive_request` makes a benign
-        // non-INVITE entry for it — the FSM sends no response to an ACK.)
-        if request.body().is_empty() {
-            return;
-        }
+        // Every ACK falls through to dispatch, body or not (#497).
+        // A body-less one used to return here on the reasoning that an
+        // early-offer ACK carries no SDP and needs no application
+        // handling — true of that population, and the premise fails on
+        // the one that matters: a **delayed-offer** ACK with no SDP is
+        // the peer declining to answer our offer, which is precisely
+        // what `missing_sdp_answer` classifies (#425). Returning early
+        // meant the UAS never saw it, so that call was left to Timer H
+        // and recorded `ack_timeout` 32 s later — a cause that means
+        // "no ACK arrived at all" — while the variant, its
+        // `delayed_offer_total` label and its DEPLOY.md row described
+        // an outcome the daemon could not produce.
+        //
+        // The glue's `on_ack` and `BridgingAcceptor::on_ack` were
+        // already written for both populations (an ACK for a dialog we
+        // are not holding matches nothing and is ignored), so the cost
+        // of dispatching them all is one dialog-map probe per
+        // early-offer ACK, once per call. `receive_request` makes a
+        // benign non-INVITE entry for it — the FSM sends no response to
+        // an ACK.
     }
 
     let handle = transaction_mgr

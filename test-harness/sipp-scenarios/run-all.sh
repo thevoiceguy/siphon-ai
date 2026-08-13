@@ -1939,6 +1939,93 @@ fi
 do_cleanup
 trap - EXIT
 
+# ─── auxiliary phase: delayed_offer_no_answer ─────────────────────
+# The other side of the delayed-offer negotiation: the peer ACKs with
+# NO SDP, declining to answer our offer (RFC 3261 §13.2.2.4 requires
+# it). SiphonAI must reap that call **immediately** as
+# `missing_sdp_answer` rather than hold the half-established dialog
+# until Timer H expires ~32 s later and record `ack_timeout`.
+#
+# Asserted daemon-side, because SIPp cannot see the difference — it
+# sends the same ACK either way and never gets another message:
+#   * the metric carries the right label, and
+#   * the CDR carries the right cause, and exists AT ALL by the time
+#     this runs. A regression to the Timer-H path writes no CDR for
+#     another 32 s, so the grep below is also the timing assertion.
+#
+# Issue #497: the packet pump used to drop every body-less ACK before
+# dispatch, so this outcome was unreachable in the daemon while its
+# unit tests (which call `on_ack` directly) stayed green.
+echo
+echo "─── auxiliary phase: delayed_offer_no_answer ──────────"
+DONA_WS_PORT=8793
+DONA_ADMIN_PORT=9100
+DONA_WS_LOG=$(mktemp -t echo-ws-dona.XXXXXX.log)
+DONA_DAEMON_LOG=$(mktemp -t siphon-ai-dona.XXXXXX.log)
+DONA_CONFIG=$(mktemp -t siphon-ai-dona.XXXXXX.toml)
+DONA_CDR=$(mktemp -t siphon-ai-dona-cdr.XXXXXX.jsonl)
+cat >"$DONA_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-dona"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$DONA_WS_PORT/"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$DONA_ADMIN_PORT"
+# The master switch is load-bearing: [cdr] has no enabled default,
+# so a [cdr.file] block on its own writes nothing.
+[cdr]
+enabled = true
+[cdr.file]
+enabled = true
+path = "$DONA_CDR"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+DONA_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$DONA_PYTHON" ]] || DONA_PYTHON=python3
+"$DONA_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
+    --bind "127.0.0.1:$DONA_WS_PORT" >"$DONA_WS_LOG" 2>&1 &
+DONA_WS_PID=$!
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$DONA_CONFIG" \
+    >"$DONA_DAEMON_LOG" 2>&1 &
+DONA_DAEMON_PID=$!
+dona_cleanup() {
+    kill "$DONA_WS_PID" "$DONA_DAEMON_PID" 2>/dev/null || true
+    wait "$DONA_WS_PID" "$DONA_DAEMON_PID" 2>/dev/null || true
+}
+trap dona_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── delayed_offer_no_answer ──────────────────────────"
+dona_ok=0
+if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/delayed_offer_no_answer.xml" -m 1 -timeout 12s -trace_err \
+        -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1; then
+    if curl -s "http://127.0.0.1:$DONA_ADMIN_PORT/metrics" \
+            | grep -q 'siphon_ai_delayed_offer_total{result="missing_sdp_answer"} 1' \
+        && grep -q '"cause":"missing_sdp_answer"' "$DONA_CDR"; then
+        dona_ok=1
+    fi
+fi
+if (( dona_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (daemon: $DONA_DAEMON_LOG; ws: $DONA_WS_LOG; cdr: $DONA_CDR)"
+    failures=$((failures + 1))
+fi
+
+dona_cleanup
+trap - EXIT
+
 # ─── auxiliary phase: delayed_offer + SRTP ────────────────────────
 # (0.9.2) Inbound delayed offer where SiphonAI OFFERS SDES SRTP in the
 # 200 OK (we're the offerer). `[media].srtp = "required"` makes the

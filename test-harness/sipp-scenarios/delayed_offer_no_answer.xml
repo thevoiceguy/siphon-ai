@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  delayed_offer_no_answer — the peer declines to answer our delayed
+  offer: SIPp (UAC) sends an offerless INVITE, SiphonAI answers 200 OK
+  with ITS OWN SDP offer, and the ACK comes back with **no body at
+  all**.
+
+  RFC 3261 §13.2.2.4 requires the answer in that ACK, so the call is
+  dead on arrival. SiphonAI must reap it immediately with
+  `missing_sdp_answer` — a CDR with that `termination.cause` and
+  `siphon_ai_delayed_offer_total{result="missing_sdp_answer"}` — rather
+  than hold the half-established dialog until Timer H expires ~32 s
+  later and record the wrong cause and duration (#425).
+
+  Nothing comes back after the ACK: the call never went active, so
+  there is no BYE to send and none to expect. The pause is there to let
+  the daemon write the CDR before the runner asserts on it.
+
+  **The `[peer_tag_param]` on the ACK's To header is load-bearing.**
+  An in-dialog request with no To tag cannot be resolved to a dialog
+  (`DialogId::from_request` needs both tags), so the ACK is logged as
+  "Received ACK for unknown dialog", never reaches the acceptor, and
+  the call dies at Timer H under `ack_timeout` instead — which looks
+  like a product bug and is not one.
+-->
+<scenario name="delayed_offer_no_answer">
+  <send retrans="500">
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp-dona@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp-dona@[local_ip]:[local_port]>
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+
+  <!-- The 200 must carry our offer — that is what the ACK is supposed
+       to answer, and the premise of the case. -->
+  <recv response="200" rtd="true">
+    <action>
+      <ereg regexp="m=audio [0-9]+ RTP/AVP"
+            search_in="msg"
+            check_it="true"
+            assign_to="our_offer_mline"/>
+      <log message="delayed-offer 200 carried offer m-line: [$our_offer_mline]"/>
+    </action>
+  </recv>
+
+  <!-- The ACK, with no SDP answer and no body. -->
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp-dona@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="800"/>
+</scenario>

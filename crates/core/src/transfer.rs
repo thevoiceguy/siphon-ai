@@ -102,6 +102,46 @@ impl DialogSource {
         }
     }
 
+    /// Publish the CSeq that the in-dialog request about to be built
+    /// from `dialog` will consume, **before** it goes on the wire, and
+    /// return it. Call this immediately before each send, not once per
+    /// [`Self::resolve`] — a hold that retries after a 491 sends twice
+    /// from one resolve.
+    ///
+    /// [`Self::commit`] alone is too late (issue #490). It runs after
+    /// the response, so between send and answer the shared dialog still
+    /// reads the *pre-request* number, and anything else on this leg
+    /// picks it up. The teardown BYE did exactly that: the RFC 4028
+    /// refresh loop ticks at `Session-Expires/2` while the armed expiry
+    /// sits at `Session-Expires`, so on a leg whose refreshes are being
+    /// rejected the tick and the expiry fire together — measured 564 µs
+    /// apart — and the BYE went out carrying the in-flight re-INVITE's
+    /// CSeq. A peer entitled to reject that BYE leaves the leg, and its
+    /// billing, up at the far end: the leak #480 armed the expiry to
+    /// close.
+    ///
+    /// `Managed` (inbound) legs need nothing here — every
+    /// `IntegratedUAC` in-dialog send re-inserts the advanced dialog
+    /// into the `DialogManager` *before* the request leaves, so the
+    /// number is already published by the time anyone else can read it.
+    /// This window is the `Direct` half's alone, for the same reason
+    /// #353 was: the write-back is ours to do.
+    ///
+    /// Never moves the sequence backwards, so a concurrent reservation
+    /// can only push it further along — two in-flight requests get two
+    /// distinct numbers.
+    pub(crate) fn reserve_cseq(&self, dialog: &Dialog) -> Option<u32> {
+        let DialogSource::Direct { dialog: shared, .. } = self else {
+            return None;
+        };
+        let pending = dialog.local_cseq().saturating_add(1);
+        let mut shared = shared.lock();
+        while shared.local_cseq() < pending {
+            shared.next_local_cseq();
+        }
+        Some(pending)
+    }
+
     /// Whether the transfer task should BYE the leg itself after a
     /// 202 ("REFER + BYE", RFC 5589 §6.1). True for inbound legs.
     /// False for outbound legs — their `run_call` teardown already
@@ -154,6 +194,15 @@ impl DialogControl {
         self.source.resolve()
     }
 
+    /// Publish the CSeq the next in-dialog request on this leg will
+    /// consume, before it is sent (#490). See
+    /// [`DialogSource::reserve_cseq`]. The re-INVITE senders below do
+    /// this themselves; call it directly when driving a `uac` send by
+    /// hand (the REFER path).
+    pub(crate) fn reserve_cseq(&self, dialog: &sip_dialog::Dialog) -> Option<u32> {
+        self.source.reserve_cseq(dialog)
+    }
+
     /// Drive a re-INVITE with `sdp` as the offer (e.g. `a=sendonly` to
     /// hold, `a=sendrecv` to resume), reusing the inbound TCP/TLS
     /// connection when `flow` is set. The 2xx is auto-ACKed by the
@@ -163,6 +212,7 @@ impl DialogControl {
         dialog: &mut sip_dialog::Dialog,
         sdp: &str,
     ) -> anyhow::Result<sip_core::Response> {
+        self.reserve_cseq(dialog);
         match &self.flow {
             Some(flow) => {
                 self.uac
@@ -446,6 +496,81 @@ mod tests {
         };
         assert!(src.resolve().is_none());
         assert!(src.bye_after_refer());
+    }
+
+    /// Build the outbound leg's shared-dialog source the way
+    /// `run_call` does.
+    fn direct_source() -> (DialogSource, Arc<Mutex<Dialog>>) {
+        let shared = Arc::new(Mutex::new(consult_dialog("leg@siphon", "ltag", "rtag")));
+        (
+            DialogSource::Direct {
+                sip_call_id: "leg@siphon".into(),
+                dialog: shared.clone(),
+            },
+            shared,
+        )
+    }
+
+    /// #490, the regression this exists to prevent: a session refresh
+    /// is in flight (its CSeq taken but not yet answered) when the
+    /// armed expiry tears the call down, and the teardown BYE must not
+    /// reuse the re-INVITE's number.
+    #[test]
+    fn a_reserved_cseq_is_visible_to_a_request_racing_the_one_that_took_it() {
+        let (src, _shared) = direct_source();
+
+        // The refresh task resolves and reserves before sending.
+        let refreshing = src.resolve().expect("dialog");
+        assert_eq!(refreshing.local_cseq(), 1);
+        let reserved = src
+            .reserve_cseq(&refreshing)
+            .expect("outbound leg reserves");
+        assert_eq!(reserved, 2, "the number the in-flight re-INVITE will use");
+
+        // Teardown resolves while that re-INVITE is still unanswered,
+        // so `commit` has not run. Before the reservation this read 1
+        // and the BYE went out as CSeq 2 — the same number.
+        let mut tearing_down = src.resolve().expect("dialog");
+        assert_eq!(tearing_down.local_cseq(), 2);
+        assert_eq!(
+            tearing_down.next_local_cseq(),
+            3,
+            "BYE continues, not reuses"
+        );
+    }
+
+    #[test]
+    fn reservations_never_run_backwards() {
+        let (src, shared) = direct_source();
+        let dialog = src.resolve().expect("dialog");
+
+        // A hold that retries after a 491 sends twice from one resolve;
+        // reserving again for the same pending number must not rewind
+        // the shared dialog or hand out the number twice.
+        assert_eq!(src.reserve_cseq(&dialog), Some(2));
+        assert_eq!(src.reserve_cseq(&dialog), Some(2));
+        assert_eq!(shared.lock().local_cseq(), 2);
+
+        // A second in-flight request resolves after the first
+        // reservation and therefore takes the next number, not a
+        // duplicate.
+        let second = src.resolve().expect("dialog");
+        assert_eq!(src.reserve_cseq(&second), Some(3));
+        assert_eq!(shared.lock().local_cseq(), 3);
+    }
+
+    #[test]
+    fn managed_legs_need_no_reservation() {
+        // Inbound: every `IntegratedUAC` in-dialog send re-inserts the
+        // advanced dialog into the shared `DialogManager` before the
+        // request leaves, so the number is already published. Nothing
+        // to write back here, and nothing to claim we did.
+        let src = DialogSource::Managed {
+            sip_call_id: "leg@pbx".into(),
+            dialog_manager: Arc::new(DialogManager::new()),
+        };
+        let dialog = consult_dialog("leg@pbx", "ltag", "rtag");
+        assert_eq!(src.reserve_cseq(&dialog), None);
     }
 
     #[test]

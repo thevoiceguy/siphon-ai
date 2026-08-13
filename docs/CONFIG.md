@@ -127,11 +127,14 @@ credentials. Resolved secret values are never logged.
 > session itself; we arm an expiry against that dialog and end the call at the
 > deadline if the refreshes stop. If the callee instead nominates *us*
 > (`refresher=uac` — non-compliant when we never advertised support, but SBCs
-> do it), **we refresh at half the interval** with a re-INVITE and the call
-> survives; the expiry stays armed underneath as the backstop for a refresh
-> that fails. Either way nothing holds a leg open past the deadline its callee
-> is enforcing. The two knobs above are inbound-only — the outbound interval is
-> whatever the callee asked for.
+> do it), **we refresh five seconds before half the interval** with a re-INVITE
+> and the call survives; the expiry stays armed underneath as the backstop for a
+> refresh that fails. (The guard is deliberate: refreshing at exactly half would
+> put a refresh attempt on the deadline itself, which is how a teardown BYE came
+> to race an in-flight re-INVITE in #490. It also leaves ten seconds in which a
+> rejected refresh is logged before the call ends.) Either way nothing holds a
+> leg open past the deadline its callee is enforcing. The two knobs above are
+> inbound-only — the outbound interval is whatever the callee asked for.
 
 ### `[sip.tls]`
 

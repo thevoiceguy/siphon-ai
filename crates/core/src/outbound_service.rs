@@ -846,17 +846,30 @@ async fn run_call(
             let expires = std::time::Duration::from_secs(u64::from(negotiated.delta_seconds()));
             timers.arm(dialog_id.clone(), expires, cleanup_handle.clone());
             let we_refresh = negotiated.refresher() == Some(sip_core::RefresherRole::Uac);
-            info!(
-                session_expires_secs = negotiated.delta_seconds(),
-                refresher = ?negotiated.refresher(),
-                we_refresh,
-                "armed RFC 4028 expiry on outbound leg; {}",
-                if we_refresh {
-                    "we refresh at half the interval and this is the backstop if that fails"
-                } else {
-                    "the callee refreshes and the call ends at this deadline if it stops"
-                }
-            );
+            // Log the cadence we will actually use rather than a phrase
+            // describing it: this line claimed "half the interval" for a
+            // release after #490's guard made it `se/2` less five
+            // seconds. A computed field cannot drift from the code that
+            // computes it.
+            if we_refresh {
+                info!(
+                    session_expires_secs = negotiated.delta_seconds(),
+                    refresher = ?negotiated.refresher(),
+                    we_refresh,
+                    refresh_period_secs =
+                        session_refresh_period(negotiated.delta_seconds()).as_secs(),
+                    "armed RFC 4028 expiry on outbound leg; we refresh on that period and this \
+                     is the backstop if that fails"
+                );
+            } else {
+                info!(
+                    session_expires_secs = negotiated.delta_seconds(),
+                    refresher = ?negotiated.refresher(),
+                    we_refresh,
+                    "armed RFC 4028 expiry on outbound leg; the callee refreshes and the call \
+                     ends at this deadline if it stops"
+                );
+            }
             Some((timers.clone(), dialog_id))
         }
         _ => None,

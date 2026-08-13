@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The session-refresh re-INVITE and the teardown BYE no longer go out on the same CSeq** (issue #490). On an outbound leg whose refreshes are being rejected, the two were measured 564 µs apart carrying `CSeq: 3 INVITE` and `CSeq: 3 BYE` in one dialog — two different requests, one sequence number, which RFC 3261 §12.2.1.1 forbids. A peer entitled to reject that BYE leaves the leg (and its billing) up at the far end: the leak #480 armed the expiry to close, reopened at the moment the expiry fires. Reproduced 3/3 against the shipped 0.48.15 binary; SIPp answers the colliding BYE anyway (it matches on Call-ID), which is why the 0.48.14 verification did not see it. Two independent halves:
+  - **The consumed CSeq is now published before the request leaves, not after it is answered.** `DialogControl::commit` writes the advance back post-response, so during the round-trip the shared dialog still read the *pre-request* number and anything else on the leg picked it up — the teardown BYE did. `DialogSource::reserve_cseq` now takes the number on the shared dialog up front; it never runs the sequence backwards, so two in-flight requests get two distinct numbers. Applied to the refresh loop, to hold/resume (inside `send_reinvite`), and to REFER, all of which had the same window — the session timer just made it deterministic rather than a coincidence. Inbound legs never had it: upstream re-inserts the advanced dialog into the shared `DialogManager` before the send, so the number is published already.
+  - **No refresh tick lands on the deadline it protects.** Ticks recurred at exactly `Session-Expires/2` while the armed expiry sat at `Session-Expires` past the last *successful* refresh, so the second tick after any failure coincided with the teardown by construction. Refreshes now run a five-second guard ahead of the half-way point, which puts twice the guard between the last attempt and the deadline. Refreshing early is always safe (RFC 4028 §10 — the peer restarts its timer from whenever the refresh lands), and the gap is also the window in which a rejected refresh gets to be logged before the call ends: `exhausted` is now reachable on a 90 s timer instead of losing the photo finish to the expiry. `docs/DEPLOY.md`'s metric row said so and has been corrected.
+  - Every refresh attempt now logs its `cseq`, so this class of defect is legible in the field rather than only in a packet capture.
+
 ## [0.48.15] - 2026-08-12
 
 ### Fixed

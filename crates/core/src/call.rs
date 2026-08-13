@@ -2947,6 +2947,12 @@ async fn run_transfer_inner(
         ReferPlan::Attended { refer_to, consult } => (refer_to, Some(consult.as_ref())),
     };
 
+    // Publish the CSeq the REFER is about to take before it leaves, so
+    // the teardown BYE that follows a 202 — or anything else racing it
+    // on this leg — continues the sequence instead of duplicating it
+    // (#490). The commit after the round-trip is still what carries the
+    // response's target refresh.
+    ctx.control.reserve_cseq(&dialog);
     // TCP/TLS dialogs: the REFER must ride the inbound connection —
     // the dispatcher is inbound-only and the peer's Contact names an
     // ephemeral source port nothing listens on (issue #159, same

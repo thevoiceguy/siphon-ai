@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
@@ -63,17 +64,53 @@ use siphon_ai_recording::{RecordingConfig, RecordingMode, RecordingSetup};
 /// loop stops trying (#484).
 ///
 /// **Two, not upstream's three, because three can never be reached.**
-/// Refreshes run at `Session-Expires/2` while the armed expiry sits a
-/// full `Session-Expires` past the last *successful* one, so at most two
-/// attempts fit inside a dying session: on a 90 s timer refreshed at 45 s,
-/// a failure at t=45 leaves exactly one more attempt at t=90 — which is
-/// the deadline itself. A threshold of three would mean the loop never
-/// announces giving up, because the expiry always tears the call down
-/// first, which is precisely the silence this change exists to remove.
+/// Refreshes run at just under `Session-Expires/2` while the armed
+/// expiry sits a full `Session-Expires` past the last *successful* one,
+/// so at most two attempts fit inside a dying session: on a 90 s timer
+/// refreshed at 40 s, a failure there leaves exactly one more attempt at
+/// 80 s, and the deadline is at 90. A threshold of three would mean the
+/// loop never announces giving up, because the expiry always tears the
+/// call down first, which is precisely the silence this change exists to
+/// remove.
 ///
 /// Stopping early costs nothing: the call ends at the same deadline
 /// either way. What changes is that it ends having *said* why.
 const MAX_CONSECUTIVE_SESSION_REFRESH_FAILURES: u32 = 2;
+
+/// How far ahead of the half-way point each RFC 4028 refresh is sent
+/// (#490).
+///
+/// Refreshing at exactly `Session-Expires/2` puts a tick on the
+/// deadline itself: the armed expiry sits at `Session-Expires` past the
+/// last successful refresh, and ticks recur every half-interval, so the
+/// second tick after any failure lands on it. Measured on 0.48.15, the
+/// refresh re-INVITE and the expiry's teardown BYE went out 564 µs
+/// apart, and the BYE carried the in-flight re-INVITE's CSeq.
+///
+/// [`crate::transfer::DialogSource::reserve_cseq`] is what makes the
+/// sequence correct under that race. This is what stops it happening:
+/// pulling every tick a guard *before* the half-way point leaves twice
+/// the guard between the last attempt and the deadline, which is also
+/// the window in which a rejected refresh gets to be logged before the
+/// call ends.
+///
+/// Refreshing early is always safe — the peer restarts its timer from
+/// whenever the refresh lands (RFC 4028 §10) — so the only cost is
+/// marginally more signalling on very long sessions.
+const SESSION_REFRESH_GUARD: Duration = Duration::from_secs(5);
+
+/// The interval between RFC 4028 refreshes for a `session_expires_secs`
+/// session: half of it, less [`SESSION_REFRESH_GUARD`].
+///
+/// Floored at one second so a nonsensically short interval can't hand
+/// `tokio::time::interval_at` a zero period (which panics). Upstream's
+/// `SessionExpires` enforces the RFC's 90 s minimum long before this,
+/// so the floor is belt and braces.
+fn session_refresh_period(session_expires_secs: u32) -> Duration {
+    let half = Duration::from_secs(u64::from(session_expires_secs)) / 2;
+    half.saturating_sub(SESSION_REFRESH_GUARD)
+        .max(Duration::from_secs(1))
+}
 
 /// What one refresh attempt means for the loop (#484).
 ///
@@ -872,10 +909,12 @@ async fn run_call(
             let dialog_id = dialog_id.clone();
             let se = negotiated.delta_seconds();
             let expires = std::time::Duration::from_secs(u64::from(se));
-            // RFC 4028 §10: refresh at half the interval. `interval_at`
-            // rather than `interval` so the first one lands at se/2 and
-            // not immediately (the mistake upstream made, siphon-rs#92).
-            let period = expires / 2;
+            // RFC 4028 §10: refresh at half the interval — less a guard,
+            // so no tick lands on the deadline it is protecting (#490,
+            // see `SESSION_REFRESH_GUARD`). `interval_at` rather than
+            // `interval` so the first one lands there and not
+            // immediately (the mistake upstream made, siphon-rs#92).
+            let period = session_refresh_period(se);
             let offer_sdp = accepted.offer_sdp.clone();
             let log_call_id = sip_call_id.clone();
             Some(tokio::spawn(async move {
@@ -894,6 +933,13 @@ async fn run_call(
                             .increment(1);
                         return;
                     };
+                    // Publish the CSeq this re-INVITE is about to take
+                    // *before* it leaves, so a teardown BYE built while
+                    // it is in flight continues the sequence instead of
+                    // duplicating it (#490). The commit below is still
+                    // needed — it carries the response's target refresh,
+                    // not just the number.
+                    let cseq = control.reserve_cseq(&dialog);
                     let outcome = uac
                         .refresh_session(&mut dialog, se, "uac", false, Some(&offer_sdp))
                         .await;
@@ -923,6 +969,7 @@ async fn run_call(
                             debug!(
                                 sip_call_id = %log_call_id,
                                 session_expires_secs = se,
+                                ?cseq,
                                 "RFC 4028 session refreshed"
                             );
                         }
@@ -935,6 +982,7 @@ async fn run_call(
                             warn!(
                                 sip_call_id = %log_call_id,
                                 code,
+                                ?cseq,
                                 error = ?outcome.as_ref().err(),
                                 "session refresh says the dialog is gone; nothing is refreshing \
                                  this session now and the armed expiry will end the call"
@@ -946,6 +994,7 @@ async fn run_call(
                             warn!(
                                 sip_call_id = %log_call_id,
                                 code,
+                                ?cseq,
                                 consecutive,
                                 "session refresh rejected; the armed expiry will end the call"
                             );
@@ -954,6 +1003,7 @@ async fn run_call(
                             consecutive += 1;
                             warn!(
                                 sip_call_id = %log_call_id,
+                                ?cseq,
                                 error = ?outcome.as_ref().err(),
                                 consecutive,
                                 "session refresh failed; the armed expiry will end the call"
@@ -1184,6 +1234,50 @@ mod tests {
     use chrono::TimeZone;
     use siphon_ai_cdr::TerminationCause as CdrTerminationCause;
 
+    /// #490: no refresh tick may land on the deadline it protects.
+    ///
+    /// The expiry sits `se` past the last successful refresh, and ticks
+    /// recur every period from there — so with a period of exactly
+    /// `se/2` the second tick after a failure *is* the deadline, which
+    /// is how the teardown BYE came to race an in-flight re-INVITE.
+    #[test]
+    fn no_refresh_tick_lands_on_the_deadline() {
+        for se in [90u32, 120, 300, 1800, 3600] {
+            let period = session_refresh_period(se);
+            let deadline = Duration::from_secs(u64::from(se));
+            // Ticks after a success at t=0, up to and past the deadline.
+            let mut t = period;
+            while t <= deadline {
+                assert_ne!(t, deadline, "se={se}: a tick lands on the deadline");
+                t += period;
+            }
+            // The last attempt before the deadline is a guard's worth of
+            // room — long enough for a rejection to be logged before the
+            // call ends, which is the other half of what this buys.
+            let last_before = deadline
+                .as_secs()
+                .div_euclid(period.as_secs())
+                .saturating_mul(period.as_secs());
+            assert!(
+                deadline.as_secs() - last_before >= SESSION_REFRESH_GUARD.as_secs(),
+                "se={se}: only {}s between the last attempt and teardown",
+                deadline.as_secs() - last_before
+            );
+        }
+    }
+
+    /// Half the interval, less the guard — and never a zero period,
+    /// which `tokio::time::interval_at` panics on.
+    #[test]
+    fn the_refresh_period_is_just_under_half_the_interval() {
+        assert_eq!(session_refresh_period(90), Duration::from_secs(40));
+        assert_eq!(session_refresh_period(1800), Duration::from_secs(895));
+        // Below the RFC floor `SessionExpires` enforces, so unreachable
+        // in practice — but it must still produce a usable interval.
+        assert_eq!(session_refresh_period(4), Duration::from_secs(1));
+        assert_eq!(session_refresh_period(0), Duration::from_secs(1));
+    }
+
     /// A 2xx is the only outcome that keeps the session alive, and the
     /// only one that resets the failure count.
     #[test]
@@ -1261,16 +1355,17 @@ mod tests {
     /// ends the call, or the loop never announces that it stopped — the
     /// exact silence #484 exists to remove.
     ///
-    /// Refreshes run at `Session-Expires/2`; the expiry sits one full
-    /// `Session-Expires` past the last success. So the attempts that fit
-    /// inside a dying session is `se / (se/2)` = 2, independent of the
-    /// negotiated value. Raising the threshold to upstream's default of 3
-    /// would make it unreachable — this test is here to say so out loud
-    /// if someone tries.
+    /// Refreshes run at just under `Session-Expires/2` (#490's guard);
+    /// the expiry sits one full `Session-Expires` past the last success.
+    /// So two attempts fit inside a dying session, independent of the
+    /// negotiated value — the guard shortens the period, which can only
+    /// help. Raising the threshold to upstream's default of 3 would make
+    /// it unreachable — this test is here to say so out loud if someone
+    /// tries.
     #[test]
     fn the_give_up_threshold_is_reachable_before_the_expiry() {
         for se in [90u32, 120, 600, 1800, 3600] {
-            let period = se / 2;
+            let period = session_refresh_period(se).as_secs() as u32;
             let attempts_before_deadline = se / period;
             assert_eq!(attempts_before_deadline, 2, "se={se}");
             assert!(

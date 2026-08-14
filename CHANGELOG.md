@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.18] - 2026-08-14
+
 ### Changed
 
 - **Bumped siphon-rs `9f70b83011f2` → `9ad33983b0e9`** — [siphon-rs#102](https://github.com/thevoiceguy/siphon-rs/pull/102) (its issue #101, filed from this project): `TransactionManager::ack_received` now returns whether it **absorbed** the ACK. It used to return `()` and no-op on a miss, hiding the one distinction RFC 3261 §17.2.1 draws — an ACK for a non-2xx final belongs to the completed INVITE server transaction alone, while an ACK for a 2xx is end-to-end and only the transaction user can handle it. The FSM already knew which was which (`send_final` terminates the server transaction on a 2xx and leaves it `Completed` on a non-2xx, so "matched an entry" is exactly "ACK to a non-2xx") and simply did not say so. Source-compatible and not `#[must_use]`, so the signal is opt-in; this release opts in — see the `Fixed` entry below. Verified per CLAUDE.md §7.5: workspace suite green, SIPp signalling suite re-run, no glue changes.

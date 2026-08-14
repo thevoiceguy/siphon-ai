@@ -34,6 +34,29 @@ look like the bridge falling over. Size the range to at least `2 ×
 target_concurrency` (plus headroom for calls in teardown, which hold their
 ports briefly) before running anything in §4.
 
+**Then reserve the range from the kernel, or a run will lose the odd call to
+a port it never actually owned.** Every range in the table above sits inside
+the default `net.ipv4.ip_local_port_range` (`32768–60999`), so the kernel is
+free to hand an RTP port to any socket that does not bind explicitly — a DNS
+lookup by any process on the box qualifies. The call that wanted it is
+rejected `500`:
+
+```
+WARN rejecting INVITE error=forge session error: Network error:
+  Failed to bind socket to 0.0.0.0:44134: Address in use (os error 98)
+```
+
+Measured **once in 399 calls** on the 0.48.18 soak, and it is not the
+daemon's fault — `README.md` calls a 500 here "forge itself is broken",
+which sends you looking in the wrong place. Fix it before the run:
+
+```sh
+sudo sysctl -w net.ipv4.ip_local_reserved_ports=41000-45000   # = rtp_port_range
+```
+
+See issue #504 and `docs/DEPLOY.md`. A run without this is still valid for
+everything except a clean zero-failure claim, so record it if you skip it.
+
 ### 1.2 Admission control will rate-limit the whole test
 
 SIPp drives every call from **one source IP**, so `[sip.admission]`'s

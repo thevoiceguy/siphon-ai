@@ -118,10 +118,27 @@ range so the kernel never issues it ephemerally —
 sysctl -w net.ipv4.ip_local_reserved_ports=40000-40500   # match rtp_port_range
 ```
 
-or move `rtp_port_range` above `ip_local_port_range`'s ceiling. Neither
-`docs/DEPLOY.md`, `docs/CONFIG.md` nor `LOAD_TEST_PLAN.md` §1 mentions
-this today, and §1.1 ("RTP port range is the real ceiling") is exactly
-where an operator would look for it.
+or move `rtp_port_range` above `ip_local_port_range`'s ceiling.
+
+Nothing in the repo said so when this run happened — not `docs/DEPLOY.md`,
+not `docs/CONFIG.md`, and not `LOAD_TEST_PLAN.md` §1.1, which is exactly
+where an operator would look. Filed as **#504** and documented in **#505**,
+which also corrects this directory's `README.md`: its failure table called a
+500 here *"should NOT happen … unless forge itself is broken"*, sending you
+to debug forge instead of running one sysctl.
+
+On this host the reservation is now in place
+(`/etc/sysctl.d/60-siphon-ai-rtp.conf`, matching production's
+`rtp_port_range`), verified deterministically rather than by re-running the
+load: 3,000 ephemeral UDP sockets spanning 32773–60991 put **zero** in the
+reserved 40000–40500, while an equally-sized adjacent control window
+(40501–41001) caught **55**. A clean re-run would have proved little — the
+fault rate was 1 in 399.
+
+**A run made before that sysctl is applied is still valid for everything
+except a clean zero-failure claim** — which is why this one reports 200/200
+for §6.1 (run before the reuse test surfaced it) and 199/200 for the reuse
+load.
 
 ## Verdict
 

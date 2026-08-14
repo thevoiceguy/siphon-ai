@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Bumped siphon-rs `9f70b83011f2` → `9ad33983b0e9`** — [siphon-rs#102](https://github.com/thevoiceguy/siphon-rs/pull/102) (its issue #101, filed from this project): `TransactionManager::ack_received` now returns whether it **absorbed** the ACK. It used to return `()` and no-op on a miss, hiding the one distinction RFC 3261 §17.2.1 draws — an ACK for a non-2xx final belongs to the completed INVITE server transaction alone, while an ACK for a 2xx is end-to-end and only the transaction user can handle it. The FSM already knew which was which (`send_final` terminates the server transaction on a 2xx and leaves it `Completed` on a non-2xx, so "matched an entry" is exactly "ACK to a non-2xx") and simply did not say so. Source-compatible and not `#[must_use]`, so the signal is opt-in; this release opts in — see the `Fixed` entry below. Verified per CLAUDE.md §7.5: workspace suite green, SIPp signalling suite re-run, no glue changes.
+
+### Fixed
+
+- **Absorbed ACKs no longer reach the UAS, so a rejected INVITE stops producing a stray `WARN`.** 0.48.17 fixed `missing_sdp_answer` (#497) by dispatching *every* ACK, because the pump had no way to keep the delayed-offer ACK it needed while dropping the ones it did not. The side effect shipped with it: an ACK acknowledging a non-2xx final — which the transaction has already absorbed, and which is hop-by-hop by §17.2.1 — was handed to `IntegratedUAS`, resolved to no dialog, and logged `Received ACK for unknown dialog`. On a public-facing listener that is one per scanner INVITE rejected with a `403` and then ACKed: **measured at ~0.5/min (~660/day) on the reference node**, against zero in the week before, plus a dialog-manager lock and a task spawn per packet.
+  - Nothing was ever broken by it — `ack_received` is called before dispatch either way, so non-2xx absorption and retransmission-timer clearing were untouched throughout. The cost was operator noise in a `WARN` stream that is otherwise worth reading, and a little attacker-triggerable work per unsolicited datagram.
+  - **The fix belongs upstream, not in a log level.** With `ack_received` now reporting absorption, the pump returns on `true` and dispatches only what the transaction layer left for it. That is the RFC's own layering rather than a filter bolted on top: `warn!`-to-`debug!` would have hidden the symptom while still doing the lookup and the spawn.
+  - The delayed-offer path is unchanged and still covered by the `delayed_offer_no_answer` harness phase: a 2xx terminates the server transaction as it is sent, so its ACK is never absorbed and still reaches `on_ack` — body or not.
+
 ## [0.48.17] - 2026-08-13
 
 ### Changed

@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  rejected_invite_ack — an INVITE that matches no trunk draws `403
+  Forbidden`, and the peer ACKs the rejection. Every public listener
+  sees this all day: it is what an internet scanner's INVITE turns into.
+
+  The ACK acknowledges a **non-2xx** final, so RFC 3261 §17.2.1 gives it
+  to the completed INVITE server transaction and nothing above. The
+  daemon must absorb it there and stop — dispatching it reaches a dialog
+  lookup that cannot match, which costs a `WARN`, a dialog-manager lock
+  and a task spawn for every such packet.
+
+  **The ACK must reuse the INVITE's branch** (§17.1.1.3) — that is what
+  makes the transaction recognise it. `[last_Via:]` copies the Via from
+  the last received message, and the 403 echoes our INVITE's Via
+  verbatim, so the branch returns exactly right. A fresh `[branch]` here
+  would match no transaction at all and be dispatched — correctly, but
+  it would be testing a different case.
+
+  Asserted daemon-side: SIPp cannot see the difference, since an ACK
+  draws no response either way.
+-->
+<scenario name="rejected_invite_ack">
+  <send retrans="500">
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp-scanner@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp-scanner@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+s=-
+c=IN IP[media_ip_type] [media_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+
+  <!-- The rejection under test. -->
+  <recv response="403" rtd="true"/>
+
+  <!-- ACK to a non-2xx: same branch as the INVITE, carried back by the
+       403's echoed Via. -->
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+[last_Via:]
+Max-Forwards: 70
+From: <sip:sipp-scanner@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- Long enough for Timer G to have retransmitted the 403 if the ACK
+       had not been absorbed, and for the daemon to log if it dispatched
+       it. -->
+  <pause milliseconds="1500"/>
+</scenario>

@@ -2026,6 +2026,82 @@ fi
 dona_cleanup
 trap - EXIT
 
+# ─── auxiliary phase: rejected_invite_ack ─────────────────────────
+# The ACK to a **non-2xx** final is hop-by-hop: RFC 3261 §17.2.1 gives
+# it to the completed INVITE server transaction, and nothing above it
+# is supposed to see one. Here the INVITE matches no trunk, draws a
+# `403`, and the peer ACKs — which is every scanner INVITE that reaches
+# a public listener.
+#
+# Asserted daemon-side, because SIPp cannot tell the difference: an ACK
+# draws no response whether it was absorbed or dispatched. The absence
+# of `Received ACK for unknown dialog` is the assertion — that line is
+# what a dispatched ACK produces when it reaches the UAS and matches no
+# dialog.
+#
+# Issue #101 upstream (siphon-rs#102): #497 had to dispatch *every* ACK
+# to reach the delayed-offer population, because `ack_received` could
+# not report which ACKs the transaction had already absorbed. Now it
+# can, so the pump stops at the absorbed ones. A regression to
+# dispatch-all is silent apart from this line — hence the guard.
+echo
+echo "─── auxiliary phase: rejected_invite_ack ──────────────"
+RIA_WS_PORT=8794
+RIA_DAEMON_LOG=$(mktemp -t siphon-ai-ria.XXXXXX.log)
+RIA_CONFIG=$(mktemp -t siphon-ai-ria.XXXXXX.toml)
+cat >"$RIA_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-ria"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$RIA_WS_PORT/"
+# A trunk that deliberately does not match the loopback SIPp runs on,
+# so the INVITE is rejected 403 — the premise of the case. Without any
+# [[trunk]] at all the daemon accepts from anywhere and the scenario
+# would fail at its `recv 403`.
+[[trunk]]
+name = "nowhere"
+peer_addrs = ["192.0.2.1"]
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+RUST_LOG=siphon_ai=info,sip_uas=warn "$DAEMON_BIN" --config "$RIA_CONFIG" \
+    >"$RIA_DAEMON_LOG" 2>&1 &
+RIA_DAEMON_PID=$!
+ria_cleanup() {
+    kill "$RIA_DAEMON_PID" 2>/dev/null || true
+    wait "$RIA_DAEMON_PID" 2>/dev/null || true
+}
+trap ria_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── rejected_invite_ack ──────────────────────────────"
+ria_ok=0
+if sipp -i 127.0.0.1 -sf "$SCRIPT_DIR/rejected_invite_ack.xml" -m 1 -timeout 12s -trace_err \
+        -p "$SIPP_PORT" -s 1000 "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1; then
+    # SIPp passing already proves the 403 arrived; the daemon must not
+    # have handed the ACK above the transaction layer.
+    if ! grep -q 'ACK for unknown dialog' "$RIA_DAEMON_LOG"; then
+        ria_ok=1
+    fi
+fi
+if (( ria_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (daemon: $RIA_DAEMON_LOG)"
+    failures=$((failures + 1))
+fi
+
+ria_cleanup
+trap - EXIT
+
 # ─── auxiliary phase: delayed_offer + SRTP ────────────────────────
 # (0.9.2) Inbound delayed offer where SiphonAI OFFERS SDES SRTP in the
 # 200 OK (we're the offerer). `[media].srtp = "required"` makes the

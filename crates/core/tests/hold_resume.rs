@@ -148,6 +148,18 @@ async fn push_bridge_event_emits_hold_and_resume_on_ws() {
     assert_eq!(resume["type"], "resume");
 
     // 4. Drive cleanup so the controller exits.
+    //
+    // Each layer is checked rather than discarded. `let _ = …` here hid
+    // three distinct failures behind a passing test: a timeout (the
+    // controller ignored `shutdown()`), a `JoinError` (it panicked on
+    // the way out), and an `Err` return (it exited reporting failure).
+    // The assertions above would all still have passed through any of
+    // them, since they only read events the controller had already
+    // emitted. Same idiom as `registry_bye`.
     handle.shutdown();
-    let _ = tokio::time::timeout(Duration::from_secs(3), run).await;
+    tokio::time::timeout(Duration::from_secs(3), run)
+        .await
+        .expect("controller exits after shutdown()")
+        .expect("task didn't panic")
+        .expect("controller returns Ok");
 }

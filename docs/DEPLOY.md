@@ -112,13 +112,59 @@ operator's network, and the daemon container.
 | `[sip].listen`    | UDP    | TOML           | inbound   | SIP signaling (default 5060 / 5070 in samples). Bidirectional within UDP. |
 | `[sip].listen`    | TCP    | TOML           | inbound   | Same port number when `transports` includes `"tcp"`. |
 | `[sip.tls].listen`| TCP    | TOML           | inbound   | TLS signaling. Defaults to the SIP IP + 5061. |
-| `[media].rtp_port_range` | UDP | TOML       | both      | RTP/RTCP. Forge allocates one even-numbered RTP port + the next odd RTCP port per call. Forward the whole range. |
+| `[media].rtp_port_range` | UDP | TOML       | both      | RTP/RTCP. Forge allocates one even-numbered RTP port + the next odd RTCP port per call. Forward the whole range. **Also reserve it from the kernel — see below.** |
 | `[observability].http_listen` | TCP | TOML  | inbound (cluster-local) | `/metrics`, `/health`, `/ready`. Unauthenticated — keep it cluster-local. Since 0.10.0 `/admin/*` is **not** served here (returns `404`); it moved to the dedicated `[admin]` listener below. |
 | `[admin].listen`  | TCP    | TOML           | inbound (cluster-local) | `/admin/*` control plane (0.10.0). Bearer-token auth + RBAC (`readonly` ⊂ `operator` ⊂ `admin`); omit `[admin]` and `/admin/*` isn't served at all. Set `[admin.tls]` (0.18.0) to serve HTTPS so the token is encrypted on a routable bind. Still keep it off the public internet. |
 | Outbound, dynamic | TCP    | `[bridge].ws_url` (per route) | outbound | WebSocket from daemon to operator's WS server. |
 | Outbound, dynamic | TCP    | `[cdr.webhook].url`, `[webhooks].url` | outbound | HTTP POSTs for CDRs and lifecycle webhooks. |
 | Outbound 9060     | UDP    | `[hep].collector` | outbound | HEP3 to Homer. UDP only in v1. |
 | Outbound 5060/5061 | UDP/TCP | `[[register]].server` | bidirectional | Per `[[register]]` block. |
+
+### Reserve the RTP range from the kernel
+
+Forwarding the RTP range is not enough. On Linux the range you pick almost
+certainly sits **inside** the ephemeral port range the kernel hands out to
+any socket that does not bind an explicit port:
+
+```sh
+$ cat /proc/sys/net/ipv4/ip_local_port_range
+32768   60999
+```
+
+A typical `rtp_port_range = [40000, 40500]` is entirely within it. Nothing
+stops the kernel from giving one of those ports to an unrelated UDP socket
+— **a DNS lookup by any process on the host is enough** — and when a call
+then needs that port, the bind fails and the INVITE is rejected:
+
+```
+WARN rejecting INVITE error=forge session error: Network error:
+  Failed to bind socket to 0.0.0.0:44134: Address in use (os error 98)
+  code=500 reason="Server Internal Error"
+```
+
+The call is lost, and the daemon looks at fault when the host is. It is
+rare, it is silent until it happens, and it scales with how much ephemeral
+UDP traffic the host generates rather than with call volume — so a busy
+host drops calls a quiet one never will. Measured once in 399 calls during
+a 200-concurrent soak (issue #504).
+
+Reserve the range so the kernel never issues it ephemerally — match your
+`rtp_port_range` exactly:
+
+```sh
+# /etc/sysctl.d/60-siphon-ai-rtp.conf
+net.ipv4.ip_local_reserved_ports = 40000-40500
+```
+
+```sh
+sudo sysctl --system
+cat /proc/sys/net/ipv4/ip_local_reserved_ports   # verify: 40000-40500
+```
+
+Reserving costs nothing — the ports are already yours in intent, and the
+kernel simply stops handing them to anyone else. The alternative is to
+choose an `rtp_port_range` above `ip_local_port_range`'s ceiling, which
+works equally well but leaves less room to grow.
 
 ## TLS deployment (SIP/TLS + WSS)
 

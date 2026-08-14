@@ -587,7 +587,7 @@ timeout_ms = 5000
 enabled = false
 url = "https://ops.example.com/siphon-events"
 auth_header = "Bearer ${WEBHOOK_TOKEN}"
-events = ["call_start", "call_end", "registration_state_changed", "ws_failure"]
+events = ["call_start", "call_end", "registration_state_changed"]
 retry_max = 3
 timeout_ms = 5000
 

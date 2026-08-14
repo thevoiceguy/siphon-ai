@@ -232,7 +232,22 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad
 # AI logic belongs in the WS server, never here. See CLAUDE.md §4.1 and the
 # upstream gate at https://github.com/thevoiceguy/forge-media/pull/39.
 #
-# forge-media is pinned to a `main` rev. Bumped 2026-08-07 to b4f8df5c8f09
+# forge-media is pinned to a `main` rev. Bumped 2026-08-14 to 1d7bbaba0c22
+# = forge-media #112 (its issue #111, filed from this project's #504): a
+# port bind that hits AddrInUse now retries the next pair instead of
+# failing the session. `PortPool` allocates from its own bookkeeping and
+# binds later, so a port it believes free can be held by a socket outside
+# the process — our `rtp_port_range` sits inside the kernel's ephemeral
+# range, and a DNS lookup by anything on the host is enough to take one.
+# That surfaced here as a `500 Server Internal Error` on an inbound INVITE,
+# measured at one call in 399 during the 0.48.18 soak. Upstream now splits
+# `ForgeError::AddrInUse(SocketAddr)` out of `Network(String)` and draws up
+# to five pairs. **Additive for us**: nothing in this workspace matches on
+# `ForgeError`, so the new variant changes no code here.
+# The `net.ipv4.ip_local_reserved_ports` guidance in docs/DEPLOY.md stays
+# correct and is still worth applying — this removes the *requirement*,
+# not the value, of reserving the range.
+# (Prior: 2026-08-07 to b4f8df5c8f09
 # = forge-media #102 + #104 + #105 (plus dependabot bumps #88/#89/#91/#99).
 # #102: every facade metric family gets describe_*! HELP text and every
 # histogram explicit buckets (forge's sibling of siphon-ai #432); six
@@ -244,7 +259,7 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad
 # #105: forge_rtcp_sender_{packets,bytes}_total now count SR deltas per
 # SSRC instead of summing running totals. `metrics` facade stays 0.24 on
 # both sides (must move in lockstep with our exporter — see v0.31.1 note).
-# external/siphon-rs submodule unchanged (74b903b).
+# external/siphon-rs submodule unchanged (74b903b).)
 #
 # Prior pin: bumped 2026-07-30 to aeae479b391d
 # = forge-media #100: external/siphon-rs submodule f3454c7 → 74b903b, which
@@ -285,20 +300,20 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad
 # comment for the current rev.) Prior forge pins: forge 1c996ae5fb4f = #86
 # neural VAD; forge 3c59b5f6e464 = #82-#85 dependency migrations; forge
 # 5fa76fb38675 = #81.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
-forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
-forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
+forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
+forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
 # Conference rooms (0.7.0): forge-mixer is the per-room AudioMixer;
 # forge-injection provides ToneGenerator (join/leave tones now, MOH
 # for park later). Deliberately NOT forge-conference — its DTMF
 # IVR/PIN/host-control layer is unused per DEV_PLAN_0.7.0.md §9.4.
-forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
-forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "b4f8df5c8f09" }
+forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
+forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Bumped forge-media `b4f8df5c8f09` → `1d7bbaba0c22`** — [forge-media#112](https://github.com/thevoiceguy/forge-media/pull/112) (its issue #111, filed from this project's #504): a port bind that hits `AddrInUse` now **retries the next pair instead of failing the session**. `PortPool` allocates from its own bookkeeping and binds later, so a port it believes free can be held by a socket outside the process — `[media].rtp_port_range` sits inside the kernel's ephemeral range (`net.ipv4.ip_local_port_range`, commonly 32768–60999), and a DNS lookup by anything on the host is enough to take one. Here that surfaced as a `500 Server Internal Error` on an inbound INVITE, measured at **one call in 399** during the 0.48.18 soak. Upstream splits `ForgeError::AddrInUse(SocketAddr)` out of `Network(String)` — so the retry keys off a type rather than message text — and draws up to five pairs, logging a `warn!` with the address each time it steps past one.
+  - **No code change here and nothing to configure.** Nothing in this workspace matches on `ForgeError`, so the new variant is purely additive. Operators get the fix by upgrading.
+  - **The `net.ipv4.ip_local_reserved_ports` guidance in `docs/DEPLOY.md` stays correct and is still worth applying.** This removes the *requirement* to reserve the range, not the value of doing so: a reserved range means the retry never has to fire, and a `warn!` that does fire is still telling you something real about the host. The docs are left as they are for that reason.
+  - Verified per CLAUDE.md §7.5: workspace suite 1,161 passed / 0 failed, fmt, clippy `-D warnings`, all three check scripts, and the SIPp signalling suite re-run. No glue changes.
+
 ## [0.48.18] - 2026-08-14
 
 ### Changed

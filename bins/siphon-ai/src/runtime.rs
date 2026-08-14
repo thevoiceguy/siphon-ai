@@ -2739,34 +2739,38 @@ async fn handle_packet(
     let ctx = TransportContext::new(tx_kind, peer, stream).with_local_addr(local);
 
     if request.method().as_str() == "ACK" {
-        // ACK doesn't open a server transaction; notify the matching
-        // invite TM key so the UAS can clear its 200 OK retransmission
-        // timer (RFC 3261 §17.2.1, §17.1.1.3 — the ACK transaction key
-        // uses the original INVITE's method).
+        // ACK opens no server transaction of its own; hand it to the
+        // matching INVITE key so the transaction can clear its
+        // retransmission timer (RFC 3261 §17.2.1, §17.1.1.3 — the ACK
+        // transaction key uses the original INVITE's method).
+        //
+        // `ack_received` reports whether it **absorbed** the ACK
+        // (siphon-rs #101). Absorbed means the ACK acknowledged a
+        // non-2xx final: it is hop-by-hop, the transaction is the whole
+        // of its audience, and passing it to the UAS would only reach a
+        // dialog lookup that cannot match — one `warn!("Received ACK for
+        // unknown dialog")`, a dialog-manager lock and a task spawn per
+        // packet, which on a public listener is one per rejected scanner
+        // INVITE.
+        //
+        // Anything it does not absorb is dispatched, body or not. That
+        // is the ACK to a **2xx**, which is end-to-end and ours to
+        // handle: a delayed-offer ACK carries the peer's SDP answer, and
+        // one carrying **no** body is the peer declining to answer,
+        // which is exactly what `missing_sdp_answer` classifies (#425,
+        // reachable since #497). Body-less ACKs used to return here, so
+        // that call sat half-established until Timer H and recorded
+        // `ack_timeout` 32 s later — a cause that is supposed to mean no
+        // ACK arrived at all.
+        //
+        // `receive_request` below makes a benign non-INVITE entry for a
+        // dispatched ACK; the FSM sends no response to one.
         if let Some(branch) = sip_transaction::request_branch_id(&request) {
             let key = sip_transaction::TransactionKey::new(branch, sip_core::Method::Invite, true);
-            transaction_mgr.ack_received(&key).await;
+            if transaction_mgr.ack_received(&key).await {
+                return;
+            }
         }
-        // Every ACK falls through to dispatch, body or not (#497).
-        // A body-less one used to return here on the reasoning that an
-        // early-offer ACK carries no SDP and needs no application
-        // handling — true of that population, and the premise fails on
-        // the one that matters: a **delayed-offer** ACK with no SDP is
-        // the peer declining to answer our offer, which is precisely
-        // what `missing_sdp_answer` classifies (#425). Returning early
-        // meant the UAS never saw it, so that call was left to Timer H
-        // and recorded `ack_timeout` 32 s later — a cause that means
-        // "no ACK arrived at all" — while the variant, its
-        // `delayed_offer_total` label and its DEPLOY.md row described
-        // an outcome the daemon could not produce.
-        //
-        // The glue's `on_ack` and `BridgingAcceptor::on_ack` were
-        // already written for both populations (an ACK for a dialog we
-        // are not holding matches nothing and is ignored), so the cost
-        // of dispatching them all is one dialog-map probe per
-        // early-offer ACK, once per call. `receive_request` makes a
-        // benign non-INVITE entry for it — the FSM sends no response to
-        // an ACK.
     }
 
     let handle = transaction_mgr

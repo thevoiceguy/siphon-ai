@@ -65,27 +65,51 @@ fn start_msg(call_id: &str) -> StartMsg {
 
 /// Start a one-shot WS server on an ephemeral port. The handler
 /// is given the `WebSocketStream` for one accepted connection.
-async fn one_shot_server<F, Fut>(handler: F) -> u16
+/// Returns the port **and the server task's `JoinHandle`**. Callers must
+/// finish with [`join_server`] — the handle is how a failed assertion
+/// inside `handler` reaches the test.
+///
+/// It used to return the port alone and drop the handle. A panicking
+/// assertion in the handler then killed only that task: `#[tokio::test]`
+/// never saw it, and the test passed. Every `assert!` inside a handler
+/// closure in this file was silently unenforced — proven by flipping one
+/// to a sentinel string and watching the suite stay green.
+async fn one_shot_server<F, Fut>(handler: F) -> (u16, tokio::task::JoinHandle<()>)
 where
     F: FnOnce(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send,
 {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
         let ws = tokio_tungstenite::accept_hdr_async(stream, echo_subprotocol)
             .await
             .expect("accept_hdr_async");
         handler(ws).await;
     });
-    port
+    (port, task)
+}
+
+/// Await a scripted server task and re-raise whatever it asserted.
+///
+/// Call this **after** the controller has finished, so the handler has
+/// already run to completion; awaiting earlier would deadlock against a
+/// handler still waiting on the controller.
+async fn join_server(task: tokio::task::JoinHandle<()>) {
+    match task.await {
+        Ok(()) => {}
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(e) => panic!("scripted ws server task failed: {e}"),
+    }
 }
 
 /// Like [`one_shot_server`] but accepts **two** connections on the same
 /// port in sequence — the original session (`h1`) and the reconnect
 /// redial (`h2`). Used by the WS-reconnect tests (0.7.3).
-async fn two_shot_server<F1, Fut1, F2, Fut2>(h1: F1, h2: F2) -> u16
+/// Returns the port and the task handle; finish with [`join_server`],
+/// for the same reason [`one_shot_server`] does.
+async fn two_shot_server<F1, Fut1, F2, Fut2>(h1: F1, h2: F2) -> (u16, tokio::task::JoinHandle<()>)
 where
     F1: FnOnce(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Fut1 + Send + 'static,
     Fut1: std::future::Future<Output = ()> + Send,
@@ -94,7 +118,7 @@ where
 {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let (s1, _) = listener.accept().await.expect("accept 1");
         let ws1 = tokio_tungstenite::accept_hdr_async(s1, echo_subprotocol)
             .await
@@ -107,7 +131,7 @@ where
             .expect("handshake 2");
         h2(ws2).await;
     });
-    port
+    (port, task)
 }
 
 /// Controller with WS reconnect enabled and a caller-chosen window.
@@ -298,7 +322,7 @@ fn enabled_conference() -> ConferenceRegistry {
 
 #[tokio::test]
 async fn server_closes_after_start_yields_ws_disconnect() {
-    let port = one_shot_server(|mut ws| async move {
+    let (port, srv) = one_shot_server(|mut ws| async move {
         // Read the start message, verify it's well-formed, then close.
         let msg = ws.next().await.expect("recv start").expect("ws ok");
         let text = match msg {
@@ -325,11 +349,12 @@ async fn server_closes_after_start_yields_ws_disconnect() {
         matches!(bridge, Ok(DisconnectReason::ServerClosed)),
         "expected ServerClosed, got {bridge:?}"
     );
+    join_server(srv).await;
 }
 
 #[tokio::test]
 async fn server_hangup_yields_server_hangup_termination() {
-    let port = one_shot_server(|mut ws| async move {
+    let (port, srv) = one_shot_server(|mut ws| async move {
         // Read start.
         let _ = ws.next().await;
 
@@ -355,6 +380,7 @@ async fn server_hangup_yields_server_hangup_termination() {
     let (controller, _handle) = make_controller(port, "test-2");
     let outcome = controller.run().await.expect("run");
     assert_eq!(outcome.termination, CallTermination::ServerHangup);
+    join_server(srv).await;
 }
 
 #[tokio::test]
@@ -363,7 +389,7 @@ async fn ws_drop_reconnects_and_resumes() {
     // ws_url. Conn 1 reads `start` then drops the socket; conn 2 (the
     // redial) MUST carry `start.reconnected = true` (seq 0), then ends
     // the call with a `hangup`.
-    let port = two_shot_server(
+    let (port, srv) = two_shot_server(
         |mut ws| async move {
             let _ = ws.next().await; // original start
             drop(ws); // unexpected close — no stop/hangup
@@ -398,6 +424,7 @@ async fn ws_drop_reconnects_and_resumes() {
     let outcome = controller.run().await.expect("run");
     // The call survived the drop and ended via the resumed session's hangup.
     assert_eq!(outcome.termination, CallTermination::ServerHangup);
+    join_server(srv).await;
 }
 
 #[tokio::test]
@@ -405,7 +432,7 @@ async fn ws_reconnect_exhausts_and_tears_down() {
     // Conn 1 reads `start` then drops; the server never accepts again, so
     // every redial is refused. With a short window the controller gives
     // up and tears the call down (→ §5.7 ws_disconnect).
-    let port = one_shot_server(|mut ws| async move {
+    let (port, srv) = one_shot_server(|mut ws| async move {
         let _ = ws.next().await;
         drop(ws);
     })
@@ -415,11 +442,12 @@ async fn ws_reconnect_exhausts_and_tears_down() {
         make_controller_reconnect(port, "recon-2", Duration::from_millis(500));
     let outcome = controller.run().await.expect("run");
     assert_eq!(outcome.termination, CallTermination::WsDisconnect);
+    join_server(srv).await;
 }
 
 #[tokio::test]
 async fn external_shutdown_yields_local_shutdown() {
-    let port = one_shot_server(|mut ws| async move {
+    let (port, srv) = one_shot_server(|mut ws| async move {
         // Accept start, then sit until close.
         let _ = ws.next().await;
         while let Some(msg) = ws.next().await {
@@ -440,6 +468,7 @@ async fn external_shutdown_yields_local_shutdown() {
 
     let outcome = run_task.await.expect("join").expect("run");
     assert_eq!(outcome.termination, CallTermination::LocalShutdown);
+    join_server(srv).await;
 }
 
 #[tokio::test]
@@ -461,7 +490,7 @@ async fn transfer_without_uac_emits_error() {
     // No IntegratedUAC installed (transfer = None on the config).
     // BridgeIn::Transfer must surface as a BridgeOut::Error with
     // code = transfer_failed instead of silently dropping.
-    let port = one_shot_server(|mut ws| async move {
+    let (port, srv) = one_shot_server(|mut ws| async move {
         // Drain start.
         let _ = ws.next().await;
         // Ask for a transfer.
@@ -480,6 +509,15 @@ async fn transfer_without_uac_emits_error() {
                     let v: Value = serde_json::from_str(&t).expect("json");
                     if v["type"] == "error" {
                         assert_eq!(v["code"], "transfer_failed");
+                        // Pin the message too, not just the code. This
+                        // arm is unreachable from any deployment of the
+                        // daemon — `runtime.rs` builds the transfer UAC
+                        // unconditionally — so this test is the only
+                        // thing that can tell `transfer_failed` for
+                        // "no UAC installed" apart from
+                        // `transfer_failed` for a transfer that was
+                        // attempted and refused by the peer.
+                        assert_eq!(v["message"], "transfer not configured on daemon");
                         break true;
                     }
                 }
@@ -499,6 +537,7 @@ async fn transfer_without_uac_emits_error() {
     // Server closed the WS after the error without a `hangup` — per
     // §5.7 a bare close is an unexpected drop (`ws_disconnect`, #369).
     assert_eq!(outcome.termination, CallTermination::WsDisconnect);
+    join_server(srv).await;
 }
 
 #[tokio::test]
@@ -506,7 +545,7 @@ async fn conference_join_without_registry_emits_error() {
     // Conferencing disabled (conference = None): a `conference_join`
     // must surface as `error { code: conference_failed }`, not a
     // silent drop. The call continues.
-    let port = one_shot_server(|mut ws| async move {
+    let (port, srv) = one_shot_server(|mut ws| async move {
         let _ = ws.next().await; // drain start
         let join = serde_json::json!({
             "type": "conference_join",
@@ -537,6 +576,7 @@ async fn conference_join_without_registry_emits_error() {
     let outcome = controller.run().await.expect("run");
     // Bare close without `hangup` → `ws_disconnect` (§5.7, #369).
     assert_eq!(outcome.termination, CallTermination::WsDisconnect);
+    join_server(srv).await;
 }
 
 #[tokio::test]
@@ -544,7 +584,7 @@ async fn conference_join_then_leave_round_trip() {
     // With an enabled registry: `conference_join` → `conference_joined`
     // (participants = 1, this call alone in a fresh room), then
     // `conference_leave` → `conference_left { reason: "left" }`.
-    let port = one_shot_server(|mut ws| async move {
+    let (port, srv) = one_shot_server(|mut ws| async move {
         let _ = ws.next().await; // drain start
 
         ws.send(Message::Text(
@@ -606,6 +646,7 @@ async fn conference_join_then_leave_round_trip() {
     let outcome = controller.run().await.expect("run");
     // Bare close without `hangup` → `ws_disconnect` (§5.7, #369).
     assert_eq!(outcome.termination, CallTermination::WsDisconnect);
+    join_server(srv).await;
 }
 
 // ─── Park / retrieve (0.7.0) ─────────────────────────────────────────
@@ -618,7 +659,7 @@ async fn park_then_retrieve_round_trip() {
     // model the pre-park and post-retrieve sessions; the call ends
     // normally when the retrieved session closes.
     let (a_done_tx, a_done_rx) = tokio::sync::oneshot::channel::<bool>();
-    let port_a = one_shot_server(move |mut ws| async move {
+    let (port_a, srv_a) = one_shot_server(move |mut ws| async move {
         let _ = ws.next().await; // drain start
                                  // Read until the bridge closes the WS for the park; record
                                  // whether we saw the `stop{park}` first.
@@ -636,7 +677,7 @@ async fn park_then_retrieve_round_trip() {
     .await;
 
     let (b_seen_tx, b_seen_rx) = tokio::sync::oneshot::channel::<bool>();
-    let port_b = one_shot_server(move |mut ws| async move {
+    let (port_b, srv_b) = one_shot_server(move |mut ws| async move {
         // The retrieved session's `start` must carry `retrieved: true`.
         let retrieved = match ws.next().await {
             Some(Ok(Message::Text(t))) => {
@@ -678,6 +719,8 @@ async fn park_then_retrieve_round_trip() {
     assert_eq!(outcome.termination, CallTermination::WsDisconnect);
     let park = outcome.park.expect("park summary present");
     assert_eq!(park.count, 1, "one park episode");
+    join_server(srv_a).await;
+    join_server(srv_b).await;
 }
 
 #[tokio::test]
@@ -692,7 +735,7 @@ async fn park_timeout_hangup_tears_down() {
     // `biased` select — fires first, deterministically. A production
     // call has continuous RTP, so the tap never ends mid-park and any
     // real `timeout_secs` applies.
-    let port = one_shot_server(|mut ws| async move {
+    let (port, srv) = one_shot_server(|mut ws| async move {
         let _ = ws.next().await; // drain start
         while ws.next().await.is_some() {} // until park closes the WS
     })
@@ -710,6 +753,7 @@ async fn park_timeout_hangup_tears_down() {
     let outcome = run.await.expect("join").expect("run");
     assert_eq!(outcome.termination, CallTermination::LocalShutdown);
     assert_eq!(outcome.park.expect("park summary").count, 1);
+    join_server(srv).await;
 }
 
 #[tokio::test]
@@ -718,7 +762,7 @@ async fn caller_bye_while_parked_tears_down() {
     // parked tears it down cleanly, with the park episode still
     // accounted on the outcome.
     let (a_done_tx, a_done_rx) = tokio::sync::oneshot::channel::<()>();
-    let port = one_shot_server(move |mut ws| async move {
+    let (port, srv) = one_shot_server(move |mut ws| async move {
         let _ = ws.next().await; // drain start
         while ws.next().await.is_some() {} // until park closes the WS
         let _ = a_done_tx.send(());
@@ -740,6 +784,7 @@ async fn caller_bye_while_parked_tears_down() {
     let outcome = run.await.expect("join").expect("run");
     assert_eq!(outcome.termination, CallTermination::LocalShutdown);
     assert_eq!(outcome.park.expect("park summary").count, 1);
+    join_server(srv).await;
 }
 
 #[tokio::test]
@@ -748,7 +793,7 @@ async fn rtp_inactivity_emits_rtp_timeout_then_stop() {
     // hangup or closes itself, so the ONLY thing that can end the call is
     // the tap's RTP inactivity watchdog → `rtp_timeout`.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let port = one_shot_server(move |mut ws| async move {
+    let (port, srv) = one_shot_server(move |mut ws| async move {
         while let Some(Ok(msg)) = ws.next().await {
             if let Message::Text(t) = msg {
                 let _ = tx.send(t);
@@ -779,6 +824,7 @@ async fn rtp_inactivity_emits_rtp_timeout_then_stop() {
         "server should receive error{{rtp_timeout}}"
     );
     assert!(saw_stop, "a fatal error must be followed by stop");
+    join_server(srv).await;
 }
 
 // ─── WS-failure prompt (0.34.0, DESIGN_WS_FAILURE_PROMPT.md) ─────────
@@ -858,7 +904,7 @@ async fn ws_drop_with_play_prompt_plays_then_tears_down() {
     // siphon-initiated-teardown failure. With play_prompt the caller
     // hears the prompt (observed as constant-sample frames reaching
     // forge) before the controller completes the normal teardown.
-    let port = one_shot_server(|mut ws| async move {
+    let (port, srv) = one_shot_server(|mut ws| async move {
         let _ = ws.next().await;
         drop(ws);
     })
@@ -906,13 +952,14 @@ async fn ws_drop_with_play_prompt_plays_then_tears_down() {
     assert!(saw_prompt);
 
     let _ = std::fs::remove_dir_all(&dir);
+    join_server(srv).await;
 }
 
 #[tokio::test]
 async fn ws_drop_with_unusable_prompt_falls_open_to_hangup() {
     // The prompt file vanished after config load (or is garbage): the
     // call must fall open to today's immediate teardown — never wedge.
-    let port = one_shot_server(|mut ws| async move {
+    let (port, srv) = one_shot_server(|mut ws| async move {
         let _ = ws.next().await;
         drop(ws);
     })
@@ -930,4 +977,5 @@ async fn ws_drop_with_unusable_prompt_falls_open_to_hangup() {
         started.elapsed() < Duration::from_secs(5),
         "fail-open must not wait on any prompt machinery",
     );
+    join_server(srv).await;
 }

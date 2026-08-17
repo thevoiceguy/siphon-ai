@@ -29,7 +29,7 @@ pub fn spawn(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            let (calls, registrations, drain, errors, conferences, parked, status, recent) = tokio::join!(
+            let (calls, registrations, drain, errors, conferences, parked, status, recent, log) = tokio::join!(
                 client.calls(),
                 client.registrations(),
                 client.drain(),
@@ -37,7 +37,8 @@ pub fn spawn(
                 client.conferences(),
                 client.parked(),
                 client.status(),
-                client.recent_cdrs()
+                client.recent_cdrs(),
+                client.log_filter()
             );
             // Only the three core endpoints decide node health. The
             // errors ring and status are 0.49.0+ (older daemons 404 →
@@ -48,18 +49,22 @@ pub fn spawn(
             let parked = parked.map(|p| p.parked).unwrap_or_default();
             let status = status.ok();
             let recent_cdrs = recent.ok().map(|r| r.cdrs);
+            let log_filter = log.ok().map(|l| l.filter);
             let result = calls
                 .and_then(|c| registrations.map(|r| (c, r)))
                 .and_then(|(c, r)| {
-                    drain.map(|d| NodeSnapshot {
-                        calls: c.calls,
-                        registrations: r.registrations,
-                        drain: d,
-                        conferences,
-                        parked,
-                        status,
-                        recent_cdrs,
-                        errors,
+                    drain.map(|d| {
+                        Box::new(NodeSnapshot {
+                            calls: c.calls,
+                            registrations: r.registrations,
+                            drain: d,
+                            conferences,
+                            parked,
+                            status,
+                            log_filter,
+                            recent_cdrs,
+                            errors,
+                        })
                     })
                 });
             if tx.send(Msg::Snapshot { node, result }).await.is_err() {

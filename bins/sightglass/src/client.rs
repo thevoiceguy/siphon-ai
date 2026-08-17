@@ -10,8 +10,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use siphon_ai_admin_api_types::{
-    CallsResponse, ConferencesResponse, DrainStatus, ErrorBody, ErrorsResponse, ParkedResponse,
-    RecentCdrsResponse, RegistrationsResponse, StatusResponse,
+    CallsResponse, ConferencesResponse, DrainStatus, ErrorBody, ErrorsResponse, LogFilterResponse,
+    ParkedResponse, RecentCdrsResponse, RegistrationsResponse, SetLogFilterResponse,
+    StatusResponse,
 };
 
 use crate::config::Node;
@@ -141,6 +142,54 @@ impl AdminClient {
             body["ws_url"] = serde_json::Value::String(u.to_string());
         }
         self.post("/admin/v1/calls", Some(body)).await
+    }
+
+    /// Current tracing filter directive; readonly, polled with the
+    /// snapshot.
+    pub async fn log_filter(&self) -> Result<LogFilterResponse, String> {
+        self.get_json("/admin/v1/log").await
+    }
+
+    /// Replace the tracing filter (admin role). Plaintext body — the
+    /// daemon accepts either that or JSON.
+    pub async fn set_log_filter(&self, directive: &str) -> Result<String, ApiError> {
+        let mut req = self.http.put(format!("{}{}", self.base, "/admin/v1/log"));
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req
+            .body(directive.to_string())
+            .send()
+            .await
+            .map_err(|e| ApiError::Other(connect_error(e)))?;
+        let status = resp.status();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| ApiError::Other(connect_error(e)))?;
+        if status.as_u16() == 403 {
+            return Err(ApiError::Forbidden);
+        }
+        if status.is_success() {
+            let detail = serde_json::from_slice::<SetLogFilterResponse>(&bytes)
+                .map(|r| format!("now {:?} (was {:?})", r.filter, r.previous))
+                .unwrap_or_else(|_| format!("accepted ({})", status.as_u16()));
+            return Ok(detail);
+        }
+        let detail = serde_json::from_slice::<ErrorBody>(&bytes)
+            .map(|e| e.error)
+            .unwrap_or_else(|_| status.to_string());
+        Err(ApiError::Other(detail))
+    }
+
+    /// Emit a HEP probe packet toward the collector (admin role).
+    pub async fn hep_test(&self) -> Result<String, ApiError> {
+        self.post("/admin/v1/hep/test", None).await
+    }
+
+    /// Start a graceful drain — the programmatic SIGTERM (admin role).
+    pub async fn drain_start(&self) -> Result<String, ApiError> {
+        self.post("/admin/v1/drain", None).await
     }
 
     pub async fn end_conference(&self, room_id: &str) -> Result<String, ApiError> {

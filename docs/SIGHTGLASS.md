@@ -74,7 +74,7 @@ Unicode status glyphs for ASCII.
 
 | Key | Effect |
 |---|---|
-| `1`–`5`, `⇥` / `⇧⇥` | switch tab (overview / trunks / calls / rooms / errors) |
+| `1`–`6`, `⇥` / `⇧⇥` | switch tab (overview / trunks / calls / rooms / errors / system) |
 | `n` | cycle the node filter (all → node → … → all); scopes every tab |
 | `j`/`k`, `↓`/`↑`, `g`/`G` | move the call selection |
 | `q`, `Esc`, `Ctrl-C` | quit |
@@ -100,6 +100,12 @@ Unicode status glyphs for ASCII.
   focused member / hangs up the focused parked call (node-named
   confirm, operator role); `u` retrieves the focused parked call —
   with an optional new `ws_url`, same as the calls tab.
+- **system** — one row per node: live log filter, drain state, HEP,
+  version. `L` sets the tracing filter on the selected node (live, no
+  restart — crank `siphon_ai=debug` mid-incident and drop it back),
+  `H` emits a HEP probe packet toward the collector, `D` starts a
+  **graceful drain** (programmatic SIGTERM — the node stops taking
+  calls; big node-named confirm). All three need the admin role.
 - **errors** — the fleet's merged recent-errors tail, newest first:
   every `warn!`/`error!` the daemons captured (last
   `[observability].error_ring_size` per node, default 256), with the

@@ -138,6 +138,9 @@ pub struct Runtime {
     /// `Some` when `[observability].enabled = true`. Dropped on
     /// shutdown to stop the HTTP listener.
     observability: Option<ObservabilityServer>,
+    /// Admin-initiated drain (0.49.0): `POST /admin/v1/drain` fires
+    /// this; `run()` treats it exactly like the shutdown signal.
+    admin_drain: Arc<tokio::sync::Notify>,
     /// `Some` when `[admin]` is configured — the authenticated admin
     /// HTTP listener. Dropped on shutdown.
     admin: Option<AdminServer>,
@@ -1127,6 +1130,20 @@ impl Runtime {
         // capacity now and expose the snapshot to `GET /admin/v1/errors`.
         siphon_ai_telemetry::error_ring::set_capacity(observability.error_ring_size);
         siphon_ai_telemetry::cdr_ring::set_capacity(observability.cdr_ring_size);
+        // `POST /admin/v1/drain` trigger (0.49.0): the same graceful
+        // path as SIGTERM — `run()` selects on this Notify beside the
+        // signal future. The closure reports whether a drain was
+        // already underway (for the response's `already_draining`).
+        let admin_drain = Arc::new(tokio::sync::Notify::new());
+        let drain_start_fn: siphon_ai_telemetry::admin::DrainStartFn = {
+            let notify = admin_drain.clone();
+            let drain = drain.clone();
+            Arc::new(move || {
+                let already = drain.is_draining();
+                notify.notify_one();
+                already
+            })
+        };
         // `GET /admin/v1/status` summary closure (0.49.0). Live
         // snapshot only — cumulative counters stay on /metrics.
         let status_fn: siphon_ai_telemetry::admin::StatusFn = {
@@ -1158,6 +1175,7 @@ impl Runtime {
         };
         let admin_state = AdminState {
             status: Some(status_fn),
+            drain_start: Some(drain_start_fn),
             call_registry: Some(Arc::new(RuntimeCallRegistry {
                 inner: call_registry_for_admin,
                 control: control_registry.clone(),
@@ -1219,6 +1237,7 @@ impl Runtime {
             uas,
             listeners,
             observability: observability_server,
+            admin_drain,
             admin: admin_server,
             hep_telemetry,
             hep_worker,
@@ -1263,8 +1282,15 @@ impl Runtime {
         S: std::future::Future<Output = ()>,
     {
         info!(listen = %self.sip_listen, "siphon-ai daemon ready");
-        shutdown.await;
-        info!("shutdown signal received");
+        let admin_drain = self.admin_drain.clone();
+        tokio::select! {
+            _ = shutdown => info!("shutdown signal received"),
+            // POST /admin/v1/drain (0.49.0): same graceful path. A
+            // force-teardown still needs a real second SIGTERM/SIGINT
+            // (`wait_for_force_signal` below listens for signals only)
+            // — the API can drain a node, not kill its calls.
+            _ = admin_drain.notified() => info!("admin-initiated drain requested"),
+        }
 
         // ─── Graceful drain (0.17.0) ───────────────────────────────
         // Between the signal and teardown, let active calls finish.

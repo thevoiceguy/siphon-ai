@@ -208,6 +208,11 @@ fn dispatch(action: Action, app: &App, clients: &[Arc<AdminClient>], tx: &mpsc::
                 format!("{call_id} from {room_id}"),
                 client.remove_participant(room_id, call_id).await,
             ),
+            Action::SetLogFilter { directive, .. } => {
+                (directive.clone(), client.set_log_filter(directive).await)
+            }
+            Action::HepProbe { .. } => ("probe".to_string(), client.hep_test().await),
+            Action::StartDrain { .. } => ("graceful".to_string(), client.drain_start().await),
         };
         let msg = match result {
             Ok(detail) => Msg::ActionOutcome {

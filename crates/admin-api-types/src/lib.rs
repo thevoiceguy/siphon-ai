@@ -150,6 +150,39 @@ pub struct StatusResponse {
     pub hep_enabled: bool,
 }
 
+// ─── /admin/v1/log ─────────────────────────────────────────────────
+
+/// `GET /admin/v1/log` response — the active `tracing` filter
+/// directive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogFilterResponse {
+    pub filter: String,
+}
+
+/// `PUT /admin/v1/log` success response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetLogFilterResponse {
+    /// The directive now in effect.
+    pub filter: String,
+    /// What it replaced.
+    pub previous: String,
+}
+
+// ─── POST /admin/v1/drain ──────────────────────────────────────────
+
+/// `POST /admin/v1/drain` (0.49.0, DESIGN_SIGHTGLASS.md §6.5)
+/// response. The programmatic twin of SIGTERM: the daemon enters the
+/// same graceful drain (`GET /admin/v1/drain` has the countdown).
+/// Idempotent — a repeat while draining changes nothing (and, unlike
+/// a second SIGTERM, never forces immediate teardown).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrainStartResponse {
+    /// Always `true` on a 202 — the drain signal was delivered.
+    pub drain_signalled: bool,
+    /// The daemon was already draining when this request landed.
+    pub already_draining: bool,
+}
+
 // ─── GET /admin/v1/errors ──────────────────────────────────────────
 
 /// One captured `warn!`/`error!` event in the `GET /admin/v1/errors`
@@ -375,6 +408,26 @@ mod tests {
                 "count": 1,
                 "parked": [{ "call_id": "siphon-abc", "parked_secs": 12 }],
             })
+        );
+    }
+
+    #[test]
+    fn drain_start_and_log_filter_wire_shapes() {
+        assert_eq!(
+            serde_json::to_value(DrainStartResponse {
+                drain_signalled: true,
+                already_draining: false,
+            })
+            .unwrap(),
+            json!({ "drain_signalled": true, "already_draining": false })
+        );
+        assert_eq!(
+            serde_json::to_value(SetLogFilterResponse {
+                filter: "siphon_ai=debug".into(),
+                previous: "siphon_ai=info".into(),
+            })
+            .unwrap(),
+            json!({ "filter": "siphon_ai=debug", "previous": "siphon_ai=info" })
         );
     }
 

@@ -1,0 +1,66 @@
+# Tier 2 (LOAD_TEST_PLAN.md §10.2) — generator is FreeSWITCH on Box B
+# (194.195.208.34), daemon under test is the SHIPPED 0.48.19 deb binary here
+# on Box A (139.177.205.140).
+#
+# Posture is deliberately IDENTICAL to the tier-1 lab config (soak18/lab.toml,
+# which produced the published 0.48.18 §6.1 numbers): G.711, recording off,
+# HEP off, energy VAD, no webhooks/audit, udp_rate_limit_pps = 0. The only
+# things tier 2 changes are the generator, the network and (in phase 2) the
+# crypto — so any delta is attributable to those and not to posture drift.
+[node]
+id = "siphon-tier2-tls"
+# Required once [sip].listen is unspecified: the SDP answer's c= line cannot
+# be 0.0.0.0, and Box B must be told where to send RTP.
+public_address = "139.177.205.140"
+
+[sip]
+# 0.0.0.0, not 127.0.0.1: the INVITEs arrive over the NIC from Box B.
+listen             = "0.0.0.0:5070"
+transports         = ["udp", "tls"]
+user_agent         = "SiphonAI/tier2-lab"
+# Matches tier 1 (see RESULTS-0.48.13 §Environment / #459): admission control
+# off, so §5-style numbers measure the bridge and not the transport cap.
+udp_rate_limit_pps = 0
+
+# This listener is on a public IP and :5060 already sees scanner INVITEs, so
+# the allowlist is not optional here — only Box B may originate.
+[sip.tls]
+listen = "0.0.0.0:5071"
+cert   = "/PATH/TO/WORKDIR/lab-cert.pem"
+key    = "/PATH/TO/WORKDIR/lab-key.pem"
+
+[[trunk]]
+name       = "fs-load"
+peer_addrs = ["194.195.208.34"]
+
+[media]
+codecs                  = ["pcmu", "pcma"]
+dtmf                    = "rfc2833"
+# Same range as the tier-1 run for comparability. NOT covered by
+# /etc/sysctl.d/60-siphon-ai-rtp.conf (which reserves 40000-40500), so a
+# kernel-issued ephemeral port can still collide here — on 0.48.19 that is
+# retried rather than fatal (#504 / RESULTS-0.48.19.md). Any
+# "held outside the pool" warning during a run belongs in the write-up.
+rtp_port_range          = [41000, 45000]
+srtp                    = "required"
+inactivity_timeout_secs = 60
+
+[bridge]
+ws_url                = "ws://127.0.0.1:8767/"
+ws_connect_timeout_ms = 3000
+
+[observability]
+enabled     = true
+http_listen = "127.0.0.1:9191"
+
+[cdr]
+enabled = true
+
+[cdr.file]
+enabled = true
+path    = "/PATH/TO/WORKDIR/cdr-tls.jsonl"
+
+[[route]]
+name = "default"
+[route.match]
+any = true

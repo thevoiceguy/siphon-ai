@@ -28,6 +28,15 @@ the burst's signalling-only calls at the one-minute mark.
 > (admission control, the inactivity watchdog, and the WS server's own
 > ceiling) that will otherwise invalidate a run.
 
+## What else is in here
+
+| | |
+|---|---|
+| `RESULTS-*.md` | published runs — `0.48.10`, `0.48.13`, `0.48.18`, `0.48.19` (RTP port-bind A/B), and `tier2` |
+| `tier2/` | the two-box FreeSWITCH rig behind `RESULTS-tier2.md` (§10.2) — generator scripts, phase drivers, lab configs |
+| `paced_sink.mjs` | the WS sink the §6.1 and tier-2 numbers were measured through. **Use this, not a `setInterval`-paced sink** — see §8's first trap |
+| `squat.py` | holds RTP ports the way an ephemeral socket does, to reproduce #504 on demand |
+
 ## Prerequisites
 
 ```sh

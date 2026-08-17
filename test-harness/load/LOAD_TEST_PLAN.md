@@ -57,6 +57,14 @@ sudo sysctl -w net.ipv4.ip_local_reserved_ports=41000-45000   # = rtp_port_range
 See issue #504 and `docs/DEPLOY.md`. A run without this is still valid for
 everything except a clean zero-failure claim, so record it if you skip it.
 
+**From 0.48.19 a single lost bind no longer fails the call** — forge draws up
+to five pairs, logging `RTP port is held outside the pool; drawing another
+pair` each time it steps past one, so the `500` above needs *five consecutive*
+collisions. Reserve the range anyway: it means the retry never fires, and a
+`warn!` that does fire is telling you something real about the host. Against a
+pool with half its pairs held, 0.48.18 lost 7 calls in 20 and 0.48.19 lost 1 —
+see `RESULTS-0.48.19.md`.
+
 ### 1.2 Admission control will rate-limit the whole test
 
 SIPp drives every call from **one source IP**, so `[sip.admission]`'s

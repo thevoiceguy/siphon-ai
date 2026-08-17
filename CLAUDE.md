@@ -45,6 +45,7 @@ For the full design rationale, see `docs/DEV_PLAN.md`.
 siphon-ai/
 ├── Cargo.toml                    # workspace root
 ├── crates/
+│   ├── admin-api-types/          # Admin API wire shapes (shared: daemon serializes, sightglass deserializes)
 │   ├── core/                     # CallController, state machine, glue
 │   ├── bridge/                   # WS client + protocol types + audio bridging
 │   ├── sip-glue/                 # Adapter: siphon-rs events → core
@@ -56,6 +57,7 @@ siphon-ai/
 │   ├── protocol-testkit/         # siphon-ai-testkit: WS protocol conformance harness
 │   └── telemetry/                # tracing + metrics + HEP wiring + admin/health endpoints
 ├── bins/
+│   ├── sightglass/               # Terminal operator console (crate: siphon-ai-sightglass; docs/design/DESIGN_SIGHTGLASS.md)
 │   └── siphon-ai/                # The daemon binary
 ├── sdks/
 │   ├── python/                   # Server SDK (siphon-ai-server on PyPI-style layout)
@@ -99,6 +101,8 @@ siphon-ai/
 | New HEP chunk emission | `crates/telemetry/src/hep.rs` (uses `hep-rs` crate) |
 | New metric | `crates/telemetry/src/metrics.rs` + document in `docs/DEPLOY.md` |
 | New admin endpoint | `crates/telemetry/src/admin.rs` + document in `docs/DEPLOY.md` |
+| Admin API request/response shape | `crates/admin-api-types/` (wire snapshot tests lock the JSON; sightglass parses these) |
+| Sightglass TUI feature | `bins/sightglass/` — per the PR plan in `docs/design/DESIGN_SIGHTGLASS.md` |
 | New CLI flag | `bins/siphon-ai/src/main.rs` |
 | Integration test against a real SIP scenario | `test-harness/sipp-scenarios/` |
 | Test that needs a HEP collector | `test-harness/hep-collector-stub/` |

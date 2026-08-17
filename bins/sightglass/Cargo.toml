@@ -1,0 +1,24 @@
+[package]
+name        = "siphon-ai-sightglass"
+description = "Sightglass: terminal operator console for one or more siphon-ai nodes."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[[bin]]
+name = "sightglass"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace     = true
+clap.workspace       = true
+ratatui.workspace    = true
+reqwest.workspace    = true
+serde.workspace      = true
+serde_json.workspace = true
+tokio.workspace      = true
+toml.workspace       = true
+siphon-ai-admin-api-types.workspace = true

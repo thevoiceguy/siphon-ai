@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`sightglass`: a terminal operator console for one or more siphon-ai nodes** (DESIGN_SIGHTGLASS.md, PR 1 of 6). A new `bins/sightglass` binary (crate `siphon-ai-sightglass`, ratatui) that fans out to each configured node's `[admin]` listener and renders a tabbed live view — **overview** (fleet health grid + active-call sparkline), **trunks** (registration state across nodes), **calls** (fleet-unified table with both id namespaces and direction, plus a per-focused-call quality pane fed by `GET /admin/v1/calls/:id/stats` with a client-side MOS trend). Multi-node is first-class from this first cut: every record is keyed `(node, id)`, one staggered poller set per node, a down node degrades to its own dimmed row without stalling the rest, and the Node column auto-hides on single-node fleets. Fleet config is `~/.config/sightglass/config.toml` (`[[node]]` name/url/token_file/ca) or `--target` for an ad-hoc single node; `--read-only` and `--ascii` flags per the design note. Read-only in this PR — operator actions (hangup/park/retrieve/originate, node-named confirm modals, per-node RBAC-aware keybinds) are PR 2. The daemon binary is untouched: ratatui/crossterm live only in the new crate.
+
+- **`crates/admin-api-types`: the admin API's request/response wire shapes as a shared crate**. The `/admin/v1/*` JSON shapes (`AdminCallRow`, `RegistrationRow`, `ConferenceRow`, `ParkedRow`, `DrainStatus`, the list envelopes, and the POST bodies) moved out of `siphon-ai-telemetry` into a serde-only crate consumed by both the daemon (serializer) and sightglass (deserializer), so the two cannot drift. Wire-preserving by construction: telemetry re-exports the same names at the same paths, the handlers serialize the same JSON byte-for-byte (all 79 existing admin dispatch tests pass unchanged), and new wire snapshot tests in the crate pin the exact JSON as the contract. One internal type change: `AdminCallRow.direction` is `String` rather than `&'static str` (identical on the wire; required for the deserialize direction).
+
 ## [0.48.19] - 2026-08-14
 
 ### Changed

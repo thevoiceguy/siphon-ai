@@ -64,11 +64,22 @@ use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::header::CONTENT_TYPE;
 use hyper::{Response, StatusCode};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 
 use crate::log_filter::LogFilterHandle;
 use crate::HepTelemetry;
+
+// The request/response wire shapes live in `siphon-ai-admin-api-types`
+// so admin clients (sightglass, DESIGN_SIGHTGLASS.md) share the exact
+// structs the daemon serializes. Re-exported here so existing
+// `siphon_ai_telemetry::admin::…` paths keep working; the server-side
+// traits and error enums below stay in this crate.
+pub use siphon_ai_admin_api_types::{
+    AddParticipantRequest, AdminCallRow, CallsResponse, ConferenceRow, ConferencesResponse,
+    CreateConferenceRequest, DrainStatus, OriginateRequest, ParkRequest, ParkedResponse, ParkedRow,
+    RegistrationRow, RegistrationsResponse, RetrieveRequest,
+};
 
 /// Bundle of dependencies the admin handlers may need. Each is
 /// optional so partially-configured deployments don't crash on
@@ -113,24 +124,6 @@ pub struct AdminState {
 /// telemetry crate's deps.
 pub type QualityStatsFn = Arc<dyn Fn(&str) -> Option<serde_json::Value> + Send + Sync>;
 
-/// Snapshot of the daemon's graceful-shutdown drain state (0.17.0),
-/// served by `GET /admin/v1/drain`. Lets an operator / deploy script
-/// confirm a pod has entered drain and watch the countdown.
-#[derive(Debug, Clone, Serialize)]
-pub struct DrainStatus {
-    /// `true` once a shutdown signal has put the daemon into drain
-    /// (new INVITEs are 503'd and `/ready` is false), until it exits.
-    pub draining: bool,
-    /// Calls still active right now (the drain waits for this to hit 0).
-    pub active_calls: usize,
-    /// Configured `[shutdown].drain_timeout_secs` (`0` = drain disabled,
-    /// immediate exit).
-    pub drain_timeout_secs: u64,
-    /// Seconds left until the drain deadline force-terminates
-    /// stragglers. `Some` only while `draining`; `None` otherwise.
-    pub remaining_secs: Option<u64>,
-}
-
 /// Closure producing a fresh [`DrainStatus`] per request. Same
 /// indirection rationale as [`CallRegistryHandle`] — keeps the drain
 /// flag / call registry types out of the telemetry crate's deps.
@@ -152,23 +145,6 @@ pub trait CallRegistryHandle: Send + Sync + 'static {
     fn hangup(&self, sip_call_id: &str) -> bool;
 }
 
-/// One active call in the `GET /admin/v1/calls` response.
-///
-/// `call_id` is the **bridge** id — the value on the WS `start` message
-/// and the CDR, and the id every `/admin/v1/calls/:id/…` route
-/// (`/hangup`, `/park`, `/retrieve`, `/stats`) and `/admin/v1/conferences/*`
-/// take. `sip_call_id` is the **SIP** Call-ID, the id the deprecated
-/// `POST /admin/calls/:id/hangup` alias takes. Exposing both
-/// (with `direction`) is the fix for issue #311, where the listing gave
-/// only the SIP Call-ID and the bridge id had no admin source.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct AdminCallRow {
-    pub call_id: String,
-    pub sip_call_id: String,
-    /// `"inbound"` | `"outbound"`.
-    pub direction: &'static str,
-}
-
 /// Boxed clone-friendly handle the runtime constructs.
 pub type AdminCallRegistry = Arc<dyn CallRegistryHandle>;
 
@@ -176,32 +152,6 @@ pub type AdminCallRegistry = Arc<dyn CallRegistryHandle>;
 /// admin request. Same indirection rationale as `CallRegistryHandle`
 /// — keeps `siphon-ai-sip-glue` out of the telemetry crate's deps.
 pub type RegistrationSnapshotFn = Arc<dyn Fn() -> Vec<RegistrationRow> + Send + Sync>;
-
-/// `POST /admin/v1/calls` request body — originate an outbound call (0.6.0).
-#[derive(Debug, Clone, Deserialize)]
-pub struct OriginateRequest {
-    /// Dialed destination (E.164 number or SIP user) — becomes the
-    /// Request-URI user dialed through the gateway.
-    pub to: String,
-    /// Name of the `[[gateway]]` (or `[[register]]` reuse) to dial through.
-    pub gateway: String,
-    /// WS server to bridge the answered call to. Falls back to
-    /// `[bridge].ws_url` when omitted.
-    #[serde(default)]
-    pub ws_url: Option<String>,
-    /// Caller-ID override (a `sip:` URI). Falls back to the gateway's `from`.
-    #[serde(default)]
-    pub from: Option<String>,
-    /// Place the call as a **delayed offer** (RFC 3264): send an INVITE
-    /// with no SDP and answer the peer's offer in the ACK. Default `false`
-    /// (early offer — SiphonAI offers in the INVITE).
-    #[serde(default)]
-    pub delayed_offer: bool,
-    /// Recording override for this leg (0.26.0): `"off"` / `"always"` /
-    /// `"on_demand"`. Falls back to the gateway's `recording` default.
-    #[serde(default)]
-    pub recording: Option<String>,
-}
 
 /// Why an originate request was refused synchronously (before the call is
 /// placed). The admin layer maps each to an HTTP status.
@@ -243,34 +193,6 @@ pub trait OutboundOriginateHandle: Send + Sync + 'static {
 /// Boxed handle the runtime installs into [`AdminState`].
 pub type AdminOutbound = Arc<dyn OutboundOriginateHandle>;
 
-/// One conference room in the `GET /admin/v1/conferences` response.
-#[derive(Debug, Clone, Serialize)]
-pub struct ConferenceRow {
-    pub room_id: String,
-    pub sample_rate: u32,
-    /// Member call-ids (bridge ids) currently in the room.
-    pub participants: Vec<String>,
-}
-
-/// `POST /admin/v1/conferences` body — pre-create a room.
-#[derive(Debug, Clone, Deserialize)]
-pub struct CreateConferenceRequest {
-    /// Optional room id; the daemon generates one when omitted.
-    #[serde(default)]
-    pub room_id: Option<String>,
-    /// Rate the room locks to (8000 or 16000). Defaults to 8000 — the
-    /// most common PSTN rate; a join at a different rate is rejected.
-    #[serde(default)]
-    pub sample_rate: Option<u32>,
-}
-
-/// `POST /admin/v1/conferences/:id/participants` body.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AddParticipantRequest {
-    /// Bridge `call_id` of the active call to add to the room.
-    pub call_id: String,
-}
-
 /// Why a conference admin op was refused. The admin layer maps each to
 /// an HTTP status.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,31 +229,6 @@ pub trait ConferenceAdminHandle: Send + Sync + 'static {
 /// Boxed handle the runtime installs into [`AdminState`].
 pub type AdminConference = Arc<dyn ConferenceAdminHandle>;
 
-/// One parked call in the `GET /admin/v1/parked` response.
-#[derive(Debug, Clone, Serialize)]
-pub struct ParkedRow {
-    pub call_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub slot: Option<String>,
-    pub parked_secs: u64,
-}
-
-/// `POST /admin/v1/calls/:id/park` body (all optional).
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ParkRequest {
-    #[serde(default)]
-    pub slot: Option<String>,
-}
-
-/// `POST /admin/v1/calls/:id/retrieve` body (all optional).
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct RetrieveRequest {
-    /// Redirect the retrieved session to a different WS server.
-    /// Defaults to the call's original `ws_url`.
-    #[serde(default)]
-    pub ws_url: Option<String>,
-}
-
 /// Why a park-admin op was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParkAdminError {
@@ -355,19 +252,6 @@ pub trait ParkAdminHandle: Send + Sync + 'static {
 
 /// Boxed handle the runtime installs into [`AdminState`].
 pub type AdminPark = Arc<dyn ParkAdminHandle>;
-
-/// One row of the `GET /admin/registrations` response. Mirrors
-/// `sip_glue::RegistrationState` but defined here so telemetry
-/// doesn't depend on the upstream crate.
-#[derive(Debug, Clone, Serialize)]
-pub struct RegistrationRow {
-    pub name: String,
-    pub server_addr: String,
-    pub status: String,
-    pub last_attempt_at: Option<String>,
-    pub expires_at: Option<String>,
-    pub last_error: Option<String>,
-}
 
 /// Operator write action on one `[[register]]` binding (0.33.0,
 /// DESIGN_REGISTRATION_ADMIN.md).
@@ -598,7 +482,10 @@ fn list_calls(state: &AdminState) -> Response<Full<Bytes>> {
     let calls = reg.snapshot_calls();
     json_response(
         StatusCode::OK,
-        &json!({ "count": calls.len(), "calls": calls }),
+        &CallsResponse {
+            count: calls.len(),
+            calls,
+        },
     )
 }
 
@@ -699,7 +586,10 @@ fn list_registrations(state: &AdminState) -> Response<Full<Bytes>> {
     let rows = snapshot_fn();
     json_response(
         StatusCode::OK,
-        &json!({ "count": rows.len(), "registrations": rows }),
+        &RegistrationsResponse {
+            count: rows.len(),
+            registrations: rows,
+        },
     )
 }
 
@@ -842,7 +732,10 @@ fn list_conferences(state: &AdminState) -> Response<Full<Bytes>> {
     let rooms = svc.list();
     json_response(
         StatusCode::OK,
-        &json!({ "count": rooms.len(), "conferences": rooms }),
+        &ConferencesResponse {
+            count: rooms.len(),
+            conferences: rooms,
+        },
     )
 }
 
@@ -964,7 +857,10 @@ fn list_parked(state: &AdminState) -> Response<Full<Bytes>> {
     let parked = svc.list();
     json_response(
         StatusCode::OK,
-        &json!({ "count": parked.len(), "parked": parked }),
+        &ParkedResponse {
+            count: parked.len(),
+            parked,
+        },
     )
 }
 
@@ -1142,7 +1038,7 @@ mod tests {
                 .map(|sip| AdminCallRow {
                     call_id: format!("siphon-{sip}"),
                     sip_call_id: sip.clone(),
-                    direction: "inbound",
+                    direction: "inbound".into(),
                 })
                 .collect()
         }

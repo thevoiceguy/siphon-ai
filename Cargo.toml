@@ -1,7 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    "bins/sightglass",
     "bins/siphon-ai",
+    "crates/admin-api-types",
     "crates/audit",
     "crates/bridge",
     "crates/cdr",
@@ -31,6 +33,7 @@ homepage = "https://github.com/thevoiceguy/siphon-ai"
 
 [workspace.dependencies]
 # Internal crates (used by bins/siphon-ai and cross-crate)
+siphon-ai-admin-api-types = { path = "crates/admin-api-types" }
 siphon-ai-audit       = { path = "crates/audit" }
 siphon-ai-bridge      = { path = "crates/bridge" }
 siphon-ai-cdr         = { path = "crates/cdr" }
@@ -115,6 +118,11 @@ regex = "1"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
+
+# Sightglass TUI (bins/sightglass ONLY — the daemon never links these;
+# DESIGN_SIGHTGLASS.md §9). crossterm comes via ratatui's re-export so
+# the two can't version-skew.
+ratatui = "0.29"
 
 # Utilities
 parking_lot = "0.12"

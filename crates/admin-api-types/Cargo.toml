@@ -1,0 +1,15 @@
+[package]
+name        = "siphon-ai-admin-api-types"
+description = "Admin API wire types shared by the daemon (serializer) and admin clients such as sightglass (deserializer)."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

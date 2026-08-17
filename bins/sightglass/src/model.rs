@@ -12,7 +12,7 @@
 
 use std::collections::VecDeque;
 
-use siphon_ai_admin_api_types::{AdminCallRow, DrainStatus, RegistrationRow};
+use siphon_ai_admin_api_types::{AdminCallRow, DrainStatus, ErrorEntry, RegistrationRow};
 
 /// Index into [`App::nodes`]. Display name lives on the node itself.
 pub type NodeId = usize;
@@ -25,16 +25,18 @@ pub enum Tab {
     Overview,
     Trunks,
     Calls,
+    Errors,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Overview, Tab::Trunks, Tab::Calls];
+    pub const ALL: [Tab; 4] = [Tab::Overview, Tab::Trunks, Tab::Calls, Tab::Errors];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Overview => "overview",
             Tab::Trunks => "trunks",
             Tab::Calls => "calls",
+            Tab::Errors => "errors",
         }
     }
 
@@ -263,6 +265,10 @@ pub struct NodeState {
     pub calls: Vec<AdminCallRow>,
     pub registrations: Vec<RegistrationRow>,
     pub drain: Option<DrainStatus>,
+    /// Recent-errors tail, newest first. `None` = the node's daemon
+    /// doesn't serve `/admin/v1/errors` yet (pre-0.49) — rendered as
+    /// "endpoint unavailable", distinct from an empty ring.
+    pub errors: Option<Vec<ErrorEntry>>,
     /// This node's token role, from the startup probe. `None` until
     /// learned — actions stay enabled while unknown (a wrong guess
     /// surfaces as a 403 toast, which also teaches the ceiling).
@@ -277,6 +283,7 @@ impl NodeState {
             calls: Vec::new(),
             registrations: Vec::new(),
             drain: None,
+            errors: None,
             role: None,
         }
     }
@@ -288,6 +295,8 @@ pub struct NodeSnapshot {
     pub calls: Vec<AdminCallRow>,
     pub registrations: Vec<RegistrationRow>,
     pub drain: DrainStatus,
+    /// `None` = errors endpoint unavailable on this daemon.
+    pub errors: Option<Vec<ErrorEntry>>,
 }
 
 /// Live-stats pane for the focused call: latest snapshot plus
@@ -382,6 +391,7 @@ impl App {
                         n.calls = snap.calls;
                         n.registrations = snap.registrations;
                         n.drain = Some(snap.drain);
+                        n.errors = snap.errors;
                     }
                     // Keep last-seen data; only the health flips.
                     Err(error) => n.health = NodeHealth::Down { error },
@@ -484,6 +494,20 @@ impl App {
             .filter(|(id, _)| self.node_filter.is_none_or(|f| f == *id))
             .flat_map(|(id, n)| n.calls.iter().map(move |c| (id, c)))
             .collect()
+    }
+
+    /// Errors visible under the node filter, merged across nodes and
+    /// sorted newest-first by capture time.
+    pub fn visible_errors(&self) -> Vec<(NodeId, &ErrorEntry)> {
+        let mut merged: Vec<(NodeId, &ErrorEntry)> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(id, _)| self.node_filter.is_none_or(|f| f == *id))
+            .flat_map(|(id, n)| n.errors.iter().flatten().map(move |e| (id, e)))
+            .collect();
+        merged.sort_by_key(|(_, e)| std::cmp::Reverse(e.ts_ms));
+        merged
     }
 
     /// The `(node, call_id)` the stats poller should be fetching.
@@ -601,6 +625,7 @@ mod tests {
                 drain_timeout_secs: 30,
                 remaining_secs: None,
             },
+            errors: None,
         }
     }
 
@@ -754,6 +779,58 @@ mod tests {
         });
         assert_eq!(app.nodes[1].role, Some(Role::Operator));
         assert!(app.can(1, Role::Operator));
+    }
+
+    #[test]
+    fn visible_errors_merge_sorted_newest_first_across_nodes() {
+        fn entry(ts_ms: u64, msg: &str) -> ErrorEntry {
+            ErrorEntry {
+                ts_ms,
+                level: "warn".into(),
+                target: "t".into(),
+                message: msg.into(),
+                call_id: None,
+            }
+        }
+        let mut app = two_node_app();
+        app.update(Msg::Snapshot {
+            node: 0,
+            result: Ok(NodeSnapshot {
+                errors: Some(vec![entry(100, "old-a"), entry(300, "new-a")]),
+                ..snapshot(vec![])
+            }),
+        });
+        app.update(Msg::Snapshot {
+            node: 1,
+            result: Ok(NodeSnapshot {
+                errors: Some(vec![entry(200, "mid-b")]),
+                ..snapshot(vec![])
+            }),
+        });
+        let merged = app.visible_errors();
+        let order: Vec<(&str, NodeId)> = merged
+            .iter()
+            .map(|(n, e)| (e.message.as_str(), *n))
+            .collect();
+        assert_eq!(order, vec![("new-a", 0), ("mid-b", 1), ("old-a", 0)]);
+
+        // Node filter scopes the tail too.
+        app.cycle_node_filter(); // -> node 0
+        assert_eq!(app.visible_errors().len(), 2);
+    }
+
+    #[test]
+    fn errors_none_means_endpoint_unavailable_not_empty() {
+        let mut app = two_node_app();
+        app.update(Msg::Snapshot {
+            node: 0,
+            result: Ok(NodeSnapshot {
+                errors: None,
+                ..snapshot(vec![])
+            }),
+        });
+        assert!(app.nodes[0].errors.is_none());
+        assert!(app.visible_errors().is_empty());
     }
 
     #[test]

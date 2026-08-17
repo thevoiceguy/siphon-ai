@@ -4,6 +4,7 @@
 
 mod calls;
 mod chrome;
+mod errors;
 mod modal;
 mod overview;
 pub mod theme;
@@ -20,6 +21,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) {
         Tab::Overview => overview::draw(frame, app, theme, body),
         Tab::Trunks => trunks::draw(frame, app, theme, body),
         Tab::Calls => calls::draw(frame, app, theme, body),
+        Tab::Errors => errors::draw(frame, app, theme, body),
     }
     // Overlays last: modal + toasts sit above the tab content.
     modal::draw(frame, app, theme);
@@ -66,6 +68,7 @@ mod tests {
                     drain_timeout_secs: 30,
                     remaining_secs: None,
                 },
+                errors: None,
             }),
         });
         app.update(Msg::Snapshot {
@@ -151,6 +154,34 @@ mod tests {
         app.read_only = true;
         let screen = render(&app, 100, 30);
         assert!(screen.contains("read-only"), "{screen}");
+    }
+
+    #[test]
+    fn errors_tab_renders_merged_tail_with_unavailable_note() {
+        use siphon_ai_admin_api_types::ErrorEntry;
+        let mut app = fixture_app();
+        // prod-1 (up) serves the ring; prod-2 is down. Add a third
+        // up-node without the endpoint via a manual snapshot on
+        // prod-1's shape is overkill — instead flip prod-1's errors.
+        app.nodes[0].errors = Some(vec![ErrorEntry {
+            ts_ms: 1_786_995_158_000,
+            level: "warn".into(),
+            target: "siphon_ai_bridge::conn".into(),
+            message: "server_too_slow deadline=5s".into(),
+            call_id: Some("siphon-aa11".into()),
+        }]);
+        app.tab = Tab::Errors;
+        let screen = render(&app, 110, 30);
+        assert!(screen.contains("errors (1)"), "{screen}");
+        assert!(screen.contains("19:32:38"), "{screen}");
+        assert!(screen.contains("warn"), "{screen}");
+        assert!(screen.contains("server_too_slow"), "{screen}");
+        assert!(screen.contains("siphon-aa11"), "{screen}");
+
+        // An up node without the endpoint gets the unavailable note.
+        app.nodes[0].errors = None;
+        let screen = render(&app, 110, 30);
+        assert!(screen.contains("unavailable on: prod-1"), "{screen}");
     }
 
     #[test]

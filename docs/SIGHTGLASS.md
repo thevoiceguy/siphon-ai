@@ -74,7 +74,7 @@ Unicode status glyphs for ASCII.
 
 | Key | Effect |
 |---|---|
-| `1` / `2` / `3`, `⇥` / `⇧⇥` | switch tab (overview / trunks / calls) |
+| `1`–`4`, `⇥` / `⇧⇥` | switch tab (overview / trunks / calls / errors) |
 | `n` | cycle the node filter (all → node → … → all); scopes every tab |
 | `j`/`k`, `↓`/`↑`, `g`/`G` | move the call selection |
 | `q`, `Esc`, `Ctrl-C` | quit |
@@ -90,6 +90,12 @@ Unicode status glyphs for ASCII.
   a detail pane for the focused call: live MOS, jitter, packet
   counters, first-audio latency, barge-ins, and a MOS trend sparkline.
   Stats are polled for the focused call only.
+- **errors** — the fleet's merged recent-errors tail, newest first:
+  every `warn!`/`error!` the daemons captured (last
+  `[observability].error_ring_size` per node, default 256), with the
+  originating call's `call_id` when the event fired inside a call.
+  Needs a 0.49.0+ daemon; older nodes show an "endpoint unavailable"
+  note instead of contributing rows.
 
 ## Actions (calls tab)
 

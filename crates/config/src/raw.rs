@@ -1133,6 +1133,13 @@ pub struct RawObservability {
     /// inline the secret. `/health` and `/ready` are never gated.
     #[serde(default)]
     pub metrics_token: Option<String>,
+    /// Capacity of the recent-errors ring served by
+    /// `GET /admin/v1/errors` (0.49.0, DESIGN_SIGHTGLASS.md §6.1).
+    /// Default 256; `0` disables capture (the endpoint then answers
+    /// an empty list). Independent of `enabled` — the ring feeds the
+    /// *admin* listener, not this one.
+    #[serde(default)]
+    pub error_ring_size: Option<usize>,
     /// `[observability.otlp]` — OpenTelemetry OTLP trace export (0.22.0).
     /// Independent of the metrics HTTP server above — you can export traces
     /// without scraping metrics, and vice versa. Off by default.

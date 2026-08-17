@@ -443,6 +443,10 @@ pub struct ObservabilityConfig {
     pub http_listen: Option<SocketAddr>,
     /// Bearer token gating `GET /metrics` (0.35.0). `None` = open.
     pub metrics_token: Option<String>,
+    /// Recent-errors ring capacity for `GET /admin/v1/errors`
+    /// (0.49.0). Default 256; `0` disables capture. Independent of
+    /// `enabled` — the ring feeds the admin listener.
+    pub error_ring_size: usize,
     /// `Some` when `[observability.otlp].enabled` — OTLP/gRPC trace export
     /// (0.22.0). Independent of `enabled`/`http_listen` (traces without
     /// metrics scraping is a valid setup). The daemon maps this to
@@ -846,6 +850,13 @@ pub enum CompileError {
          open endpoint, or provide a real secret (${{file:…}} / ${{cred:…}})"
     )]
     EmptyMetricsToken,
+
+    #[error(
+        "[observability].error_ring_size {0} exceeds the 65536 cap — the ring is \
+         an in-memory tail for operators, not log storage; point a real log \
+         pipeline at stdout for retention"
+    )]
+    ErrorRingTooLarge(usize),
 
     #[error(
         "{scope} resolves on_ws_failure = \"play_prompt\" but no \
@@ -3010,6 +3021,14 @@ fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, C
     // HEP vs `[cdr]`, you can export traces without scraping metrics — so
     // compile it regardless of the `enabled` master switch.
     let otlp = compile_otlp(raw.otlp)?;
+    // The error ring feeds the *admin* listener, so it too is
+    // independent of the `enabled` switch (0.49.0).
+    let error_ring_size = raw
+        .error_ring_size
+        .unwrap_or(crate::DEFAULT_ERROR_RING_SIZE);
+    if error_ring_size > 65536 {
+        return Err(CompileError::ErrorRingTooLarge(error_ring_size));
+    }
 
     if !raw.enabled {
         // Disabled means "don't spawn the HTTP server" — sub-block
@@ -3020,6 +3039,7 @@ fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, C
             enabled: false,
             http_listen: None,
             metrics_token: None,
+            error_ring_size,
             otlp,
         });
     }
@@ -3043,6 +3063,7 @@ fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, C
         enabled: true,
         http_listen: Some(http_listen),
         metrics_token,
+        error_ring_size,
         otlp,
     })
 }

@@ -194,6 +194,13 @@ pub const ADMIN_REQUESTS_TOTAL: &str = "siphon_ai_admin_requests_total";
 /// `siphon-ai-telemetry::http`.
 pub const METRICS_REQUESTS_TOTAL: &str = "siphon_ai_metrics_requests_total";
 
+/// `warn!`/`error!` events captured into the recent-errors ring
+/// (`GET /admin/v1/errors`, 0.49.0). Labeled by `level`: `warn` |
+/// `error`. A rate spike here is itself a health signal, independent
+/// of anyone reading the ring. Literal must match the call site in
+/// `siphon-ai-telemetry::error_ring`.
+pub const ERROR_RING_CAPTURED_TOTAL: &str = "siphon_ai_error_ring_captured_total";
+
 /// WS-failure prompt playbacks (0.34.0,
 /// `[bridge].on_ws_failure = "play_prompt"`). Labeled by `result`:
 /// `played` (EOF reached), `cut_short` (caller hung up / teardown
@@ -782,6 +789,10 @@ pub fn register_descriptions() {
         "Authenticated admin API requests, by endpoint (route template), role, and result (ok, unauthenticated, forbidden, not_found, error)."
     );
     describe_counter!(
+        ERROR_RING_CAPTURED_TOTAL,
+        "warn/error tracing events captured into the recent-errors ring (GET /admin/v1/errors), by level (warn, error)."
+    );
+    describe_counter!(
         DELAYED_OFFER_TOTAL,
         "Inbound delayed-offer (offerless INVITE) outcomes, by result (answered, ack_timeout, missing_sdp_answer, invalid_sdp_answer, no_compatible_codec, invalid_remote_media, caller_hangup)."
     );
@@ -1130,6 +1141,7 @@ pub const ALL_COUNTERS: &[&str] = &[
     OUTBOUND_SRTP_TOTAL,
     ADMIN_REQUESTS_TOTAL,
     METRICS_REQUESTS_TOTAL,
+    ERROR_RING_CAPTURED_TOTAL,
     WS_FAILURE_PROMPTS_TOTAL,
     DELAYED_OFFER_TOTAL,
     OUTBOUND_DELAYED_OFFER_TOTAL,

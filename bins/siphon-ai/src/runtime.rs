@@ -1122,11 +1122,16 @@ impl Runtime {
                 }
             })
         };
+        // Recent-errors ring (0.49.0): the capture layer was installed
+        // at init_tracing (before config existed); apply the configured
+        // capacity now and expose the snapshot to `GET /admin/v1/errors`.
+        siphon_ai_telemetry::error_ring::set_capacity(observability.error_ring_size);
         let admin_state = AdminState {
             call_registry: Some(Arc::new(RuntimeCallRegistry {
                 inner: call_registry_for_admin,
                 control: control_registry.clone(),
             }) as AdminCallRegistry),
+            errors: Some(Arc::new(siphon_ai_telemetry::error_ring::snapshot)),
             registration_snapshot: Some(Arc::new(move || {
                 registration_mgr_for_admin
                     .snapshot()

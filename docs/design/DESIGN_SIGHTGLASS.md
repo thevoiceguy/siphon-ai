@@ -1,11 +1,14 @@
 # Design note — Sightglass: a terminal UI for siphon-ai
 
-> **Status: IN PROGRESS.** PR 1 (this doc, the `admin-api-types`
-> extraction, the multi-node read-only scaffold) and PR 2 (operator
-> actions with node-named confirm modals, toasts, per-node RBAC-aware
-> keybinds via startup role probes, `--read-only` enforcement, user
-> guide `docs/SIGHTGLASS.md`) are implemented. PRs 3–6 in §10 are
-> pending. Update this header as chunks land.
+> **Status: IN PROGRESS.** Implemented: PR 1 (this doc, the
+> `admin-api-types` extraction, the multi-node read-only scaffold),
+> PR 2 (operator actions with node-named confirm modals, toasts,
+> per-node RBAC-aware keybinds via startup role probes, `--read-only`
+> enforcement, user guide `docs/SIGHTGLASS.md`), and PR 3 (§6.1
+> errors ring — `tracing` layer + `[observability].error_ring_size` +
+> `GET /admin/v1/errors` — and the Errors tab, tolerant of pre-0.49
+> daemons). PRs 4–6 in §10 are pending. Update this header as chunks
+> land.
 
 A sight glass is the fitting on a pipe that lets you watch the fluid
 moving through it. `sightglass` is that for running siphon-ai nodes —
@@ -117,7 +120,7 @@ one node is configured), and `n` cycles a node filter
 | **Trunks** | registrations across the fleet, grouped by node: state, expiry, last result; refresh/restart actions | `GET /admin/v1/registrations`, `POST …/{name}/refresh\|restart` | yes |
 | **Calls** | unified table of active calls (node, both id namespaces + direction per #311); detail pane for focused call: codec, duration, MOS gauge, jitter/loss sparklines, WS state; actions §5 | `GET /admin/v1/calls`, `GET …/{id}/stats` | yes |
 | **Rooms** | conferences + participants, parked calls, node-tagged; end room, kick, retrieve | `GET /admin/v1/conferences`, `GET /admin/v1/parked`, conference sub-resources | yes |
-| **Errors** | merged fleet tail of warn/error events, node-tagged, with call_id correlation | `GET /admin/v1/errors` (new, §6.1) | no |
+| **Errors** | merged fleet tail of warn/error events, node-tagged, with call_id correlation | `GET /admin/v1/errors` (§6.1, shipped in PR 3) | 0.49.0+ |
 | **System** | acts on one node at a time (selected via the node filter): log filter get/set, HEP test probe, drain status/initiate | `PUT /admin/v1/log`, `POST /admin/v1/hep/test`, `GET /admin/v1/drain` | mostly |
 
 ## 5. Operator actions (all against existing endpoints)

@@ -1607,7 +1607,8 @@ impl CallRegistryHandle for RuntimeCallRegistry {
                 direction: match c.direction {
                     Direction::Inbound => "inbound",
                     Direction::Outbound => "outbound",
-                },
+                }
+                .to_string(),
             })
             .collect()
     }

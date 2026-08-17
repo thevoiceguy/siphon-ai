@@ -1,0 +1,158 @@
+//! sightglass — terminal operator console for siphon-ai fleets.
+//!
+//! A sight glass is the fitting on a pipe that lets you watch the
+//! fluid moving through it. This is that for one or more running
+//! siphon-ai nodes: a read-and-act client of each node's `[admin]`
+//! HTTP listener, and nothing more — no SIP, no RTP, no daemon
+//! coupling beyond the admin wire types. See DESIGN_SIGHTGLASS.md.
+
+mod client;
+mod config;
+mod keys;
+mod model;
+mod poller;
+mod ui;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Result;
+use clap::Parser;
+use tokio::sync::{mpsc, watch};
+
+use client::AdminClient;
+use model::{App, Msg, NodeId};
+use ui::Theme;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "sightglass",
+    version,
+    about = "Terminal operator console for siphon-ai nodes"
+)]
+pub struct Cli {
+    /// Fleet config file (default: ~/.config/sightglass/config.toml).
+    #[arg(long, conflicts_with = "target")]
+    config: Option<std::path::PathBuf>,
+
+    /// Ad-hoc single node: admin listener base URL
+    /// (e.g. https://prod-1.example.com:9090). Token via --token-file
+    /// or $SIGHTGLASS_TOKEN.
+    #[arg(long)]
+    target: Option<String>,
+
+    /// Bearer-token file for --target. (Never a raw token argument —
+    /// argv is visible in `ps`.)
+    #[arg(long, requires = "target")]
+    token_file: Option<std::path::PathBuf>,
+
+    /// PEM CA bundle for --target when the admin TLS cert is
+    /// privately signed.
+    #[arg(long, requires = "target")]
+    ca: Option<std::path::PathBuf>,
+
+    /// Disable every mutating action client-side, regardless of token
+    /// role — for NOC wall screens.
+    #[arg(long)]
+    read_only: bool,
+
+    /// ASCII-only status glyphs (no Unicode dots).
+    #[arg(long)]
+    ascii: bool,
+}
+
+/// Wall-clock redraw cadence when nothing else arrives, and the
+/// sampling cadence for the fleet-history sparkline.
+const TICK: Duration = Duration::from_secs(1);
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    // Resolve config (and its errors) before raw mode: a bad fleet
+    // file should print like a normal CLI failure, not corrupt a
+    // half-initialized terminal.
+    let fleet = config::load(&cli)?;
+    let clients: Vec<Arc<AdminClient>> = fleet
+        .nodes
+        .iter()
+        .map(|n| AdminClient::new(n).map(Arc::new))
+        .collect::<Result<_>>()?;
+
+    let (tx, rx) = mpsc::channel::<Msg>(64);
+    let (focus_tx, focus_rx) = watch::channel::<Option<(NodeId, String)>>(None);
+    for (id, client) in clients.iter().enumerate() {
+        poller::spawn(
+            id,
+            clients.len(),
+            client.clone(),
+            fleet.poll_interval,
+            tx.clone(),
+            focus_rx.clone(),
+        );
+    }
+    spawn_input_thread(tx.clone());
+
+    let app = App::new(
+        fleet.nodes.iter().map(|n| n.name.clone()).collect(),
+        cli.read_only,
+    );
+    let theme = Theme::new(cli.ascii);
+
+    let mut terminal = ratatui::init();
+    let result = run(&mut terminal, app, &theme, rx, focus_tx).await;
+    ratatui::restore();
+    result
+}
+
+async fn run(
+    terminal: &mut ratatui::DefaultTerminal,
+    mut app: App,
+    theme: &Theme,
+    mut rx: mpsc::Receiver<Msg>,
+    focus_tx: watch::Sender<Option<(NodeId, String)>>,
+) -> Result<()> {
+    let mut tick = tokio::time::interval(TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        terminal.draw(|f| ui::draw(f, &app, theme))?;
+        tokio::select! {
+            msg = rx.recv() => match msg {
+                Some(Msg::Input(event)) => keys::handle(&mut app, &event),
+                Some(msg) => app.update(msg),
+                None => return Ok(()), // all producers gone
+            },
+            _ = tick.tick() => app.update(Msg::Tick),
+        }
+        // Tell the pollers which call's stats to fetch. send_if_modified
+        // keeps the watch quiet when the focus didn't move.
+        focus_tx.send_if_modified(|current| {
+            let focus = app.focus();
+            if *current == focus {
+                false
+            } else {
+                *current = focus;
+                true
+            }
+        });
+        if app.should_quit {
+            return Ok(());
+        }
+    }
+}
+
+/// Terminal input on a plain thread: `crossterm::event::read` blocks,
+/// which is fine here and keeps the async side purely channel-driven.
+/// The thread ends with the process (the receiver hanging up just
+/// makes it exit on the next event).
+fn spawn_input_thread(tx: mpsc::Sender<Msg>) {
+    std::thread::spawn(move || loop {
+        match ratatui::crossterm::event::read() {
+            Ok(event) => {
+                if tx.blocking_send(Msg::Input(event)).is_err() {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    });
+}

@@ -24,6 +24,9 @@ thiserror.workspace                   = true
 # Signed audit-event stream (0.20.0): admin requests emit AuditEvents.
 # Only depends on siphon-ai-http, so no dep cycle.
 siphon-ai-audit.workspace             = true
+# Admin wire shapes, shared with admin clients (sightglass) so the
+# serializer and deserializer are the same structs. Serde-only dep.
+siphon-ai-admin-api-types.workspace   = true
 # Admin bearer-token auth: SHA-256 the token + constant-time compare.
 sha2.workspace                        = true
 subtle.workspace                      = true

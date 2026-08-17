@@ -439,6 +439,22 @@ us the first time someone hits the wall and reports it as a bug.
   available to it; say so rather than reporting zero drops.
 - **Re-sample a gauge before calling it stale.** Sampling in the same breath
   as the event that clears it produces phantom leaks.
+- **`ps -o %cpu` is a lifetime average, not an instantaneous rate.** It made a
+  flat 50-call run look like it was ramping (18 → 24 → 26%), and it is
+  meaningless for a generator process that has been up for hours. Measure with
+  `/proc/<pid>/stat` fields 14+15 delta over a fixed window. `bc` may not be
+  installed on a stock box — do the arithmetic in `awk`.
+- **Forcing SIGTERM during the daemon's 30 s drain orphans the calls** — no BYE,
+  no CDR, and the far end holds its channels up until *its* media timeout. Wait
+  the drain out, or hang up from the generator first.
+- **Bound the calls, don't rely on a closing `hupall`.** Originating with
+  `execute_on_answer='sched_hangup +<hold> NORMAL_CLEARING'` makes every call
+  end on its own schedule, so a run that loses its driving session still
+  terminates. Tier 2 (§10.2) uses this throughout.
+- **Arm a detached auto-removal alongside `netem`.** It impairs your own ssh to
+  the box; a dropped session must not strand the qdisc.
+- **`fs_cli -x "show channels count"` prints a leading blank line** — `head -1`
+  silently yields nothing. Use `tail -1`.
 
 ---
 
@@ -489,6 +505,15 @@ the constraint. Record the generator box's CPU in every row. If it is above
 ~70% while the daemon under test is below it, the run is void.
 
 ### 10.2 Tier 2 — FreeSWITCH as the load generator
+
+> **Run 2026-08-17 — see `RESULTS-tier2.md`, rig in `tier2/`.** All three phases
+> (plaintext ramp, TLS+SRTP, `netem`) are done at 50/100/200 concurrent. Two
+> things below need correcting in light of it: the daemon side needs
+> `[media].srtp = "required"` — stock FreeSWITCH `488`s the `"preferred"`
+> `RTP/AVP` + `a=crypto` shape — and FreeSWITCH's stock `max-sessions` /
+> `sessions-per-second` already cover 200 at 10 cps, so the raise below is only
+> needed past ~500 (~400 with crypto, where FS's own CPU starts to threaten
+> §10.1).
 
 This is the highest-value addition and it costs nothing but a second VM.
 FreeSWITCH is a real SIP stack, so unlike a SIPp scenario it exercises

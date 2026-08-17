@@ -199,6 +199,15 @@ fn dispatch(action: Action, app: &App, clients: &[Arc<AdminClient>], tx: &mpsc::
                 format!("{to} via {gateway}"),
                 client.originate(to, gateway, ws_url.as_deref()).await,
             ),
+            Action::EndConference { room_id, .. } => {
+                (room_id.clone(), client.end_conference(room_id).await)
+            }
+            Action::RemoveParticipant {
+                room_id, call_id, ..
+            } => (
+                format!("{call_id} from {room_id}"),
+                client.remove_participant(room_id, call_id).await,
+            ),
         };
         let msg = match result {
             Ok(detail) => Msg::ActionOutcome {

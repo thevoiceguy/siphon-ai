@@ -1126,7 +1126,37 @@ impl Runtime {
         // at init_tracing (before config existed); apply the configured
         // capacity now and expose the snapshot to `GET /admin/v1/errors`.
         siphon_ai_telemetry::error_ring::set_capacity(observability.error_ring_size);
+        // `GET /admin/v1/status` summary closure (0.49.0). Live
+        // snapshot only — cumulative counters stay on /metrics.
+        let status_fn: siphon_ai_telemetry::admin::StatusFn = {
+            let registry = registry_for_drain.clone();
+            let drain = drain.clone();
+            let registration_mgr = registration_mgr.clone();
+            let hep_enabled = hep_telemetry.is_some();
+            let started = std::time::Instant::now();
+            Arc::new(move || {
+                let regs = registration_mgr.snapshot();
+                let registered = regs
+                    .iter()
+                    .filter(|r| {
+                        matches!(r.status, siphon_ai_sip_glue::RegistrationStatus::Registered)
+                    })
+                    .count();
+                siphon_ai_telemetry::admin::StatusResponse {
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    uptime_secs: started.elapsed().as_secs(),
+                    active_calls: registry.len(),
+                    registrations: siphon_ai_telemetry::admin::RegistrationsSummary {
+                        registered,
+                        total: regs.len(),
+                    },
+                    draining: drain.is_draining(),
+                    hep_enabled,
+                }
+            })
+        };
         let admin_state = AdminState {
+            status: Some(status_fn),
             call_registry: Some(Arc::new(RuntimeCallRegistry {
                 inner: call_registry_for_admin,
                 control: control_registry.clone(),

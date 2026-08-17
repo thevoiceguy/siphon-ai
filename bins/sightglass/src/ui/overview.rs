@@ -23,9 +23,18 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
 fn draw_grid(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let header = Row::new(
-        ["", "NODE", "STATUS", "CALLS", "REGISTRATIONS", "DRAIN"]
-            .into_iter()
-            .map(|h| Cell::from(Span::styled(h, theme.dim_text()))),
+        [
+            "",
+            "NODE",
+            "STATUS",
+            "VERSION",
+            "UPTIME",
+            "CALLS",
+            "REGISTRATIONS",
+            "DRAIN",
+        ]
+        .into_iter()
+        .map(|h| Cell::from(Span::styled(h, theme.dim_text()))),
     );
 
     let rows = app
@@ -40,8 +49,10 @@ fn draw_grid(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         rows,
         [
             Constraint::Length(1),
-            Constraint::Length(18),
-            Constraint::Min(24),
+            Constraint::Length(16),
+            Constraint::Min(20),
+            Constraint::Length(9),
+            Constraint::Length(11),
             Constraint::Length(6),
             Constraint::Length(14),
             Constraint::Length(16),
@@ -83,6 +94,11 @@ fn node_row<'a>(n: &'a NodeState, theme: &Theme) -> Row<'a> {
     } else {
         format!("{registered}/{}", n.registrations.len())
     };
+    let (version, uptime) = match &n.status {
+        // Pre-0.49 daemons don't serve /admin/v1/status.
+        None => ("—".to_string(), "—".to_string()),
+        Some(s) => (s.version.clone(), fmt_uptime(s.uptime_secs)),
+    };
     let drain = match &n.drain {
         Some(d) if d.draining => match d.remaining_secs {
             Some(s) => format!("draining ({s}s)"),
@@ -95,10 +111,23 @@ fn node_row<'a>(n: &'a NodeState, theme: &Theme) -> Row<'a> {
         Cell::from(Span::styled(glyph, theme.text().fg(color))),
         Cell::from(Span::styled(n.name.as_str(), data_style)),
         Cell::from(status),
+        Cell::from(Span::styled(version, data_style)),
+        Cell::from(Span::styled(uptime, data_style)),
         Cell::from(Span::styled(n.calls.len().to_string(), data_style)),
         Cell::from(Span::styled(regs, data_style)),
         Cell::from(Span::styled(drain, data_style)),
     ])
+}
+
+/// `3d 04:05:06`-style uptime; days omitted under 24h.
+fn fmt_uptime(secs: u64) -> String {
+    let (d, rem) = (secs / 86_400, secs % 86_400);
+    let (h, m, s) = (rem / 3600, (rem / 60) % 60, rem % 60);
+    if d > 0 {
+        format!("{d}d {h:02}:{m:02}:{s:02}")
+    } else {
+        format!("{h:02}:{m:02}:{s:02}")
+    }
 }
 
 fn draw_activity(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
@@ -113,4 +142,16 @@ fn draw_activity(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 .title(Span::styled(" active calls (fleet) ", theme.title())),
         );
     frame.render_widget(spark, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uptime_formats_with_and_without_days() {
+        assert_eq!(fmt_uptime(59), "00:00:59");
+        assert_eq!(fmt_uptime(3_661), "01:01:01");
+        assert_eq!(fmt_uptime(86_400 + 3_661), "1d 01:01:01");
+    }
 }

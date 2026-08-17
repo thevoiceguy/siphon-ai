@@ -10,7 +10,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use siphon_ai_admin_api_types::{
-    CallsResponse, DrainStatus, ErrorBody, ErrorsResponse, RegistrationsResponse,
+    CallsResponse, ConferencesResponse, DrainStatus, ErrorBody, ErrorsResponse, ParkedResponse,
+    RegistrationsResponse, StatusResponse,
 };
 
 use crate::config::Node;
@@ -69,6 +70,22 @@ impl AdminClient {
         self.get_json("/admin/v1/errors").await
     }
 
+    /// Node summary (0.49.0+ daemons); same tolerance as `errors`.
+    pub async fn status(&self) -> Result<StatusResponse, String> {
+        self.get_json("/admin/v1/status").await
+    }
+
+    /// Conference rooms; `501` when `[conference]` is disabled —
+    /// callers treat any failure as "no rooms".
+    pub async fn conferences(&self) -> Result<ConferencesResponse, String> {
+        self.get_json("/admin/v1/conferences").await
+    }
+
+    /// Parked calls; `501` when `[park]` is disabled — same tolerance.
+    pub async fn parked(&self) -> Result<ParkedResponse, String> {
+        self.get_json("/admin/v1/parked").await
+    }
+
     /// Live quality snapshot for one active call. Kept as a loose
     /// `Value` until the stats shape joins `admin-api-types`
     /// (DESIGN_SIGHTGLASS.md §6.4, PR 5).
@@ -120,6 +137,22 @@ impl AdminClient {
         self.post("/admin/v1/calls", Some(body)).await
     }
 
+    pub async fn end_conference(&self, room_id: &str) -> Result<String, ApiError> {
+        self.delete(&format!("/admin/v1/conferences/{room_id}"))
+            .await
+    }
+
+    pub async fn remove_participant(
+        &self,
+        room_id: &str,
+        call_id: &str,
+    ) -> Result<String, ApiError> {
+        self.delete(&format!(
+            "/admin/v1/conferences/{room_id}/participants/{call_id}"
+        ))
+        .await
+    }
+
     /// Learn this token's role without side effects
     /// (DESIGN_SIGHTGLASS.md §5). The 403 body carries no role, so we
     /// probe the RBAC gate itself — it runs *before* dispatch:
@@ -159,6 +192,33 @@ impl AdminClient {
         }
         if let Some(body) = &body {
             req = req.json(body);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ApiError::Other(connect_error(e)))?;
+        let status = resp.status();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| ApiError::Other(connect_error(e)))?;
+        if status.as_u16() == 403 {
+            return Err(ApiError::Forbidden);
+        }
+        if status.is_success() {
+            return Ok(format!("accepted ({})", status.as_u16()));
+        }
+        let detail = serde_json::from_slice::<ErrorBody>(&bytes)
+            .map(|e| e.error)
+            .unwrap_or_else(|_| status.to_string());
+        Err(ApiError::Other(detail))
+    }
+
+    /// DELETE twin of `post` (conference end / participant remove).
+    async fn delete(&self, path: &str) -> Result<String, ApiError> {
+        let mut req = self.http.delete(format!("{}{}", self.base, path));
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
         }
         let resp = req
             .send()

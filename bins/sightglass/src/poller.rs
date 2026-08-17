@@ -29,16 +29,23 @@ pub fn spawn(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            let (calls, registrations, drain, errors) = tokio::join!(
+            let (calls, registrations, drain, errors, conferences, parked, status) = tokio::join!(
                 client.calls(),
                 client.registrations(),
                 client.drain(),
-                client.errors()
+                client.errors(),
+                client.conferences(),
+                client.parked(),
+                client.status()
             );
-            // The errors ring is 0.49.0+; a failure there (404 from an
-            // older daemon) must not mark the node down — it degrades
-            // to "endpoint unavailable" on the Errors tab.
+            // Only the three core endpoints decide node health. The
+            // errors ring and status are 0.49.0+ (older daemons 404 →
+            // "endpoint unavailable", never node-down); conferences and
+            // parked answer 501 when the feature is off → empty lists.
             let errors = errors.ok().map(|e| e.errors);
+            let conferences = conferences.map(|c| c.conferences).unwrap_or_default();
+            let parked = parked.map(|p| p.parked).unwrap_or_default();
+            let status = status.ok();
             let result = calls
                 .and_then(|c| registrations.map(|r| (c, r)))
                 .and_then(|(c, r)| {
@@ -46,6 +53,9 @@ pub fn spawn(
                         calls: c.calls,
                         registrations: r.registrations,
                         drain: d,
+                        conferences,
+                        parked,
+                        status,
                         errors,
                     })
                 });

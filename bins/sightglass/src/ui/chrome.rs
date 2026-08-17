@@ -104,6 +104,18 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     if app.nodes.len() > 1 {
         hint("n".into(), "node filter", true);
     }
+    if app.tab == Tab::Rooms {
+        hint("j/k".into(), "select", true);
+        let node = app
+            .visible_rooms()
+            .get(app.selected_room)
+            .map(|r| r.node)
+            .or(app.node_filter)
+            .unwrap_or(0);
+        let operator_ok = app.can(node, crate::model::Role::Operator);
+        hint("x".into(), "end/kick", operator_ok);
+        hint("u".into(), "retrieve", operator_ok);
+    }
     if app.tab == Tab::Calls {
         hint("j/k".into(), "select", true);
         // Action keys grey out per the focused call's node.

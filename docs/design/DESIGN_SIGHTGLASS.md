@@ -1,10 +1,11 @@
 # Design note — Sightglass: a terminal UI for siphon-ai
 
-> **Status: IN PROGRESS.** PR 1 is implemented: this doc, the
-> `crates/admin-api-types` extraction (wire-preserving, snapshot-
-> tested), and the `bins/sightglass` scaffold — multi-node model,
-> per-node pollers, theme/chrome, read-only Overview/Trunks/Calls.
-> PRs 2–6 in §10 are pending. Update this header as chunks land.
+> **Status: IN PROGRESS.** PR 1 (this doc, the `admin-api-types`
+> extraction, the multi-node read-only scaffold) and PR 2 (operator
+> actions with node-named confirm modals, toasts, per-node RBAC-aware
+> keybinds via startup role probes, `--read-only` enforcement, user
+> guide `docs/SIGHTGLASS.md`) are implemented. PRs 3–6 in §10 are
+> pending. Update this header as chunks land.
 
 A sight glass is the fitting on a pipe that lets you watch the fluid
 moving through it. `sightglass` is that for running siphon-ai nodes —
@@ -142,7 +143,14 @@ Rules:
   each node's token role (`crates/telemetry/src/auth.rs`:
   `readonly` < `operator` < `admin`) and greys out actions the owning
   node's token cannot perform, rather than surfacing a 403 after the
-  keypress.
+  keypress. *Mechanism (settled in PR 2):* the 403 body carries no
+  role, so the role is learned by probing the RBAC gate — which runs
+  before dispatch — with two side-effect-free POSTs: a hangup on a
+  sentinel call id (403 ⇒ readonly, 404 ⇒ ≥ operator) and an
+  empty-body originate (403 ⇒ operator, validation 400/501 ⇒ admin;
+  nothing is dialed). Probes are skipped under `--read-only`, and an
+  unlearned role stays permissive — a later real 403 toasts and
+  teaches the ceiling.
 - **`--read-only` flag** disables all mutating actions client-side
   regardless of token role — for NOC wall screens.
 - Destructive actions (hangup, end-room, drain) always get a

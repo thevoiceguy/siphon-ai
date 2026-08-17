@@ -74,14 +74,15 @@ Unicode status glyphs for ASCII.
 
 | Key | Effect |
 |---|---|
-| `1`–`4`, `⇥` / `⇧⇥` | switch tab (overview / trunks / calls / errors) |
+| `1`–`5`, `⇥` / `⇧⇥` | switch tab (overview / trunks / calls / rooms / errors) |
 | `n` | cycle the node filter (all → node → … → all); scopes every tab |
 | `j`/`k`, `↓`/`↑`, `g`/`G` | move the call selection |
 | `q`, `Esc`, `Ctrl-C` | quit |
 
 - **overview** — fleet health grid (one row per node: reachability,
-  active calls, registrations up, drain state) plus a fleet-wide
-  active-calls sparkline. A down node shows `○ down (retrying)` with
+  **version and uptime** from `GET /admin/v1/status` on 0.49.0+
+  daemons, active calls, registrations up, drain state) plus a
+  fleet-wide active-calls sparkline. A down node shows `○ down (retrying)` with
   its last-seen data dimmed; it never breaks the rest of the view.
 - **trunks** — every `[[register]]` binding across the fleet with
   state, expiry, and last error.
@@ -90,6 +91,11 @@ Unicode status glyphs for ASCII.
   a detail pane for the focused call: live MOS, jitter, packet
   counters, first-audio latency, barge-ins, and a MOS trend sparkline.
   Stats are polled for the focused call only.
+- **rooms** — conference rooms with their members inline, plus parked
+  calls, across the fleet. `x` ends the focused room / kicks the
+  focused member / hangs up the focused parked call (node-named
+  confirm, operator role); `u` retrieves the focused parked call —
+  with an optional new `ws_url`, same as the calls tab.
 - **errors** — the fleet's merged recent-errors tail, newest first:
   every `warn!`/`error!` the daemons captured (last
   `[observability].error_ring_size` per node, default 256), with the

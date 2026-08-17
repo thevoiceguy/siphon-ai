@@ -7,6 +7,7 @@ mod chrome;
 mod errors;
 mod modal;
 mod overview;
+mod rooms;
 pub mod theme;
 mod trunks;
 
@@ -21,6 +22,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) {
         Tab::Overview => overview::draw(frame, app, theme, body),
         Tab::Trunks => trunks::draw(frame, app, theme, body),
         Tab::Calls => calls::draw(frame, app, theme, body),
+        Tab::Rooms => rooms::draw(frame, app, theme, body),
         Tab::Errors => errors::draw(frame, app, theme, body),
     }
     // Overlays last: modal + toasts sit above the tab content.
@@ -68,6 +70,9 @@ mod tests {
                     drain_timeout_secs: 30,
                     remaining_secs: None,
                 },
+                conferences: vec![],
+                parked: vec![],
+                status: None,
                 errors: None,
             }),
         });
@@ -98,13 +103,19 @@ mod tests {
     #[test]
     fn overview_shows_fleet_grid_with_down_node() {
         let app = fixture_app();
-        let screen = render(&app, 100, 30);
+        // Wide enough for the full error detail…
+        let screen = render(&app, 130, 30);
         assert!(screen.contains("prod-1"), "{screen}");
         assert!(screen.contains("prod-2"), "{screen}");
         assert!(screen.contains("connection refused"), "{screen}");
         // Fleet rollup in the header: one of two nodes up, two calls.
         assert!(screen.contains("1/2 up"), "{screen}");
         assert!(screen.contains("2 calls"), "{screen}");
+        // …while a narrower terminal still shows the health state
+        // (the error detail may truncate — that's the layout rule,
+        // nothing must panic or overflow).
+        let narrow = render(&app, 100, 30);
+        assert!(narrow.contains("down (retrying)"), "{narrow}");
     }
 
     #[test]
@@ -154,6 +165,52 @@ mod tests {
         app.read_only = true;
         let screen = render(&app, 100, 30);
         assert!(screen.contains("read-only"), "{screen}");
+    }
+
+    #[test]
+    fn overview_shows_version_and_uptime_from_status() {
+        use siphon_ai_admin_api_types::{RegistrationsSummary, StatusResponse};
+        let mut app = fixture_app();
+        app.nodes[0].status = Some(StatusResponse {
+            version: "0.49.0".into(),
+            uptime_secs: 90_061,
+            active_calls: 2,
+            registrations: RegistrationsSummary {
+                registered: 1,
+                total: 1,
+            },
+            draining: false,
+            hep_enabled: true,
+        });
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("VERSION"), "{screen}");
+        assert!(screen.contains("0.49.0"), "{screen}");
+        assert!(screen.contains("1d 01:01:01"), "{screen}");
+        // prod-2 (down, no status) shows the dash.
+        assert!(screen.contains("—"), "{screen}");
+    }
+
+    #[test]
+    fn rooms_tab_renders_rooms_members_and_parked() {
+        use siphon_ai_admin_api_types::{ConferenceRow, ParkedRow};
+        let mut app = fixture_app();
+        app.nodes[0].conferences = vec![ConferenceRow {
+            room_id: "room-1".into(),
+            sample_rate: 8000,
+            participants: vec!["siphon-aa11".into()],
+        }];
+        app.nodes[0].parked = vec![ParkedRow {
+            call_id: "siphon-pk".into(),
+            slot: Some("lot-3".into()),
+            parked_secs: 42,
+        }];
+        app.tab = Tab::Rooms;
+        let screen = render(&app, 110, 30);
+        assert!(screen.contains("rooms & parked (3)"), "{screen}");
+        assert!(screen.contains("room-1"), "{screen}");
+        assert!(screen.contains("8000 Hz"), "{screen}");
+        assert!(screen.contains("member"), "{screen}");
+        assert!(screen.contains("slot lot-3"), "{screen}");
     }
 
     #[test]

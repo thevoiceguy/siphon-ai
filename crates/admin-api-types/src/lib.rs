@@ -103,6 +103,38 @@ pub struct ParkedResponse {
     pub parked: Vec<ParkedRow>,
 }
 
+// ─── GET /admin/v1/status ──────────────────────────────────────────
+
+/// Registration rollup inside [`StatusResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistrationsSummary {
+    /// Bindings currently in the `registered` state.
+    pub registered: usize,
+    /// Configured `[[register]]` bindings.
+    pub total: usize,
+}
+
+/// `GET /admin/v1/status` (0.49.0, DESIGN_SIGHTGLASS.md §6.2): a
+/// one-request JSON summary of the node for dashboards and fleet
+/// tooling — the live snapshot only. Cumulative counters
+/// (`calls_total`, HEP delivery) stay on `/metrics`; collector
+/// *health* is `siphon_ai_hep_*` territory too — `hep_enabled` here
+/// just says whether HEP shipping is configured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusResponse {
+    /// Daemon version (`CARGO_PKG_VERSION`).
+    pub version: String,
+    /// Seconds since the daemon finished starting.
+    pub uptime_secs: u64,
+    pub active_calls: usize,
+    pub registrations: RegistrationsSummary,
+    /// Graceful-shutdown drain in progress (`/admin/v1/drain` has the
+    /// countdown detail).
+    pub draining: bool,
+    /// HEP/Homer shipping configured on this node.
+    pub hep_enabled: bool,
+}
+
 // ─── GET /admin/v1/errors ──────────────────────────────────────────
 
 /// One captured `warn!`/`error!` event in the `GET /admin/v1/errors`
@@ -327,6 +359,32 @@ mod tests {
             json!({
                 "count": 1,
                 "parked": [{ "call_id": "siphon-abc", "parked_secs": 12 }],
+            })
+        );
+    }
+
+    #[test]
+    fn status_response_wire_shape() {
+        let resp = StatusResponse {
+            version: "0.49.0".into(),
+            uptime_secs: 86_461,
+            active_calls: 2,
+            registrations: RegistrationsSummary {
+                registered: 1,
+                total: 2,
+            },
+            draining: false,
+            hep_enabled: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&resp).unwrap(),
+            json!({
+                "version": "0.49.0",
+                "uptime_secs": 86_461,
+                "active_calls": 2,
+                "registrations": { "registered": 1, "total": 2 },
+                "draining": false,
+                "hep_enabled": true,
             })
         );
     }

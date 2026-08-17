@@ -79,7 +79,7 @@ pub use siphon_ai_admin_api_types::{
     AddParticipantRequest, AdminCallRow, CallsResponse, ConferenceRow, ConferencesResponse,
     CreateConferenceRequest, DrainStatus, ErrorEntry, ErrorsResponse, OriginateRequest,
     ParkRequest, ParkedResponse, ParkedRow, RegistrationRow, RegistrationsResponse,
-    RetrieveRequest,
+    RegistrationsSummary, RetrieveRequest, StatusResponse,
 };
 
 /// Bundle of dependencies the admin handlers may need. Each is
@@ -116,6 +116,10 @@ pub struct AdminState {
     /// `[[register]]` blocks — triggers then 404); `None` only in
     /// partially-built test states → 503.
     pub registrations: Option<AdminRegistrations>,
+    /// Node status summary (0.49.0), serving `GET /admin/v1/status`.
+    /// Always installed by the runtime; `None` only in partially-built
+    /// test states → 503.
+    pub status: Option<StatusFn>,
     /// Recent-errors ring snapshot (0.49.0), serving
     /// `GET /admin/v1/errors`. Always installed by the runtime (the
     /// capture layer runs regardless; `error_ring_size = 0` just
@@ -123,6 +127,10 @@ pub struct AdminState {
     /// states → 503.
     pub errors: Option<ErrorsSnapshotFn>,
 }
+
+/// Closure producing a fresh [`StatusResponse`] per request. Same
+/// indirection rationale as [`CallRegistryHandle`].
+pub type StatusFn = Arc<dyn Fn() -> StatusResponse + Send + Sync>;
 
 /// Closure producing the recent-errors ring, newest first. Same
 /// indirection rationale as [`CallRegistryHandle`] — the runtime
@@ -341,6 +349,7 @@ pub async fn dispatch(
         (&hyper::Method::GET, "/admin/v1/parked") => list_parked(state),
         (&hyper::Method::GET, "/admin/v1/drain") => drain_status(state),
         (&hyper::Method::GET, "/admin/v1/errors") => list_errors(state),
+        (&hyper::Method::GET, "/admin/v1/status") => node_status(state),
         (m, p)
             if *m == hyper::Method::POST
                 && p.starts_with("/admin/v1/registrations/")
@@ -500,6 +509,14 @@ fn list_calls(state: &AdminState) -> Response<Full<Bytes>> {
             calls,
         },
     )
+}
+
+/// `GET /admin/v1/status` (0.49.0) — one-request node summary.
+fn node_status(state: &AdminState) -> Response<Full<Bytes>> {
+    let Some(f) = state.status.as_ref() else {
+        return service_unavailable("status not installed");
+    };
+    json_response(StatusCode::OK, &f())
 }
 
 /// `GET /admin/v1/errors` (0.49.0) — the recent-errors ring, newest
@@ -1884,6 +1901,38 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ─── GET /admin/v1/status (0.49.0) ───────────────────────────────
+
+    #[tokio::test]
+    async fn status_503_when_not_installed() {
+        let (status, _) = conf(hyper::Method::GET, "/admin/v1/status", "", &empty_state()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn status_reports_summary() {
+        use siphon_ai_admin_api_types::RegistrationsSummary;
+        let state = AdminState {
+            status: Some(Arc::new(|| StatusResponse {
+                version: "0.49.0-test".into(),
+                uptime_secs: 42,
+                active_calls: 1,
+                registrations: RegistrationsSummary {
+                    registered: 1,
+                    total: 2,
+                },
+                draining: false,
+                hep_enabled: false,
+            }) as StatusFn),
+            ..AdminState::default()
+        };
+        let (status, v) = conf(hyper::Method::GET, "/admin/v1/status", "", &state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["version"], "0.49.0-test");
+        assert_eq!(v["registrations"]["total"], 2);
+        assert_eq!(v["uptime_secs"], 42);
     }
 
     // ─── GET /admin/v1/errors (0.49.0) ───────────────────────────────

@@ -7,7 +7,7 @@
 
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::model::{Action, App, Field, InputKind, InputModal, Modal, Role, Tab};
+use crate::model::{Action, App, Field, InputKind, InputModal, Modal, Role, RoomsRowKind, Tab};
 
 pub fn handle(app: &mut App, event: &Event) -> Option<Action> {
     let Event::Key(key) = event else { return None };
@@ -27,7 +27,8 @@ pub fn handle(app: &mut App, event: &Event) -> Option<Action> {
         KeyCode::Char('1') => app.tab = Tab::Overview,
         KeyCode::Char('2') => app.tab = Tab::Trunks,
         KeyCode::Char('3') => app.tab = Tab::Calls,
-        KeyCode::Char('4') => app.tab = Tab::Errors,
+        KeyCode::Char('4') => app.tab = Tab::Rooms,
+        KeyCode::Char('5') => app.tab = Tab::Errors,
         KeyCode::Char('n') => app.cycle_node_filter(),
         KeyCode::Char('j') | KeyCode::Down => app.select_next(),
         KeyCode::Char('k') | KeyCode::Up => app.select_prev(),
@@ -52,6 +53,8 @@ pub fn handle(app: &mut App, event: &Event) -> Option<Action> {
             vec![Field::required("room id")],
         ),
         KeyCode::Char('o') if app.tab == Tab::Calls => open_originate(app),
+        KeyCode::Char('x') if app.tab == Tab::Rooms => rooms_destroy(app),
+        KeyCode::Char('u') if app.tab == Tab::Rooms => rooms_retrieve(app),
         _ => {}
     }
     None
@@ -138,6 +141,69 @@ fn open_originate(app: &mut App) {
     }));
 }
 
+/// `x` on the Rooms tab: end the focused room, kick the focused
+/// member, or hang up the focused parked call — always via a
+/// node-named confirm.
+fn rooms_destroy(app: &mut App) {
+    let Some(row) = app.visible_rooms().get(app.selected_room).cloned() else {
+        app.push_toast("nothing selected".into(), false);
+        return;
+    };
+    if !guard(app, row.node, Role::Operator) {
+        return;
+    }
+    let node_name = app.nodes[row.node].name.clone();
+    let (action, what) = match row.kind {
+        RoomsRowKind::Room { room_id, .. } => (
+            Action::EndConference {
+                node: row.node,
+                room_id: room_id.clone(),
+            },
+            format!("end room {room_id}"),
+        ),
+        RoomsRowKind::Participant { room_id, call_id } => (
+            Action::RemoveParticipant {
+                node: row.node,
+                room_id: room_id.clone(),
+                call_id: call_id.clone(),
+            },
+            format!("kick {call_id} from {room_id}"),
+        ),
+        RoomsRowKind::Parked { call_id, .. } => (
+            Action::Hangup {
+                node: row.node,
+                call_id: call_id.clone(),
+            },
+            format!("hangup parked {call_id}"),
+        ),
+    };
+    let prompt = format!("{what} on {node_name}? (y/n)");
+    app.modal = Some(Modal::Confirm { action, prompt });
+}
+
+/// `u` on the Rooms tab: retrieve the focused *parked* call (optional
+/// new ws_url), same form as the Calls tab.
+fn rooms_retrieve(app: &mut App) {
+    let Some(row) = app.visible_rooms().get(app.selected_room).cloned() else {
+        app.push_toast("nothing selected".into(), false);
+        return;
+    };
+    let RoomsRowKind::Parked { call_id, .. } = row.kind else {
+        app.push_toast("select a parked call to retrieve".into(), false);
+        return;
+    };
+    if !guard(app, row.node, Role::Operator) {
+        return;
+    }
+    app.modal = Some(Modal::Input(InputModal {
+        kind: InputKind::Retrieve,
+        node: row.node,
+        call_id: Some(call_id),
+        fields: vec![Field::optional("ws_url (blank = original)")],
+        active: 0,
+    }));
+}
+
 /// Keys while a modal is open.
 fn modal_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
     match app.modal.take()? {
@@ -209,6 +275,9 @@ mod tests {
                 drain_timeout_secs: 30,
                 remaining_secs: None,
             },
+            conferences: vec![],
+            parked: vec![],
+            status: None,
             errors: None,
         }
     }
@@ -377,6 +446,74 @@ mod tests {
             panic!("form gone");
         };
         assert_eq!(form.fields[0].value, "q");
+    }
+
+    #[test]
+    fn rooms_x_ends_room_kicks_member_and_u_retrieves_parked() {
+        use siphon_ai_admin_api_types::{ConferenceRow, ParkedRow};
+        let mut app = App::new(vec!["prod-1".into(), "prod-2".into()], false);
+        app.update(Msg::Snapshot {
+            node: 1,
+            result: Ok(NodeSnapshot {
+                conferences: vec![ConferenceRow {
+                    room_id: "room-9".into(),
+                    sample_rate: 8000,
+                    participants: vec!["siphon-m".into()],
+                }],
+                parked: vec![ParkedRow {
+                    call_id: "siphon-pk".into(),
+                    slot: None,
+                    parked_secs: 3,
+                }],
+                ..snapshot(vec![])
+            }),
+        });
+        app.tab = Tab::Rooms;
+
+        // Row 0 = the room → x proposes ending it, node-named.
+        app.select_first();
+        handle(&mut app, &press(KeyCode::Char('x')));
+        let Some(Modal::Confirm { prompt, .. }) = &app.modal else {
+            panic!("expected confirm, got {:?}", app.modal);
+        };
+        assert!(prompt.contains("end room room-9 on prod-2"), "{prompt}");
+        let action = handle(&mut app, &press(KeyCode::Char('y'))).expect("action");
+        assert_eq!(
+            action,
+            Action::EndConference {
+                node: 1,
+                room_id: "room-9".into()
+            }
+        );
+
+        // Row 1 = the member → x proposes a kick.
+        app.select_next();
+        handle(&mut app, &press(KeyCode::Char('x')));
+        let Some(Modal::Confirm { prompt, .. }) = &app.modal else {
+            panic!("expected confirm");
+        };
+        assert!(prompt.contains("kick siphon-m from room-9"), "{prompt}");
+        handle(&mut app, &press(KeyCode::Esc));
+
+        // Row 2 = parked → u opens the retrieve form; submit builds
+        // the retrieve for THAT call.
+        app.select_next();
+        handle(&mut app, &press(KeyCode::Char('u')));
+        assert!(matches!(app.modal, Some(Modal::Input(_))));
+        let action = handle(&mut app, &press(KeyCode::Enter)).expect("action");
+        assert_eq!(
+            action,
+            Action::Retrieve {
+                node: 1,
+                call_id: "siphon-pk".into(),
+                ws_url: None
+            }
+        );
+
+        // u on a non-parked row is refused with a toast.
+        app.select_first();
+        assert!(handle(&mut app, &press(KeyCode::Char('u'))).is_none());
+        assert!(app.toasts.iter().any(|t| t.text.contains("parked")));
     }
 
     #[test]

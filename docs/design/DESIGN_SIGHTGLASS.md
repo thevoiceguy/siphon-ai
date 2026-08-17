@@ -116,10 +116,10 @@ one node is configured), and `n` cycles a node filter
 
 | Tab | Contents | Source (per node) | Exists today? |
 |---|---|---|---|
-| **Overview** | fleet health grid (one row per node: reachability, version, uptime, active calls, drain state, HEP collector up) + aggregate totals and calls/sec sparkline | `GET /admin/v1/status` (new, §6.2), `GET /admin/v1/drain` | partly |
+| **Overview** | fleet health grid (one row per node: reachability, version, uptime, active calls, drain state) + aggregate totals and calls/sec sparkline | `GET /admin/v1/status` (§6.2, shipped in PR 4), `GET /admin/v1/drain` | 0.49.0+ |
 | **Trunks** | registrations across the fleet, grouped by node: state, expiry, last result; refresh/restart actions | `GET /admin/v1/registrations`, `POST …/{name}/refresh\|restart` | yes |
 | **Calls** | unified table of active calls (node, both id namespaces + direction per #311); detail pane for focused call: codec, duration, MOS gauge, jitter/loss sparklines, WS state; actions §5 | `GET /admin/v1/calls`, `GET …/{id}/stats` | yes |
-| **Rooms** | conferences + participants, parked calls, node-tagged; end room, kick, retrieve | `GET /admin/v1/conferences`, `GET /admin/v1/parked`, conference sub-resources | yes |
+| **Rooms** | conferences + participants, parked calls, node-tagged; end room, kick, retrieve (shipped in PR 4) | `GET /admin/v1/conferences`, `GET /admin/v1/parked`, conference sub-resources | yes |
 | **Errors** | merged fleet tail of warn/error events, node-tagged, with call_id correlation | `GET /admin/v1/errors` (§6.1, shipped in PR 3) | 0.49.0+ |
 | **System** | acts on one node at a time (selected via the node filter): log filter get/set, HEP test probe, drain status/initiate | `PUT /admin/v1/log`, `POST /admin/v1/hep/test`, `GET /admin/v1/drain` | mostly |
 
@@ -175,10 +175,16 @@ the ring newest-first; `readonly` role suffices.
 
 ### 6.2 `GET /admin/v1/status` summary
 
-Small JSON: version, uptime_secs, active_calls, total_calls,
-registrations `{up, down, total}`, `hep_collector_up`, drain state.
-Everything already exists as metrics/state; this avoids the TUI
-parsing Prometheus text exposition. `readonly`.
+Small JSON: version, uptime_secs, active_calls, registrations
+`{registered, total}`, `draining`, `hep_enabled`. Everything already
+exists as state; this avoids the TUI parsing Prometheus text
+exposition. `readonly`. *Deviations settled in PR 4:* `total_calls`
+was dropped — the cumulative count exists only as the labeled
+`siphon_ai_calls_total` metric (incremented at teardown in core) and
+duplicating it as a readable counter wasn't worth new core plumbing;
+same story for `hep_collector_up`, which has no readable state behind
+the metric — status carries `hep_enabled` (shipping configured) and
+collector *health* stays on `/metrics`.
 
 ### 6.3 Recent-calls ring + `GET /admin/v1/cdrs/recent`
 

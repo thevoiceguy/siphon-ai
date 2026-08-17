@@ -12,7 +12,10 @@
 
 use std::collections::VecDeque;
 
-use siphon_ai_admin_api_types::{AdminCallRow, DrainStatus, ErrorEntry, RegistrationRow};
+use siphon_ai_admin_api_types::{
+    AdminCallRow, ConferenceRow, DrainStatus, ErrorEntry, ParkedRow, RegistrationRow,
+    StatusResponse,
+};
 
 /// Index into [`App::nodes`]. Display name lives on the node itself.
 pub type NodeId = usize;
@@ -25,17 +28,25 @@ pub enum Tab {
     Overview,
     Trunks,
     Calls,
+    Rooms,
     Errors,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Overview, Tab::Trunks, Tab::Calls, Tab::Errors];
+    pub const ALL: [Tab; 5] = [
+        Tab::Overview,
+        Tab::Trunks,
+        Tab::Calls,
+        Tab::Rooms,
+        Tab::Errors,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Overview => "overview",
             Tab::Trunks => "trunks",
             Tab::Calls => "calls",
+            Tab::Rooms => "rooms",
             Tab::Errors => "errors",
         }
     }
@@ -97,6 +108,15 @@ pub enum Action {
         gateway: String,
         ws_url: Option<String>,
     },
+    EndConference {
+        node: NodeId,
+        room_id: String,
+    },
+    RemoveParticipant {
+        node: NodeId,
+        room_id: String,
+        call_id: String,
+    },
 }
 
 impl Action {
@@ -106,7 +126,9 @@ impl Action {
             | Action::Park { node, .. }
             | Action::Retrieve { node, .. }
             | Action::AddToConference { node, .. }
-            | Action::Originate { node, .. } => *node,
+            | Action::Originate { node, .. }
+            | Action::EndConference { node, .. }
+            | Action::RemoveParticipant { node, .. } => *node,
         }
     }
 
@@ -128,6 +150,8 @@ impl Action {
             Action::Retrieve { .. } => "retrieve",
             Action::AddToConference { .. } => "conference-add",
             Action::Originate { .. } => "originate",
+            Action::EndConference { .. } => "end-room",
+            Action::RemoveParticipant { .. } => "kick",
         }
     }
 }
@@ -265,6 +289,12 @@ pub struct NodeState {
     pub calls: Vec<AdminCallRow>,
     pub registrations: Vec<RegistrationRow>,
     pub drain: Option<DrainStatus>,
+    /// Conference rooms + members. Empty when conferencing is off.
+    pub conferences: Vec<ConferenceRow>,
+    /// Parked calls. Empty when park is off.
+    pub parked: Vec<ParkedRow>,
+    /// `GET /admin/v1/status` summary. `None` = pre-0.49 daemon.
+    pub status: Option<StatusResponse>,
     /// Recent-errors tail, newest first. `None` = the node's daemon
     /// doesn't serve `/admin/v1/errors` yet (pre-0.49) — rendered as
     /// "endpoint unavailable", distinct from an empty ring.
@@ -283,6 +313,9 @@ impl NodeState {
             calls: Vec::new(),
             registrations: Vec::new(),
             drain: None,
+            conferences: Vec::new(),
+            parked: Vec::new(),
+            status: None,
             errors: None,
             role: None,
         }
@@ -295,8 +328,40 @@ pub struct NodeSnapshot {
     pub calls: Vec<AdminCallRow>,
     pub registrations: Vec<RegistrationRow>,
     pub drain: DrainStatus,
+    /// Empty when conferencing is off (501) or the fetch failed.
+    pub conferences: Vec<ConferenceRow>,
+    /// Empty when park is off (501) or the fetch failed.
+    pub parked: Vec<ParkedRow>,
+    /// `None` = status endpoint unavailable (pre-0.49 daemon).
+    pub status: Option<StatusResponse>,
     /// `None` = errors endpoint unavailable on this daemon.
     pub errors: Option<Vec<ErrorEntry>>,
+}
+
+/// One flattened Rooms-tab row (owned — the lists are small and this
+/// keeps keys/UI free of borrow gymnastics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomsRow {
+    pub node: NodeId,
+    pub kind: RoomsRowKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomsRowKind {
+    Room {
+        room_id: String,
+        sample_rate: u32,
+        participants: usize,
+    },
+    Participant {
+        room_id: String,
+        call_id: String,
+    },
+    Parked {
+        call_id: String,
+        slot: Option<String>,
+        parked_secs: u64,
+    },
 }
 
 /// Live-stats pane for the focused call: latest snapshot plus
@@ -352,6 +417,8 @@ pub struct App {
     pub node_filter: Option<NodeId>,
     /// Selection index into [`App::visible_calls`].
     pub selected_call: usize,
+    /// Selection index into [`App::visible_rooms`].
+    pub selected_room: usize,
     pub stats: StatsPane,
     /// Fleet-wide active-call totals, one sample per tick, newest last.
     pub fleet_history: VecDeque<u64>,
@@ -370,6 +437,7 @@ impl App {
             tab: Tab::Overview,
             node_filter: None,
             selected_call: 0,
+            selected_room: 0,
             stats: StatsPane::default(),
             fleet_history: VecDeque::new(),
             modal: None,
@@ -391,6 +459,9 @@ impl App {
                         n.calls = snap.calls;
                         n.registrations = snap.registrations;
                         n.drain = Some(snap.drain);
+                        n.conferences = snap.conferences;
+                        n.parked = snap.parked;
+                        n.status = snap.status;
                         n.errors = snap.errors;
                     }
                     // Keep last-seen data; only the health flips.
@@ -496,6 +567,48 @@ impl App {
             .collect()
     }
 
+    /// One row of the Rooms tab's flattened listing: a room, one of
+    /// its members, or a parked call — always carrying the composite
+    /// `(node, id)` key the actions need.
+    pub fn visible_rooms(&self) -> Vec<RoomsRow> {
+        let mut rows = Vec::new();
+        for (id, n) in self.nodes.iter().enumerate() {
+            if self.node_filter.is_some_and(|f| f != id) {
+                continue;
+            }
+            for room in &n.conferences {
+                rows.push(RoomsRow {
+                    node: id,
+                    kind: RoomsRowKind::Room {
+                        room_id: room.room_id.clone(),
+                        sample_rate: room.sample_rate,
+                        participants: room.participants.len(),
+                    },
+                });
+                for call_id in &room.participants {
+                    rows.push(RoomsRow {
+                        node: id,
+                        kind: RoomsRowKind::Participant {
+                            room_id: room.room_id.clone(),
+                            call_id: call_id.clone(),
+                        },
+                    });
+                }
+            }
+            for p in &n.parked {
+                rows.push(RoomsRow {
+                    node: id,
+                    kind: RoomsRowKind::Parked {
+                        call_id: p.call_id.clone(),
+                        slot: p.slot.clone(),
+                        parked_secs: p.parked_secs,
+                    },
+                });
+            }
+        }
+        rows
+    }
+
     /// Errors visible under the node filter, merged across nodes and
     /// sorted newest-first by capture time.
     pub fn visible_errors(&self) -> Vec<(NodeId, &ErrorEntry)> {
@@ -519,22 +632,39 @@ impl App {
     }
 
     pub fn select_next(&mut self) {
+        if self.tab == Tab::Rooms {
+            self.selected_room = self.selected_room.saturating_add(1);
+            self.clamp_selection();
+            return;
+        }
         self.selected_call = self.selected_call.saturating_add(1);
         self.clamp_selection();
         self.sync_stats_focus();
     }
 
     pub fn select_prev(&mut self) {
+        if self.tab == Tab::Rooms {
+            self.selected_room = self.selected_room.saturating_sub(1);
+            return;
+        }
         self.selected_call = self.selected_call.saturating_sub(1);
         self.sync_stats_focus();
     }
 
     pub fn select_first(&mut self) {
+        if self.tab == Tab::Rooms {
+            self.selected_room = 0;
+            return;
+        }
         self.selected_call = 0;
         self.sync_stats_focus();
     }
 
     pub fn select_last(&mut self) {
+        if self.tab == Tab::Rooms {
+            self.selected_room = self.visible_rooms().len().saturating_sub(1);
+            return;
+        }
         self.selected_call = self.visible_calls().len().saturating_sub(1);
         self.sync_stats_focus();
     }
@@ -556,6 +686,12 @@ impl App {
             self.selected_call = 0;
         } else if self.selected_call >= len {
             self.selected_call = len - 1;
+        }
+        let rooms = self.visible_rooms().len();
+        if rooms == 0 {
+            self.selected_room = 0;
+        } else if self.selected_room >= rooms {
+            self.selected_room = rooms - 1;
         }
     }
 
@@ -625,6 +761,9 @@ mod tests {
                 drain_timeout_secs: 30,
                 remaining_secs: None,
             },
+            conferences: vec![],
+            parked: vec![],
+            status: None,
             errors: None,
         }
     }
@@ -831,6 +970,74 @@ mod tests {
         });
         assert!(app.nodes[0].errors.is_none());
         assert!(app.visible_errors().is_empty());
+    }
+
+    #[test]
+    fn rooms_flatten_rooms_members_and_parked_with_filter() {
+        use siphon_ai_admin_api_types::{ConferenceRow, ParkedRow};
+        let mut app = two_node_app();
+        app.update(Msg::Snapshot {
+            node: 0,
+            result: Ok(NodeSnapshot {
+                conferences: vec![ConferenceRow {
+                    room_id: "room-1".into(),
+                    sample_rate: 8000,
+                    participants: vec!["siphon-a".into(), "siphon-b".into()],
+                }],
+                parked: vec![ParkedRow {
+                    call_id: "siphon-p".into(),
+                    slot: Some("lot-1".into()),
+                    parked_secs: 12,
+                }],
+                ..snapshot(vec![])
+            }),
+        });
+        let rows = app.visible_rooms();
+        assert_eq!(rows.len(), 4);
+        assert!(
+            matches!(rows[0].kind, RoomsRowKind::Room { ref room_id, participants: 2, .. } if room_id == "room-1")
+        );
+        assert!(
+            matches!(rows[1].kind, RoomsRowKind::Participant { ref call_id, .. } if call_id == "siphon-a")
+        );
+        assert!(
+            matches!(rows[3].kind, RoomsRowKind::Parked { ref slot, .. } if slot.as_deref() == Some("lot-1"))
+        );
+
+        // Filter to node 1 (nothing there) empties the view and the
+        // selection clamps.
+        app.tab = Tab::Rooms;
+        app.select_last();
+        assert_eq!(app.selected_room, 3);
+        app.cycle_node_filter();
+        app.cycle_node_filter(); // -> node 1
+        assert!(app.visible_rooms().is_empty());
+        assert_eq!(app.selected_room, 0);
+    }
+
+    #[test]
+    fn status_summary_is_stored_per_node() {
+        use siphon_ai_admin_api_types::{RegistrationsSummary, StatusResponse};
+        let mut app = two_node_app();
+        app.update(Msg::Snapshot {
+            node: 1,
+            result: Ok(NodeSnapshot {
+                status: Some(StatusResponse {
+                    version: "0.49.0".into(),
+                    uptime_secs: 7,
+                    active_calls: 0,
+                    registrations: RegistrationsSummary {
+                        registered: 0,
+                        total: 0,
+                    },
+                    draining: false,
+                    hep_enabled: false,
+                }),
+                ..snapshot(vec![])
+            }),
+        });
+        assert_eq!(app.nodes[1].status.as_ref().unwrap().version, "0.49.0");
+        assert!(app.nodes[0].status.is_none());
     }
 
     #[test]

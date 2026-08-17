@@ -58,6 +58,10 @@ pub use siphon_ai_recording::RecordingMode;
 /// not depend on telemetry.
 pub const DEFAULT_ERROR_RING_SIZE: usize = 256;
 
+/// Default `[observability].cdr_ring_size` (0.49.0); sibling of
+/// `DEFAULT_ERROR_RING_SIZE` with the same sync rule.
+pub const DEFAULT_CDR_RING_SIZE: usize = 50;
+
 /// Top-level error type. Loaders surface this; consumers match on
 /// the underlying variants when they need to discriminate.
 #[derive(Debug, Error)]

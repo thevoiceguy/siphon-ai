@@ -1140,6 +1140,12 @@ pub struct RawObservability {
     /// *admin* listener, not this one.
     #[serde(default)]
     pub error_ring_size: Option<usize>,
+    /// Capacity of the recent-CDRs ring served by
+    /// `GET /admin/v1/cdrs/recent` (0.49.0, DESIGN_SIGHTGLASS.md
+    /// §6.3). Default 50; `0` disables. Independent of `[cdr]` —
+    /// the ring keeps the tail in memory even with no CDR sinks.
+    #[serde(default)]
+    pub cdr_ring_size: Option<usize>,
     /// `[observability.otlp]` — OpenTelemetry OTLP trace export (0.22.0).
     /// Independent of the metrics HTTP server above — you can export traces
     /// without scraping metrics, and vice versa. Off by default.

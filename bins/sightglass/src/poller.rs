@@ -29,14 +29,15 @@ pub fn spawn(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            let (calls, registrations, drain, errors, conferences, parked, status) = tokio::join!(
+            let (calls, registrations, drain, errors, conferences, parked, status, recent) = tokio::join!(
                 client.calls(),
                 client.registrations(),
                 client.drain(),
                 client.errors(),
                 client.conferences(),
                 client.parked(),
-                client.status()
+                client.status(),
+                client.recent_cdrs()
             );
             // Only the three core endpoints decide node health. The
             // errors ring and status are 0.49.0+ (older daemons 404 →
@@ -46,6 +47,7 @@ pub fn spawn(
             let conferences = conferences.map(|c| c.conferences).unwrap_or_default();
             let parked = parked.map(|p| p.parked).unwrap_or_default();
             let status = status.ok();
+            let recent_cdrs = recent.ok().map(|r| r.cdrs);
             let result = calls
                 .and_then(|c| registrations.map(|r| (c, r)))
                 .and_then(|(c, r)| {
@@ -56,6 +58,7 @@ pub fn spawn(
                         conferences,
                         parked,
                         status,
+                        recent_cdrs,
                         errors,
                     })
                 });

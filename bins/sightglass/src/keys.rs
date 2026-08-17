@@ -278,6 +278,7 @@ mod tests {
             conferences: vec![],
             parked: vec![],
             status: None,
+            recent_cdrs: None,
             errors: None,
         }
     }

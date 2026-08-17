@@ -188,17 +188,25 @@ collector *health* stays on `/metrics`.
 
 ### 6.3 Recent-calls ring + `GET /admin/v1/cdrs/recent`
 
-In-memory ring (default 50) of completed-call CDR summaries
-(disposition, duration, hangup cause, MOS). Feeds a history section on
-the Calls tab. Reuses the CDR structs from `crates/cdr` — no second
-schema. `readonly`.
+In-memory ring (default 50, `[observability].cdr_ring_size`) of
+completed-call CDRs. Feeds the history pane on the Calls tab. Reuses
+the CDR records verbatim (serialized `CdrRecord`) — no second schema;
+the ring-capturing sink joins the runtime's CDR fanout, so it works
+with zero `[cdr]` sinks configured and survives SIGHUP sink rebuilds.
+`readonly`. Shipped in PR 5.
 
 ### 6.4 Stats enrichment (additive fields on `…/{id}/stats`)
 
 Fields `CallController`/tap already know, plumbed into the stats
-response: VAD state (speaking/silent), last DTMF digits, WS reconnect
-count, recording state, STIR/SHAKEN verstat, SRTP on/off. Additive
-JSON — no version concerns.
+response. *Split settled in PR 5:* the **static** facts — direction,
+from, to, SIP Call-ID, bridge sample rate, SRTP suite, STIR/SHAKEN
+attestation — ship now, registered once per call alongside the
+quality feed (they all live on the WS `start` template the controller
+already holds). The **dynamic** fields (live VAD state, last DTMF
+digits, WS reconnect count, live recording state) are deferred: each
+needs a tap→registry streaming channel that doesn't exist yet, and
+none is worth that plumbing until someone asks. Additive JSON — no
+version concerns.
 
 ### 6.5 `POST /admin/v1/drain` (admin role)
 

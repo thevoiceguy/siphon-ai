@@ -88,9 +88,13 @@ Unicode status glyphs for ASCII.
   state, expiry, and last error.
 - **calls** — fleet-unified call table (both id namespaces +
   direction; the Node column hides itself on single-node fleets), and
-  a detail pane for the focused call: live MOS, jitter, packet
-  counters, first-audio latency, barge-ins, and a MOS trend sparkline.
-  Stats are polled for the focused call only.
+  a detail pane for the focused call: direction, from/to, SIP
+  Call-ID, sample rate, SRTP suite, STIR/SHAKEN attestation (0.49.0+
+  daemons), plus live MOS, jitter, packet counters, first-audio
+  latency, barge-ins, and a MOS trend sparkline. Stats are polled for
+  the focused call only. Below the active table, a **recent** pane
+  tails the last completed calls (ended time, from → to, hangup
+  cause, duration, MOS) from `GET /admin/v1/cdrs/recent`.
 - **rooms** — conference rooms with their members inline, plus parked
   calls, across the fleet. `x` ends the focused room / kicks the
   focused member / hangs up the focused parked call (node-named

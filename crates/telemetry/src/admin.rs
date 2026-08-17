@@ -78,8 +78,8 @@ use crate::HepTelemetry;
 pub use siphon_ai_admin_api_types::{
     AddParticipantRequest, AdminCallRow, CallsResponse, ConferenceRow, ConferencesResponse,
     CreateConferenceRequest, DrainStatus, ErrorEntry, ErrorsResponse, OriginateRequest,
-    ParkRequest, ParkedResponse, ParkedRow, RegistrationRow, RegistrationsResponse,
-    RegistrationsSummary, RetrieveRequest, StatusResponse,
+    ParkRequest, ParkedResponse, ParkedRow, RecentCdrsResponse, RegistrationRow,
+    RegistrationsResponse, RegistrationsSummary, RetrieveRequest, StatusResponse,
 };
 
 /// Bundle of dependencies the admin handlers may need. Each is
@@ -120,6 +120,10 @@ pub struct AdminState {
     /// Always installed by the runtime; `None` only in partially-built
     /// test states → 503.
     pub status: Option<StatusFn>,
+    /// Recent-CDRs ring snapshot (0.49.0), serving
+    /// `GET /admin/v1/cdrs/recent`. Always installed by the runtime;
+    /// `None` only in partially-built test states → 503.
+    pub recent_cdrs: Option<RecentCdrsFn>,
     /// Recent-errors ring snapshot (0.49.0), serving
     /// `GET /admin/v1/errors`. Always installed by the runtime (the
     /// capture layer runs regardless; `error_ring_size = 0` just
@@ -131,6 +135,11 @@ pub struct AdminState {
 /// Closure producing a fresh [`StatusResponse`] per request. Same
 /// indirection rationale as [`CallRegistryHandle`].
 pub type StatusFn = Arc<dyn Fn() -> StatusResponse + Send + Sync>;
+
+/// Closure producing the recent-CDRs ring (serialized records,
+/// newest first). Same indirection rationale as
+/// [`CallRegistryHandle`] — the runtime wraps `cdr_ring::snapshot`.
+pub type RecentCdrsFn = Arc<dyn Fn() -> Vec<serde_json::Value> + Send + Sync>;
 
 /// Closure producing the recent-errors ring, newest first. Same
 /// indirection rationale as [`CallRegistryHandle`] — the runtime
@@ -350,6 +359,7 @@ pub async fn dispatch(
         (&hyper::Method::GET, "/admin/v1/drain") => drain_status(state),
         (&hyper::Method::GET, "/admin/v1/errors") => list_errors(state),
         (&hyper::Method::GET, "/admin/v1/status") => node_status(state),
+        (&hyper::Method::GET, "/admin/v1/cdrs/recent") => recent_cdrs(state),
         (m, p)
             if *m == hyper::Method::POST
                 && p.starts_with("/admin/v1/registrations/")
@@ -517,6 +527,22 @@ fn node_status(state: &AdminState) -> Response<Full<Bytes>> {
         return service_unavailable("status not installed");
     };
     json_response(StatusCode::OK, &f())
+}
+
+/// `GET /admin/v1/cdrs/recent` (0.49.0) — the last N completed
+/// calls' CDRs. See `crate::cdr_ring`.
+fn recent_cdrs(state: &AdminState) -> Response<Full<Bytes>> {
+    let Some(f) = state.recent_cdrs.as_ref() else {
+        return service_unavailable("cdr ring not installed");
+    };
+    let cdrs = f();
+    json_response(
+        StatusCode::OK,
+        &RecentCdrsResponse {
+            count: cdrs.len(),
+            cdrs,
+        },
+    )
 }
 
 /// `GET /admin/v1/errors` (0.49.0) — the recent-errors ring, newest
@@ -1901,6 +1927,34 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ─── GET /admin/v1/cdrs/recent (0.49.0) ──────────────────────────
+
+    #[tokio::test]
+    async fn recent_cdrs_503_when_not_installed() {
+        let (status, _) = conf(
+            hyper::Method::GET,
+            "/admin/v1/cdrs/recent",
+            "",
+            &empty_state(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn recent_cdrs_lists_ring_passthrough() {
+        let state = AdminState {
+            recent_cdrs: Some(Arc::new(|| {
+                vec![serde_json::json!({ "version": 8, "call_id": "siphon-abc" })]
+            }) as RecentCdrsFn),
+            ..AdminState::default()
+        };
+        let (status, v) = conf(hyper::Method::GET, "/admin/v1/cdrs/recent", "", &state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["cdrs"][0]["call_id"], "siphon-abc");
     }
 
     // ─── GET /admin/v1/status (0.49.0) ───────────────────────────────

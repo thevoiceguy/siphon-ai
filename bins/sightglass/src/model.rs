@@ -295,6 +295,9 @@ pub struct NodeState {
     pub parked: Vec<ParkedRow>,
     /// `GET /admin/v1/status` summary. `None` = pre-0.49 daemon.
     pub status: Option<StatusResponse>,
+    /// Recent completed-call CDRs (serialized records, newest first).
+    /// `None` = endpoint unavailable (pre-0.49 daemon).
+    pub recent_cdrs: Option<Vec<serde_json::Value>>,
     /// Recent-errors tail, newest first. `None` = the node's daemon
     /// doesn't serve `/admin/v1/errors` yet (pre-0.49) — rendered as
     /// "endpoint unavailable", distinct from an empty ring.
@@ -316,6 +319,7 @@ impl NodeState {
             conferences: Vec::new(),
             parked: Vec::new(),
             status: None,
+            recent_cdrs: None,
             errors: None,
             role: None,
         }
@@ -334,6 +338,8 @@ pub struct NodeSnapshot {
     pub parked: Vec<ParkedRow>,
     /// `None` = status endpoint unavailable (pre-0.49 daemon).
     pub status: Option<StatusResponse>,
+    /// `None` = cdrs/recent endpoint unavailable (pre-0.49 daemon).
+    pub recent_cdrs: Option<Vec<serde_json::Value>>,
     /// `None` = errors endpoint unavailable on this daemon.
     pub errors: Option<Vec<ErrorEntry>>,
 }
@@ -462,6 +468,7 @@ impl App {
                         n.conferences = snap.conferences;
                         n.parked = snap.parked;
                         n.status = snap.status;
+                        n.recent_cdrs = snap.recent_cdrs;
                         n.errors = snap.errors;
                     }
                     // Keep last-seen data; only the health flips.
@@ -607,6 +614,29 @@ impl App {
             }
         }
         rows
+    }
+
+    /// Recent completed calls under the node filter, merged across
+    /// nodes and sorted newest-first by `ended_at` (RFC 3339 strings
+    /// compare chronologically).
+    pub fn visible_recent_cdrs(&self) -> Vec<(NodeId, &serde_json::Value)> {
+        let mut merged: Vec<(NodeId, &serde_json::Value)> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(id, _)| self.node_filter.is_none_or(|f| f == *id))
+            .flat_map(|(id, n)| n.recent_cdrs.iter().flatten().map(move |c| (id, c)))
+            .collect();
+        merged.sort_by(|a, b| {
+            let key = |v: &serde_json::Value| {
+                v.get("ended_at")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            key(b.1).cmp(&key(a.1))
+        });
+        merged
     }
 
     /// Errors visible under the node filter, merged across nodes and
@@ -764,6 +794,7 @@ mod tests {
             conferences: vec![],
             parked: vec![],
             status: None,
+            recent_cdrs: None,
             errors: None,
         }
     }
@@ -1038,6 +1069,40 @@ mod tests {
         });
         assert_eq!(app.nodes[1].status.as_ref().unwrap().version, "0.49.0");
         assert!(app.nodes[0].status.is_none());
+    }
+
+    #[test]
+    fn recent_cdrs_merge_sorted_by_ended_at_desc() {
+        use serde_json::json;
+        let mut app = two_node_app();
+        app.update(Msg::Snapshot {
+            node: 0,
+            result: Ok(NodeSnapshot {
+                recent_cdrs: Some(vec![
+                    json!({ "call_id": "old-a", "ended_at": "2026-08-17T10:00:00Z" }),
+                    json!({ "call_id": "new-a", "ended_at": "2026-08-17T12:00:00Z" }),
+                ]),
+                ..snapshot(vec![])
+            }),
+        });
+        app.update(Msg::Snapshot {
+            node: 1,
+            result: Ok(NodeSnapshot {
+                recent_cdrs: Some(vec![
+                    json!({ "call_id": "mid-b", "ended_at": "2026-08-17T11:00:00Z" }),
+                ]),
+                ..snapshot(vec![])
+            }),
+        });
+        let order: Vec<&str> = app
+            .visible_recent_cdrs()
+            .iter()
+            .map(|(_, c)| c["call_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(order, vec!["new-a", "mid-b", "old-a"]);
+
+        app.cycle_node_filter(); // node 0 only
+        assert_eq!(app.visible_recent_cdrs().len(), 2);
     }
 
     #[test]

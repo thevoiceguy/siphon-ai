@@ -81,7 +81,7 @@ use siphon_ai_audit::{
 };
 use siphon_ai_bridge::Direction;
 use siphon_ai_cdr::{
-    CdrSinkHandle, FileSink, HepCdrSink, MultiSink, NullSink, WebhookSink, WebhookSinkConfig,
+    CdrSinkHandle, FileSink, HepCdrSink, MultiSink, WebhookSink, WebhookSinkConfig,
 };
 use siphon_ai_config::{
     AdminTlsConfig, AuditConfig, CdrConfig, CdrFileConfig, CdrWebhookConfig, Config, HepConfig,
@@ -1126,6 +1126,7 @@ impl Runtime {
         // at init_tracing (before config existed); apply the configured
         // capacity now and expose the snapshot to `GET /admin/v1/errors`.
         siphon_ai_telemetry::error_ring::set_capacity(observability.error_ring_size);
+        siphon_ai_telemetry::cdr_ring::set_capacity(observability.cdr_ring_size);
         // `GET /admin/v1/status` summary closure (0.49.0). Live
         // snapshot only — cumulative counters stay on /metrics.
         let status_fn: siphon_ai_telemetry::admin::StatusFn = {
@@ -1162,6 +1163,7 @@ impl Runtime {
                 control: control_registry.clone(),
             }) as AdminCallRegistry),
             errors: Some(Arc::new(siphon_ai_telemetry::error_ring::snapshot)),
+            recent_cdrs: Some(Arc::new(siphon_ai_telemetry::cdr_ring::snapshot)),
             registration_snapshot: Some(Arc::new(move || {
                 registration_mgr_for_admin
                     .snapshot()
@@ -2192,21 +2194,42 @@ pub(crate) async fn build_cdr_sink(
         info!("CDR HEP sink active (chunk type 101)");
     }
 
+    // The "no sub-sinks" warning keys off the operator-configured
+    // sinks — the always-on ring below is not *shipping*, so it
+    // doesn't count.
+    if cdr.enabled && sinks.is_empty() {
+        warn!(
+            "[cdr].enabled = true but no sub-sinks (file / webhook / hep) are active; CDRs will be dropped"
+        );
+    }
+
+    // Recent-CDRs ring (0.49.0, DESIGN_SIGHTGLASS.md §6.3): keep the
+    // last N records in memory for `GET /admin/v1/cdrs/recent`.
+    // Always installed — capacity 0 turns the push into a no-op, and
+    // the ring survives SIGHUP sink rebuilds (it's process-global;
+    // this sink is stateless).
+    sinks.push(Arc::new(RingCdrSink) as CdrSinkHandle);
+
     Ok(match sinks.len() {
-        // No CDR shipping anywhere — silently drop. We only warn
-        // when `[cdr].enabled = true` was set but no sub-sinks
-        // landed, since that's the misconfig the operator cares about.
-        0 => {
-            if cdr.enabled {
-                warn!(
-                    "[cdr].enabled = true but no sub-sinks (file / webhook / hep) are active; CDRs will be dropped"
-                );
-            }
-            Arc::new(NullSink) as CdrSinkHandle
-        }
         1 => sinks.pop().unwrap(),
         _ => Arc::new(MultiSink::new(sinks)) as CdrSinkHandle,
     })
+}
+
+/// Serializes each completed call's CDR into the process-global
+/// recent-CDRs ring. The serialization runs on the CDR emission task
+/// at call end — never the audio path.
+struct RingCdrSink;
+
+#[async_trait::async_trait]
+impl siphon_ai_cdr::CdrSink for RingCdrSink {
+    async fn emit(&self, record: siphon_ai_cdr::CdrRecord) {
+        // A CdrRecord that fails to serialize would already have
+        // broken every real sink; the ring stays quiet about it.
+        if let Ok(v) = serde_json::to_value(&record) {
+            siphon_ai_telemetry::cdr_ring::push(v);
+        }
+    }
 }
 
 /// Build the audit sink from a validated (`enabled = true`) config.

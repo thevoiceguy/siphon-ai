@@ -73,6 +73,7 @@ mod tests {
                 conferences: vec![],
                 parked: vec![],
                 status: None,
+                recent_cdrs: None,
                 errors: None,
             }),
         });
@@ -211,6 +212,58 @@ mod tests {
         assert!(screen.contains("8000 Hz"), "{screen}");
         assert!(screen.contains("member"), "{screen}");
         assert!(screen.contains("slot lot-3"), "{screen}");
+    }
+
+    #[test]
+    fn calls_tab_history_pane_reads_cdr_fields_defensively() {
+        use serde_json::json;
+        let mut app = fixture_app();
+        app.nodes[0].recent_cdrs = Some(vec![json!({
+            "version": 8,
+            "call_id": "siphon-done",
+            "from": "sipp",
+            "to": "1000",
+            "ended_at": "2026-08-17T19:32:38Z",
+            "duration_ms": 18_000,
+            "termination": { "cause": "caller_hangup" },
+            "quality": { "mos_estimate_avg": 4.31 },
+        })]);
+        app.tab = Tab::Calls;
+        let screen = render(&app, 120, 34);
+        assert!(screen.contains("recent (1)"), "{screen}");
+        assert!(screen.contains("19:32:38"), "{screen}");
+        assert!(screen.contains("sipp → 1000"), "{screen}");
+        assert!(screen.contains("caller_hangup"), "{screen}");
+        assert!(screen.contains("18s"), "{screen}");
+        assert!(screen.contains("4.3"), "{screen}");
+    }
+
+    #[test]
+    fn detail_pane_renders_static_meta_fields() {
+        use serde_json::json;
+        let mut app = fixture_app();
+        app.tab = Tab::Calls;
+        app.select_first();
+        let (node, call_id) = app.focus().unwrap();
+        app.update(Msg::Stats {
+            node,
+            call_id,
+            stats: json!({
+                "direction": "inbound",
+                "from": "sipp",
+                "to": "1000",
+                "sip_call_id": "aa11@pbx",
+                "sample_rate": 8000,
+                "srtp_profile": "AES_CM_128_HMAC_SHA1_80",
+                "verstat_attest": "A",
+                "mos_estimate_avg": 4.4,
+            }),
+        });
+        let screen = render(&app, 120, 34);
+        assert!(screen.contains("inbound"), "{screen}");
+        assert!(screen.contains("8000 Hz"), "{screen}");
+        assert!(screen.contains("AES_CM_128"), "{screen}");
+        assert!(screen.contains("attest"), "{screen}");
     }
 
     #[test]

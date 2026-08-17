@@ -26,8 +26,93 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         (t, d)
     };
 
-    draw_table(frame, app, theme, table_area);
+    let [active_area, history_area] =
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .areas(table_area);
+    draw_table(frame, app, theme, active_area);
+    draw_history(frame, app, theme, history_area);
     draw_detail(frame, app, theme, detail_area);
+}
+
+/// Recent completed calls (0.49.0+ daemons): a dim tail under the
+/// active table, read defensively off the serialized CDR records —
+/// the CDR schema is versioned; absent fields render as dashes.
+fn draw_history(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let multi_node = app.nodes.len() > 1;
+    let recent = app.visible_recent_cdrs();
+
+    let mut headers = vec!["ENDED", "FROM → TO", "CAUSE", "DUR", "MOS"];
+    if multi_node {
+        headers.insert(0, "NODE");
+    }
+    let header = Row::new(
+        headers
+            .into_iter()
+            .map(|h| Cell::from(Span::styled(h, theme.dim_text()))),
+    );
+
+    let s = |v: &serde_json::Value, k: &str| {
+        v.get(k).and_then(|x| x.as_str()).unwrap_or("—").to_string()
+    };
+    let rows = recent.iter().map(|(node, c)| {
+        let ended = s(c, "ended_at");
+        let ended = ended.get(11..19).unwrap_or(&ended).to_string();
+        let route = format!("{} → {}", s(c, "from"), s(c, "to"));
+        let cause = c
+            .get("termination")
+            .and_then(|t| t.get("cause"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("—")
+            .to_string();
+        let dur = c
+            .get("duration_ms")
+            .and_then(|d| d.as_u64())
+            .map(|ms| format!("{}s", ms / 1000))
+            .unwrap_or_else(|| "—".into());
+        let mos = c
+            .get("quality")
+            .and_then(|q| q.get("mos_estimate_avg"))
+            .and_then(|m| m.as_f64())
+            .map(|m| format!("{m:.1}"))
+            .unwrap_or_else(|| "—".into());
+        let mut cells = vec![
+            Cell::from(Span::styled(ended, theme.dim_text())),
+            Cell::from(Span::styled(route, theme.dim_text())),
+            Cell::from(Span::styled(cause, theme.dim_text())),
+            Cell::from(Span::styled(dur, theme.dim_text())),
+            Cell::from(Span::styled(mos, theme.dim_text())),
+        ];
+        if multi_node {
+            cells.insert(
+                0,
+                Cell::from(Span::styled(
+                    app.nodes[*node].name.as_str(),
+                    theme.dim_text(),
+                )),
+            );
+        }
+        Row::new(cells)
+    });
+
+    let mut widths = vec![
+        Constraint::Length(8),
+        Constraint::Min(16),
+        Constraint::Length(14),
+        Constraint::Length(6),
+        Constraint::Length(4),
+    ];
+    if multi_node {
+        widths.insert(0, Constraint::Length(10));
+    }
+
+    let title = format!(" recent ({}) ", recent.len());
+    let table = Table::new(rows, widths).header(header).block(
+        Block::new()
+            .borders(Borders::ALL)
+            .border_style(theme.dim_text())
+            .title(Span::styled(title, theme.dim_text())),
+    );
+    frame.render_widget(table, area);
 }
 
 fn draw_table(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
@@ -125,6 +210,21 @@ fn draw_detail(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     match &app.stats.latest {
         None => lines.push(Line::styled("fetching stats…", theme.dim_text())),
         Some(stats) => {
+            for (key, label) in [
+                ("direction", "direction"),
+                ("from", "from"),
+                ("to", "to"),
+                ("sip_call_id", "sip call-id"),
+                ("srtp_profile", "srtp"),
+                ("verstat_attest", "attest"),
+            ] {
+                if let Some(v) = stats.get(key).and_then(|v| v.as_str()) {
+                    lines.push(field_line_owned(theme, label, v.to_string()));
+                }
+            }
+            if let Some(rate) = stats.get("sample_rate").and_then(|v| v.as_u64()) {
+                lines.push(field_line_owned(theme, "rate", format!("{rate} Hz")));
+            }
             lines.push(Line::default());
             push_stat(
                 &mut lines,
@@ -220,6 +320,13 @@ fn draw_detail(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 .title(Span::styled(" MOS trend ", theme.dim_text())),
         );
     frame.render_widget(spark, spark_area);
+}
+
+fn field_line_owned(theme: &Theme, label: &str, value: String) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label:>12}  "), theme.dim_text()),
+        Span::styled(value, theme.text()),
+    ])
 }
 
 fn field_line<'a>(theme: &Theme, label: &'a str, value: &'a str) -> Line<'a> {

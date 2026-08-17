@@ -10,6 +10,7 @@ repository.workspace   = true
 
 [dependencies]
 serde.workspace = true
-
-[dev-dependencies]
+# For the recent-CDRs passthrough envelope only — CDR entries are the
+# serialized siphon-ai-cdr records (the CDR schema is the schema; this
+# crate doesn't re-model it).
 serde_json.workspace = true

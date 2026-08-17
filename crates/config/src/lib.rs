@@ -52,6 +52,12 @@ pub use raw::{
 // `Config.recording.mode` without a direct dep on the recording crate.
 pub use siphon_ai_recording::RecordingMode;
 
+/// Default `[observability].error_ring_size` (0.49.0). Kept in sync
+/// with `siphon_ai_telemetry::error_ring::DEFAULT_CAPACITY` by the
+/// runtime's wiring test rather than a cross-crate dep — config must
+/// not depend on telemetry.
+pub const DEFAULT_ERROR_RING_SIZE: usize = 256;
+
 /// Top-level error type. Loaders surface this; consumers match on
 /// the underlying variants when they need to discriminate.
 #[derive(Debug, Error)]

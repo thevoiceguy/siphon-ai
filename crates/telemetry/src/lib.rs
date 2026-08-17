@@ -21,6 +21,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod error_ring;
 pub mod hep;
 pub mod http;
 pub mod log_filter;

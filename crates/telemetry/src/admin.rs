@@ -77,8 +77,9 @@ use crate::HepTelemetry;
 // traits and error enums below stay in this crate.
 pub use siphon_ai_admin_api_types::{
     AddParticipantRequest, AdminCallRow, CallsResponse, ConferenceRow, ConferencesResponse,
-    CreateConferenceRequest, DrainStatus, OriginateRequest, ParkRequest, ParkedResponse, ParkedRow,
-    RegistrationRow, RegistrationsResponse, RetrieveRequest,
+    CreateConferenceRequest, DrainStatus, ErrorEntry, ErrorsResponse, OriginateRequest,
+    ParkRequest, ParkedResponse, ParkedRow, RegistrationRow, RegistrationsResponse,
+    RetrieveRequest,
 };
 
 /// Bundle of dependencies the admin handlers may need. Each is
@@ -115,7 +116,18 @@ pub struct AdminState {
     /// `[[register]]` blocks — triggers then 404); `None` only in
     /// partially-built test states → 503.
     pub registrations: Option<AdminRegistrations>,
+    /// Recent-errors ring snapshot (0.49.0), serving
+    /// `GET /admin/v1/errors`. Always installed by the runtime (the
+    /// capture layer runs regardless; `error_ring_size = 0` just
+    /// means an empty listing); `None` only in partially-built test
+    /// states → 503.
+    pub errors: Option<ErrorsSnapshotFn>,
 }
+
+/// Closure producing the recent-errors ring, newest first. Same
+/// indirection rationale as [`CallRegistryHandle`] — the runtime
+/// wraps `error_ring::snapshot`.
+pub type ErrorsSnapshotFn = Arc<dyn Fn() -> Vec<ErrorEntry> + Send + Sync>;
 
 /// Closure resolving a bridge `call_id` to its live quality snapshot,
 /// pre-serialized by the runtime adapter. `None` = no active call with
@@ -328,6 +340,7 @@ pub async fn dispatch(
         (&hyper::Method::POST, "/admin/v1/conferences") => create_conference(state, &body),
         (&hyper::Method::GET, "/admin/v1/parked") => list_parked(state),
         (&hyper::Method::GET, "/admin/v1/drain") => drain_status(state),
+        (&hyper::Method::GET, "/admin/v1/errors") => list_errors(state),
         (m, p)
             if *m == hyper::Method::POST
                 && p.starts_with("/admin/v1/registrations/")
@@ -485,6 +498,22 @@ fn list_calls(state: &AdminState) -> Response<Full<Bytes>> {
         &CallsResponse {
             count: calls.len(),
             calls,
+        },
+    )
+}
+
+/// `GET /admin/v1/errors` (0.49.0) — the recent-errors ring, newest
+/// first. See `crate::error_ring`.
+fn list_errors(state: &AdminState) -> Response<Full<Bytes>> {
+    let Some(f) = state.errors.as_ref() else {
+        return service_unavailable("error ring not installed");
+    };
+    let errors = f();
+    json_response(
+        StatusCode::OK,
+        &ErrorsResponse {
+            count: errors.len(),
+            errors,
         },
     )
 }
@@ -1855,6 +1884,36 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ─── GET /admin/v1/errors (0.49.0) ───────────────────────────────
+
+    #[tokio::test]
+    async fn errors_503_when_not_installed() {
+        let (status, _) = conf(hyper::Method::GET, "/admin/v1/errors", "", &empty_state()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn errors_lists_ring_snapshot_newest_first() {
+        let state = AdminState {
+            errors: Some(Arc::new(|| {
+                vec![ErrorEntry {
+                    ts_ms: 1_755_000_000_123,
+                    level: "warn".into(),
+                    target: "siphon_ai_bridge::conn".into(),
+                    message: "server_too_slow deadline=5s".into(),
+                    call_id: Some("siphon-abc".into()),
+                }]
+            }) as ErrorsSnapshotFn),
+            ..AdminState::default()
+        };
+        let (status, v) = conf(hyper::Method::GET, "/admin/v1/errors", "", &state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["errors"][0]["level"], "warn");
+        assert_eq!(v["errors"][0]["call_id"], "siphon-abc");
+        assert_eq!(v["errors"][0]["ts_ms"], 1_755_000_000_123u64);
     }
 
     // ─── GET /admin/v1/drain (0.17.0) ────────────────────────────────

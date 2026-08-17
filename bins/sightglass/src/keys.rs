@@ -27,6 +27,7 @@ pub fn handle(app: &mut App, event: &Event) -> Option<Action> {
         KeyCode::Char('1') => app.tab = Tab::Overview,
         KeyCode::Char('2') => app.tab = Tab::Trunks,
         KeyCode::Char('3') => app.tab = Tab::Calls,
+        KeyCode::Char('4') => app.tab = Tab::Errors,
         KeyCode::Char('n') => app.cycle_node_filter(),
         KeyCode::Char('j') | KeyCode::Down => app.select_next(),
         KeyCode::Char('k') | KeyCode::Up => app.select_prev(),
@@ -208,6 +209,7 @@ mod tests {
                 drain_timeout_secs: 30,
                 remaining_secs: None,
             },
+            errors: None,
         }
     }
 

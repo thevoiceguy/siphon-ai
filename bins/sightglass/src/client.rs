@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
-use siphon_ai_admin_api_types::{CallsResponse, DrainStatus, ErrorBody, RegistrationsResponse};
+use siphon_ai_admin_api_types::{
+    CallsResponse, DrainStatus, ErrorBody, ErrorsResponse, RegistrationsResponse,
+};
 
 use crate::config::Node;
 use crate::model::Role;
@@ -58,6 +60,13 @@ impl AdminClient {
 
     pub async fn drain(&self) -> Result<DrainStatus, String> {
         self.get_json("/admin/v1/drain").await
+    }
+
+    /// Recent-errors ring (0.49.0+ daemons). Callers treat a failure
+    /// as "endpoint unavailable", not node-down — pre-0.49 daemons
+    /// 404 this.
+    pub async fn errors(&self) -> Result<ErrorsResponse, String> {
+        self.get_json("/admin/v1/errors").await
     }
 
     /// Live quality snapshot for one active call. Kept as a loose

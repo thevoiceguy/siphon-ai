@@ -29,8 +29,16 @@ pub fn spawn(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            let (calls, registrations, drain) =
-                tokio::join!(client.calls(), client.registrations(), client.drain());
+            let (calls, registrations, drain, errors) = tokio::join!(
+                client.calls(),
+                client.registrations(),
+                client.drain(),
+                client.errors()
+            );
+            // The errors ring is 0.49.0+; a failure there (404 from an
+            // older daemon) must not mark the node down — it degrades
+            // to "endpoint unavailable" on the Errors tab.
+            let errors = errors.ok().map(|e| e.errors);
             let result = calls
                 .and_then(|c| registrations.map(|r| (c, r)))
                 .and_then(|(c, r)| {
@@ -38,6 +46,7 @@ pub fn spawn(
                         calls: c.calls,
                         registrations: r.registrations,
                         drain: d,
+                        errors,
                     })
                 });
             if tx.send(Msg::Snapshot { node, result }).await.is_err() {

@@ -209,7 +209,9 @@ pub fn min_role(method: &hyper::Method, path: &str) -> Option<Role> {
         // only by falling through to `authorize`'s unknown-path default —
         // i.e. the right answer for the wrong reason, and silently wrong
         // had the default ever been tightened.
-        | (&Method::GET, "/admin/v1/drain") => Some(Role::ReadOnly),
+        | (&Method::GET, "/admin/v1/drain")
+        // Recent-errors ring (0.49.0) — another plain GET snapshot.
+        | (&Method::GET, "/admin/v1/errors") => Some(Role::ReadOnly),
 
         // ── Admin (billable / config / observability-blinding) ──
         (&Method::PUT, "/admin/log" | "/admin/v1/log")
@@ -465,6 +467,10 @@ mod tests {
     fn min_role_table_matches_endpoint_groups() {
         assert_eq!(
             min_role(&Method::GET, "/admin/v1/parked"),
+            Some(Role::ReadOnly)
+        );
+        assert_eq!(
+            min_role(&Method::GET, "/admin/v1/errors"),
             Some(Role::ReadOnly)
         );
         assert_eq!(

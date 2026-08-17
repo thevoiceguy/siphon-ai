@@ -103,6 +103,36 @@ pub struct ParkedResponse {
     pub parked: Vec<ParkedRow>,
 }
 
+// ─── GET /admin/v1/errors ──────────────────────────────────────────
+
+/// One captured `warn!`/`error!` event in the `GET /admin/v1/errors`
+/// response (0.49.0, DESIGN_SIGHTGLASS.md §6.1). Captured by the
+/// daemon's error-ring tracing layer; newest-first in the listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorEntry {
+    /// Capture time, milliseconds since the Unix epoch.
+    pub ts_ms: u64,
+    /// `"warn"` | `"error"`.
+    pub level: String,
+    /// The `tracing` target (module path unless overridden).
+    pub target: String,
+    /// The event's message, with any structured fields appended as
+    /// `key=value`.
+    pub message: String,
+    /// The `call_id` span field nearest the event, when the event
+    /// fired inside a per-call span.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub call_id: Option<String>,
+}
+
+/// `GET /admin/v1/errors` response envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorsResponse {
+    pub count: usize,
+    /// Newest first.
+    pub errors: Vec<ErrorEntry>,
+}
+
 // ─── GET /admin/v1/drain ───────────────────────────────────────────
 
 /// Snapshot of the daemon's graceful-shutdown drain state (0.17.0),
@@ -299,6 +329,43 @@ mod tests {
                 "parked": [{ "call_id": "siphon-abc", "parked_secs": 12 }],
             })
         );
+    }
+
+    #[test]
+    fn errors_response_wire_shape() {
+        let resp = ErrorsResponse {
+            count: 1,
+            errors: vec![ErrorEntry {
+                ts_ms: 1_755_000_000_123,
+                level: "warn".into(),
+                target: "siphon_ai_bridge::conn".into(),
+                message: "server sent no audio within start-deadline deadline=5s".into(),
+                call_id: Some("siphon-abc".into()),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&resp).unwrap(),
+            json!({
+                "count": 1,
+                "errors": [{
+                    "ts_ms": 1_755_000_000_123u64,
+                    "level": "warn",
+                    "target": "siphon_ai_bridge::conn",
+                    "message": "server sent no audio within start-deadline deadline=5s",
+                    "call_id": "siphon-abc",
+                }],
+            })
+        );
+        // call_id is omitted, not null, when the event fired outside
+        // a per-call span.
+        let no_call = ErrorEntry {
+            ts_ms: 0,
+            level: "error".into(),
+            target: "t".into(),
+            message: "m".into(),
+            call_id: None,
+        };
+        assert!(!serde_json::to_string(&no_call).unwrap().contains("call_id"));
     }
 
     #[test]

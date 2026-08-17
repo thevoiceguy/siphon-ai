@@ -655,10 +655,23 @@ fn init_tracing(cli_filter: Option<&str>) -> (LogFilterHandle, OtelActivation) {
     // don't crash this process; the second init is a noop. The
     // reload handle works either way because the layer is part of
     // the subscriber, not a global cell.
+    // Recent-errors ring (0.49.0, DESIGN_SIGHTGLASS.md §6.1): capture
+    // warn/error into the in-memory ring behind `GET /admin/v1/errors`.
+    // Installed here — before config loads — so config-load warnings are
+    // themselves captured; the runtime applies the configured capacity
+    // later. The per-layer WARN filter keeps it at zero cost for the
+    // info/debug firehose. Caveat: the reloadable `filter_layer` above
+    // is a global filter gating every layer, so an operator narrowing
+    // the directive below WARN (`PUT /admin/v1/log` with `off`, or a
+    // target filter that drops a crate entirely) also narrows what the
+    // ring sees — documented in CONFIG.md.
+    let ring_layer = siphon_ai_telemetry::error_ring::ErrorRingLayer
+        .with_filter(tracing_subscriber::filter::LevelFilter::WARN);
     let _ = tracing_subscriber::registry()
         .with(filter_layer)
         .with(otel_layer)
         .with(fmt_layer)
+        .with(ring_layer)
         .try_init();
 
     // Deferred activation: open the OTLP layer's filter. The runtime calls

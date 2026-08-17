@@ -54,6 +54,195 @@ impl Tab {
     }
 }
 
+/// Admin token role ladder, mirroring the daemon's `auth::Role`
+/// (`readonly` < `operator` < `admin`). Learned per node by the
+/// startup probe (`AdminClient::probe_role`) and downgraded lazily if
+/// an action ever answers 403.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Role {
+    ReadOnly,
+    Operator,
+    Admin,
+}
+
+/// An operator action against exactly one node (DESIGN_SIGHTGLASS.md
+/// §5). Node-scoped by construction: the composite `(node, id)` key
+/// travels with the action, so a dispatch can never act on the wrong
+/// box.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    Hangup {
+        node: NodeId,
+        call_id: String,
+    },
+    Park {
+        node: NodeId,
+        call_id: String,
+    },
+    Retrieve {
+        node: NodeId,
+        call_id: String,
+        ws_url: Option<String>,
+    },
+    AddToConference {
+        node: NodeId,
+        call_id: String,
+        room_id: String,
+    },
+    Originate {
+        node: NodeId,
+        to: String,
+        gateway: String,
+        ws_url: Option<String>,
+    },
+}
+
+impl Action {
+    pub fn node(&self) -> NodeId {
+        match self {
+            Action::Hangup { node, .. }
+            | Action::Park { node, .. }
+            | Action::Retrieve { node, .. }
+            | Action::AddToConference { node, .. }
+            | Action::Originate { node, .. } => *node,
+        }
+    }
+
+    /// Minimum role per the daemon's endpoint→role table
+    /// (`telemetry::auth::min_role`): call control is `operator`,
+    /// origination is billable and needs `admin`.
+    pub fn required_role(&self) -> Role {
+        match self {
+            Action::Originate { .. } => Role::Admin,
+            _ => Role::Operator,
+        }
+    }
+
+    /// Verb for toasts/labels.
+    pub fn verb(&self) -> &'static str {
+        match self {
+            Action::Hangup { .. } => "hangup",
+            Action::Park { .. } => "park",
+            Action::Retrieve { .. } => "retrieve",
+            Action::AddToConference { .. } => "conference-add",
+            Action::Originate { .. } => "originate",
+        }
+    }
+}
+
+/// A modal blocking normal input: a yes/no confirm or a small form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Modal {
+    Confirm {
+        action: Action,
+        /// Built at open time; always names the node ("… on prod-2?").
+        prompt: String,
+    },
+    Input(InputModal),
+}
+
+/// Which action an input form builds on submit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputKind {
+    Retrieve,
+    AddToConference,
+    Originate,
+}
+
+/// One text field of an input modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Field {
+    pub label: &'static str,
+    pub value: String,
+    pub required: bool,
+}
+
+impl Field {
+    pub fn required(label: &'static str) -> Self {
+        Self {
+            label,
+            value: String::new(),
+            required: true,
+        }
+    }
+
+    pub fn optional(label: &'static str) -> Self {
+        Self {
+            label,
+            value: String::new(),
+            required: false,
+        }
+    }
+}
+
+/// A small form modal (retrieve / conference-add / originate).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputModal {
+    pub kind: InputKind,
+    pub node: NodeId,
+    /// The focused call the form acts on (absent for originate).
+    pub call_id: Option<String>,
+    pub fields: Vec<Field>,
+    pub active: usize,
+}
+
+impl InputModal {
+    pub fn title(&self, node_name: &str) -> String {
+        match self.kind {
+            InputKind::Retrieve => format!(" retrieve on {node_name} "),
+            InputKind::AddToConference => format!(" add to conference on {node_name} "),
+            InputKind::Originate => format!(" originate on {node_name} "),
+        }
+    }
+
+    /// Build the action, or an error naming the first missing field.
+    pub fn submit(&self) -> Result<Action, String> {
+        if let Some(missing) = self
+            .fields
+            .iter()
+            .find(|f| f.required && f.value.trim().is_empty())
+        {
+            return Err(format!("{} is required", missing.label));
+        }
+        let val = |i: usize| self.fields[i].value.trim().to_string();
+        let opt = |i: usize| {
+            let v = val(i);
+            (!v.is_empty()).then_some(v)
+        };
+        Ok(match self.kind {
+            InputKind::Retrieve => Action::Retrieve {
+                node: self.node,
+                call_id: self.call_id.clone().unwrap_or_default(),
+                ws_url: opt(0),
+            },
+            InputKind::AddToConference => Action::AddToConference {
+                node: self.node,
+                call_id: self.call_id.clone().unwrap_or_default(),
+                room_id: val(0),
+            },
+            InputKind::Originate => Action::Originate {
+                node: self.node,
+                to: val(0),
+                gateway: val(1),
+                ws_url: opt(2),
+            },
+        })
+    }
+}
+
+/// Toast lifetime in ticks (1 s cadence).
+const TOAST_TTL: u8 = 5;
+/// At most this many toasts on screen; older ones are dropped first.
+const TOAST_MAX: usize = 4;
+
+/// A transient action-result notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Toast {
+    pub text: String,
+    pub ok: bool,
+    pub ttl: u8,
+}
+
 /// Reachability of one node's admin listener. A down node keeps its
 /// last-seen data (rendered dimmed) — §2's "degrade, never break".
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +263,10 @@ pub struct NodeState {
     pub calls: Vec<AdminCallRow>,
     pub registrations: Vec<RegistrationRow>,
     pub drain: Option<DrainStatus>,
+    /// This node's token role, from the startup probe. `None` until
+    /// learned — actions stay enabled while unknown (a wrong guess
+    /// surfaces as a 403 toast, which also teaches the ceiling).
+    pub role: Option<Role>,
 }
 
 impl NodeState {
@@ -84,6 +277,7 @@ impl NodeState {
             calls: Vec::new(),
             registrations: Vec::new(),
             drain: None,
+            role: None,
         }
     }
 }
@@ -128,6 +322,18 @@ pub enum Msg {
     /// A terminal event from the input thread. Routed to `keys::handle`
     /// by the main loop before `update` ever sees it.
     Input(ratatui::crossterm::event::Event),
+    /// The startup probe resolved a node's token role.
+    RoleLearned { node: NodeId, role: Role },
+    /// A dispatched action finished (2xx or not).
+    ActionOutcome {
+        node: NodeId,
+        ok: bool,
+        /// The action answered 403 — the token sits below
+        /// `required`; teaches the role ceiling.
+        forbidden: bool,
+        required: Role,
+        text: String,
+    },
 }
 
 pub struct App {
@@ -140,6 +346,10 @@ pub struct App {
     pub stats: StatsPane,
     /// Fleet-wide active-call totals, one sample per tick, newest last.
     pub fleet_history: VecDeque<u64>,
+    /// Blocking modal, if any. While set, all keys route to it.
+    pub modal: Option<Modal>,
+    /// Transient action-result notices, oldest first.
+    pub toasts: Vec<Toast>,
     pub read_only: bool,
     pub should_quit: bool,
 }
@@ -153,6 +363,8 @@ impl App {
             selected_call: 0,
             stats: StatsPane::default(),
             fleet_history: VecDeque::new(),
+            modal: None,
+            toasts: Vec::new(),
             read_only,
             should_quit: false,
         }
@@ -200,9 +412,66 @@ impl App {
             Msg::Tick => {
                 let total: u64 = self.nodes.iter().map(|n| n.calls.len() as u64).sum();
                 push_capped(&mut self.fleet_history, Some(total));
+                // Age out toasts.
+                for t in &mut self.toasts {
+                    t.ttl = t.ttl.saturating_sub(1);
+                }
+                self.toasts.retain(|t| t.ttl > 0);
             }
             // Input is dispatched to `keys::handle` by the main loop.
             Msg::Input(_) => {}
+            Msg::RoleLearned { node, role } => {
+                if let Some(n) = self.nodes.get_mut(node) {
+                    n.role = Some(role);
+                }
+            }
+            Msg::ActionOutcome {
+                node,
+                ok,
+                forbidden,
+                required,
+                text,
+            } => {
+                self.push_toast(text, ok);
+                // A 403 teaches the ceiling: the token is below
+                // `required`, so it is at most the role beneath it.
+                if forbidden {
+                    if let Some(n) = self.nodes.get_mut(node) {
+                        let ceiling = match required {
+                            Role::Admin => Role::Operator,
+                            _ => Role::ReadOnly,
+                        };
+                        n.role = Some(match n.role {
+                            Some(current) => current.min(ceiling),
+                            None => ceiling,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn push_toast(&mut self, text: String, ok: bool) {
+        if self.toasts.len() == TOAST_MAX {
+            self.toasts.remove(0);
+        }
+        self.toasts.push(Toast {
+            text,
+            ok,
+            ttl: TOAST_TTL,
+        });
+    }
+
+    /// Whether an action needing `required` on `node` is currently
+    /// permitted: `--read-only` beats everything; an unknown role is
+    /// permissive (the 403 toast will teach it).
+    pub fn can(&self, node: NodeId, required: Role) -> bool {
+        if self.read_only {
+            return false;
+        }
+        match self.nodes.get(node).and_then(|n| n.role) {
+            Some(role) => role >= required,
+            None => true,
         }
     }
 
@@ -438,5 +707,68 @@ mod tests {
         let mut app = two_node_app();
         app.update(Msg::Tick);
         assert_eq!(app.fleet_history.back(), Some(&3));
+    }
+
+    #[test]
+    fn toasts_expire_after_ttl_ticks() {
+        let mut app = two_node_app();
+        app.push_toast("hello".into(), true);
+        for _ in 0..TOAST_TTL - 1 {
+            app.update(Msg::Tick);
+        }
+        assert_eq!(app.toasts.len(), 1);
+        app.update(Msg::Tick);
+        assert!(app.toasts.is_empty());
+    }
+
+    #[test]
+    fn action_outcome_toasts_and_403_teaches_role_ceiling() {
+        let mut app = two_node_app();
+        app.update(Msg::RoleLearned {
+            node: 0,
+            role: Role::Admin,
+        });
+        assert!(app.can(0, Role::Admin));
+
+        // A forbidden operator-level action drops the ceiling to
+        // readonly and leaves an error toast.
+        app.update(Msg::ActionOutcome {
+            node: 0,
+            ok: false,
+            forbidden: true,
+            required: Role::Operator,
+            text: "hangup on prod-1: forbidden".into(),
+        });
+        assert_eq!(app.nodes[0].role, Some(Role::ReadOnly));
+        assert!(!app.can(0, Role::Operator));
+        assert!(app.toasts.iter().any(|t| !t.ok));
+
+        // A forbidden admin-level action on a fresh node caps it at
+        // operator.
+        app.update(Msg::ActionOutcome {
+            node: 1,
+            ok: false,
+            forbidden: true,
+            required: Role::Admin,
+            text: "originate on prod-2: forbidden".into(),
+        });
+        assert_eq!(app.nodes[1].role, Some(Role::Operator));
+        assert!(app.can(1, Role::Operator));
+    }
+
+    #[test]
+    fn read_only_beats_any_role() {
+        let mut app = App::new(vec!["a".into()], true);
+        app.update(Msg::RoleLearned {
+            node: 0,
+            role: Role::Admin,
+        });
+        assert!(!app.can(0, Role::Operator));
+    }
+
+    #[test]
+    fn unknown_role_is_permissive() {
+        let app = two_node_app();
+        assert!(app.can(0, Role::Admin));
     }
 }

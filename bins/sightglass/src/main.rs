@@ -20,8 +20,8 @@ use anyhow::Result;
 use clap::Parser;
 use tokio::sync::{mpsc, watch};
 
-use client::AdminClient;
-use model::{App, Msg, NodeId};
+use client::{AdminClient, ApiError};
+use model::{Action, App, Msg, NodeId};
 use ui::Theme;
 
 #[derive(Debug, Parser)]
@@ -92,6 +92,21 @@ async fn main() -> Result<()> {
     }
     spawn_input_thread(tx.clone());
 
+    // Learn each node's token role up front so action keys grey out
+    // instead of 403ing (§5). Skipped in --read-only: no actions will
+    // ever fire, so don't spend the probe (or its audit-log entries).
+    if !cli.read_only {
+        for (id, client) in clients.iter().enumerate() {
+            let tx = tx.clone();
+            let client = client.clone();
+            tokio::spawn(async move {
+                if let Some(role) = client.probe_role().await {
+                    let _ = tx.send(Msg::RoleLearned { node: id, role }).await;
+                }
+            });
+        }
+    }
+
     let app = App::new(
         fleet.nodes.iter().map(|n| n.name.clone()).collect(),
         cli.read_only,
@@ -99,7 +114,7 @@ async fn main() -> Result<()> {
     let theme = Theme::new(cli.ascii);
 
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, app, &theme, rx, focus_tx).await;
+    let result = run(&mut terminal, app, &theme, rx, focus_tx, &clients, tx).await;
     ratatui::restore();
     result
 }
@@ -110,6 +125,8 @@ async fn run(
     theme: &Theme,
     mut rx: mpsc::Receiver<Msg>,
     focus_tx: watch::Sender<Option<(NodeId, String)>>,
+    clients: &[Arc<AdminClient>],
+    tx: mpsc::Sender<Msg>,
 ) -> Result<()> {
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -117,7 +134,11 @@ async fn run(
         terminal.draw(|f| ui::draw(f, &app, theme))?;
         tokio::select! {
             msg = rx.recv() => match msg {
-                Some(Msg::Input(event)) => keys::handle(&mut app, &event),
+                Some(Msg::Input(event)) => {
+                    if let Some(action) = keys::handle(&mut app, &event) {
+                        dispatch(action, &app, clients, &tx);
+                    }
+                }
                 Some(msg) => app.update(msg),
                 None => return Ok(()), // all producers gone
             },
@@ -138,6 +159,72 @@ async fn run(
             return Ok(());
         }
     }
+}
+
+/// Fire an action against its owning node's client on a background
+/// task; the outcome comes back as a [`Msg::ActionOutcome`] toast.
+/// The keymap already RBAC-gated the action — a 403 here means the
+/// probe guessed high, and the outcome teaches the real ceiling.
+fn dispatch(action: Action, app: &App, clients: &[Arc<AdminClient>], tx: &mpsc::Sender<Msg>) {
+    let node = action.node();
+    let Some(client) = clients.get(node).cloned() else {
+        return;
+    };
+    let node_name = app.nodes[node].name.clone();
+    let required = action.required_role();
+    let verb = action.verb();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let (subject, result) = match &action {
+            Action::Hangup { call_id, .. } => (call_id.clone(), client.hangup(call_id).await),
+            Action::Park { call_id, .. } => (call_id.clone(), client.park(call_id).await),
+            Action::Retrieve {
+                call_id, ws_url, ..
+            } => (
+                call_id.clone(),
+                client.retrieve(call_id, ws_url.as_deref()).await,
+            ),
+            Action::AddToConference {
+                call_id, room_id, ..
+            } => (
+                format!("{call_id} → {room_id}"),
+                client.add_to_conference(room_id, call_id).await,
+            ),
+            Action::Originate {
+                to,
+                gateway,
+                ws_url,
+                ..
+            } => (
+                format!("{to} via {gateway}"),
+                client.originate(to, gateway, ws_url.as_deref()).await,
+            ),
+        };
+        let msg = match result {
+            Ok(detail) => Msg::ActionOutcome {
+                node,
+                ok: true,
+                forbidden: false,
+                required,
+                text: format!("{verb} {subject} on {node_name}: {detail}"),
+            },
+            Err(ApiError::Forbidden) => Msg::ActionOutcome {
+                node,
+                ok: false,
+                forbidden: true,
+                required,
+                text: format!("{verb} on {node_name}: forbidden (token role too low)"),
+            },
+            Err(ApiError::Other(detail)) => Msg::ActionOutcome {
+                node,
+                ok: false,
+                forbidden: false,
+                required,
+                text: format!("{verb} {subject} on {node_name}: {detail}"),
+            },
+        };
+        let _ = tx.send(msg).await;
+    });
 }
 
 /// Terminal input on a plain thread: `crossterm::event::read` blocks,

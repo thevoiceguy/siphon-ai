@@ -76,18 +76,49 @@ fn draw_tabs(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let mut hints: Vec<(&str, &str)> = vec![("q", "quit"), ("⇥/1-3", "tabs")];
+    // While a form modal is open the only valid keys are its own.
+    if matches!(app.modal, Some(crate::model::Modal::Input(_))) {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " enter submit · tab next field · esc cancel ",
+                theme.dim_text(),
+            )),
+            area,
+        );
+        return;
+    }
+    let mut spans: Vec<Span> = Vec::new();
+    let mut hint = |key: String, what: &str, enabled: bool| {
+        if enabled {
+            spans.push(Span::styled(format!(" {key} "), theme.title()));
+            spans.push(Span::styled(format!("{what}  "), theme.dim_text()));
+        } else {
+            // Greyed, not hidden: the key exists, this token can't
+            // use it (§5 RBAC-aware keybinds).
+            spans.push(Span::styled(format!(" {key} "), theme.dim_text()));
+            spans.push(Span::styled(format!("{what}✗  "), theme.dim_text()));
+        }
+    };
+    hint("q".into(), "quit", true);
+    hint("⇥/1-3".into(), "tabs", true);
     if app.nodes.len() > 1 {
-        hints.push(("n", "node filter"));
+        hint("n".into(), "node filter", true);
     }
     if app.tab == Tab::Calls {
-        hints.push(("j/k", "select"));
-        hints.push(("g/G", "top/bottom"));
-    }
-    let mut spans = Vec::with_capacity(hints.len() * 3);
-    for (key, what) in hints {
-        spans.push(Span::styled(format!(" {key} "), theme.title()));
-        spans.push(Span::styled(format!("{what}  "), theme.dim_text()));
+        hint("j/k".into(), "select", true);
+        // Action keys grey out per the focused call's node.
+        let focus_node = app.focus().map(|(n, _)| n);
+        let operator_ok = focus_node.is_some_and(|n| app.can(n, crate::model::Role::Operator));
+        let admin_node = app.node_filter.or(focus_node).unwrap_or(0);
+        hint("x".into(), "hangup", operator_ok);
+        hint("p".into(), "park", operator_ok);
+        hint("u".into(), "retrieve", operator_ok);
+        hint("c".into(), "conf", operator_ok);
+        hint(
+            "o".into(),
+            "originate",
+            app.can(admin_node, crate::model::Role::Admin),
+        );
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

@@ -4,6 +4,7 @@
 
 mod calls;
 mod chrome;
+mod modal;
 mod overview;
 pub mod theme;
 mod trunks;
@@ -20,6 +21,8 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) {
         Tab::Trunks => trunks::draw(frame, app, theme, body),
         Tab::Calls => calls::draw(frame, app, theme, body),
     }
+    // Overlays last: modal + toasts sit above the tab content.
+    modal::draw(frame, app, theme);
 }
 
 #[cfg(test)]
@@ -148,6 +151,79 @@ mod tests {
         app.read_only = true;
         let screen = render(&app, 100, 30);
         assert!(screen.contains("read-only"), "{screen}");
+    }
+
+    #[test]
+    fn confirm_modal_names_the_node() {
+        use crate::keys;
+        use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = fixture_app();
+        app.tab = Tab::Calls;
+        app.select_first();
+        keys::handle(
+            &mut app,
+            &Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+        );
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("confirm"), "{screen}");
+        assert!(screen.contains("on prod-1?"), "{screen}");
+    }
+
+    #[test]
+    fn originate_form_renders_fields_and_node_title() {
+        use crate::model::{Field, InputKind, InputModal, Modal};
+        let mut app = fixture_app();
+        app.tab = Tab::Calls;
+        app.modal = Some(Modal::Input(InputModal {
+            kind: InputKind::Originate,
+            node: 1,
+            call_id: None,
+            fields: vec![
+                Field::required("to (number/user)"),
+                Field::required("gateway"),
+                Field::optional("ws_url (blank = default)"),
+            ],
+            active: 0,
+        }));
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("originate on prod-2"), "{screen}");
+        assert!(screen.contains("gateway"), "{screen}");
+        assert!(screen.contains("enter submit"), "{screen}");
+    }
+
+    #[test]
+    fn toasts_render_bottom_right() {
+        let mut app = fixture_app();
+        app.push_toast("hangup abc on prod-1: accepted (200)".into(), true);
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("accepted (200)"), "{screen}");
+    }
+
+    #[test]
+    fn footer_greys_action_keys_for_readonly_token() {
+        use crate::model::{Msg, Role};
+        let mut app = fixture_app();
+        app.tab = Tab::Calls;
+        app.select_first();
+        app.update(Msg::RoleLearned {
+            node: 0,
+            role: Role::ReadOnly,
+        });
+        let screen = render(&app, 110, 30);
+        // Greyed hints carry the ✗ marker; enabled ones don't.
+        assert!(screen.contains("hangup✗"), "{screen}");
+        assert!(screen.contains("originate✗"), "{screen}");
+
+        app.update(Msg::RoleLearned {
+            node: 0,
+            role: Role::Operator,
+        });
+        let screen = render(&app, 110, 30);
+        assert!(!screen.contains("hangup✗"), "{screen}");
+        assert!(
+            screen.contains("originate✗"),
+            "operator can't originate: {screen}"
+        );
     }
 
     #[test]

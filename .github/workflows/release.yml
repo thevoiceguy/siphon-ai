@@ -155,17 +155,21 @@ jobs:
       - name: Build (release, static musl)
         run: |
           cargo zigbuild --release --locked \
-            -p siphon-ai --target ${{ matrix.target }}
+            -p siphon-ai -p siphon-ai-sightglass --target ${{ matrix.target }}
 
-      # Package: the binary + both licenses + README into a versioned
-      # tarball. The binary is fully static, so the tarball is the whole
-      # delivery for that arch.
+      # Package: the daemon + the sightglass operator console (0.49.0)
+      # + both licenses + README into a versioned tarball. Both
+      # binaries are fully static, so the tarball is the whole
+      # delivery for that arch. (The .deb below stays daemon-only on
+      # purpose: sightglass is a client tool that usually runs on a
+      # workstation, not the service host — tarball users get both.)
       - name: Package
         run: |
           version="${TAG#v}"
           dist="siphon-ai-${version}-${{ matrix.target }}"
           mkdir -p "staging/${dist}"
           cp "target/${{ matrix.target }}/release/siphon-ai" "staging/${dist}/"
+          cp "target/${{ matrix.target }}/release/sightglass" "staging/${dist}/"
           cp LICENSE-APACHE LICENSE-MIT README.md "staging/${dist}/"
           tar -C staging -czf "${dist}.tar.gz" "${dist}"
           ls -l "${dist}.tar.gz"

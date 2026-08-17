@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-08-17
+
 ### Added
 
 - **`POST /admin/v1/drain` and sightglass's System tab — the plan's final chunk** (DESIGN_SIGHTGLASS.md §6.5, PR 6 of 6). The daemon gains an admin-role **programmatic drain**: the endpoint fires a `Notify` the runtime's `run()` selects beside the SIGTERM future, entering the exact graceful path (503 new INVITEs, active calls finish, force-terminate at the deadline, exit) — `202 {drain_signalled, already_draining}`, idempotent, and deliberately not wired to the "second signal forces teardown" escape hatch, so repeating the POST can never kill calls. `GET`/`PUT /admin/v1/log` responses move to typed wire structs (byte-identical JSON). Sightglass gains the **System tab** (`6`): one row per node with live log filter, drain state, HEP, and version — `L` sets the tracing filter on the selected node (live, no restart), `H` emits a HEP probe, `D` starts the drain behind a deliberately loud node-named confirm; all admin-gated per node. This completes the six-PR sightglass plan.
+
+- **Release tarballs now carry two binaries: `siphon-ai` and `sightglass`.** The release workflow builds and packages the operator console alongside the daemon for both musl targets. The `.deb` stays daemon-only on purpose — sightglass is a client tool that usually runs on an operator's workstation, not the service host; take it from the tarball.
 
 - **A recent-CDRs ring behind `GET /admin/v1/cdrs/recent`, richer live stats, and sightglass's call history** (DESIGN_SIGHTGLASS.md §6.3/§6.4, PR 5 of 6). A ring-capturing sink joins the runtime's CDR fanout and keeps the last `[observability].cdr_ring_size` (default 50) completed calls' **CDR records verbatim** in memory — the CDR schema is the one schema, served newest-first on the readonly endpoint, working with zero `[cdr]` sinks configured and surviving SIGHUP sink rebuilds. The live-stats endpoint `GET /admin/v1/calls/:id/stats` gains **static call facts**, registered once per call beside the quality feed: `direction`, `from`, `to`, `sip_call_id`, `sample_rate`, `srtp_profile` (absent = plaintext RTP), `verstat_attest` — all additive JSON. (The design's dynamic fields — live VAD state, last DTMF, WS reconnect count — are deferred; each needs tap→registry streaming that isn't worth building unasked. The design note records the split.) Sightglass's calls tab grows a **recent pane** under the active table (ended time, from → to, hangup cause, duration, MOS — read defensively off the versioned CDR records) and the detail pane renders the new static facts. Pre-0.49 daemons degrade to an absent pane, never a down node.
 

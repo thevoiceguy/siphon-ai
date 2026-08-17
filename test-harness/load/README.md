@@ -131,7 +131,7 @@ A "passing" run is boring. Common failure modes and where they show:
 | RSS grows linearly over an hour          | A per-call allocation isn't being freed. | `dhat` or `heaptrack` against a shorter run. |
 | Audio quality degrades after N minutes    | Jitter buffer drift or codec encoder state leak. | `forge_rtcp_jitter_ms` histogram. |
 | Burst hits a `503 Service Unavailable`    | Port pool exhausted before old calls released. | `[media].rtp_port_range` size; ensure post-call `stop_session` is winning. |
-| Burst hits a `500 Server Internal Error`  | Usually **not** forge. Check the daemon log for `Failed to bind socket … Address in use`: the RTP range overlaps `net.ipv4.ip_local_port_range` and the kernel gave the port to another socket (issue #504, `LOAD_TEST_PLAN.md` §1.1 — reserve the range and re-run). Only if the error is something else is this the `start_session` failure path PR #19 fixed. | Daemon log. |
+| Burst hits a `500 Server Internal Error`  | Usually **not** forge. Check the daemon log for `Failed to bind socket … Address in use`: the RTP range overlaps `net.ipv4.ip_local_port_range` and the kernel gave the port to another socket (issue #504, `LOAD_TEST_PLAN.md` §1.1 — reserve the range and re-run). On 0.48.19+ that takes **five consecutive** collisions, preceded by `RTP port is held outside the pool` warnings — one collision is retried past. Only if the error is something else is this the `start_session` failure path PR #19 fixed. | Daemon log. |
 | `siphon_ai_hep_packets_dropped_total` rises | HEP queue too small for the call rate. | Bump `[hep].queue_capacity`. |
 
 ## Why this isn't in CI

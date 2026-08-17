@@ -8,6 +8,7 @@ mod errors;
 mod modal;
 mod overview;
 mod rooms;
+mod system;
 pub mod theme;
 mod trunks;
 
@@ -24,6 +25,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) {
         Tab::Calls => calls::draw(frame, app, theme, body),
         Tab::Rooms => rooms::draw(frame, app, theme, body),
         Tab::Errors => errors::draw(frame, app, theme, body),
+        Tab::System => system::draw(frame, app, theme, body),
     }
     // Overlays last: modal + toasts sit above the tab content.
     modal::draw(frame, app, theme);
@@ -43,7 +45,7 @@ mod tests {
         let mut app = App::new(vec!["prod-1".into(), "prod-2".into()], false);
         app.update(Msg::Snapshot {
             node: 0,
-            result: Ok(NodeSnapshot {
+            result: Ok(Box::new(NodeSnapshot {
                 calls: vec![
                     AdminCallRow {
                         call_id: "siphon-aa11".into(),
@@ -73,9 +75,10 @@ mod tests {
                 conferences: vec![],
                 parked: vec![],
                 status: None,
+                log_filter: Some("siphon_ai=info".into()),
                 recent_cdrs: None,
                 errors: None,
-            }),
+            })),
         });
         app.update(Msg::Snapshot {
             node: 1,
@@ -264,6 +267,19 @@ mod tests {
         assert!(screen.contains("8000 Hz"), "{screen}");
         assert!(screen.contains("AES_CM_128"), "{screen}");
         assert!(screen.contains("attest"), "{screen}");
+    }
+
+    #[test]
+    fn system_tab_renders_per_node_controls() {
+        let mut app = fixture_app();
+        app.tab = Tab::System;
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("LOG FILTER"), "{screen}");
+        assert!(screen.contains("siphon_ai=info"), "{screen}");
+        assert!(screen.contains("idle"), "{screen}");
+        // Down node renders dashes, not errors.
+        assert!(screen.contains("prod-2"), "{screen}");
+        assert!(screen.contains("programmatic SIGTERM"), "{screen}");
     }
 
     #[test]

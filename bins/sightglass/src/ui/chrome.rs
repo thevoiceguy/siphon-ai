@@ -104,6 +104,18 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     if app.nodes.len() > 1 {
         hint("n".into(), "node filter", true);
     }
+    if app.tab == Tab::System {
+        hint("j/k".into(), "select node", true);
+        let node = app
+            .visible_system_nodes()
+            .get(app.selected_system)
+            .copied()
+            .unwrap_or(0);
+        let admin_ok = app.can(node, crate::model::Role::Admin);
+        hint("L".into(), "log filter", admin_ok);
+        hint("H".into(), "hep probe", admin_ok);
+        hint("D".into(), "drain", admin_ok);
+    }
     if app.tab == Tab::Rooms {
         hint("j/k".into(), "select", true);
         let node = app

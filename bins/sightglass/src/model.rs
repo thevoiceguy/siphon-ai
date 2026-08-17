@@ -30,15 +30,17 @@ pub enum Tab {
     Calls,
     Rooms,
     Errors,
+    System,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [
+    pub const ALL: [Tab; 6] = [
         Tab::Overview,
         Tab::Trunks,
         Tab::Calls,
         Tab::Rooms,
         Tab::Errors,
+        Tab::System,
     ];
 
     pub fn title(self) -> &'static str {
@@ -48,6 +50,7 @@ impl Tab {
             Tab::Calls => "calls",
             Tab::Rooms => "rooms",
             Tab::Errors => "errors",
+            Tab::System => "system",
         }
     }
 
@@ -112,6 +115,16 @@ pub enum Action {
         node: NodeId,
         room_id: String,
     },
+    SetLogFilter {
+        node: NodeId,
+        directive: String,
+    },
+    HepProbe {
+        node: NodeId,
+    },
+    StartDrain {
+        node: NodeId,
+    },
     RemoveParticipant {
         node: NodeId,
         room_id: String,
@@ -128,7 +141,10 @@ impl Action {
             | Action::AddToConference { node, .. }
             | Action::Originate { node, .. }
             | Action::EndConference { node, .. }
-            | Action::RemoveParticipant { node, .. } => *node,
+            | Action::RemoveParticipant { node, .. }
+            | Action::SetLogFilter { node, .. }
+            | Action::HepProbe { node }
+            | Action::StartDrain { node } => *node,
         }
     }
 
@@ -137,7 +153,10 @@ impl Action {
     /// origination is billable and needs `admin`.
     pub fn required_role(&self) -> Role {
         match self {
-            Action::Originate { .. } => Role::Admin,
+            Action::Originate { .. }
+            | Action::SetLogFilter { .. }
+            | Action::HepProbe { .. }
+            | Action::StartDrain { .. } => Role::Admin,
             _ => Role::Operator,
         }
     }
@@ -152,6 +171,9 @@ impl Action {
             Action::Originate { .. } => "originate",
             Action::EndConference { .. } => "end-room",
             Action::RemoveParticipant { .. } => "kick",
+            Action::SetLogFilter { .. } => "log-filter",
+            Action::HepProbe { .. } => "hep-probe",
+            Action::StartDrain { .. } => "drain",
         }
     }
 }
@@ -173,6 +195,7 @@ pub enum InputKind {
     Retrieve,
     AddToConference,
     Originate,
+    LogFilter,
 }
 
 /// One text field of an input modal.
@@ -218,6 +241,7 @@ impl InputModal {
             InputKind::Retrieve => format!(" retrieve on {node_name} "),
             InputKind::AddToConference => format!(" add to conference on {node_name} "),
             InputKind::Originate => format!(" originate on {node_name} "),
+            InputKind::LogFilter => format!(" set log filter on {node_name} "),
         }
     }
 
@@ -251,6 +275,10 @@ impl InputModal {
                 to: val(0),
                 gateway: val(1),
                 ws_url: opt(2),
+            },
+            InputKind::LogFilter => Action::SetLogFilter {
+                node: self.node,
+                directive: val(0),
             },
         })
     }
@@ -295,6 +323,8 @@ pub struct NodeState {
     pub parked: Vec<ParkedRow>,
     /// `GET /admin/v1/status` summary. `None` = pre-0.49 daemon.
     pub status: Option<StatusResponse>,
+    /// Active tracing filter directive from `GET /admin/v1/log`.
+    pub log_filter: Option<String>,
     /// Recent completed-call CDRs (serialized records, newest first).
     /// `None` = endpoint unavailable (pre-0.49 daemon).
     pub recent_cdrs: Option<Vec<serde_json::Value>>,
@@ -319,6 +349,7 @@ impl NodeState {
             conferences: Vec::new(),
             parked: Vec::new(),
             status: None,
+            log_filter: None,
             recent_cdrs: None,
             errors: None,
             role: None,
@@ -338,6 +369,8 @@ pub struct NodeSnapshot {
     pub parked: Vec<ParkedRow>,
     /// `None` = status endpoint unavailable (pre-0.49 daemon).
     pub status: Option<StatusResponse>,
+    /// `None` = log filter fetch failed.
+    pub log_filter: Option<String>,
     /// `None` = cdrs/recent endpoint unavailable (pre-0.49 daemon).
     pub recent_cdrs: Option<Vec<serde_json::Value>>,
     /// `None` = errors endpoint unavailable on this daemon.
@@ -386,10 +419,13 @@ pub struct StatsPane {
 
 #[derive(Debug)]
 pub enum Msg {
-    /// One poll round finished for a node.
+    /// One poll round finished for a node. Boxed: the snapshot has
+    /// grown seven fields deep and would otherwise dominate every
+    /// `Msg` (clippy::large_enum_variant); one heap hop per poll
+    /// round is nothing.
     Snapshot {
         node: NodeId,
-        result: Result<NodeSnapshot, String>,
+        result: Result<Box<NodeSnapshot>, String>,
     },
     /// Stats arrived for the focused call.
     Stats {
@@ -425,6 +461,8 @@ pub struct App {
     pub selected_call: usize,
     /// Selection index into [`App::visible_rooms`].
     pub selected_room: usize,
+    /// Selection index into [`App::visible_system_nodes`].
+    pub selected_system: usize,
     pub stats: StatsPane,
     /// Fleet-wide active-call totals, one sample per tick, newest last.
     pub fleet_history: VecDeque<u64>,
@@ -444,6 +482,7 @@ impl App {
             node_filter: None,
             selected_call: 0,
             selected_room: 0,
+            selected_system: 0,
             stats: StatsPane::default(),
             fleet_history: VecDeque::new(),
             modal: None,
@@ -461,6 +500,7 @@ impl App {
                 };
                 match result {
                     Ok(snap) => {
+                        let snap = *snap;
                         n.health = NodeHealth::Up;
                         n.calls = snap.calls;
                         n.registrations = snap.registrations;
@@ -468,6 +508,7 @@ impl App {
                         n.conferences = snap.conferences;
                         n.parked = snap.parked;
                         n.status = snap.status;
+                        n.log_filter = snap.log_filter;
                         n.recent_cdrs = snap.recent_cdrs;
                         n.errors = snap.errors;
                     }
@@ -616,6 +657,14 @@ impl App {
         rows
     }
 
+    /// Node indices visible on the System tab (the node filter, as a
+    /// selectable list).
+    pub fn visible_system_nodes(&self) -> Vec<NodeId> {
+        (0..self.nodes.len())
+            .filter(|id| self.node_filter.is_none_or(|f| f == *id))
+            .collect()
+    }
+
     /// Recent completed calls under the node filter, merged across
     /// nodes and sorted newest-first by `ended_at` (RFC 3339 strings
     /// compare chronologically).
@@ -662,6 +711,11 @@ impl App {
     }
 
     pub fn select_next(&mut self) {
+        if self.tab == Tab::System {
+            self.selected_system = self.selected_system.saturating_add(1);
+            self.clamp_selection();
+            return;
+        }
         if self.tab == Tab::Rooms {
             self.selected_room = self.selected_room.saturating_add(1);
             self.clamp_selection();
@@ -673,6 +727,10 @@ impl App {
     }
 
     pub fn select_prev(&mut self) {
+        if self.tab == Tab::System {
+            self.selected_system = self.selected_system.saturating_sub(1);
+            return;
+        }
         if self.tab == Tab::Rooms {
             self.selected_room = self.selected_room.saturating_sub(1);
             return;
@@ -682,6 +740,10 @@ impl App {
     }
 
     pub fn select_first(&mut self) {
+        if self.tab == Tab::System {
+            self.selected_system = 0;
+            return;
+        }
         if self.tab == Tab::Rooms {
             self.selected_room = 0;
             return;
@@ -691,6 +753,10 @@ impl App {
     }
 
     pub fn select_last(&mut self) {
+        if self.tab == Tab::System {
+            self.selected_system = self.visible_system_nodes().len().saturating_sub(1);
+            return;
+        }
         if self.tab == Tab::Rooms {
             self.selected_room = self.visible_rooms().len().saturating_sub(1);
             return;
@@ -722,6 +788,12 @@ impl App {
             self.selected_room = 0;
         } else if self.selected_room >= rooms {
             self.selected_room = rooms - 1;
+        }
+        let sys = self.visible_system_nodes().len();
+        if sys == 0 {
+            self.selected_system = 0;
+        } else if self.selected_system >= sys {
+            self.selected_system = sys - 1;
         }
     }
 
@@ -794,6 +866,7 @@ mod tests {
             conferences: vec![],
             parked: vec![],
             status: None,
+            log_filter: None,
             recent_cdrs: None,
             errors: None,
         }
@@ -803,11 +876,11 @@ mod tests {
         let mut app = App::new(vec!["prod-1".into(), "prod-2".into()], false);
         app.update(Msg::Snapshot {
             node: 0,
-            result: Ok(snapshot(vec![call("a"), call("b")])),
+            result: Ok(Box::new(snapshot(vec![call("a"), call("b")]))),
         });
         app.update(Msg::Snapshot {
             node: 1,
-            result: Ok(snapshot(vec![call("a")])), // same call_id as node 0 on purpose
+            result: Ok(Box::new(snapshot(vec![call("a")]))), // same call_id as node 0 on purpose
         });
         app
     }
@@ -864,7 +937,7 @@ mod tests {
         // Node 0's calls end; only node 1's remains.
         app.update(Msg::Snapshot {
             node: 0,
-            result: Ok(snapshot(vec![])),
+            result: Ok(Box::new(snapshot(vec![]))),
         });
         assert_eq!(app.selected_call, 0);
         assert_eq!(app.focus(), Some((1, "a".to_string())));
@@ -965,17 +1038,17 @@ mod tests {
         let mut app = two_node_app();
         app.update(Msg::Snapshot {
             node: 0,
-            result: Ok(NodeSnapshot {
+            result: Ok(Box::new(NodeSnapshot {
                 errors: Some(vec![entry(100, "old-a"), entry(300, "new-a")]),
                 ..snapshot(vec![])
-            }),
+            })),
         });
         app.update(Msg::Snapshot {
             node: 1,
-            result: Ok(NodeSnapshot {
+            result: Ok(Box::new(NodeSnapshot {
                 errors: Some(vec![entry(200, "mid-b")]),
                 ..snapshot(vec![])
-            }),
+            })),
         });
         let merged = app.visible_errors();
         let order: Vec<(&str, NodeId)> = merged
@@ -994,10 +1067,10 @@ mod tests {
         let mut app = two_node_app();
         app.update(Msg::Snapshot {
             node: 0,
-            result: Ok(NodeSnapshot {
+            result: Ok(Box::new(NodeSnapshot {
                 errors: None,
                 ..snapshot(vec![])
-            }),
+            })),
         });
         assert!(app.nodes[0].errors.is_none());
         assert!(app.visible_errors().is_empty());
@@ -1009,7 +1082,7 @@ mod tests {
         let mut app = two_node_app();
         app.update(Msg::Snapshot {
             node: 0,
-            result: Ok(NodeSnapshot {
+            result: Ok(Box::new(NodeSnapshot {
                 conferences: vec![ConferenceRow {
                     room_id: "room-1".into(),
                     sample_rate: 8000,
@@ -1021,7 +1094,7 @@ mod tests {
                     parked_secs: 12,
                 }],
                 ..snapshot(vec![])
-            }),
+            })),
         });
         let rows = app.visible_rooms();
         assert_eq!(rows.len(), 4);
@@ -1052,7 +1125,7 @@ mod tests {
         let mut app = two_node_app();
         app.update(Msg::Snapshot {
             node: 1,
-            result: Ok(NodeSnapshot {
+            result: Ok(Box::new(NodeSnapshot {
                 status: Some(StatusResponse {
                     version: "0.49.0".into(),
                     uptime_secs: 7,
@@ -1065,7 +1138,7 @@ mod tests {
                     hep_enabled: false,
                 }),
                 ..snapshot(vec![])
-            }),
+            })),
         });
         assert_eq!(app.nodes[1].status.as_ref().unwrap().version, "0.49.0");
         assert!(app.nodes[0].status.is_none());
@@ -1077,22 +1150,22 @@ mod tests {
         let mut app = two_node_app();
         app.update(Msg::Snapshot {
             node: 0,
-            result: Ok(NodeSnapshot {
+            result: Ok(Box::new(NodeSnapshot {
                 recent_cdrs: Some(vec![
                     json!({ "call_id": "old-a", "ended_at": "2026-08-17T10:00:00Z" }),
                     json!({ "call_id": "new-a", "ended_at": "2026-08-17T12:00:00Z" }),
                 ]),
                 ..snapshot(vec![])
-            }),
+            })),
         });
         app.update(Msg::Snapshot {
             node: 1,
-            result: Ok(NodeSnapshot {
+            result: Ok(Box::new(NodeSnapshot {
                 recent_cdrs: Some(vec![
                     json!({ "call_id": "mid-b", "ended_at": "2026-08-17T11:00:00Z" }),
                 ]),
                 ..snapshot(vec![])
-            }),
+            })),
         });
         let order: Vec<&str> = app
             .visible_recent_cdrs()

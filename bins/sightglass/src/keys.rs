@@ -29,6 +29,7 @@ pub fn handle(app: &mut App, event: &Event) -> Option<Action> {
         KeyCode::Char('3') => app.tab = Tab::Calls,
         KeyCode::Char('4') => app.tab = Tab::Rooms,
         KeyCode::Char('5') => app.tab = Tab::Errors,
+        KeyCode::Char('6') => app.tab = Tab::System,
         KeyCode::Char('n') => app.cycle_node_filter(),
         KeyCode::Char('j') | KeyCode::Down => app.select_next(),
         KeyCode::Char('k') | KeyCode::Up => app.select_prev(),
@@ -55,6 +56,17 @@ pub fn handle(app: &mut App, event: &Event) -> Option<Action> {
         KeyCode::Char('o') if app.tab == Tab::Calls => open_originate(app),
         KeyCode::Char('x') if app.tab == Tab::Rooms => rooms_destroy(app),
         KeyCode::Char('u') if app.tab == Tab::Rooms => rooms_retrieve(app),
+        KeyCode::Char('L') if app.tab == Tab::System => system_log_filter(app),
+        KeyCode::Char('H') if app.tab == Tab::System => system_confirm(
+            app,
+            |node| Action::HepProbe { node },
+            "emit HEP probe packet",
+        ),
+        KeyCode::Char('D') if app.tab == Tab::System => system_confirm(
+            app,
+            |node| Action::StartDrain { node },
+            "START GRACEFUL DRAIN (stops taking calls!)",
+        ),
         _ => {}
     }
     None
@@ -204,6 +216,37 @@ fn rooms_retrieve(app: &mut App) {
     }));
 }
 
+/// The System tab's focused node, RBAC-guarded (all System actions
+/// are admin-level).
+fn system_target(app: &mut App) -> Option<usize> {
+    let node = *app.visible_system_nodes().get(app.selected_system)?;
+    guard(app, node, Role::Admin).then_some(node)
+}
+
+fn system_confirm(app: &mut App, build: impl Fn(usize) -> Action, what: &str) {
+    let Some(node) = system_target(app) else {
+        return;
+    };
+    let prompt = format!("{what} on {}? (y/n)", app.nodes[node].name);
+    app.modal = Some(Modal::Confirm {
+        action: build(node),
+        prompt,
+    });
+}
+
+fn system_log_filter(app: &mut App) {
+    let Some(node) = system_target(app) else {
+        return;
+    };
+    app.modal = Some(Modal::Input(InputModal {
+        kind: InputKind::LogFilter,
+        node,
+        call_id: None,
+        fields: vec![Field::required("directive (e.g. siphon_ai=debug)")],
+        active: 0,
+    }));
+}
+
 /// Keys while a modal is open.
 fn modal_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
     match app.modal.take()? {
@@ -278,6 +321,7 @@ mod tests {
             conferences: vec![],
             parked: vec![],
             status: None,
+            log_filter: None,
             recent_cdrs: None,
             errors: None,
         }
@@ -296,7 +340,7 @@ mod tests {
         let mut app = App::new(vec!["prod-1".into(), "prod-2".into()], false);
         app.update(Msg::Snapshot {
             node: 1,
-            result: Ok(snapshot(vec![call("abc")])),
+            result: Ok(Box::new(snapshot(vec![call("abc")]))),
         });
         app.tab = Tab::Calls;
         app.select_first();
@@ -455,7 +499,7 @@ mod tests {
         let mut app = App::new(vec!["prod-1".into(), "prod-2".into()], false);
         app.update(Msg::Snapshot {
             node: 1,
-            result: Ok(NodeSnapshot {
+            result: Ok(Box::new(NodeSnapshot {
                 conferences: vec![ConferenceRow {
                     room_id: "room-9".into(),
                     sample_rate: 8000,
@@ -467,7 +511,7 @@ mod tests {
                     parked_secs: 3,
                 }],
                 ..snapshot(vec![])
-            }),
+            })),
         });
         app.tab = Tab::Rooms;
 
@@ -515,6 +559,51 @@ mod tests {
         app.select_first();
         assert!(handle(&mut app, &press(KeyCode::Char('u'))).is_none());
         assert!(app.toasts.iter().any(|t| t.text.contains("parked")));
+    }
+
+    #[test]
+    fn system_tab_drain_and_log_filter_flow() {
+        let mut app = App::new(vec!["prod-1".into(), "prod-2".into()], false);
+        app.update(Msg::RoleLearned {
+            node: 1,
+            role: Role::Admin,
+        });
+        app.tab = Tab::System;
+        app.select_next(); // -> prod-2
+
+        // D: node-named scary confirm building StartDrain for prod-2.
+        handle(&mut app, &press(KeyCode::Char('D')));
+        let Some(Modal::Confirm { prompt, .. }) = &app.modal else {
+            panic!("expected confirm, got {:?}", app.modal);
+        };
+        assert!(prompt.contains("DRAIN"), "{prompt}");
+        assert!(prompt.contains("on prod-2"), "{prompt}");
+        let action = handle(&mut app, &press(KeyCode::Enter)).expect("action");
+        assert_eq!(action, Action::StartDrain { node: 1 });
+
+        // L: log-filter form, typed directive submits SetLogFilter.
+        handle(&mut app, &press(KeyCode::Char('L')));
+        assert!(matches!(app.modal, Some(Modal::Input(_))));
+        for c in "warn".chars() {
+            handle(&mut app, &press(KeyCode::Char(c)));
+        }
+        let action = handle(&mut app, &press(KeyCode::Enter)).expect("action");
+        assert_eq!(
+            action,
+            Action::SetLogFilter {
+                node: 1,
+                directive: "warn".into()
+            }
+        );
+
+        // Operator role can't touch System actions.
+        app.update(Msg::RoleLearned {
+            node: 1,
+            role: Role::Operator,
+        });
+        assert!(handle(&mut app, &press(KeyCode::Char('H'))).is_none());
+        assert!(app.modal.is_none());
+        assert!(app.toasts.iter().any(|t| t.text.contains("prod-2")));
     }
 
     #[test]

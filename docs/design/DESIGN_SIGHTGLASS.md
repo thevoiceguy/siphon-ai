@@ -1,6 +1,10 @@
 # Design note — Sightglass: a terminal UI for siphon-ai
 
-> **Status: IN PROGRESS.** Implemented: PR 1 (this doc, the
+> **Status: COMPLETE.** All six PRs of §10 are implemented and the
+> tab set of §4 is fully shipped (see §6.2/§6.4 for the two recorded
+> deviations, and §6.6 for the one deliberately-open question).
+>
+> *(History of the incremental status below.)* Implemented: PR 1 (this doc, the
 > `admin-api-types` extraction, the multi-node read-only scaffold),
 > PR 2 (operator actions with node-named confirm modals, toasts,
 > per-node RBAC-aware keybinds via startup role probes, `--read-only`
@@ -212,7 +216,10 @@ version concerns.
 
 Programmatic equivalent of SIGTERM drain so the System tab can start a
 graceful drain with a confirm modal. Reuses the existing shutdown
-path; no new drain logic.
+path; no new drain logic. Shipped in PR 6 — a `Notify` the runtime's
+`run()` selects beside the signal future; deliberately NOT wired to
+the "second signal forces teardown" escape hatch, so repeating the
+POST can never kill calls.
 
 ### 6.6 Open question — gateway (IP-auth) trunk health
 

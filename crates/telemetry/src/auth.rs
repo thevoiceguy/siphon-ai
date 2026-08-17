@@ -219,7 +219,10 @@ pub fn min_role(method: &hyper::Method, path: &str) -> Option<Role> {
         // ── Admin (billable / config / observability-blinding) ──
         (&Method::PUT, "/admin/log" | "/admin/v1/log")
         | (&Method::POST, "/admin/hep/test" | "/admin/v1/hep/test")
-        | (&Method::POST, "/admin/v1/calls") => Some(Role::Admin),
+        | (&Method::POST, "/admin/v1/calls")
+        // Admin-initiated graceful drain (0.49.0): takes the node out
+        // of service — as operationally heavy as it gets.
+        | (&Method::POST, "/admin/v1/drain") => Some(Role::Admin),
 
         // ── Operator (live-call control) ──
         (&Method::POST, "/admin/v1/conferences") => Some(Role::Operator),
@@ -483,6 +486,10 @@ mod tests {
         assert_eq!(
             min_role(&Method::GET, "/admin/v1/cdrs/recent"),
             Some(Role::ReadOnly)
+        );
+        assert_eq!(
+            min_role(&Method::POST, "/admin/v1/drain"),
+            Some(Role::Admin)
         );
         assert_eq!(
             min_role(&Method::POST, "/admin/v1/calls"),

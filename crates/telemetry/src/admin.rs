@@ -77,9 +77,10 @@ use crate::HepTelemetry;
 // traits and error enums below stay in this crate.
 pub use siphon_ai_admin_api_types::{
     AddParticipantRequest, AdminCallRow, CallsResponse, ConferenceRow, ConferencesResponse,
-    CreateConferenceRequest, DrainStatus, ErrorEntry, ErrorsResponse, OriginateRequest,
-    ParkRequest, ParkedResponse, ParkedRow, RecentCdrsResponse, RegistrationRow,
-    RegistrationsResponse, RegistrationsSummary, RetrieveRequest, StatusResponse,
+    CreateConferenceRequest, DrainStartResponse, DrainStatus, ErrorEntry, ErrorsResponse,
+    LogFilterResponse, OriginateRequest, ParkRequest, ParkedResponse, ParkedRow,
+    RecentCdrsResponse, RegistrationRow, RegistrationsResponse, RegistrationsSummary,
+    RetrieveRequest, SetLogFilterResponse, StatusResponse,
 };
 
 /// Bundle of dependencies the admin handlers may need. Each is
@@ -116,6 +117,11 @@ pub struct AdminState {
     /// `[[register]]` blocks — triggers then 404); `None` only in
     /// partially-built test states → 503.
     pub registrations: Option<AdminRegistrations>,
+    /// Admin-initiated graceful drain (0.49.0), serving
+    /// `POST /admin/v1/drain`. Returns whether the daemon was
+    /// *already* draining. Always installed by the runtime; `None`
+    /// only in partially-built test states → 503.
+    pub drain_start: Option<DrainStartFn>,
     /// Node status summary (0.49.0), serving `GET /admin/v1/status`.
     /// Always installed by the runtime; `None` only in partially-built
     /// test states → 503.
@@ -135,6 +141,11 @@ pub struct AdminState {
 /// Closure producing a fresh [`StatusResponse`] per request. Same
 /// indirection rationale as [`CallRegistryHandle`].
 pub type StatusFn = Arc<dyn Fn() -> StatusResponse + Send + Sync>;
+
+/// Closure delivering the admin drain signal; returns `true` when the
+/// daemon was already draining. Same indirection rationale as
+/// [`CallRegistryHandle`] — the runtime wraps its drain `Notify`.
+pub type DrainStartFn = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Closure producing the recent-CDRs ring (serialized records,
 /// newest first). Same indirection rationale as
@@ -357,6 +368,7 @@ pub async fn dispatch(
         (&hyper::Method::POST, "/admin/v1/conferences") => create_conference(state, &body),
         (&hyper::Method::GET, "/admin/v1/parked") => list_parked(state),
         (&hyper::Method::GET, "/admin/v1/drain") => drain_status(state),
+        (&hyper::Method::POST, "/admin/v1/drain") => drain_start(state),
         (&hyper::Method::GET, "/admin/v1/errors") => list_errors(state),
         (&hyper::Method::GET, "/admin/v1/status") => node_status(state),
         (&hyper::Method::GET, "/admin/v1/cdrs/recent") => recent_cdrs(state),
@@ -561,6 +573,24 @@ fn list_errors(state: &AdminState) -> Response<Full<Bytes>> {
     )
 }
 
+/// `POST /admin/v1/drain` (0.49.0) — start a graceful drain, the
+/// programmatic twin of SIGTERM. 202 either way; `already_draining`
+/// says which. Deliberately NOT the "second signal forces teardown"
+/// path — repeating the POST is safe.
+fn drain_start(state: &AdminState) -> Response<Full<Bytes>> {
+    let Some(f) = state.drain_start.as_ref() else {
+        return service_unavailable("drain trigger not installed");
+    };
+    let already_draining = f();
+    json_response(
+        StatusCode::ACCEPTED,
+        &DrainStartResponse {
+            drain_signalled: true,
+            already_draining,
+        },
+    )
+}
+
 fn drain_status(state: &AdminState) -> Response<Full<Bytes>> {
     let Some(f) = state.drain.as_ref() else {
         return service_unavailable("drain status not installed");
@@ -669,7 +699,12 @@ fn get_log_filter(state: &AdminState) -> Response<Full<Bytes>> {
     let Some(handle) = state.log_filter.as_ref() else {
         return service_unavailable("log filter reload handle not installed");
     };
-    json_response(StatusCode::OK, &json!({ "filter": handle.current() }))
+    json_response(
+        StatusCode::OK,
+        &LogFilterResponse {
+            filter: handle.current(),
+        },
+    )
 }
 
 fn set_log_filter(state: &AdminState, body: &Bytes) -> Response<Full<Bytes>> {
@@ -693,7 +728,10 @@ fn set_log_filter(state: &AdminState, body: &Bytes) -> Response<Full<Bytes>> {
     match handle.set(&directive) {
         Ok(prev) => json_response(
             StatusCode::OK,
-            &json!({ "filter": directive, "previous": prev }),
+            &SetLogFilterResponse {
+                filter: directive,
+                previous: prev,
+            },
         ),
         Err(e) => json_response(StatusCode::BAD_REQUEST, &json!({ "error": e.to_string() })),
     }
@@ -2017,6 +2055,33 @@ mod tests {
         assert_eq!(v["errors"][0]["level"], "warn");
         assert_eq!(v["errors"][0]["call_id"], "siphon-abc");
         assert_eq!(v["errors"][0]["ts_ms"], 1_755_000_000_123u64);
+    }
+
+    // ─── POST /admin/v1/drain (0.49.0) ───────────────────────────────
+
+    #[tokio::test]
+    async fn drain_start_503_when_not_installed() {
+        let (status, _) = conf(hyper::Method::POST, "/admin/v1/drain", "", &empty_state()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn drain_start_202_and_reports_already_draining() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let draining = Arc::new(AtomicBool::new(false));
+        let d = draining.clone();
+        let state = AdminState {
+            drain_start: Some(Arc::new(move || d.swap(true, Ordering::SeqCst)) as DrainStartFn),
+            ..AdminState::default()
+        };
+        let (status, v) = conf(hyper::Method::POST, "/admin/v1/drain", "", &state).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(v["drain_signalled"], true);
+        assert_eq!(v["already_draining"], false);
+        // Idempotent repeat: still 202, now already draining.
+        let (status, v) = conf(hyper::Method::POST, "/admin/v1/drain", "", &state).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(v["already_draining"], true);
     }
 
     // ─── GET /admin/v1/drain (0.17.0) ────────────────────────────────

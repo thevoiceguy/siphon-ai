@@ -213,7 +213,8 @@ pub fn min_role(method: &hyper::Method, path: &str) -> Option<Role> {
         // Recent-errors ring + status summary (0.49.0) — more plain
         // GET snapshots.
         | (&Method::GET, "/admin/v1/errors")
-        | (&Method::GET, "/admin/v1/status") => Some(Role::ReadOnly),
+        | (&Method::GET, "/admin/v1/status")
+        | (&Method::GET, "/admin/v1/cdrs/recent") => Some(Role::ReadOnly),
 
         // ── Admin (billable / config / observability-blinding) ──
         (&Method::PUT, "/admin/log" | "/admin/v1/log")
@@ -477,6 +478,10 @@ mod tests {
         );
         assert_eq!(
             min_role(&Method::GET, "/admin/v1/status"),
+            Some(Role::ReadOnly)
+        );
+        assert_eq!(
+            min_role(&Method::GET, "/admin/v1/cdrs/recent"),
             Some(Role::ReadOnly)
         );
         assert_eq!(

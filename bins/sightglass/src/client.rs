@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use siphon_ai_admin_api_types::{
     CallsResponse, ConferencesResponse, DrainStatus, ErrorBody, ErrorsResponse, ParkedResponse,
-    RegistrationsResponse, StatusResponse,
+    RecentCdrsResponse, RegistrationsResponse, StatusResponse,
 };
 
 use crate::config::Node;
@@ -84,6 +84,12 @@ impl AdminClient {
     /// Parked calls; `501` when `[park]` is disabled — same tolerance.
     pub async fn parked(&self) -> Result<ParkedResponse, String> {
         self.get_json("/admin/v1/parked").await
+    }
+
+    /// Recent completed-call CDRs (0.49.0+ daemons); same tolerance
+    /// as `status`/`errors`.
+    pub async fn recent_cdrs(&self) -> Result<RecentCdrsResponse, String> {
+        self.get_json("/admin/v1/cdrs/recent").await
     }
 
     /// Live quality snapshot for one active call. Kept as a loose

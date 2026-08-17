@@ -103,6 +103,21 @@ pub struct ParkedResponse {
     pub parked: Vec<ParkedRow>,
 }
 
+// ─── GET /admin/v1/cdrs/recent ─────────────────────────────────────
+
+/// `GET /admin/v1/cdrs/recent` (0.49.0, DESIGN_SIGHTGLASS.md §6.3):
+/// the last N completed calls' CDRs, newest first. Entries are
+/// **verbatim serialized CDR records** — the CDR schema
+/// (`crates/cdr/src/schema.rs`, versioned via its `version` field) is
+/// the one schema, deliberately not re-modeled here; consumers read
+/// the fields the CDR docs promise.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecentCdrsResponse {
+    pub count: usize,
+    /// Newest first.
+    pub cdrs: Vec<serde_json::Value>,
+}
+
 // ─── GET /admin/v1/status ──────────────────────────────────────────
 
 /// Registration rollup inside [`StatusResponse`].
@@ -361,6 +376,18 @@ mod tests {
                 "parked": [{ "call_id": "siphon-abc", "parked_secs": 12 }],
             })
         );
+    }
+
+    #[test]
+    fn recent_cdrs_passthrough_round_trips() {
+        let resp = RecentCdrsResponse {
+            count: 1,
+            cdrs: vec![json!({ "version": 8, "call_id": "siphon-abc", "duration_ms": 1200 })],
+        };
+        let back: RecentCdrsResponse =
+            serde_json::from_value(serde_json::to_value(&resp).unwrap()).unwrap();
+        assert_eq!(back.cdrs[0]["call_id"], "siphon-abc");
+        assert_eq!(back.count, 1);
     }
 
     #[test]

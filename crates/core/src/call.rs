@@ -1159,6 +1159,26 @@ impl CallController {
         // `run` deregisters.
         let _quality_live_guard = crate::quality_live::LiveQualityGuard::register(
             call_id.as_str(),
+            crate::quality_live::LiveCallMeta {
+                direction: match start_template.direction {
+                    siphon_ai_bridge::Direction::Inbound => "inbound".to_string(),
+                    siphon_ai_bridge::Direction::Outbound => "outbound".to_string(),
+                },
+                from: start_template.from.clone(),
+                to: start_template.to.clone(),
+                sip_call_id: start_template.sip.call_id.clone(),
+                sample_rate: start_template.audio.sample_rate,
+                srtp_profile: start_template.srtp.as_ref().map(|s| s.profile.clone()),
+                // AttestationLevel serializes as its wire letter
+                // ("A"/"B"/"C") — reuse that rather than a parallel
+                // mapping.
+                verstat_attest: start_template
+                    .verstat
+                    .as_ref()
+                    .and_then(|v| v.attest.as_ref())
+                    .and_then(|a| serde_json::to_value(a).ok())
+                    .and_then(|v| v.as_str().map(String::from)),
+            },
             quality_rx.clone(),
             epoch_rx.clone(),
         );

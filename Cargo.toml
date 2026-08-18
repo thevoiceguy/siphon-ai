@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.49.0"
+version = "0.49.1"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -138,7 +138,29 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # main branch and replace the rev hashes here (see CLAUDE.md §7.5).
 
 # siphon-rs — RFC 3261 SIP stack.
-# Bumped 2026-08-14 `9f70b83011f2` → `9ad33983b0e9` = siphon-rs #102:
+# Bumped 2026-08-18 `9ad33983b0e9` → `15303bf847e6` = siphon-rs #104
+# (its issue #103, filed from this project): client transactions that
+# completed normally never left the manager's table. The terminal wait
+# timers — K for non-INVITE (RFC 3261 §17.1.2.2), D for INVITE (§17.1.1.2) —
+# set the FSM `Terminated` but emitted only `Cancel`, while the manager
+# removed the entry solely on `Terminate`, which is reserved for abnormal
+# endings because it notifies the TU. So a client transaction that FAILED
+# was reclaimed and one that SUCCEEDED was not, and with no periodic sweep
+# the only thing that ever removed a completed client transaction was the
+# 10,000-entry eviction.
+# Found here: this project's reference node registers every 60 s, and each
+# refresh costs two client transactions (the 401'd REGISTER plus the
+# authenticated retry), so it filled the cap in ~3.5 days and then evicted
+# on every refresh — picking the victim by `start_time` alone, so a live
+# transaction could be the one taken. Wider than REGISTER (OPTIONS, INFO,
+# MESSAGE, NOTIFY, SUBSCRIBE, UAC BYE, and INVITE after a non-2xx) and both
+# transports; client-side only, as the server's Timer J/I already terminate.
+# **No code change here and nothing to configure** — the reap is entirely
+# inside `TransactionManager`, keyed on FSM state so the transaction-user
+# contract is unchanged. Operators get the fix by upgrading.
+# Also carries siphon-rs #105 (clippy backlog) and #106 (a pinned fmt+clippy
+# CI gate), neither of which changes behaviour.
+# (Prior: 2026-08-14 `9f70b83011f2` → `9ad33983b0e9` = siphon-rs #102:
 # `TransactionManager::ack_received` now returns whether it **absorbed** the
 # ACK (siphon-rs #101, filed from this project). It used to return `()` and
 # no-op on a miss, which hid the one distinction RFC 3261 §17.2.1 makes:
@@ -148,7 +170,7 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # transaction on a 2xx and leaves it `Completed` on a non-2xx, so "matched
 # an entry" is exactly "ACK to a non-2xx" — and only had to say so.
 # Used immediately by the packet pump below, which stops handing absorbed
-# ACKs to the UAS; see `handle_packet` in `bins/siphon-ai/src/runtime.rs`.
+# ACKs to the UAS; see `handle_packet` in `bins/siphon-ai/src/runtime.rs`.)
 # (Prior: 2026-08-13 `b9f5a3bf66f2` → `9f70b83011f2` = siphon-rs #100: the UAC
 # session refresh reserves the CSeq it consumes *before* the request leaves,
 # instead of committing it after the response (siphon-rs #99, filed from this
@@ -206,31 +228,31 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 #  `6fd432270bb8` = #67 dialog_manager share, siphon-ai #324;
 #  `fcaff011f9c6` = #65 invite_with_from, siphon-ai #316;
 #  `3a4fc312ade3` = #64 TLS-SNI-is-hostname, siphon-ai #312.)
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad33983b0e9" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad33983b0e9" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad33983b0e9", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad33983b0e9" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad33983b0e9" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad33983b0e9" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad33983b0e9" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad33983b0e9" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad33983b0e9" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
 # (distinct from forge-media's pinned sip-sdp). Used by the outbound
 # delayed-offer answer generator to hand the UAC a SessionDescription it
 # accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad33983b0e9" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad33983b0e9" }
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
 # sip-observe — the transport-layer observability seam. We implement its
 # `TransportMetrics` trait in siphon-ai-telemetry and install it with
 # `set_transport_metrics`, which is the only way to see ingress
 # rate-limit drops: the hook is defaulted to a no-op upstream, so an
 # embedder that installs nothing (as we did until 0.48.11) silently gets
 # the `NoopTransportMetrics` fallback (siphon-ai #459).
-sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad33983b0e9" }
+sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9ad33983b0e9" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #

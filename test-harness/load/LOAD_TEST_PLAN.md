@@ -190,10 +190,24 @@ Per-step SLO — all must hold for the full 5 minutes:
 | Setup success | 100% reach `200 OK`; `invites_total` == `calls_total` |
 | Media quality | `siphon_ai_rtp_mos_estimate` p50 ≥ 4.0; loss p95 ≤ 0.01 **from the CDR** — `rtp_packet_loss_ratio` does not exist |
 | Jitter | `siphon_ai_rtp_rx_jitter_ms` p95 ≤ 30 ms (**not** `rtp_jitter_ms`) |
-| Playout | ~~`siphon_ai_outbound_audio_frames_dropped_total`~~ — **no such metric; this SLO has no data source** |
+| Playout | `siphon_ai_outbound_audio_frames_dropped_total` **0 for the whole step** — and if not, attribute it before blaming the bridge (see note) |
 | Setup latency | `sdp_negotiate_seconds` p95 ≤ 200 ms (see note) |
 | Headroom | bridge CPU ≤ 80% of total cores; RSS not growing within the step |
 | Not port-capped | concurrency < `rtp_port_range / 2` (else you measured §1.1) |
+
+**The playout SLO is assertable again — and it usually indicts the sink.**
+`siphon_ai_outbound_audio_frames_dropped_total` did not exist when this
+table was written; it shipped in 0.48.14 (#474) and publishes at zero, so
+the row is a real threshold rather than a struck-out one. Read a non-zero
+value as a *question*, not a verdict: the counter fires when the WS server
+hands the bridge audio faster than realtime and the 200 ms buffer trims the
+excess (PROTOCOL §5.5), which is far more often the sink's pacing than the
+bridge's scheduling. Attribute it before reporting it — one `WARN` per call
+(`server streaming outbound audio faster than realtime`) is systematic and
+points at the generator; drops scattered across a subset of calls point at
+the bridge. See §8's pacing traps: `ws_sink.mjs` under-runs at low
+connection counts and `paced_sink.mjs` over-runs at high ones, and a run at
+200 concurrent has been measured tripping the latter on every call.
 
 **Why 200 ms and not a rounder 250.** `SDP_NEGOTIATE_BUCKETS`
 (`crates/telemetry/src/metrics.rs`) tops out at a finite `0.2` — above that
@@ -424,6 +438,20 @@ us the first time someone hits the wall and reports it as a bug.
   `target = t0 + n × 20 ms; setTimeout(tick, target - now)`. **No tx-rate or
   timing number measured through an uncorrected sink is worth quoting** — CPU
   and RSS work is unaffected.
+- **…and the monotonic correction that fixes it *over*-runs at high
+  connection counts.** `paced_sink.mjs` sends to every connection inside one
+  tick. At 200 connections that loop takes longer than 20 ms, and because the
+  correction targets `t0 + n × 20 ms` it then fires immediately and catches up
+  in a **burst** — which the daemon correctly reads as faster-than-realtime and
+  trims to its 200 ms buffer (PROTOCOL §5.5). Measured at 200 concurrent:
+  69,155 `outbound_audio_frames_dropped_total` and exactly **one `WARN` per
+  call**, which is the signature — a per-call count that equals the call count
+  is systematic, i.e. the generator, not degradation. The two traps are mirror
+  images: `setInterval` under-runs when idle, monotonic correction over-runs
+  when saturated. **§1.4's "prove the sink is not the constraint" is therefore
+  not satisfied at 200 by a single-process sink** — shard it across processes
+  or pace per connection before quoting any aggregate outbound-path number at
+  that concurrency. A canary on a *separate* WS server (§11) is unaffected.
 - **Check the daemon actually started.** `Address in use` from a leftover
   instance produces failures that look exactly like load failures.
 - **`gh`-style exit codes**: `cmd | tail; echo $?` reports *tail's* status.
@@ -715,6 +743,33 @@ mode = "always"                    # strict override — verified, RC-03
 **Speak a fixed script** so dropouts are detectable afterwards rather than
 remembered. Counting `one … twenty` at a steady pace works: every gap,
 clip, or repeat is visible in the waveform and countable.
+
+**Turn barge-in off on the reference route, or you will measure the
+barge-in policy instead of the bridge.** If the WS server echoes the caller
+back — the obvious way to let a human judge the return path — then under
+`[bridge.barge_in] mode = "pause"` (or `auto_clear`) every spoken word
+suppresses playout of *its own echo*, and the caller hears exactly what a
+degraded call sounds like on a completely idle box. Measured: 44% echo
+retention under `pause` against 89% with it off, `barge_in_count` 20 for a
+count to twenty, and `tx_packets_sent` ~27% below the continuous-50 fps
+figure. The inbound half was pristine throughout, so no metric flags it —
+only the caller does.
+
+The artifact would appear in both halves of the A/B, so the comparison
+still technically holds; the reason to remove it anyway is that it makes a
+load-induced dropout indistinguishable from barge-in cutting the caller's
+own voice, which is the one signal this test exists to detect. Use a
+per-route override so production policy is untouched:
+
+```toml
+[route.bridge.barge_in]
+mode = "notify_only"               # VAD still reported; playout never cut
+```
+
+It is route-level, so `systemctl reload` applies it — no restart, no
+dropped calls. `notify_only` is the right mode rather than deleting the
+block: speech events keep flowing to the WS server, so the observability
+half of the call is unchanged.
 
 **Run it as an A/B.** Place the identical call with the load **off**, then
 again at full load, and compare:

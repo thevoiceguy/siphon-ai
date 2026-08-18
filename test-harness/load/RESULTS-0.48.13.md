@@ -281,4 +281,9 @@ Clean shed at a known cap, identical to 0.48.10.
 - **Convergence.** Hour 2 of the two-hour run still added 6 MB. Growth is
   decelerating sharply and the reuse test says the memory is reusable, but
   nothing here shows it actually stopping, and no run has gone past two hours.
+  **CLOSED by `RESULTS-convergence-8h.md`** (8 h at 200 concurrent): growth ends
+  by about hour 4 and the last four hours add 1.6 MB, with fds returning exactly
+  to baseline. Note this run's own hour 3 → 4 shows why two hours could not
+  settle it — a +7.9 MB hour was followed by a +16.6 MB burst.
 - **Tier 2 / tier 3** — generator on its own box, TLS/SRTP, real carrier.
+  **Tier 2 CLOSED by `RESULTS-tier2.md`**; tier 3 still not run.

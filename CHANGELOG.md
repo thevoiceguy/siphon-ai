@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.1] - 2026-08-18
+
+### Changed
+
+- **Bumped siphon-rs `9ad33983b0e9` → `15303bf847e6`** — [siphon-rs#104](https://github.com/thevoiceguy/siphon-rs/pull/104) (its issue #103, filed from this project): **a client SIP transaction that completed normally never left the transaction manager's table.** The terminal wait timers — K for non-INVITE (RFC 3261 §17.1.2.2), D for INVITE (§17.1.1.2) — set the FSM `Terminated` but emitted only `Cancel`, while the manager removed the entry solely on `Terminate`. `Terminate` is reserved for abnormal endings because it notifies the transaction user, so the normal path had no removal at all: **a transaction that failed was reclaimed, and one that succeeded was not.** With no periodic sweep, the only thing that ever removed a completed client transaction was the 10,000-entry eviction.
+  - **Found on this project's reference node**, which registers to a registrar every 60s. Each refresh costs two client transactions (the 401-challenged REGISTER plus the authenticated retry), so the table filled in **~3.5 days** and then evicted on every subsequent refresh, logging `Client transaction limit reached, evicting oldest transaction ... method: Register ... current_count=10000 limit=10000` once a minute.
+  - **Why it is a fix and not just tidiness:** the eviction picks its victim by `start_time` alone, so once the table is full the oldest entry can be a *live* transaction rather than a dead one. Everything before that point is bounded and harmless; past it, a long-running transaction is at risk.
+  - Scope is wider than REGISTER — every normally-completing client transaction (OPTIONS, INFO, MESSAGE, NOTIFY, SUBSCRIBE, UAC BYE via Timer K; INVITE after a non-2xx final via Timer D) — and both transports: on TCP/TLS the wait timer is zero, so those leaked immediately rather than after T4. Client-side only; the server's Timer J/I already emitted `Terminate`.
+  - Upstream fixes it by reaping on **FSM state** rather than on the action, so the transaction-user contract is unchanged — notably no extra `on_terminated` call, and therefore no new `WARN`, on a path that runs once per registration refresh and once per request on a busy proxy.
+  - **No code change here and nothing to configure.** The reap is entirely inside `TransactionManager`; nothing in this workspace changed. Operators get the fix by upgrading, and a restart clears an already-saturated table.
+  - Also carries [siphon-rs#105](https://github.com/thevoiceguy/siphon-rs/pull/105) (clears ~180 clippy warnings across 12 crates) and [siphon-rs#106](https://github.com/thevoiceguy/siphon-rs/pull/106) (a fmt + clippy CI gate on a pinned toolchain). Neither changes behaviour.
+  - Verified per CLAUDE.md §7.5: workspace suite green, fmt, clippy `-D warnings`, all check scripts, and the SIPp signalling suite re-run. No glue changes.
+
 ## [0.49.0] - 2026-08-17
 
 ### Added

@@ -228,12 +228,14 @@ pub struct SipMessageEntry {
     /// client rendering a ladder wants to subtract them anyway.
     pub ts_ms: u64,
     /// `"in"` | `"out"` | `"unknown"`, derived by matching `src`/`dst`
-    /// against the node's own addresses (`[node].public_address` and a
-    /// non-wildcard SIP bind IP). `"unknown"` when neither end is
-    /// recognisably this node — a wildcard bind with no
-    /// `public_address` — because guessing is worse than saying so.
-    /// Matching is on IP, never port: SIP peers send *from* 5060 too.
-    /// `src`/`dst` are kept so the derivation stays checkable.
+    /// against the node's own addresses (`[node].public_address`, a
+    /// non-wildcard SIP bind IP, and an unspecified IP — siphon-rs
+    /// stamps our end `0.0.0.0` on a wildcard bind). When both ends
+    /// look local (loopback), the SIP bind port breaks the tie; port
+    /// is never consulted first, because peers send *from* 5060 too.
+    /// `"unknown"` when neither end is recognisably this node —
+    /// guessing would be worse than saying so, and `src`/`dst` are
+    /// kept so the derivation stays checkable.
     pub direction: String,
     pub src: String,
     pub dst: String,

@@ -213,9 +213,26 @@ the source *port* against our bind, treating a `0.0.0.0` bind as
 "any IP" — is wrong, and wrong in the common direction. SIP peers
 overwhelmingly send *from* 5060 as well, so a port-based test labels
 almost every inbound message `"out"`. A unit test caught it before it
-shipped and now locks it. Where neither end is recognisably this node
-(wildcard bind, no `public_address`), the value is `"unknown"`:
-guessing would be worse than saying so, and the client has `src`/`dst`.
+shipped and now locks it.
+
+**Second correction (0.49.4, found by running the 0.49.3 artifact
+against a production-shaped node):** matching *only* the configured
+addresses was also wrong, and broke the field on the deployment shape
+it was built for. siphon-rs stamps a HEP packet's local end with the
+**socket's** address, so on the usual `listen = "0.0.0.0:5060"` our own
+end is literally `0.0.0.0` — proven from prod's Homer capture:
+inbound `srcIp <peer> / dstIp 0.0.0.0`, outbound the reverse. Neither
+end matched the configured public address, so **every message on a
+wildcard-bound node rendered `"unknown"`** and sightglass drew no
+arrows at all. On loopback the opposite: both ends are `127.0.0.1`,
+both "ours", and everything read `"out"`.
+
+So: an unspecified IP counts as ours (that is exactly what siphon-rs
+means by it), and when *both* ends look local the SIP bind port breaks
+the tie — port consulted only after IP has failed, never before, which
+is what keeps the first correction true. Where neither end is
+recognisably this node the value stays `"unknown"`: guessing would be
+worse than saying so, and the client has `src`/`dst`.
 
 Messages are **oldest first** — a ladder reads down the page in wire
 order, unlike the newest-first `errors` / `cdrs` listings — and

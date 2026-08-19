@@ -217,13 +217,35 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install sip-tester + python venv
+        # Its own timeout: this step cancelled the whole 15-minute job
+        # four times running on 2026-08-19 without executing a single
+        # scenario, because `apt-get update` stalled — the runner's
+        # azure.archive.ubuntu.com mirror was returning `Ign:` for every
+        # index and the archive.ubuntu.com fallback hung. A step budget
+        # means a mirror outage costs 6 minutes and says so, instead of
+        # silently eating the scenarios' time.
+        timeout-minutes: 6
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends sip-tester python3-venv libcap2-bin
+          set -eu
+          pkgs="sip-tester python3-venv libcap2-bin"
+          # Try the install against the indices the runner image already
+          # ships with — usually current, and this skips the slow refresh
+          # entirely. Only fall back to `update` when a package genuinely
+          # is not resolvable.
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          # shellcheck disable=SC2086
+          sudo apt-get install -y --no-install-recommends $apt_opts $pkgs || {
+            echo "install from preloaded indices failed; refreshing"
+            # shellcheck disable=SC2086
+            sudo apt-get update $apt_opts
+            # shellcheck disable=SC2086
+            sudo apt-get install -y --no-install-recommends $apt_opts $pkgs
+          }
           # sipp's pcap playback (the barge_in_pause phase's caller media)
           # opens a raw IPv4 socket on this distro's build; grant the
           # capability rather than running the whole suite as root.
           sudo setcap cap_net_raw+ep "$(command -v sipp)"
+          sipp -v | head -1
 
       - name: Install Rust toolchain
         run: rustup show

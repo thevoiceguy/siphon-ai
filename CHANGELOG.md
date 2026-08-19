@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.6] - 2026-08-19
+
+Everything a single load run turned up. The ring's own bounds held at
+203 concurrent — nothing dropped, no warning logged — but the run
+surfaced an eviction flaw waiting for a busier node, a trunk an operator
+could not see, and a test harness that reported port collisions as
+product regressions.
+
+**Upgrade note:** this is the first release since 0.49.2 that changes
+daemon behaviour, so unlike 0.49.5 it wants a restart to take effect.
+No config change, no protocol change (WS stays version `"1"`), no CDR
+change (still v8), and no dependency moved.
+
 ### Fixed
 
 - **The SIPp harness now fails fast on a port collision instead of reporting one as 17 scenario failures.** Thirteen auxiliary phases hard-coded `9091` for their `[observability]` listener — the same port `configs/local-dev.toml` uses, and therefore the same port a daemon already running on the box is using. The daemon exited at startup with `Address already in use` and every affected phase reported as a *scenario* failure, which reads like a signalling regression: a local run scored 17 of 40 red on 2026-08-19, none of it real. `SIPHON_AI_CONFIG` only ever fixed the main phase, because the auxiliary phases generate their own configs. Every port the harness binds (`SIPP_PORT`, `DAEMON_PORT`, `ADMIN_API_PORT`, the new shared `AUX_OBS_PORT`, `ECHO_WS_PORT`) now reads from the environment, and a preflight check refuses to start on a busy TCP listener, naming the variable and a free port to use — the same treatment the missing-echo-server case already got, and for the same reason.

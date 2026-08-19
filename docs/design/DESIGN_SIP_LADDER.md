@@ -69,6 +69,7 @@ which is what §3 uses to decouple this from HEP being configured.
 | Who can read it | **`operator` or `admin`.** `readonly` cannot. |
 | Redaction | **None.** The full message, including `Authorization` / `Proxy-Authorization` and all headers. |
 | Retention | **Match the CDR ring** — live calls, plus the last `cdr_ring_size` (default 50) completed ones. |
+| Enabled by default | **Yes**, at 50. `sip_ring_size = 0` turns it off. See §6. |
 | Positioning | Nice-to-have; deep troubleshooting is HEP/Homer's job. |
 
 On redaction: the deliberate choice is that a role trusted to hang up
@@ -252,12 +253,33 @@ promise in §2 without asking the operator to keep two numbers in sync.
 Both validated at load (CLAUDE.md §4.6): >65536 fails loud, as
 `error_ring_size` already does.
 
-**Default on or off?** Recommend **on at the default 50**, because a
-feature that needs enabling before the incident is a feature that is
-off during the incident. The counter-argument is the memory bound and
-that this stores unredacted credentials in process memory on every
-node — an argument for defaulting to `0`. Flagged for the call; the
-note assumes on.
+**Default: on, at 50** (decided 2026-08-19). A feature that needs
+enabling before the incident is a feature that is off during the
+incident, and this one's whole value is being already-populated when
+you go looking.
+
+The accepted cost is that every node then holds recent SIP — including
+the `Authorization` headers §2 chose not to redact — in process
+memory by default. Two consequences the implementation must carry
+rather than leave implicit:
+
+- **`DEPLOY.md` states it plainly**, in the same place it documents
+  admin auth: on a default install, `operator` is a role that can read
+  recent credentials, and the ring is what makes that true. An operator
+  who does not want that sets `sip_ring_size = 0`, which is a
+  documented, supported configuration and must stay one.
+- **The ring holds no more than the process already does.** These
+  bytes were in the daemon's address space anyway — as the parsed
+  dialog, and as the `HepPacket` shipped to Homer wherever HEP is
+  enabled. Defaulting on extends their *lifetime* (minutes, bounded by
+  §3.2) and their *reachability* (an authenticated operator endpoint).
+  It does not introduce a class of data the node was not already
+  handling, and it writes nothing to disk — which is the line that
+  keeps this different from per-call log files (CLAUDE.md §8).
+
+Anyone whose threat model dislikes that turns it off with one key, and
+the 501 path in §4 means sightglass reports it as disabled rather than
+broken.
 
 ---
 

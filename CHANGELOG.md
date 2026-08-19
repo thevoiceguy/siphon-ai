@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The SIP ladder key was bound but never advertised, so the feature was undiscoverable.** The calls tab's footer listed `j/k`, `x`, `p`, `u`, `c` and `o` but not `s` — reported by an operator who had the pane working only because they had been told the key existed. A keymap without a hint is half a feature. The footer now lists `s sip`, greyed with the `✗` marker for a `readonly` token like every other gated key, because a key nobody can see is a key nobody uses.
+  - While the ladder is **open**, the footer swaps to its own keys (`j/k scroll`, `⏎ expand`, `y copy`, `s close sip`). The overlay owns `j/k` while it is up, so continuing to advertise "select" described a key that no longer did that.
+  - Adding one hint pushed the footer past 110 columns and silently truncated `originate`, trading one discoverability bug for another. The two navigation labels are now terse (`⇥ tabs`, `n nodes`) — both are already visible in the tab bar and the header chip, whereas the action keys have no other source. A render test pins the fit at 110 columns.
+
 ## [0.49.4] - 2026-08-19
 
 ### Fixed

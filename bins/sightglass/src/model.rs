@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 
 use siphon_ai_admin_api_types::{
     AdminCallRow, CallSipResponse, ConferenceRow, DrainStatus, ErrorEntry, ParkedRow,
-    RegistrationRow, SipMessageEntry, StatusResponse,
+    RegistrationRow, SipMessageEntry, StatusResponse, TrunkRow,
 };
 
 use crate::client::LadderError;
@@ -328,6 +328,8 @@ pub struct NodeState {
     pub health: NodeHealth,
     pub calls: Vec<AdminCallRow>,
     pub registrations: Vec<RegistrationRow>,
+    /// Configured trunks (IP-auth peers). No live state to show.
+    pub trunks: Vec<TrunkRow>,
     pub drain: Option<DrainStatus>,
     /// Conference rooms + members. Empty when conferencing is off.
     pub conferences: Vec<ConferenceRow>,
@@ -357,6 +359,7 @@ impl NodeState {
             health: NodeHealth::Connecting,
             calls: Vec::new(),
             registrations: Vec::new(),
+            trunks: Vec::new(),
             drain: None,
             conferences: Vec::new(),
             parked: Vec::new(),
@@ -387,6 +390,9 @@ pub struct NodeSnapshot {
     pub recent_cdrs: Option<Vec<serde_json::Value>>,
     /// `None` = errors endpoint unavailable on this daemon.
     pub errors: Option<Vec<ErrorEntry>>,
+    /// Configured `[[trunk]]` allowlists (0.49.6+ daemons); empty on
+    /// older ones, which 404 the endpoint.
+    pub trunks: Vec<TrunkRow>,
 }
 
 /// One flattened Rooms-tab row (owned — the lists are small and this
@@ -582,6 +588,7 @@ impl App {
                         n.health = NodeHealth::Up;
                         n.calls = snap.calls;
                         n.registrations = snap.registrations;
+                        n.trunks = snap.trunks;
                         n.drain = Some(snap.drain);
                         n.conferences = snap.conferences;
                         n.parked = snap.parked;
@@ -1021,6 +1028,7 @@ mod tests {
             log_filter: None,
             recent_cdrs: None,
             errors: None,
+            trunks: vec![],
         }
     }
 

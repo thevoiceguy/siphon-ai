@@ -308,11 +308,18 @@ impl CallControlRegistry {
     /// last insert wins with a warning, matching [`CallRegistry`].
     pub fn insert(&self, handle: CallHandle, sip_call_id: impl Into<String>, direction: Direction) {
         let key = handle.call_id().as_str().to_string();
+        let sip_call_id = sip_call_id.into();
         let entry = ControlEntry {
             handle,
-            sip_call_id: sip_call_id.into(),
+            sip_call_id: sip_call_id.clone(),
             direction,
         };
+        // Promote this dialog's SIP-ladder trace to the live
+        // population (DESIGN_SIP_LADDER.md). This is the moment the
+        // dialog stops being indistinguishable from a scanner INVITE,
+        // and without it a silent established call sorts older than
+        // the noise and gets evicted first.
+        siphon_ai_telemetry::sip_ring::mark_live(&sip_call_id);
         if self.inner.write().insert(key.clone(), entry).is_some() {
             warn!(call_id = %key, "control registry insert collided; previous handle dropped");
         } else {

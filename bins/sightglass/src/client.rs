@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use siphon_ai_admin_api_types::{
     CallSipResponse, CallsResponse, ConferencesResponse, DrainStatus, ErrorBody, ErrorsResponse,
     LogFilterResponse, ParkedResponse, RecentCdrsResponse, RegistrationsResponse,
-    SetLogFilterResponse, StatusResponse,
+    SetLogFilterResponse, StatusResponse, TrunksResponse,
 };
 
 use crate::config::Node;
@@ -87,6 +87,13 @@ impl AdminClient {
     /// 404 this.
     pub async fn errors(&self) -> Result<ErrorsResponse, String> {
         self.get_json("/admin/v1/errors").await
+    }
+
+    /// Configured `[[trunk]]` allowlists (0.49.6+ daemons). Same
+    /// tolerance as `errors`: an older daemon 404s this and the tab
+    /// simply shows no trunk rows — never a down node.
+    pub async fn trunks(&self) -> Result<TrunksResponse, String> {
+        self.get_json("/admin/v1/trunks").await
     }
 
     /// Node summary (0.49.0+ daemons); same tolerance as `errors`.

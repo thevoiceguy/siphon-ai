@@ -31,20 +31,33 @@
 //! *completed* and evicted. The reference node sees ~1,440 REGISTER
 //! cycles and ~150 rejected INVITEs a day.
 //!
-//! So traces live in two populations:
+//! So traces live in three populations:
 //!
 //! - **completed** — a CDR was emitted for them (the runtime calls
 //!   [`complete`] from its ring CDR sink). Capped at `cap_calls`,
 //!   evicted oldest-completed-first. This is the design's promise:
 //!   the same retention window as the recent-calls pane, so the two
 //!   never disagree about which calls are inspectable.
-//! - **pending** — everything else: live calls, and all the non-call
-//!   traffic above. Capped separately at `cap_pending` and evicted
-//!   least-recently-touched, which is what bounds the noise.
+//! - **live** — a call exists for them ([`mark_live`], called when the
+//!   control registry accepts the call). Capped at [`MAX_LIVE`] and
+//!   evicted only when *that* is exceeded, never to make room for
+//!   noise.
+//! - **noise** — everything else: REGISTER refreshes, OPTIONS, and
+//!   rejected scanner INVITEs. Capped at [`MAX_PENDING`], evicted
+//!   least-recently-touched.
 //!
 //! Keying on "is it a call?" at capture time is not available: the
 //! INVITE arrives *before* the call exists in any registry, and that
-//! first message is the one most worth having.
+//! first message is the one most worth having — hence the two-step,
+//! `push` first and `mark_live` when the call materialises.
+//!
+//! **Why live calls are a separate population** (fixed after the
+//! 0.49.5 load run): an established call is SIP-silent between its ACK
+//! and its BYE, so its `last_touched` never advances, while scanner
+//! INVITEs keep arriving with fresh timestamps. Under one LRU pool the
+//! bound therefore evicted **live calls first** — precisely inverting
+//! what it was for, and discarding the ladder of the call an operator
+//! is most likely to be looking at.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
@@ -65,20 +78,30 @@ pub const DEFAULT_CAPACITY: usize = 50;
 /// dialog evict everyone else's history.
 pub const DEFAULT_MAX_MESSAGES: usize = 64;
 
-/// Pending (not-yet-completed) traces retained. Bounds live calls plus
-/// the REGISTER/OPTIONS/scanner traffic described above. Not
-/// configurable: it is a backstop, not a tuning knob, and an operator
-/// who wants less should set `sip_ring_size = 0`.
+/// Non-call traces retained: REGISTER refreshes, OPTIONS, rejected
+/// scanner INVITEs. Not configurable — a backstop, not a tuning knob;
+/// an operator who wants less sets `sip_ring_size = 0`.
 pub const MAX_PENDING: usize = 256;
+
+/// Live-call traces retained. Separate from [`MAX_PENDING`] so noise
+/// can never evict a call in progress. Sized well above any
+/// concurrency this daemon has been load-tested at (203 in the 0.49.5
+/// run), and it bounds memory: worst case is
+/// `(MAX_PENDING + MAX_LIVE + cap_calls) × cap_messages` entries,
+/// though a real call is 6–20 messages rather than the 64 cap.
+pub const MAX_LIVE: usize = 512;
 
 #[derive(Clone)]
 struct Trace {
     messages: VecDeque<SipMessageEntry>,
     truncated: bool,
-    /// Monotonic touch counter, for least-recently-used eviction of
-    /// the pending population.
+    /// Monotonic touch counter, for least-recently-used eviction.
+    /// Note this does **not** advance during an established call —
+    /// see the module docs on why that made live calls evictable.
     last_touched: u64,
     completed: bool,
+    /// A call exists for this dialog ([`mark_live`]).
+    live: bool,
 }
 
 struct Inner {
@@ -136,30 +159,39 @@ fn evict_completed(inner: &mut Inner) {
     }
 }
 
-/// Evict the least-recently-touched pending trace when the pending
-/// population is over [`MAX_PENDING`]. Returns how many were dropped
-/// so the caller can bump a metric.
+/// Evict least-recently-touched traces from whichever population is
+/// over its cap. Noise and live calls are bounded **separately**, so a
+/// flood of scanner INVITEs can never displace a call in progress —
+/// the inversion the 0.49.5 load run exposed. Returns how many were
+/// dropped so the caller can bump a metric.
 fn evict_pending(inner: &mut Inner) -> u64 {
     let mut dropped = 0;
-    loop {
-        let pending = inner.traces.values().filter(|t| !t.completed).count();
-        if pending <= MAX_PENDING {
-            return dropped;
-        }
-        let victim = inner
-            .traces
-            .iter()
-            .filter(|(_, t)| !t.completed)
-            .min_by_key(|(_, t)| t.last_touched)
-            .map(|(k, _)| k.clone());
-        match victim {
-            Some(key) => {
-                inner.traces.remove(&key);
-                dropped += 1;
+    for (want_live, cap) in [(false, MAX_PENDING), (true, MAX_LIVE)] {
+        loop {
+            let n = inner
+                .traces
+                .values()
+                .filter(|t| !t.completed && t.live == want_live)
+                .count();
+            if n <= cap {
+                break;
             }
-            None => return dropped,
+            let victim = inner
+                .traces
+                .iter()
+                .filter(|(_, t)| !t.completed && t.live == want_live)
+                .min_by_key(|(_, t)| t.last_touched)
+                .map(|(k, _)| k.clone());
+            match victim {
+                Some(key) => {
+                    inner.traces.remove(&key);
+                    dropped += 1;
+                }
+                None => break,
+            }
         }
     }
+    dropped
 }
 
 /// Capture one SIP message against `sip_call_id`.
@@ -184,6 +216,7 @@ pub fn push(sip_call_id: &str, entry: SipMessageEntry) {
             truncated: false,
             last_touched: tick,
             completed: false,
+            live: false,
         });
     trace.last_touched = tick;
     if trace.messages.len() >= cap {
@@ -203,6 +236,28 @@ pub fn push(sip_call_id: &str, entry: SipMessageEntry) {
     publish_gauge(&inner);
 }
 
+/// Promote a trace to the live population — the control registry calls
+/// this when a call is accepted for `sip_call_id`.
+///
+/// Idempotent, and a no-op for an id with no trace (capture disabled
+/// when the INVITE arrived, or already evicted). The INVITE is always
+/// captured *before* the call exists, which is why this is a second
+/// step rather than a flag on [`push`].
+pub fn mark_live(sip_call_id: &str) {
+    let mut inner = ring().lock().expect("sip ring poisoned");
+    if inner.cap_calls == 0 {
+        return;
+    }
+    if let Some(t) = inner.traces.get_mut(sip_call_id) {
+        t.live = true;
+    }
+    let dropped = evict_pending(&mut inner);
+    if dropped > 0 {
+        metrics::counter!(crate::metrics::SIP_RING_MESSAGES_TOTAL, "result" => "dropped_trace_cap")
+            .increment(dropped);
+    }
+}
+
 /// Mark a call complete — the runtime calls this from its ring CDR
 /// sink, once per call end. Moves the trace into the completed
 /// population, where it is retained until it falls out of the
@@ -216,7 +271,12 @@ pub fn complete(sip_call_id: &str) {
         return;
     }
     match inner.traces.get_mut(sip_call_id) {
-        Some(trace) if !trace.completed => trace.completed = true,
+        Some(trace) if !trace.completed => {
+            trace.completed = true;
+            // Out of the live population and into the completed
+            // window, which has its own cap.
+            trace.live = false;
+        }
         // Already completed (a duplicate CDR) or never captured.
         _ => return,
     }
@@ -506,6 +566,95 @@ mod tests {
         );
         let newest = format!("scanner-{}", MAX_PENDING + 39);
         assert!(snapshot(&newest).is_some(), "most recent pending retained");
+    }
+
+    // The 0.49.5 load run's finding, as a test. An established call is
+    // SIP-silent between ACK and BYE, so its last_touched never
+    // advances while scanner INVITEs keep arriving with fresh ones.
+    // Under a single LRU pool the live call was the *first* thing
+    // evicted — the exact inversion of what the bound is for.
+    #[test]
+    fn a_flood_of_noise_cannot_evict_a_live_call() {
+        let _serial = serial();
+        reset(50, 8);
+
+        // A call arrives and is accepted, then goes quiet.
+        push("the-live-call", entry("INVITE"));
+        push("the-live-call", entry("ACK"));
+        mark_live("the-live-call");
+
+        // Then far more non-call traffic than the noise cap, all of it
+        // touched more recently than the silent call.
+        for i in 0..(MAX_PENDING + 100) {
+            push(&format!("scanner-{i}"), entry("INVITE"));
+        }
+
+        let held = snapshot("the-live-call");
+        assert!(
+            held.is_some(),
+            "a live call must survive any amount of noise"
+        );
+        assert_eq!(held.unwrap().0.len(), 2, "and keep its messages");
+
+        // The noise is still bounded — the fix must not trade one
+        // unbounded population for another.
+        let noise = ring()
+            .lock()
+            .unwrap()
+            .traces
+            .values()
+            .filter(|t| !t.completed && !t.live)
+            .count();
+        assert!(noise <= MAX_PENDING, "noise still capped, held {noise}");
+    }
+
+    #[test]
+    fn live_calls_are_bounded_too_and_evict_oldest_first() {
+        let _serial = serial();
+        reset(50, 8);
+        for i in 0..(MAX_LIVE + 20) {
+            let id = format!("call-{i}");
+            push(&id, entry("INVITE"));
+            mark_live(&id);
+        }
+        let live = ring()
+            .lock()
+            .unwrap()
+            .traces
+            .values()
+            .filter(|t| t.live)
+            .count();
+        assert!(live <= MAX_LIVE, "live population bounded, held {live}");
+        assert!(snapshot("call-0").is_none(), "oldest live evicted first");
+        let newest = format!("call-{}", MAX_LIVE + 19);
+        assert!(snapshot(&newest).is_some(), "newest live retained");
+    }
+
+    // Completing a call takes it out of the live population, so a
+    // long-running node cannot accumulate "live" traces for calls that
+    // ended.
+    #[test]
+    fn completing_a_call_releases_its_live_slot() {
+        let _serial = serial();
+        reset(50, 8);
+        push("c1", entry("INVITE"));
+        mark_live("c1");
+        assert!(ring().lock().unwrap().traces["c1"].live);
+        complete("c1");
+        let t = &ring().lock().unwrap().traces["c1"];
+        assert!(!t.live && t.completed, "moved live → completed");
+    }
+
+    #[test]
+    fn mark_live_is_idempotent_and_ignores_unknown_ids() {
+        let _serial = serial();
+        reset(50, 8);
+        mark_live("never-seen"); // must not panic or create
+        assert!(snapshot("never-seen").is_none());
+        push("c2", entry("INVITE"));
+        mark_live("c2");
+        mark_live("c2");
+        assert!(snapshot("c2").is_some());
     }
 
     #[test]

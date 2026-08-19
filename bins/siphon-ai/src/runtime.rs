@@ -625,6 +625,9 @@ impl Runtime {
         // the allowlist. With no `[[trunk]]` blocks (legacy mode) and
         // `[sip.auth].enabled`, every source is challenged; otherwise
         // only trunks that opted into `auth_required`.
+        // Snapshot the trunk list for `GET /admin/v1/trunks` before
+        // `trunks` is moved into the allowlist below.
+        let trunks_for_admin: Arc<Vec<_>> = Arc::new(trunks.clone());
         let digest_auth = sip.auth.as_ref().map(|a| {
             let require_all = trunks.is_empty();
             let required_trunks: std::collections::HashSet<String> = trunks
@@ -1207,6 +1210,23 @@ impl Runtime {
                     .snapshot()
                     .into_iter()
                     .map(registration_state_to_row)
+                    .collect()
+            })),
+            // Static config, snapshotted once — a trunk has no live
+            // state to poll (DESIGN_SIGHTGLASS.md §6.6). Listing it is
+            // what stops "my Twilio trunk is missing" from being
+            // indistinguishable from a config mistake.
+            trunk_snapshot: Some(Arc::new(move || {
+                trunks_for_admin
+                    .iter()
+                    .map(|t| siphon_ai_telemetry::admin::TrunkRow {
+                        name: t.name.clone(),
+                        peer_addrs: t
+                            .peer_addrs
+                            .iter()
+                            .map(|c| format!("{}/{}", c.network, c.prefix_len))
+                            .collect(),
+                    })
                     .collect()
             })),
             log_filter: Some(log_filter),

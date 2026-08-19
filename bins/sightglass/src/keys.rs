@@ -418,6 +418,7 @@ mod tests {
             log_filter: None,
             recent_cdrs: None,
             errors: None,
+            trunks: vec![],
         }
     }
 

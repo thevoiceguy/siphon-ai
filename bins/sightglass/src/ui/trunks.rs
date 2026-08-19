@@ -1,8 +1,19 @@
-//! Trunks tab: every `[[register]]` binding across the fleet.
+//! Trunks tab: every `[[register]]` binding **and** every `[[trunk]]`
+//! allowlist across the fleet.
 //!
-//! Gateway (IP-auth) trunk health is an open question deliberately
-//! deferred (DESIGN_SIGHTGLASS.md §6.6); this tab shows registration
-//! state, which is what the daemon has live data for today.
+//! The two are different things and the table says so. A registration
+//! authenticates with credentials and therefore has live state —
+//! registered / expiry / last error. A `[[trunk]]` is an IP allowlist:
+//! no credentials, nothing to register, and so nothing to poll. Its
+//! rows carry `ip-auth` and dashes.
+//!
+//! They share a tab because an operator asking "is my Twilio trunk
+//! configured?" does not care about that distinction and should not
+//! have to know it to get an answer. Showing only registrations made a
+//! configured trunk indistinguishable from a missing one — reported
+//! from a live session, and the reason §6.6's deferral was not enough
+//! on its own. Actual reachability probing (OPTIONS toward the peer)
+//! remains the deferred part.
 
 use ratatui::layout::{Constraint, Rect};
 use ratatui::text::Span;
@@ -16,7 +27,7 @@ use super::Theme;
 pub fn draw(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let multi_node = app.nodes.len() > 1;
 
-    let mut headers = vec!["NAME", "SERVER", "STATUS", "EXPIRES", "LAST ERROR"];
+    let mut headers = vec!["NAME", "SERVER / PEERS", "STATUS", "EXPIRES", "LAST ERROR"];
     if multi_node {
         headers.insert(0, "NODE");
     }
@@ -58,11 +69,41 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             }
             rows.push(Row::new(cells));
         }
+
+        // Then the IP-authenticated trunks. Deliberately after the
+        // registrations: those have live state and are what an
+        // operator scans first.
+        for t in &n.trunks {
+            let base = if stale {
+                theme.dim_text()
+            } else {
+                theme.text()
+            };
+            let peers = if t.peer_addrs.is_empty() {
+                "any source".to_string()
+            } else {
+                t.peer_addrs.join(", ")
+            };
+            let mut cells = vec![
+                Cell::from(Span::styled(t.name.clone(), base)),
+                Cell::from(Span::styled(peers, base)),
+                // Not a health verdict — a statement that this kind of
+                // peer has no health to report. Dim so it never reads
+                // as "up".
+                Cell::from(Span::styled("ip-auth", theme.dim_text())),
+                Cell::from(Span::styled("—", theme.dim_text())),
+                Cell::from(Span::styled("", theme.dim_text())),
+            ];
+            if multi_node {
+                cells.insert(0, Cell::from(Span::styled(n.name.as_str(), base)));
+            }
+            rows.push(Row::new(cells));
+        }
     }
 
     let mut widths = vec![
         Constraint::Length(16),
-        Constraint::Length(22),
+        Constraint::Min(24),
         Constraint::Length(12),
         Constraint::Length(22),
         Constraint::Min(10),
@@ -89,7 +130,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         };
         frame.render_widget(
             ratatui::widgets::Paragraph::new(Span::styled(
-                "no [[register]] bindings on the visible nodes",
+                "no [[register]] bindings or [[trunk]] allowlists on the visible nodes",
                 theme.dim_text(),
             )),
             inner,

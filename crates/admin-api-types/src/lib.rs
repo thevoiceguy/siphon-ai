@@ -67,6 +67,31 @@ pub struct RegistrationsResponse {
     pub registrations: Vec<RegistrationRow>,
 }
 
+// ─── GET /admin/v1/trunks ──────────────────────────────────────────
+
+/// One configured `[[trunk]]` — an **IP-authenticated** peer allowlist.
+///
+/// Distinct from a `[[register]]` binding ([`RegistrationRow`]), which
+/// authenticates with credentials and therefore *has* live state. A
+/// trunk has none: there is nothing to register, so nothing to poll.
+/// It is listed anyway because an operator looking for "my Twilio
+/// trunk" otherwise finds an empty space and cannot tell a missing
+/// config from an unmonitorable one (DESIGN_SIGHTGLASS.md §6.6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrunkRow {
+    pub name: String,
+    /// CIDRs / addresses this trunk accepts INVITEs from, as written
+    /// in the config.
+    pub peer_addrs: Vec<String>,
+}
+
+/// `GET /admin/v1/trunks` response envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrunksResponse {
+    pub count: usize,
+    pub trunks: Vec<TrunkRow>,
+}
+
 // ─── GET /admin/v1/conferences ─────────────────────────────────────
 
 /// One conference room in the `GET /admin/v1/conferences` response.
@@ -552,6 +577,27 @@ mod tests {
             call_id: None,
         };
         assert!(!serde_json::to_string(&no_call).unwrap().contains("call_id"));
+    }
+
+    #[test]
+    fn trunks_response_wire_shape() {
+        let resp = TrunksResponse {
+            count: 1,
+            trunks: vec![TrunkRow {
+                name: "twilio".into(),
+                peer_addrs: vec!["54.172.60.0/30".into(), "54.244.51.0/30".into()],
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&resp).unwrap(),
+            json!({
+                "count": 1,
+                "trunks": [{
+                    "name": "twilio",
+                    "peer_addrs": ["54.172.60.0/30", "54.244.51.0/30"],
+                }],
+            })
+        );
     }
 
     #[test]

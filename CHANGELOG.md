@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A live call's SIP ladder could be evicted by scanner noise.** The ring bounds its not-yet-completed traces least-recently-touched, but **an established call is SIP-silent between its ACK and its BYE** — its `last_touched` never advances, while rejected scanner INVITEs and REGISTER refreshes keep arriving with fresh ones. The live call was therefore the *oldest* entry and would be evicted **before** the transient noise the bound exists to contain, discarding the ladder of the call an operator is most likely to be looking at. Live calls are now a separate population, promoted when the control registry accepts the call, bounded separately at `MAX_LIVE = 512`, and never evicted to make room for noise. Found by the 0.49.5 load run (`test-harness/load/RESULTS-0.49.5-sip-ring.md`), which did not trip the bound at 203 concurrent but showed the trace-growth curve that makes it inevitable on a busier or longer-lived node.
+
+### Added
+
+- **`GET /admin/v1/trunks` and `[[trunk]]` rows in sightglass's trunks tab.** The tab showed only `[[register]]` bindings, so on a node with a registered PBX *and* an IP-authenticated carrier trunk, the carrier was simply absent — indistinguishable from a config mistake, and reported as exactly that confusion from a live session. Trunks have no credentials and no registration, hence no live state to poll, which is why DESIGN_SIGHTGLASS.md §6.6 deferred them; but "nothing to poll" is not a reason to render nothing. Trunk rows now list their peer CIDRs with a dim `ip-auth` marker and dashes where a registration would show state, so they never read as "up". Readonly role; active OPTIONS probing toward gateways remains the deferred part.
+
+- **`test-harness/load/RESULTS-0.49.5-sip-ring.md`** — the ring shipped enabled-by-default in 0.49.3 and had never been load-tested. At 203 concurrent it dropped nothing at either bound, and the run also caught **47 of 250 calls dying on `ws_disconnect`**: the generator's WS server, not the daemon, and §1.4 of the load plan happening as written. Carries `ringstat.sh` into the harness.
+
 ## [0.49.5] - 2026-08-19
 
 A one-line UX fix with a two-line consequence: the SIP ladder's key is

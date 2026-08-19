@@ -571,6 +571,7 @@ unversioned paths as deprecated aliases — see
 | POST   | `/admin/v1/calls/:id/park`    | JSON (opt.)     | operator | **Park an active call** (0.7.0). Body `{slot?}`; `202` (dispatched). `404` if no active call has that id. `501` when `[park]` is disabled. |
 | POST   | `/admin/v1/calls/:id/retrieve`| JSON (opt.)     | operator | **Retrieve a parked call** (0.7.0). Body `{ws_url?}`; `202` (dispatched). `404` unknown call, `409` if the call isn't parked. `501` when `[park]` is disabled. |
 | GET    | `/admin/v1/calls/:id/stats`   | —               | readonly | **Live per-call quality snapshot** (0.31.0). `:id` is the bridge `call_id` (the one on the WS `start` message / CDR). Returns `{call_id, sampled_at, …}` with the CDR `quality` block's fields flattened in — whatever is measured *right now*, unmeasured fields omitted. `404` when no active call has that id (ended calls answer through the CDR / `[quality]` records). |
+| GET    | `/admin/v1/calls/:id/sip`     | —               | **operator** | **Per-call SIP ladder** (DESIGN_SIP_LADDER.md). The messages captured for one call, **oldest first**: `{call_id, sip_call_id, truncated, count, messages: [{ts_ms, direction, src, dst, payload}]}`. `:id` is the bridge `call_id`, resolved through the live registry and then the recent-CDR ring — so a call that just *ended* is still inspectable, which is when you usually want it. `direction` is `in`/`out`/`unknown` (matched on IP against `[node].public_address` and a non-wildcard bind; `src`/`dst` are kept so the derivation stays checkable). `501` when `[observability].sip_ring_size = 0`; `404` for an unknown id; `200` with an empty list when the call is known but its trace was never captured or has been evicted. **Note the role: this is the only `GET` on this API above `readonly`**, because `payload` is the raw message including `Authorization` / `Proxy-Authorization` — see *Admin auth & RBAC* below. A nice-to-have for a quick look, not a Homer replacement. |
 | GET    | `/admin/v1/drain`             | —               | readonly | **Graceful-shutdown drain status** (0.17.0). Returns `{draining, active_calls, drain_timeout_secs, remaining_secs}` — `remaining_secs` is the countdown to the deadline (non-null only while draining). Lets a deploy script confirm a pod entered drain and watch it empty. |
 | GET    | `/admin/v1/errors`            | —               | readonly | **Recent-errors ring** (0.49.0). The last N `warn!`/`error!` tracing events, newest first: `{count, errors: [{ts_ms, level, target, message, call_id?}]}` — `call_id` present when the event fired inside a per-call span, so entries join against `/admin/v1/calls`, the CDR, and Homer. Capacity via `[observability].error_ring_size` (default 256; `0` ⇒ always-empty list). Feeds sightglass's Errors tab; equally useful as `curl … /admin/v1/errors \| jq` during an incident. |
 | GET    | `/admin/v1/status`            | —               | readonly | **Node status summary** (0.49.0). One-request JSON snapshot: `{version, uptime_secs, active_calls, registrations: {registered, total}, draining, hep_enabled}`. The *live* view only — cumulative counters (`siphon_ai_calls_total`, HEP delivery/health) stay on `/metrics`. Feeds sightglass's overview grid; handy for deploy scripts that would otherwise parse Prometheus text for one number. |
@@ -639,9 +640,37 @@ Roles, lowest to highest (each inherits everything below it):
 
 | Role       | Can do |
 |------------|--------|
-| `readonly` | All `GET` / list endpoints (calls, registrations, log, conferences, parked). |
-| `operator` | Everything `readonly` can, plus hangup, park / retrieve, and conference create / end / add / remove. |
+| `readonly` | All `GET` / list endpoints (calls, registrations, log, conferences, parked) — **except `GET /admin/v1/calls/:id/sip`**, see below. |
+| `operator` | Everything `readonly` can, plus hangup, park / retrieve, conference create / end / add / remove, and **reading raw SIP** (`GET /admin/v1/calls/:id/sip`). |
 | `admin`    | Everything `operator` can, plus **billable** origination (`POST /admin/v1/calls`), `PUT /admin/v1/log`, and `POST /admin/v1/hep/test`. |
+
+> **An `operator` token can read recent SIP credentials, on a default
+> install.** `GET /admin/v1/calls/:id/sip` returns messages verbatim,
+> including `Authorization` and `Proxy-Authorization` digest headers,
+> and the SIP ladder ring is **on by default**
+> (`[observability].sip_ring_size = 50`). This is deliberate
+> (DESIGN_SIP_LADDER.md §2): a redacted ladder invites the wrong
+> conclusion about what actually went over the wire, so the access
+> boundary is the role rather than the content — which is also why this
+> is the one `GET` on the API gated above `readonly`.
+>
+> Two consequences worth planning for:
+>
+> - **Treat an `operator` token as credential-bearing.** It was already
+>   powerful (it can end live calls); it is now also readable-secrets
+>   powerful. Hand out `readonly` for dashboards and NOC wall screens —
+>   sightglass's `--read-only` flag and a `readonly` token both work.
+> - **Set `[observability].sip_ring_size = 0` to opt out.** Capture stops,
+>   nothing is held, and the endpoint answers `501`. This is a supported
+>   configuration, not a vestigial switch; clients degrade to "disabled"
+>   rather than treating the node as down.
+>
+> The ring holds no class of data the node was not already handling —
+> these bytes are in the daemon's address space as the parsed dialog
+> anyway, and as the HEP packet shipped to Homer wherever `[hep]` is on.
+> What defaulting it on changes is their *lifetime* (minutes, bounded by
+> `sip_ring_size` / `sip_ring_max_messages`) and their *reachability*
+> (an authenticated operator endpoint). Nothing is written to disk.
 
 Every request is audited: a structured log line (actor = token **name**,
 role, endpoint template, result, peer address — never the secret) and the
@@ -1311,6 +1340,8 @@ applied (and test-enforced) in our `prometheus_builder()` (issue #437).
 | `siphon_ai_register_attempts_total`     | counter   | `name`, `outcome=registered\|auth_failed\|rejected\|transport_error` | One tick per REGISTER attempt. |
 | `siphon_ai_metrics_requests_total`      | counter   | `result=ok\|unauthenticated`          | `/metrics` scrape outcomes, emitted **only when** `[observability].metrics_token` is set (0.35.0) — the series existing at all means the gate is on. A rising `unauthenticated` is a misconfigured scraper or a prober; rejected scrapes also log a rate-limited warning (≤1/min). |
 | `siphon_ai_error_ring_captured_total`   | counter   | `level=warn\|error`                   | `warn!`/`error!` tracing events captured into the recent-errors ring (`GET /admin/v1/errors`, 0.49.0). A rate spike is a health signal in its own right — alert on it even if nobody is watching the ring. Counts what the global log filter passes; `error_ring_size = 0` stops storage but this still counts captures attempted. |
+| `siphon_ai_sip_ring_messages_total`     | counter   | `result=captured\|dropped_call_cap\|dropped_trace_cap` | SIP messages offered to the per-call ladder ring (`GET /admin/v1/calls/{id}/sip`). A rising `dropped_call_cap` says `sip_ring_max_messages` is wrong for this deployment, or something is retransmitting. `dropped_trace_cap` counts whole dialogs evicted by the pending bound — REGISTER/OPTIONS/scanner traffic crowding out live calls; a sustained rate there means the ladder may miss a call you go looking for. |
+| `siphon_ai_sip_ring_traces`             | gauge     | —                                     | SIP dialogs currently held by the ladder ring: live calls, retained completed calls, **and non-call dialogs** (REGISTER refreshes, OPTIONS, rejected INVITEs) that also carry a `Call-ID`. Named `traces` rather than `calls` for exactly that reason. Bounded by `sip_ring_size` completed plus 256 pending. |
 | `siphon_ai_ws_failure_prompts_total`    | counter   | `result=played\|cut_short\|unusable\|timeout` | WS-failure prompt playbacks (0.34.0, `[bridge].on_ws_failure = "play_prompt"`). `played` = EOF reached; `cut_short` = caller hangup/teardown preempted it; `unusable` = the file failed to load at call time (fell open to plain hangup — check the rate matches the bridge); `timeout` = the 30 s safety cap fired (config smell: prompt too long, warned at load). |
 | `siphon_ai_register_admin_triggers_total` | counter | `name`, `action=refresh\|restart`     | Operator registration triggers **accepted** by the admin API (0.33.0). The resulting REGISTER's outcome lands on `siphon_ai_register_attempts_total{name,outcome}` as usual — a trigger with no matching attempt tick means the command was coalesced behind an already-queued one. |
 | `siphon_ai_barge_in_decisions_total`    | counter   | `outcome=confirmed\|rejected\|timeout` | Pause-mode barge-in arbitration resolutions (0.32.0, `[bridge.barge_in].mode = "pause"`). `confirmed` includes server verdicts *and* preempting commands (mute/hold/park/`clear`/conference-join/WS drop); `timeout` = the `on_timeout` fallback ruled. A high `timeout` share means the server isn't sending verdicts (or `decision_ms` is too tight); a high `rejected` share means VAD false positives are being caught — working as designed. |

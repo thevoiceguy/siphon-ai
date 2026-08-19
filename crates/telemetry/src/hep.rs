@@ -172,13 +172,30 @@ impl HepWorkerHandle {
 /// `siphon-ai-config`'s `HepConfig` but accepts primitives so this
 /// crate doesn't need to dep on `siphon-ai-config` (which would
 /// close a cycle through `siphon-ai-core`).
-#[derive(Debug, Clone)]
+/// The share-by-Arc `HepSink` handle the emitters and every sink leg
+/// hold. Re-exported so the daemon can build its own legs (the SIP
+/// ladder ring) without depending on `hep-rs` directly.
+pub type SinkHandle = HepSinkHandle;
+
+// No `Debug`/`Clone`: `extra_sinks` holds `dyn HepSink` legs, which
+// are neither. The struct is consumed once by `build`.
 pub struct HepTelemetryBuild {
-    pub collector: SocketAddr,
+    /// UDP collector to ship to. `None` builds no UDP leg and opens
+    /// no socket — used when `[hep]` is off but a local consumer
+    /// (the SIP ladder ring) still wants the packet stream. At least
+    /// one of `collector` or `extra_sinks` must be present, or there
+    /// is nothing to build.
+    pub collector: Option<SocketAddr>,
     pub capture_id: u32,
     pub capture_password: Option<String>,
     pub queue_capacity: usize,
     pub node_id: String,
+    /// Extra in-process `HepSink` legs fanned out alongside the UDP
+    /// one — today just `sip_ring::SipRingSink`
+    /// (DESIGN_SIP_LADDER.md §3.1). Teeing here rather than off the
+    /// UDP sink is what lets SIP capture work on a node that ships
+    /// nothing to Homer.
+    pub extra_sinks: Vec<HepSinkHandle>,
 }
 
 impl HepTelemetry {
@@ -187,23 +204,59 @@ impl HepTelemetry {
     /// [`HepWorkerHandle`] — the runtime keeps the worker on
     /// `Runtime` and stashes the telemetry handle in `Arc` for
     /// admin / CDR / call-site consumers.
-    pub async fn build(args: HepTelemetryBuild) -> Result<(Self, HepWorkerHandle), HepBuildError> {
+    /// The [`HepWorkerHandle`] is `None` when no `collector` was
+    /// given — there is no UDP worker to drain in that case.
+    pub async fn build(
+        args: HepTelemetryBuild,
+    ) -> Result<(Self, Option<HepWorkerHandle>), HepBuildError> {
         let HepTelemetryBuild {
             collector,
             capture_id,
             capture_password,
             queue_capacity,
             node_id,
+            extra_sinks,
         } = args;
 
-        let mut udp_cfg = UdpHepSinkConfig::new(collector);
-        udp_cfg.queue_capacity = queue_capacity;
-        let (sink, worker) = UdpHepSink::start(udp_cfg).await?;
+        // Build the UDP leg only when a collector is configured, so a
+        // ring-only node opens no socket and spawns no worker.
+        let mut legs: Vec<HepSinkHandle> = Vec::with_capacity(1 + extra_sinks.len());
+        let mut worker_handle = None;
+        if let Some(collector) = collector {
+            let mut udp_cfg = UdpHepSinkConfig::new(collector);
+            udp_cfg.queue_capacity = queue_capacity;
+            let (sink, worker) = UdpHepSink::start(udp_cfg).await?;
 
-        // A typed clone for the worker handle's graceful-drain signal,
-        // taken before the sink is erased into the share-by-Arc handle.
-        let shutdown_sink = sink.clone();
-        let arc_sink: HepSinkHandle = Arc::new(sink);
+            // A typed clone for the worker handle's graceful-drain
+            // signal, taken before the sink is erased into the
+            // share-by-Arc handle.
+            let shutdown_sink = sink.clone();
+            legs.push(Arc::new(sink) as HepSinkHandle);
+
+            // Publish once before anything can be emitted, so both
+            // series exist on `/metrics` from startup. The `metrics`
+            // facade registers lazily — without this an alert on
+            // `siphon_ai_hep_packets_dropped_total` would have to
+            // survive the series being *absent* until the first drop,
+            // which is exactly when nobody is looking at it.
+            publish_counters(&shutdown_sink);
+            let sampler = tokio::spawn(sample_counters(shutdown_sink.clone()));
+            worker_handle = Some(HepWorkerHandle {
+                sink: shutdown_sink,
+                worker: Some(worker),
+                sampler: Some(sampler),
+            });
+        }
+        legs.extend(extra_sinks);
+
+        // One leg stays one leg: the fan-out is only interposed when
+        // there is genuinely more than one destination, so the common
+        // HEP-only deployment keeps its exact previous call path.
+        let arc_sink: HepSinkHandle = if legs.len() == 1 {
+            legs.pop().expect("len checked")
+        } else {
+            Arc::new(crate::sip_ring::FanOutHepSink::new(legs))
+        };
 
         // Install the per-protocol emitters globally. siphon-rs's
         // `sip-transport` and forge-media's RTCP loop pick them up at
@@ -229,20 +282,6 @@ impl HepTelemetry {
             capture_id,
             capture_password,
             node_id,
-        };
-        // Publish once before anything can be emitted, so both series
-        // exist on `/metrics` from startup. The `metrics` facade
-        // registers lazily — without this an alert on
-        // `siphon_ai_hep_packets_dropped_total` would have to survive
-        // the series being *absent* until the first drop, which is
-        // exactly when nobody is looking at it.
-        publish_counters(&shutdown_sink);
-        let sampler = tokio::spawn(sample_counters(shutdown_sink.clone()));
-
-        let worker_handle = HepWorkerHandle {
-            sink: shutdown_sink,
-            worker: Some(worker),
-            sampler: Some(sampler),
         };
         Ok((telemetry, worker_handle))
     }
@@ -361,6 +400,58 @@ mod tests {
         fn send(&self, packet: HepPacket) {
             self.seen.lock().unwrap().push(packet);
         }
+    }
+
+    // DESIGN_SIP_LADDER.md §3.1. The whole reason `collector` is an
+    // Option: with `[hep]` off but the ladder on, the packet stream
+    // must still exist — teeing off the UDP sink instead would leave
+    // the ladder silently *empty* on such a node, which reads as "no
+    // messages" rather than "not enabled".
+    #[tokio::test]
+    async fn build_without_a_collector_opens_no_socket_and_still_feeds_extra_sinks() {
+        let capture = Arc::new(Capture::default());
+        let (telemetry, worker) = HepTelemetry::build(HepTelemetryBuild {
+            collector: None,
+            capture_id: 0,
+            capture_password: None,
+            queue_capacity: 8,
+            node_id: "ring-only".into(),
+            extra_sinks: vec![capture.clone() as HepSinkHandle],
+        })
+        .await
+        .expect("ring-only build succeeds");
+
+        assert!(
+            worker.is_none(),
+            "no collector ⇒ no UDP worker to drain and no socket opened"
+        );
+
+        telemetry.emit_log("hello", Some("call-1"), None);
+        let seen = capture.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "the extra leg still receives packets");
+        assert_eq!(seen[0].correlation_id.as_deref(), Some("call-1"));
+    }
+
+    // With one destination the fan-out must not be interposed, so the
+    // common HEP-only deployment keeps its exact previous call path.
+    #[tokio::test]
+    async fn a_single_leg_is_used_directly_rather_than_wrapped() {
+        let capture = Arc::new(Capture::default());
+        let (telemetry, worker) = HepTelemetry::build(HepTelemetryBuild {
+            collector: None,
+            capture_id: 7,
+            capture_password: None,
+            queue_capacity: 8,
+            node_id: "one-leg".into(),
+            extra_sinks: vec![capture.clone() as HepSinkHandle],
+        })
+        .await
+        .expect("build");
+        assert!(worker.is_none());
+        assert!(
+            Arc::ptr_eq(&telemetry.sink(), &(capture as HepSinkHandle)),
+            "the sole leg is the sink itself, not a FanOut wrapper around it"
+        );
     }
 
     fn telemetry_with(sink: HepSinkHandle) -> HepTelemetry {

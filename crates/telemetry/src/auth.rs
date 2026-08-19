@@ -264,6 +264,26 @@ fn operator_pattern(method: &hyper::Method, path: &str) -> bool {
         // /admin/v1/conferences/:id/participants/:cid  (DELETE = remove)
         || ((*method == Method::DELETE || *method == Method::POST)
             && path.starts_with("/admin/v1/conferences/"))
+        // /admin/v1/calls/:id/sip — the SIP ladder (DESIGN_SIP_LADDER.md).
+        //
+        // **The only GET on this API gated above ReadOnly.** Every other
+        // read is readonly because it returns metadata; this one returns
+        // whole SIP messages verbatim, including Authorization and
+        // Proxy-Authorization headers, which the design deliberately
+        // does not redact (§2) — a partial message invites the wrong
+        // conclusion about what went over the wire. So the access
+        // boundary is the role, not the content: a token trusted to hang
+        // up a live call and originate billable outbound is trusted to
+        // read a digest header, and `readonly` is not.
+        //
+        // Every sibling under /admin/v1/calls/:id here is a POST; this
+        // arm is deliberately a separate GET clause rather than a
+        // loosened prefix, so widening the readonly read surface takes a
+        // visible edit. `readonly_get_surface_is_not_widened_by_the_sip_arm`
+        // locks it.
+        || (*method == Method::GET
+            && path.starts_with("/admin/v1/calls/")
+            && path.ends_with("/sip"))
 }
 
 /// A **bounded-cardinality** label for the admin-request metric: the
@@ -320,6 +340,9 @@ pub fn route_label(method: &hyper::Method, path: &str) -> &'static str {
             if *m == Method::GET && p.starts_with("/admin/v1/calls/") && p.ends_with("/stats") =>
         {
             "GET /admin/v1/calls/:id/stats"
+        }
+        (m, p) if *m == Method::GET && p.starts_with("/admin/v1/calls/") && p.ends_with("/sip") => {
+            "GET /admin/v1/calls/:id/sip"
         }
         (m, p)
             if *m == Method::POST && p.starts_with("/admin/v1/calls/") && p.ends_with("/park") =>
@@ -467,6 +490,37 @@ mod tests {
         assert!(a
             .authorize(&Method::PUT, "/admin/log", Some("Bearer ad-secret"))
             .is_ok());
+    }
+
+    // DESIGN_SIP_LADDER.md §4.1. The SIP ladder is the first GET on
+    // this API that is not readonly, and the two assertions belong in
+    // one test on purpose: what must hold is the *difference* between
+    // two sibling GETs under the same /admin/v1/calls/:id prefix.
+    // Split across two tests, a refactor that loosened the prefix
+    // could leave one passing and read as fine.
+    #[test]
+    fn readonly_get_surface_is_not_widened_by_the_sip_arm() {
+        assert_eq!(
+            min_role(&Method::GET, "/admin/v1/calls/abc/sip"),
+            Some(Role::Operator),
+            "raw SIP is unredacted (design §2) — readonly must not reach it"
+        );
+        assert_eq!(
+            min_role(&Method::GET, "/admin/v1/calls/abc/stats"),
+            Some(Role::ReadOnly),
+            "the sibling metadata read stays readonly"
+        );
+        // Operator is the floor, not the ceiling: Admin is strictly
+        // greater, so an admin token reads the ladder too.
+        assert!(Role::Admin >= Role::Operator);
+        // The arm is anchored on the /sip suffix, not the prefix: a
+        // path that merely lives under a call id is not swept in.
+        assert_eq!(min_role(&Method::GET, "/admin/v1/calls/abc"), None);
+        assert_eq!(
+            route_label(&Method::GET, "/admin/v1/calls/abc/sip"),
+            "GET /admin/v1/calls/:id/sip",
+            "the metric label collapses the id — never the raw path"
+        );
     }
 
     #[test]

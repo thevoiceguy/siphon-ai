@@ -213,6 +213,52 @@ pub struct ErrorsResponse {
     pub errors: Vec<ErrorEntry>,
 }
 
+// ─── GET /admin/v1/calls/{id}/sip ──────────────────────────────────
+
+/// One captured SIP message in the `GET /admin/v1/calls/{id}/sip`
+/// response (DESIGN_SIP_LADDER.md). The message verbatim — this
+/// endpoint is deliberately unredacted and gated at `operator`
+/// (design §2), because a partial message invites the wrong
+/// conclusion about what actually went over the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SipMessageEntry {
+    /// Capture time, milliseconds since the Unix epoch. Matches
+    /// [`ErrorEntry::ts_ms`] rather than the design note's RFC3339
+    /// sketch — the ring endpoints share one time encoding, and a
+    /// client rendering a ladder wants to subtract them anyway.
+    pub ts_ms: u64,
+    /// `"in"` | `"out"` | `"unknown"`, derived by matching `src`/`dst`
+    /// against the node's own addresses (`[node].public_address` and a
+    /// non-wildcard SIP bind IP). `"unknown"` when neither end is
+    /// recognisably this node — a wildcard bind with no
+    /// `public_address` — because guessing is worse than saying so.
+    /// Matching is on IP, never port: SIP peers send *from* 5060 too.
+    /// `src`/`dst` are kept so the derivation stays checkable.
+    pub direction: String,
+    pub src: String,
+    pub dst: String,
+    /// The raw message, lossy-UTF-8 decoded. SIP is text; a message
+    /// that isn't valid UTF-8 is malformed and worth seeing as-is.
+    pub payload: String,
+}
+
+/// `GET /admin/v1/calls/{id}/sip` response envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallSipResponse {
+    /// The internal call id the request addressed.
+    pub call_id: String,
+    /// The SIP `Call-ID` the ring is keyed by.
+    pub sip_call_id: String,
+    /// `true` when the per-call cap evicted older messages — so a
+    /// client says "truncated" instead of silently showing a
+    /// ladder that starts mid-dialog.
+    pub truncated: bool,
+    pub count: usize,
+    /// Oldest first: a ladder reads down the page in wire order,
+    /// unlike the newest-first `errors`/`cdrs` listings.
+    pub messages: Vec<SipMessageEntry>,
+}
+
 // ─── GET /admin/v1/drain ───────────────────────────────────────────
 
 /// Snapshot of the daemon's graceful-shutdown drain state (0.17.0),
@@ -504,6 +550,39 @@ mod tests {
             call_id: None,
         };
         assert!(!serde_json::to_string(&no_call).unwrap().contains("call_id"));
+    }
+
+    #[test]
+    fn call_sip_response_wire_shape() {
+        let resp = CallSipResponse {
+            call_id: "siphon-abc".into(),
+            sip_call_id: "a84b4c76e66710@pbx.example.com".into(),
+            truncated: false,
+            count: 1,
+            messages: vec![SipMessageEntry {
+                ts_ms: 1_755_000_000_123,
+                direction: "out".into(),
+                src: "139.177.205.140:5060".into(),
+                dst: "194.195.208.34:5060".into(),
+                payload: "INVITE sip:+15551234@example.com SIP/2.0\r\n\r\n".into(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&resp).unwrap(),
+            json!({
+                "call_id": "siphon-abc",
+                "sip_call_id": "a84b4c76e66710@pbx.example.com",
+                "truncated": false,
+                "count": 1,
+                "messages": [{
+                    "ts_ms": 1_755_000_000_123u64,
+                    "direction": "out",
+                    "src": "139.177.205.140:5060",
+                    "dst": "194.195.208.34:5060",
+                    "payload": "INVITE sip:+15551234@example.com SIP/2.0\r\n\r\n",
+                }],
+            })
+        );
     }
 
     #[test]

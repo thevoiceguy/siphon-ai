@@ -1146,6 +1146,22 @@ pub struct RawObservability {
     /// the ring keeps the tail in memory even with no CDR sinks.
     #[serde(default)]
     pub cdr_ring_size: Option<usize>,
+    /// Completed calls whose SIP ladder is kept for
+    /// `GET /admin/v1/calls/{id}/sip` (DESIGN_SIP_LADDER.md).
+    /// Default 50 — the same window as `cdr_ring_size`; `0` disables
+    /// capture entirely (the endpoint then answers `501`).
+    ///
+    /// **On by default, and it holds SIP verbatim** — including
+    /// `Authorization` headers, which the endpoint does not redact
+    /// (design §2). The endpoint is `operator`-gated; set this to `0`
+    /// if you would rather the node not hold them at all.
+    #[serde(default)]
+    pub sip_ring_size: Option<usize>,
+    /// Per-call cap on retained SIP messages. Default 64. Overflow
+    /// drops the oldest message *within that call* and flags the
+    /// response `truncated`.
+    #[serde(default)]
+    pub sip_ring_max_messages: Option<usize>,
     /// `[observability.otlp]` — OpenTelemetry OTLP trace export (0.22.0).
     /// Independent of the metrics HTTP server above — you can export traces
     /// without scraping metrics, and vice versa. Off by default.

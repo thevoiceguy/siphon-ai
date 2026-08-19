@@ -129,7 +129,28 @@ struct SipMessage {
 }
 ```
 
-Two bounds, both required:
+**Correction (implementation, 2026-08-19): there are three bounds, not
+two.** This section originally assumed every trace is a call, so the
+completed-call window would eventually evict all of them. It does not:
+**the SIP stream carries far more than calls.** REGISTER refreshes,
+OPTIONS pings, unsolicited NOTIFYs and — on any public-IP node — a
+steady drip of scanner INVITEs rejected with 403 all carry a `Call-ID`
+and all reach this sink. None becomes a call, so none emits a CDR, so
+none is ever *completed*, so none would ever be evicted. The reference
+node alone would feed it ~1,440 REGISTER cycles and ~150 rejected
+INVITEs a day, forever.
+
+Filtering to "is it a call?" at capture time is not available either:
+the INVITE arrives *before* the call exists in any registry, and that
+first message is the one most worth having. So traces live in two
+populations — **completed** (a CDR was emitted; capped at `cap_calls`,
+evicted oldest-first) and **pending** (live calls plus all of the
+above; capped at `MAX_PENDING` = 256, evicted least-recently-touched).
+`MAX_PENDING` is deliberately not configurable: it is a backstop, not
+a tuning knob, and an operator who wants less should set
+`sip_ring_size = 0`.
+
+The three bounds:
 
 - **Per call: 64 messages** (`sip_ring_max_messages`). A normal call is
   6–20. 64 covers re-INVITE churn, auth retries and a REFER without
@@ -182,9 +203,29 @@ GET /admin/v1/calls/{id}/sip        →  200 | 401 | 403 | 404 | 501
 }
 ```
 
-`direction` is derived by comparing `src` against the node's own SIP
-bind — a convenience field, with `src`/`dst` kept so the derivation is
-always checkable.
+`direction` is `"in"` / `"out"` / `"unknown"`, derived by matching
+`src` and `dst` **on IP** against the node's own addresses
+(`[node].public_address`, plus the SIP bind IP when it is not a
+wildcard). `src`/`dst` are kept so the derivation is always checkable.
+
+**Correction (implementation):** the obvious version of this — match
+the source *port* against our bind, treating a `0.0.0.0` bind as
+"any IP" — is wrong, and wrong in the common direction. SIP peers
+overwhelmingly send *from* 5060 as well, so a port-based test labels
+almost every inbound message `"out"`. A unit test caught it before it
+shipped and now locks it. Where neither end is recognisably this node
+(wildcard bind, no `public_address`), the value is `"unknown"`:
+guessing would be worse than saying so, and the client has `src`/`dst`.
+
+Messages are **oldest first** — a ladder reads down the page in wire
+order, unlike the newest-first `errors` / `cdrs` listings — and
+`ts_ms` matches `ErrorEntry`'s encoding rather than this note's
+original RFC3339 sketch, so the ring endpoints share one time format
+and a client can subtract them.
+
+`404` is an unknown id; `200` with an empty list means the call is
+known but its trace was never captured or has been evicted — the two
+are distinguished because the answer to "why is this empty?" differs.
 
 `501` when `sip_ring_size = 0`, matching how the conference and park
 endpoints report a disabled feature; sightglass must degrade to a
@@ -285,10 +326,15 @@ broken.
 
 ## 7. Observability (CLAUDE.md §4.5 — ships in the same PR)
 
-- `siphon_ai_sip_ring_messages_total{result="captured"|"dropped_call_cap"}`
-  — a rising `dropped_call_cap` is the signal that 64 is wrong, or
-  that something is retransmitting.
-- `siphon_ai_sip_ring_calls` gauge — calls currently held.
+- `siphon_ai_sip_ring_messages_total{result="captured"|"dropped_call_cap"|"dropped_trace_cap"}`
+  — a rising `dropped_call_cap` is the signal that 64 is wrong, or that
+  something is retransmitting. `dropped_trace_cap` (added with the
+  pending bound above) counts whole dialogs evicted, i.e. REGISTER /
+  scanner noise crowding out live calls.
+- `siphon_ai_sip_ring_traces` gauge — dialogs currently held. Named
+  `traces`, not the note's original `calls`, for the same reason the
+  third bound exists: most of what it holds on a quiet public node is
+  not a call.
 - No new logs on the capture path: it is a mutex push per SIP message,
   and a log line per SIP message is the noise class 0.49.2 just spent a
   release removing.

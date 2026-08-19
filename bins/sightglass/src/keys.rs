@@ -17,6 +17,44 @@ pub fn handle(app: &mut App, event: &Event) -> Option<Action> {
     if app.modal.is_some() {
         return modal_key(app, key);
     }
+    // The SIP ladder overlay owns navigation while it is open: j/k
+    // must scroll the messages, not move the call selection under it.
+    // Esc closes the overlay rather than quitting — the same "one
+    // layer at a time" rule modals follow above.
+    if app.ladder.open && app.tab == Tab::Calls {
+        match key.code {
+            KeyCode::Esc => {
+                if app.ladder.expanded {
+                    app.ladder.expanded = false;
+                } else {
+                    app.toggle_ladder();
+                }
+                return None;
+            }
+            KeyCode::Char('s') => {
+                app.toggle_ladder();
+                return None;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                app.ladder_select_next();
+                return None;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.ladder_select_prev();
+                return None;
+            }
+            KeyCode::Enter => {
+                app.ladder.expanded = !app.ladder.expanded;
+                return None;
+            }
+            KeyCode::Char('y') => {
+                copy_focused_message(app);
+                return None;
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -54,6 +92,12 @@ pub fn handle(app: &mut App, event: &Event) -> Option<Action> {
             vec![Field::required("room id")],
         ),
         KeyCode::Char('o') if app.tab == Tab::Calls => open_originate(app),
+        // Read-only view of the focused call's signaling — no
+        // confirm modal and no node-named prompt, because it changes
+        // nothing on the node. The 403 case is a note in the pane,
+        // not a blocked keypress: the role probe can be stale, and
+        // the daemon is the authority.
+        KeyCode::Char('s') if app.tab == Tab::Calls => app.toggle_ladder(),
         KeyCode::Char('x') if app.tab == Tab::Rooms => rooms_destroy(app),
         KeyCode::Char('u') if app.tab == Tab::Rooms => rooms_retrieve(app),
         KeyCode::Char('L') if app.tab == Tab::System => system_log_filter(app),
@@ -297,6 +341,56 @@ fn modal_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
     }
 }
 
+/// Copy the focused SIP message to the system clipboard using OSC 52,
+/// the terminal escape for exactly this.
+///
+/// Deliberately not a clipboard crate: CLAUDE.md keeps the dep tree
+/// small on purpose, and OSC 52 works over SSH — which is where
+/// sightglass usually runs, and where a local-clipboard library
+/// cannot help anyway. Terminals that don't implement it ignore the
+/// sequence, so the toast says "sent" rather than claiming success we
+/// can't observe.
+fn copy_focused_message(app: &mut App) {
+    let Some(msg) = app.ladder.selected_message() else {
+        app.push_toast("nothing to copy".into(), false);
+        return;
+    };
+    let payload = msg.payload.clone();
+    let bytes = payload.len();
+    print!("\x1b]52;c;{}\x07", base64_encode(payload.as_bytes()));
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    app.push_toast(format!("sent {bytes} B to clipboard (OSC 52)"), true);
+}
+
+/// Minimal base64 for OSC 52. Twenty lines beats a dependency for the
+/// one place this crate needs it.
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        out.push(TABLE[(n >> 18 & 63) as usize] as char);
+        out.push(TABLE[(n >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +439,90 @@ mod tests {
         app.tab = Tab::Calls;
         app.select_first();
         app
+    }
+
+    // ─── SIP ladder keys (DESIGN_SIP_LADDER.md §5) ──────────────
+
+    #[test]
+    fn s_toggles_the_ladder_only_on_the_calls_tab() {
+        let mut app = app_on_calls();
+        handle(&mut app, &press(KeyCode::Char('s')));
+        assert!(app.ladder.open);
+        handle(&mut app, &press(KeyCode::Char('s')));
+        assert!(!app.ladder.open);
+
+        app.tab = Tab::Trunks;
+        handle(&mut app, &press(KeyCode::Char('s')));
+        assert!(!app.ladder.open, "s is a calls-tab key");
+    }
+
+    // The overlay owns navigation while open: j/k must scroll
+    // messages rather than move the call selection out from under it.
+    #[test]
+    fn open_ladder_captures_navigation_keys() {
+        let mut app = app_on_calls();
+        app.update(Msg::Snapshot {
+            node: 1,
+            result: Ok(Box::new(snapshot(vec![call("abc"), call("def")]))),
+        });
+        app.select_first();
+        let before = app.selected_call;
+        handle(&mut app, &press(KeyCode::Char('s')));
+        handle(&mut app, &press(KeyCode::Char('j')));
+        assert_eq!(
+            app.selected_call, before,
+            "j scrolls the ladder, not the call table"
+        );
+
+        // Closed again, j moves the table as usual.
+        handle(&mut app, &press(KeyCode::Char('s')));
+        handle(&mut app, &press(KeyCode::Char('j')));
+        assert_ne!(app.selected_call, before);
+    }
+
+    #[test]
+    fn esc_closes_the_ladder_before_it_quits_the_app() {
+        let mut app = app_on_calls();
+        handle(&mut app, &press(KeyCode::Char('s')));
+        handle(&mut app, &press(KeyCode::Enter));
+        assert!(app.ladder.expanded);
+
+        handle(&mut app, &press(KeyCode::Esc));
+        assert!(!app.ladder.expanded, "first esc collapses");
+        assert!(app.ladder.open, "and does not close the pane");
+        assert!(!app.should_quit);
+
+        handle(&mut app, &press(KeyCode::Esc));
+        assert!(!app.ladder.open, "second esc closes the pane");
+        assert!(!app.should_quit, "and still does not quit");
+
+        handle(&mut app, &press(KeyCode::Esc));
+        assert!(app.should_quit, "only then does esc quit");
+    }
+
+    // Read-only mode blocks *actions*; the ladder changes nothing on
+    // the node, so it stays available. The daemon's 403 is the real
+    // gate, and it renders inside the pane.
+    #[test]
+    fn ladder_opens_in_read_only_mode() {
+        let mut app = app_on_calls();
+        app.read_only = true;
+        handle(&mut app, &press(KeyCode::Char('s')));
+        assert!(app.ladder.open);
+        assert!(app.toasts.is_empty(), "no 'blocked' toast for a read");
+    }
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        // CRLF and non-ASCII survive — SIP payloads carry both.
+        assert_eq!(base64_encode(b"a\r\nb"), "YQ0KYg==");
     }
 
     #[test]

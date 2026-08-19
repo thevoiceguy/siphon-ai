@@ -21,7 +21,7 @@ use clap::Parser;
 use tokio::sync::{mpsc, watch};
 
 use client::{AdminClient, ApiError};
-use model::{Action, App, Msg, NodeId};
+use model::{Action, App, Msg, PollFocus};
 use ui::Theme;
 
 #[derive(Debug, Parser)]
@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
         .collect::<Result<_>>()?;
 
     let (tx, rx) = mpsc::channel::<Msg>(64);
-    let (focus_tx, focus_rx) = watch::channel::<Option<(NodeId, String)>>(None);
+    let (focus_tx, focus_rx) = watch::channel::<PollFocus>(PollFocus::default());
     for (id, client) in clients.iter().enumerate() {
         poller::spawn(
             id,
@@ -124,7 +124,7 @@ async fn run(
     mut app: App,
     theme: &Theme,
     mut rx: mpsc::Receiver<Msg>,
-    focus_tx: watch::Sender<Option<(NodeId, String)>>,
+    focus_tx: watch::Sender<PollFocus>,
     clients: &[Arc<AdminClient>],
     tx: mpsc::Sender<Msg>,
 ) -> Result<()> {
@@ -144,10 +144,11 @@ async fn run(
             },
             _ = tick.tick() => app.update(Msg::Tick),
         }
-        // Tell the pollers which call's stats to fetch. send_if_modified
-        // keeps the watch quiet when the focus didn't move.
+        // Tell the pollers which call to fetch for, and whether the
+        // SIP ladder is open. send_if_modified keeps the watch quiet
+        // when neither moved.
         focus_tx.send_if_modified(|current| {
-            let focus = app.focus();
+            let focus = app.poll_focus();
             if *current == focus {
                 false
             } else {

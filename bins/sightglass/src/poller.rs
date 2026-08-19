@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
 use crate::client::AdminClient;
-use crate::model::{Msg, NodeId, NodeSnapshot};
+use crate::model::{Msg, NodeId, NodeSnapshot, PollFocus};
 
 pub fn spawn(
     node: NodeId,
@@ -20,7 +20,7 @@ pub fn spawn(
     client: Arc<AdminClient>,
     interval: Duration,
     tx: mpsc::Sender<Msg>,
-    focus: watch::Receiver<Option<(NodeId, String)>>,
+    focus: watch::Receiver<PollFocus>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Spread node start offsets across one interval.
@@ -74,13 +74,13 @@ pub fn spawn(
             // Focused-call stats: only this node's poller fetches, and
             // only while the focus points here (§2 — never fanned out).
             let focused = focus.borrow().clone();
-            if let Some((focus_node, call_id)) = focused {
+            if let Some((focus_node, call_id)) = focused.call {
                 if focus_node == node {
                     if let Ok(stats) = client.call_stats(&call_id).await {
                         let send = tx
                             .send(Msg::Stats {
                                 node,
-                                call_id,
+                                call_id: call_id.clone(),
                                 stats,
                             })
                             .await;
@@ -91,6 +91,26 @@ pub fn spawn(
                     // A stats error is not node-down: the call likely
                     // just ended between the listing and this fetch.
                     // The next snapshot will drop the row.
+
+                    // The SIP ladder is fetched **only while the pane
+                    // is open** (DESIGN_SIP_LADDER.md §5): it is the
+                    // one payload here measured in kilobytes, so a
+                    // closed pane must cost nothing. Its errors are
+                    // typed and rendered in the pane — never
+                    // node-down, and never a toast.
+                    if focused.ladder {
+                        let result = client.call_sip(&call_id).await;
+                        let send = tx
+                            .send(Msg::Ladder {
+                                node,
+                                call_id,
+                                result: Box::new(result),
+                            })
+                            .await;
+                        if send.is_err() {
+                            return;
+                        }
+                    }
                 }
             }
         }

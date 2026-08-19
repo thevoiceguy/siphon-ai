@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`cargo audit` in CI** (`.github/workflows/audit.yml`) — this repo had no advisory scanning at all, which is why [RUSTSEC-2026-0258](https://rustsec.org/advisories/RUSTSEC-2026-0258) sat in the lockfile for two days and then surfaced from a hand run rather than a check (see 0.49.2). The sibling forge-media repo caught the same advisory the day it published, because it has this job.
+  - The trigger set is deliberately **not** test.yml's. A **daily schedule** is the case that actually matters — an advisory lands against code nobody touched, so no push and no PR will ever fire a check, only a clock. **`push` to main** keeps the default branch's status honest between nightly runs. **Pull requests are gated on dependency files only** (`Cargo.lock`, `Cargo.toml`, the workflow itself): gating every PR means a newly published advisory turns unrelated work red through no fault of its own, which is exactly what happened to [forge-media#107](https://github.com/thevoiceguy/forge-media/pull/107) — a redis bump left sitting on an h2 failure it had nothing to do with.
+  - Fails on **vulnerabilities only**. The informational "unmaintained"/"unsound" advisories (currently 6: audiopus_sys, paste, rustls-pemfile, anyhow, lru ×2) are reported without failing the run — a gate that is chronically red gates nothing.
+  - `cargo audit` reads `Cargo.lock` and never builds, so the job needs no system libraries and no workspace compile.
+
 ## [0.49.2] - 2026-08-19
 
 Housekeeping: a security advisory in our own lockfile, and two upstream log

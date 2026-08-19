@@ -1,0 +1,90 @@
+name: audit
+
+# Scans Cargo.lock against the RustSec advisory database.
+#
+# This exists because of RUSTSEC-2026-0258 (h2 unbounded empty DATA frames).
+# It was published 2026-08-17 against a lockfile nobody had touched, hit the
+# h2 under hyper 1.x — which serves every HTTP listener the daemon exposes —
+# and nothing in this repo noticed. It surfaced only when someone ran
+# `cargo audit` by hand, two days later, while working on something else.
+# The sibling repo (forge-media) had caught the same advisory the day it
+# published, because it has this job and we did not.
+#
+# The trigger set is deliberately not the same as test.yml's:
+#
+#   schedule    The case that actually matters. An advisory lands against
+#               code that has not changed, so no push and no PR will ever
+#               fire a check — only a clock will. Daily; a failure emails
+#               the workflow's actor.
+#   push:main   Catches a dependency change the moment it lands, and keeps
+#               the default branch's status honest between nightly runs.
+#   PR + paths  Gated on dependency files only, on purpose. Gating *every*
+#               PR means a newly published advisory turns unrelated work
+#               red through no fault of its own — which is exactly what
+#               happened to forge-media#107, a redis bump left sitting on
+#               an h2 failure it had nothing to do with. A PR that touches
+#               the lockfile gets audited; a PR that touches Rust source
+#               does not get held hostage by the advisory feed.
+#
+# `cargo audit` reads Cargo.lock and never builds, so this needs no system
+# libraries and no workspace compile — it is the cheapest job in the repo.
+# By default it fails on *vulnerabilities* only; the informational
+# "unmaintained"/"unsound" advisories (currently 6: audiopus_sys, paste,
+# rustls-pemfile, anyhow, and lru twice) are reported and do not fail the
+# run. Keep it that way — a gate that is chronically red gates nothing.
+#
+# When this job goes red, see CHANGELOG 0.49.2 for the fix shape: bump the
+# named crate with a minimal, hand-checked lockfile edit rather than a bare
+# `cargo update --precise`, which drags unrelated downgrades in with it.
+
+on:
+  schedule:
+    # 06:00 UTC daily. Advisories are published on their own schedule, so a
+    # fixed early slot means the first person online sees a fresh answer.
+    - cron: "0 6 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - ".github/workflows/audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins to stable; `rustup show` activates it, the
+      # same way lint-and-test does in test.yml.
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      # Caches ~/.cargo/bin too, so cargo-audit is only built from source on
+      # a cold cache rather than on every run.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Scans Cargo.lock only — no workspace build, no system deps.
+      - name: cargo audit
+        run: cargo audit

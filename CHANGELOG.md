@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The SIPp harness now fails fast on a port collision instead of reporting one as 17 scenario failures.** Thirteen auxiliary phases hard-coded `9091` for their `[observability]` listener — the same port `configs/local-dev.toml` uses, and therefore the same port a daemon already running on the box is using. The daemon exited at startup with `Address already in use` and every affected phase reported as a *scenario* failure, which reads like a signalling regression: a local run scored 17 of 40 red on 2026-08-19, none of it real. `SIPHON_AI_CONFIG` only ever fixed the main phase, because the auxiliary phases generate their own configs. Every port the harness binds (`SIPP_PORT`, `DAEMON_PORT`, `ADMIN_API_PORT`, the new shared `AUX_OBS_PORT`, `ECHO_WS_PORT`) now reads from the environment, and a preflight check refuses to start on a busy TCP listener, naming the variable and a free port to use — the same treatment the missing-echo-server case already got, and for the same reason.
+
+
+### Fixed
+
 - **A live call's SIP ladder could be evicted by scanner noise.** The ring bounds its not-yet-completed traces least-recently-touched, but **an established call is SIP-silent between its ACK and its BYE** — its `last_touched` never advances, while rejected scanner INVITEs and REGISTER refreshes keep arriving with fresh ones. The live call was therefore the *oldest* entry and would be evicted **before** the transient noise the bound exists to contain, discarding the ladder of the call an operator is most likely to be looking at. Live calls are now a separate population, promoted when the control registry accepts the call, bounded separately at `MAX_LIVE = 512`, and never evicted to make room for noise. Found by the 0.49.5 load run (`test-harness/load/RESULTS-0.49.5-sip-ring.md`), which did not trip the bound at 203 concurrent but showed the trace-growth curve that makes it inevitable on a busier or longer-lived node.
 
 ### Added

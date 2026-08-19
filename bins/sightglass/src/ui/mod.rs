@@ -149,14 +149,43 @@ mod tests {
         app.tab = Tab::Trunks;
         app.nodes[0].trunks = vec![TrunkRow {
             name: "twilio".into(),
-            peer_addrs: vec!["54.172.60.0/30".into()],
+            // Prod's real list — eight CIDRs is what overflowed.
+            peer_addrs: [
+                "54.172.60.0/30",
+                "54.244.51.0/30",
+                "54.171.127.192/30",
+                "35.156.191.128/30",
+                "54.65.63.192/30",
+                "54.169.127.128/30",
+                "54.252.254.64/30",
+                "177.71.206.192/30",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         }];
-        let screen = render(&app, 120, 30);
-        assert!(screen.contains("twilio"), "{screen}");
-        assert!(screen.contains("54.172.60.0/30"), "{screen}");
+        // Wide: whole CIDRs plus an honest count of the rest. The
+        // reported bug clipped this to `35.156.191.128/3`, which reads
+        // as a valid /3 rather than as a truncation.
+        let wide = render(&app, 160, 30);
+        assert!(wide.contains("twilio"), "{wide}");
+        assert!(wide.contains("54.172.60.0/30"), "{wide}");
+        assert!(wide.contains("35.156.191.128/30"), "{wide}");
+        assert!(wide.contains("+4 more"), "{wide}");
+        assert!(!wide.contains("/3 "), "a CIDR was cut mid-value: {wide}");
         assert!(
-            screen.contains("ip-auth"),
-            "a trunk has no live state and must say so, not read as up: {screen}"
+            wide.contains("ip-auth"),
+            "a trunk has no live state and must say so, not read as up: {wide}"
+        );
+
+        // Narrow: no room for even one address and its count, so it
+        // degrades to a bare count rather than clipping either.
+        let narrow = render(&app, 100, 30);
+        assert!(narrow.contains("twilio"), "{narrow}");
+        assert!(narrow.contains("8 peers"), "{narrow}");
+        assert!(
+            !narrow.contains("+7 mo"),
+            "the tail itself clipped: {narrow}"
         );
     }
 

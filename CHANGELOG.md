@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.5] - 2026-08-19
+
+A one-line UX fix with a two-line consequence: the SIP ladder's key is
+now visible in sightglass. **Sightglass-only** — the daemon binary is
+byte-for-byte 0.49.4 in behaviour, so there is no reason to restart a
+node for this. Sightglass ships in the release **tarball**, never the
+`.deb`; take it from there.
+
 ### Fixed
 
 - **The SIP ladder key was bound but never advertised, so the feature was undiscoverable.** The calls tab's footer listed `j/k`, `x`, `p`, `u`, `c` and `o` but not `s` — reported by an operator who had the pane working only because they had been told the key existed. A keymap without a hint is half a feature. The footer now lists `s sip`, greyed with the `✗` marker for a `readonly` token like every other gated key, because a key nobody can see is a key nobody uses.

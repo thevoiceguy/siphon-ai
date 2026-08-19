@@ -239,7 +239,17 @@ docker compose -f docker/compose.yaml up
 # Requires SIPp installed (apt install sip-tester)
 cd test-harness/sipp-scenarios
 ./run-all.sh
+
+# On a box that already runs a daemon, move the harness off the ports
+# it shares with configs/local-dev.toml. The script preflights this and
+# exits 2 with the override to use — heed it: a collision otherwise
+# surfaces as a pile of scenario failures that look like a regression.
+AUX_OBS_PORT=9591 SIPHON_AI_CONFIG=/path/to/dev.toml ./run-all.sh
 ```
+
+Every port the harness binds (`SIPP_PORT`, `DAEMON_PORT`,
+`ADMIN_API_PORT`, `AUX_OBS_PORT`, `ECHO_WS_PORT`) reads from the
+environment with the local-dev default.
 
 ### 5.3 Manual Smoke Test
 

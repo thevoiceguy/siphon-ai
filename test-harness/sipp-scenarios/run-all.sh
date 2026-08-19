@@ -32,20 +32,40 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # the CI workflow's failure-dump step has a predictable glob target.
 cd "$SCRIPT_DIR"
 
-SIPP_PORT=5080       # SIPp's listen port (any free port works)
-DAEMON_PORT=5070     # SiphonAI's listen port (matches local-dev.toml)
+# Every port below is overridable from the environment, because this
+# script is routinely run on a box that already has a daemon on it.
+# The defaults collide with a stock deployment on purpose — they match
+# configs/local-dev.toml — so a colliding run is the expected case, not
+# an exotic one:
+#
+#   AUX_OBS_PORT=9591 SIPHON_AI_CONFIG=my-dev.toml ./run-all.sh
+#
+# A collision does not fail cleanly. The daemon exits with "bind
+# observability HTTP 127.0.0.1:9091: Address already in use" and every
+# affected scenario reports as a *scenario* failure, which reads like a
+# product regression: on 2026-08-19 that cost a red 17-of-40 run that
+# was entirely ports.
+SIPP_PORT="${SIPP_PORT:-5080}"       # SIPp's listen port (any free port works)
+DAEMON_PORT="${DAEMON_PORT:-5070}"   # SiphonAI's listen port (matches local-dev.toml)
 # Admin API (0.10.0): /admin/* moved to its own authenticated listener,
 # separate from the open [observability] /metrics port. Phases that drive
 # the admin API ([admin] block + these on a bearer token); phases run
 # sequentially so one fixed port/token is reused.
-ADMIN_API_PORT=9191
-ADMIN_TOKEN="sipp-harness-admin"
+ADMIN_API_PORT="${ADMIN_API_PORT:-9191}"
+ADMIN_TOKEN="${ADMIN_TOKEN:-sipp-harness-admin}"
+
+# The [observability] http_listen the auxiliary phases bind. One value
+# for all of them: phases run sequentially, so they never contend, and
+# thirteen separate literals only ever meant thirteen places to miss.
+# Named *_ADMIN_PORT in some phases for historical reasons — every one
+# of them is the metrics listener, not the admin API above.
+AUX_OBS_PORT="${AUX_OBS_PORT:-9091}"
 # Port of the caller-supplied echo WS server (see the header). Not freely
 # changeable: the main phase runs against configs/local-dev.toml, whose
 # `[bridge] ws_url` pins 8765 independently of this script. The auxiliary
 # phases that generate their own config interpolate this value below;
 # those that spawn a private echo server use their own ports instead.
-ECHO_WS_PORT=8765
+ECHO_WS_PORT="${ECHO_WS_PORT:-8765}"
 DAEMON_BIN="${DAEMON_BIN:-$REPO_ROOT/target/debug/siphon-ai}"
 DAEMON_CONFIG="${SIPHON_AI_CONFIG:-$REPO_ROOT/configs/local-dev.toml}"
 
@@ -106,6 +126,39 @@ the phases pointed at 127.0.0.1:$ECHO_WS_PORT depend on this one.
 MSG
     exit 2
 fi
+
+# Same class of problem as the echo server above, and it bit harder.
+# The auxiliary phases bind an [observability] listener on
+# $AUX_OBS_PORT and an admin API on $ADMIN_API_PORT; the defaults match
+# configs/local-dev.toml, which is also what a daemon already running on
+# this box is using. When they collide the daemon exits at startup with
+# "Address already in use" and every affected phase reports as a scenario
+# failure — 17 of 40 on 2026-08-19, none of them real, all of them
+# looking exactly like a product regression until you read a daemon log.
+#
+# Only the TCP listeners are checked. SIP and SIPp are UDP, where a
+# probe of this kind cannot distinguish "in use" from "nothing there".
+for _spec in "AUX_OBS_PORT:$AUX_OBS_PORT:[observability] http_listen" \
+             "ADMIN_API_PORT:$ADMIN_API_PORT:admin API"; do
+    _var="${_spec%%:*}"; _rest="${_spec#*:}"
+    _port="${_rest%%:*}"; _what="${_rest#*:}"
+    if (exec 3<>"/dev/tcp/127.0.0.1/$_port") 2>/dev/null; then
+        exec 3>&- 3<&-
+        cat >&2 <<MSG
+port $_port is already in use — the harness needs it for the $_what
+
+Something is listening on 127.0.0.1:$_port. If that is a siphon-ai
+daemon you meant to leave running, give the harness a different port:
+
+  $_var=$((_port + 500)) ./run-all.sh
+
+Running anyway would fail the daemon at startup on every phase that
+binds this port, and report it as a scenario failure rather than as
+this.
+MSG
+        exit 2
+    fi
+done
 
 scenarios=(
     basic_call_then_bye.xml
@@ -489,7 +542,7 @@ trap - EXIT
 echo
 echo "─── auxiliary phase: outbound ─────────────────────────"
 OB_WS_PORT=8767
-OB_ADMIN_PORT=9091
+OB_ADMIN_PORT=$AUX_OBS_PORT
 OB_WS_LOG=$(mktemp -t echo-ws-ob.XXXXXX.log)
 OB_DAEMON_LOG=$(mktemp -t siphon-ai-ob.XXXXXX.log)
 OB_CONFIG=$(mktemp -t siphon-ai-ob.XXXXXX.toml)
@@ -978,7 +1031,7 @@ trap - EXIT
 echo
 echo "─── auxiliary phase: attended_transfer ────────────────"
 AT_CONSULT_PORT=5081
-AT_ADMIN_PORT=9091
+AT_ADMIN_PORT=$AUX_OBS_PORT
 AT_A_WS_PORT=8768
 AT_C_WS_PORT=8769
 AT_A_WS_LOG=$(mktemp -t echo-ws-at-a.XXXXXX.log)
@@ -1107,7 +1160,7 @@ trap - EXIT
 echo
 echo "─── auxiliary phase: park_timeout ─────────────────────"
 PK_WS_PORT=8770
-PK_ADMIN_PORT=9091
+PK_ADMIN_PORT=$AUX_OBS_PORT
 PK_WS_LOG=$(mktemp -t echo-ws-pk.XXXXXX.log)
 PK_DAEMON_LOG=$(mktemp -t siphon-ai-pk.XXXXXX.log)
 PK_CONFIG=$(mktemp -t siphon-ai-pk.XXXXXX.toml)
@@ -1187,7 +1240,7 @@ echo
 echo "─── auxiliary phase: park_retrieve ────────────────────"
 PR_WS_A_PORT=8770
 PR_WS_B_PORT=8771
-PR_ADMIN_PORT=9091
+PR_ADMIN_PORT=$AUX_OBS_PORT
 PR_WS_A_LOG=$(mktemp -t echo-ws-pr-a.XXXXXX.log)
 PR_WS_B_LOG=$(mktemp -t echo-ws-pr-b.XXXXXX.log)
 PR_DAEMON_LOG=$(mktemp -t siphon-ai-pr.XXXXXX.log)
@@ -1289,7 +1342,7 @@ trap - EXIT
 echo
 echo "─── auxiliary phase: conference ───────────────────────"
 CF_WS_PORT=8772
-CF_ADMIN_PORT=9091
+CF_ADMIN_PORT=$AUX_OBS_PORT
 CF_SIPP2_PORT=5082
 CF_WS_LOG=$(mktemp -t echo-ws-cf.XXXXXX.log)
 CF_DAEMON_LOG=$(mktemp -t siphon-ai-cf.XXXXXX.log)
@@ -1391,7 +1444,7 @@ trap - EXIT
 echo
 echo "─── auxiliary phase: outbound_srtp ────────────────────"
 OBS_WS_PORT=8773
-OBS_ADMIN_PORT=9091
+OBS_ADMIN_PORT=$AUX_OBS_PORT
 OBS_WS_LOG=$(mktemp -t echo-ws-obs.XXXXXX.log)
 OBS_DAEMON_LOG=$(mktemp -t siphon-ai-obs.XXXXXX.log)
 OBS_CONFIG=$(mktemp -t siphon-ai-obs.XXXXXX.toml)
@@ -1481,7 +1534,7 @@ trap - EXIT
 echo
 echo "─── auxiliary phase: bot_hold ─────────────────────────"
 BH_WS_PORT=8774
-BH_ADMIN_PORT=9091
+BH_ADMIN_PORT=$AUX_OBS_PORT
 BH_WS_LOG=$(mktemp -t echo-ws-bh.XXXXXX.log)
 BH_DAEMON_LOG=$(mktemp -t siphon-ai-bh.XXXXXX.log)
 BH_CONFIG=$(mktemp -t siphon-ai-bh.XXXXXX.toml)
@@ -1560,7 +1613,7 @@ trap - EXIT
 echo
 echo "─── auxiliary phase: ws_reconnect ─────────────────────"
 RC_WS_PORT=8775
-RC_ADMIN_PORT=9091
+RC_ADMIN_PORT=$AUX_OBS_PORT
 RC_WS_LOG=$(mktemp -t echo-ws-rc.XXXXXX.log)
 RC_DAEMON_LOG=$(mktemp -t siphon-ai-rc.XXXXXX.log)
 RC_CONFIG=$(mktemp -t siphon-ai-rc.XXXXXX.toml)
@@ -1639,7 +1692,7 @@ trap - EXIT
 echo
 echo "─── auxiliary phase: outbound_reconnect ───────────────"
 OR_WS_PORT=8776
-OR_ADMIN_PORT=9091
+OR_ADMIN_PORT=$AUX_OBS_PORT
 OR_WS_LOG=$(mktemp -t echo-ws-or.XXXXXX.log)
 OR_DAEMON_LOG=$(mktemp -t siphon-ai-or.XXXXXX.log)
 OR_CONFIG=$(mktemp -t siphon-ai-or.XXXXXX.toml)
@@ -1731,7 +1784,7 @@ trap - EXIT
 echo
 echo "─── auxiliary phase: outbound_bot_hold ────────────────"
 OH_WS_PORT=8777
-OH_ADMIN_PORT=9091
+OH_ADMIN_PORT=$AUX_OBS_PORT
 OH_WS_LOG=$(mktemp -t echo-ws-oh.XXXXXX.log)
 OH_DAEMON_LOG=$(mktemp -t siphon-ai-oh.XXXXXX.log)
 OH_CONFIG=$(mktemp -t siphon-ai-oh.XXXXXX.toml)
@@ -2299,7 +2352,7 @@ fi
 echo
 echo "─── auxiliary phase: barge_in_pause ───────────────────"
 BI_WS_PORT=8793
-BI_OBS_PORT=9091
+BI_OBS_PORT=$AUX_OBS_PORT
 BI_WS_LOG=$(mktemp -t echo-ws-bi.XXXXXX.log)
 BI_DAEMON_LOG=$(mktemp -t siphon-ai-bi.XXXXXX.log)
 BI_CONFIG=$(mktemp -t siphon-ai-bi.XXXXXX.toml)
@@ -2383,7 +2436,7 @@ trap - EXIT
 echo
 echo "─── auxiliary phase: ws_failure_prompt ────────────────"
 FP_WS_PORT=8795
-FP_OBS_PORT=9091
+FP_OBS_PORT=$AUX_OBS_PORT
 FP_WS_LOG=$(mktemp -t echo-ws-fp.XXXXXX.log)
 FP_DAEMON_LOG=$(mktemp -t siphon-ai-fp.XXXXXX.log)
 FP_CONFIG=$(mktemp -t siphon-ai-fp.XXXXXX.toml)
@@ -2471,7 +2524,7 @@ trap - EXIT
 #   * siphon_ai_register_admin_triggers_total ticks for both actions.
 echo
 echo "─── auxiliary phase: registration_admin ───────────────"
-RA_OBS_PORT=9091
+RA_OBS_PORT=$AUX_OBS_PORT
 RA_DAEMON_LOG=$(mktemp -t siphon-ai-ra.XXXXXX.log)
 RA_CONFIG=$(mktemp -t siphon-ai-ra.XXXXXX.toml)
 cat >"$RA_CONFIG" <<EOF

@@ -135,6 +135,39 @@ mod tests {
         assert!(screen.contains("NODE"), "{screen}");
     }
 
+    // Shipped in 0.49.3 with the `s` key bound but absent from the
+    // hint line, so the ladder was undiscoverable — a user with a live
+    // call reported it. The keymap is only half the feature.
+    #[test]
+    fn calls_tab_advertises_the_sip_ladder_key() {
+        let mut app = fixture_app();
+        app.tab = Tab::Calls;
+        app.select_first();
+        let screen = render(&app, 120, 30);
+        assert!(
+            screen.contains(" s ") && screen.contains("sip"),
+            "the calls tab must advertise the ladder key: {screen}"
+        );
+    }
+
+    // While the overlay is up, j/k scroll it rather than moving the
+    // call selection, so the hint must not keep claiming "select".
+    #[test]
+    fn open_ladder_swaps_the_hints_for_its_own_keys() {
+        let mut app = fixture_app();
+        app.tab = Tab::Calls;
+        app.select_first();
+        app.toggle_ladder();
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("scroll"), "{screen}");
+        assert!(screen.contains("expand"), "{screen}");
+        assert!(screen.contains("copy"), "{screen}");
+        assert!(
+            !screen.contains("j/k select"),
+            "j/k no longer selects while the ladder owns them: {screen}"
+        );
+    }
+
     #[test]
     fn single_node_fleet_hides_node_column() {
         let mut app = App::new(vec!["solo".into()], false);

@@ -99,10 +99,16 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             spans.push(Span::styled(format!("{what}✗  "), theme.dim_text()));
         }
     };
+    // These two are kept terse on purpose: the tab bar above already
+    // shows the tab names and the header shows the node filter chip,
+    // so spending footer columns on them squeezes out the action keys
+    // — which are the only thing the footer is the sole source of.
+    // Adding the `s` hint overflowed 110 columns and truncated
+    // `originate`; a render test pins the fit.
     hint("q".into(), "quit", true);
-    hint("⇥/1-3".into(), "tabs", true);
+    hint("⇥".into(), "tabs", true);
     if app.nodes.len() > 1 {
-        hint("n".into(), "node filter", true);
+        hint("n".into(), "nodes", true);
     }
     if app.tab == Tab::System {
         hint("j/k".into(), "select node", true);
@@ -129,11 +135,25 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         hint("u".into(), "retrieve", operator_ok);
     }
     if app.tab == Tab::Calls {
-        hint("j/k".into(), "select", true);
         // Action keys grey out per the focused call's node.
         let focus_node = app.focus().map(|(n, _)| n);
         let operator_ok = focus_node.is_some_and(|n| app.can(n, crate::model::Role::Operator));
         let admin_node = app.node_filter.or(focus_node).unwrap_or(0);
+        if app.ladder.open {
+            // The overlay owns j/k while it is up, so saying "select"
+            // here would be a lie about what the key does.
+            hint("j/k".into(), "scroll", true);
+            hint("⏎".into(), "expand", true);
+            hint("y".into(), "copy", true);
+            hint("s".into(), "close sip", true);
+        } else {
+            hint("j/k".into(), "select", true);
+            // Reading raw SIP needs operator, so it greys out for a
+            // readonly token like every other gated key — but it is
+            // listed either way, because a key nobody can see is a
+            // feature nobody uses.
+            hint("s".into(), "sip", operator_ok);
+        }
         hint("x".into(), "hangup", operator_ok);
         hint("p".into(), "park", operator_ok);
         hint("u".into(), "retrieve", operator_ok);

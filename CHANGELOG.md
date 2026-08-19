@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A trunk's peer list could be clipped mid-CIDR in sightglass.** `35.156.191.128/30` rendered as `35.156.191.128/3` — not merely ugly, because `/3` is itself a valid prefix length, so the table stated a range the config does not contain. Reported from a live session on a node with Twilio's eight CIDRs. The column now packs whole addresses only and appends an honest count of the rest (`54.172.60.0/30, 54.244.51.0/30, +6 more`), scaling with terminal width; where not even one address and its count fit, it degrades to a bare `8 peers` rather than clipping the count itself. The peers column also takes an exact width instead of a `Min`, so the budget is the real column rather than a guess at how leftover space gets divided. DESIGN_SIGHTGLASS.md §7: nothing truncates silently.
+
+
 ## [0.49.6] - 2026-08-19
 
 Everything a single load run turned up. The ring's own bounds held at

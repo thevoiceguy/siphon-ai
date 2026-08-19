@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.2] - 2026-08-19
+
+Housekeeping: a security advisory in our own lockfile, and two upstream log
+levels that stop a healthy node from writing noise. **No behaviour change, no
+config change, no protocol change** — the WS protocol stays `version: "1"` and
+the CDR schema stays v8.
+
+### Fixed
+
+- **Two `cargo audit` vulnerabilities in this workspace's lockfile** ([#522](https://github.com/thevoiceguy/siphon-ai/pull/522)). [RUSTSEC-2026-0258](https://rustsec.org/advisories/RUSTSEC-2026-0258) — *h2 unbounded empty DATA frames*, published 2026-08-17 — hit the h2 0.4.14 under hyper 1.x, which serves **every HTTP listener the daemon exposes**: the admin API, `/metrics`, `/healthz`, and the outbound webhook/CDR sink client. Bumped to 0.4.16. Alongside it, [RUSTSEC-2026-0204](https://rustsec.org/advisories/RUSTSEC-2026-0204) (invalid pointer dereference in crossbeam-epoch's `fmt::Pointer` impl, reached via forge-vad → tract-onnx → rayon) goes 0.9.18 → 0.9.20. Lockfile-only, no `Cargo.toml` change.
+  - The diff is deliberately **4 lines**. `cargo update -p h2 --precise 0.4.16` also rewrote 11 unrelated lines — `socket2` 0.6.3 → **0.5.10** under hyper, quinn and quinn-udp, and `windows-sys` 0.61.2 → **0.52.0** under errno, rustix, tempfile and winapi-util. Those are *downgrades*, two of them on the network path, and nothing in either advisory asks for them. This starts from the previous lockfile and edits only the two version + checksum pairs; `cargo metadata --locked` accepts the result, so cargo considers it an exact, valid resolution.
+  - **No `cargo audit` job exists in this repo's CI** (only `test.yml` and `release.yml`), so this surfaced from a hand run rather than a check. Worth adding — forge-media's Security Audit job caught the same advisory the day it published.
+
+### Changed
+
+- **Bumped siphon-rs `15303bf847e6` → `99da91f599e2`** — [siphon-rs#109](https://github.com/thevoiceguy/siphon-rs/pull/109) and [siphon-rs#110](https://github.com/thevoiceguy/siphon-rs/pull/110) (its issues #107 and #108, both filed from this project). **Two log levels; no behaviour change and nothing to configure.** Operators running at `info` get a materially quieter journal; anything already at `debug` is unaffected.
+  - **#109 — the expected first digest challenge drops from `warn!` to `debug!`.** `IntegratedUAC` warned whenever a 401/407 arrived while `auto_retry_auth` was set. That is RFC 3261 §22 working exactly as specified: the registrar is supposed to challenge, the stack answers it immediately, the request succeeds. Nothing had happened an operator could act on. **Measured on this project's reference node at a 120s granted expiry: ~1,440 WARNs/day on an idle, healthy box, 361 of them in a single 6-hour window** — a permanent non-zero warn baseline, which is what makes warn-level alerting useless. The two genuinely abnormal auth outcomes in the same function — "auth still rejected; retrying with refreshed credentials" and "auth retry limit reached; returning last challenge to caller" — keep their `warn!`.
+  - **#110 — four per-transaction `info!` sites drop to `debug!`**: the transaction start, the authenticated-retry start, and `on_final` in both `InviteTransactionUser` and `SimpleTransactionUser`. The precedent was already in the file — `on_provisional`, the sibling method handling the same class of event, has always been `debug!`, so a 180 was debug and a 200 was info for the same "a response arrived on the transaction I started" mechanic. At `info` the volume tracked request rate rather than operator intent: **~13,100 client transactions produced 52,568 lines from those four statements alone** — ~750 lines/s at a sustained 566 transactions/s, and a 20 MB log in 70s of driving.
+  - No code change in this workspace; both are log-level changes inside siphon-rs, and `cargo check --workspace` needed no glue edits.
+
+- **Bumped forge-media `1d7bbaba0c22` → `b161adedee5d`** — six commits, **all dependency bumps**: [#106](https://github.com/thevoiceguy/forge-media/pull/106) bytes 1.12.1, [#109](https://github.com/thevoiceguy/forge-media/pull/109) base64 0.23.1, [#110](https://github.com/thevoiceguy/forge-media/pull/110) validator 0.21.0, [#113](https://github.com/thevoiceguy/forge-media/pull/113) a 7-crate patch group, [#114](https://github.com/thevoiceguy/forge-media/pull/114) h2 0.4.16 for RUSTSEC-2026-0258 plus the deletion of `forge-ai-stream`'s unused reqwest 0.11, and [#107](https://github.com/thevoiceguy/forge-media/pull/107) redis 1.2.0 with the two call sites its 1.x API removed. **Taken to keep the pin current, not to collect a fix.**
+  - **No forge-media source change touches code we compile.** #114's h2 bump is in forge-media's own lockfile, which does not apply to a git dependency, and its only source edit is to `forge-ai-stream` — the crate CLAUDE.md §4.1 keeps us off. #107's redis sits behind `forge-engine`'s `persistence-redis` feature, which implies `ai`, which we disable; `redis` appears nowhere in this workspace's lockfile.
+  - One change does reach our build: #109 moves **forge-sdp to base64 0.23.1**, which now builds alongside the 0.22.1 we use ourselves. A duplicate version, harmless — dedupe when we move our own base64. Same situation as the sha1/hmac/sha2 duplicates noted at the 2026-08-07 pin.
+
 ## [0.49.1] - 2026-08-18
 
 ### Changed

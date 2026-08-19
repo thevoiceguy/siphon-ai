@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.49.1"
+version = "0.49.2"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -138,7 +138,30 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # main branch and replace the rev hashes here (see CLAUDE.md §7.5).
 
 # siphon-rs — RFC 3261 SIP stack.
-# Bumped 2026-08-18 `9ad33983b0e9` → `15303bf847e6` = siphon-rs #104
+# Bumped 2026-08-18 `15303bf847e6` → `99da91f599e2` = siphon-rs #109 + #110
+# (its issues #107 and #108, both filed from this project). Two log levels;
+# no behaviour change and nothing to configure.
+# #109: `IntegratedUAC` warned on every 401/407 while `auto_retry_auth` was
+# set. That is RFC 3261 §22 working exactly as specified — the registrar is
+# supposed to challenge, the stack answers it immediately, the request
+# succeeds — so nothing had happened an operator could act on. Measured on
+# this project's reference node at a 120 s granted expiry: ~1,440 WARNs/day
+# on an idle, healthy box, 361 of them in a single 6-hour window. A
+# permanent non-zero warn baseline is what makes warn-level alerting
+# useless. The two genuinely abnormal auth outcomes in the same function —
+# "auth still rejected" and "auth retry limit reached" — keep their `warn!`.
+# #110: four per-transaction `info!` sites (transaction start, the
+# authenticated-retry start, and `on_final` in both `InviteTransactionUser`
+# and `SimpleTransactionUser`) drop to `debug!`, matching `on_provisional`,
+# which was always `debug!` for the same "a response arrived on the
+# transaction I started" mechanic. At `info` the volume tracked request
+# rate rather than operator intent: ~13,100 client transactions produced
+# 52,568 lines from those four statements alone — ~750 lines/s at a
+# sustained 566 txn/s, and a 20 MB log in 70 s of driving.
+# **No code change here**: both are log-level changes inside siphon-rs.
+# Anyone running `RUST_LOG=siphon=info` gets a quieter journal; anything
+# already at `debug` is unaffected.
+# (Prior: 2026-08-18 `9ad33983b0e9` → `15303bf847e6` = siphon-rs #104
 # (its issue #103, filed from this project): client transactions that
 # completed normally never left the manager's table. The terminal wait
 # timers — K for non-INVITE (RFC 3261 §17.1.2.2), D for INVITE (§17.1.1.2) —
@@ -159,7 +182,7 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # inside `TransactionManager`, keyed on FSM state so the transaction-user
 # contract is unchanged. Operators get the fix by upgrading.
 # Also carries siphon-rs #105 (clippy backlog) and #106 (a pinned fmt+clippy
-# CI gate), neither of which changes behaviour.
+# CI gate), neither of which changes behaviour.)
 # (Prior: 2026-08-14 `9f70b83011f2` → `9ad33983b0e9` = siphon-rs #102:
 # `TransactionManager::ack_received` now returns whether it **absorbed** the
 # ACK (siphon-rs #101, filed from this project). It used to return `()` and
@@ -228,31 +251,31 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 #  `6fd432270bb8` = #67 dialog_manager share, siphon-ai #324;
 #  `fcaff011f9c6` = #65 invite_with_from, siphon-ai #316;
 #  `3a4fc312ade3` = #64 TLS-SNI-is-hostname, siphon-ai #312.)
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
 # (distinct from forge-media's pinned sip-sdp). Used by the outbound
 # delayed-offer answer generator to hand the UAC a SessionDescription it
 # accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
 # sip-observe — the transport-layer observability seam. We implement its
 # `TransportMetrics` trait in siphon-ai-telemetry and install it with
 # `set_transport_metrics`, which is the only way to see ingress
 # rate-limit drops: the hook is defaulted to a no-op upstream, so an
 # embedder that installs nothing (as we did until 0.48.11) silently gets
 # the `NoopTransportMetrics` fallback (siphon-ai #459).
-sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
+sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "15303bf847e6" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #
@@ -262,7 +285,24 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "153
 # AI logic belongs in the WS server, never here. See CLAUDE.md §4.1 and the
 # upstream gate at https://github.com/thevoiceguy/forge-media/pull/39.
 #
-# forge-media is pinned to a `main` rev. Bumped 2026-08-14 to 1d7bbaba0c22
+# forge-media is pinned to a `main` rev. Bumped 2026-08-18 to b161adedee5d
+# = six commits, all dependency bumps: #106 bytes 1.12.1, #109 base64
+# 0.23.1, #110 validator 0.21.0, #113 a 7-crate patch group, #114 h2 0.4.16
+# (RUSTSEC-2026-0258) plus the deletion of forge-ai-stream's unused reqwest
+# 0.11, and #107 redis 1.2.0 with the two call sites its 1.x API removed.
+# **No forge-media source change touches code we compile, and no fix here
+# is one we needed.** #114's h2 bump lives in forge-media's own lockfile,
+# which does not apply to a git dependency, and its only source edit is to
+# forge-ai-stream — the crate CLAUDE.md §4.1 keeps us off. #107's redis
+# sits behind forge-engine's `persistence-redis`, which implies `ai`, which
+# we disable; `redis` appears nowhere in this workspace's lockfile. Our own
+# copy of RUSTSEC-2026-0258 was fixed here separately, in #522 (h2 0.4.16 +
+# crossbeam-epoch 0.9.20). Bumped to keep the pin current, not for a fix.
+# One thing does reach our build: #109 moves forge-sdp to **base64 0.23.1**,
+# which now builds alongside the 0.22.1 we use ourselves. Same situation as
+# the sha1/hmac/sha2 note below — a duplicate version, harmless, dedupe
+# when we move our own base64.
+# (Prior: 2026-08-14 to 1d7bbaba0c22
 # = forge-media #112 (its issue #111, filed from this project's #504): a
 # port bind that hits AddrInUse now retries the next pair instead of
 # failing the session. `PortPool` allocates from its own bookkeeping and
@@ -276,7 +316,7 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "153
 # `ForgeError`, so the new variant changes no code here.
 # The `net.ipv4.ip_local_reserved_ports` guidance in docs/DEPLOY.md stays
 # correct and is still worth applying — this removes the *requirement*,
-# not the value, of reserving the range.
+# not the value, of reserving the range.)
 # (Prior: 2026-08-07 to b4f8df5c8f09
 # = forge-media #102 + #104 + #105 (plus dependabot bumps #88/#89/#91/#99).
 # #102: every facade metric family gets describe_*! HELP text and every
@@ -330,20 +370,20 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "153
 # comment for the current rev.) Prior forge pins: forge 1c996ae5fb4f = #86
 # neural VAD; forge 3c59b5f6e464 = #82-#85 dependency migrations; forge
 # 5fa76fb38675 = #81.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
-forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
-forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
+forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
+forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
 # Conference rooms (0.7.0): forge-mixer is the per-room AudioMixer;
 # forge-injection provides ToneGenerator (join/leave tones now, MOH
 # for park later). Deliberately NOT forge-conference — its DTMF
 # IVR/PIN/host-control layer is unused per DEV_PLAN_0.7.0.md §9.4.
-forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
-forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "1d7bbaba0c22" }
+forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
+forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.

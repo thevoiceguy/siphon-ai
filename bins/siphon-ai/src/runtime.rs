@@ -242,9 +242,28 @@ impl Runtime {
         // Built before any SIP / forge traffic so the global emitters
         // are installed before the listeners can fire. When `[hep]
         // .enabled = false` returns `None` with zero cost.
-        let hep_built = build_hep_telemetry(&node, hep).await?;
+        // Addresses that are "us", for the SIP ladder's direction
+        // derivation. `public_address` is always non-empty after
+        // compile but may be a hostname, so it is best-effort; the
+        // bind IP joins it only when it isn't a wildcard. Both may be
+        // absent, and the ring reports "unknown" rather than guessing.
+        let mut local_ips: Vec<std::net::IpAddr> = Vec::new();
+        if let Ok(ip) = node.public_address.parse::<std::net::IpAddr>() {
+            local_ips.push(ip);
+        }
+        if !sip.listen_addr.ip().is_unspecified() && !local_ips.contains(&sip.listen_addr.ip()) {
+            local_ips.push(sip.listen_addr.ip());
+        }
+        let hep_built = build_hep_telemetry(
+            &node,
+            hep,
+            observability.sip_ring_size,
+            observability.sip_ring_max_messages,
+            local_ips,
+        )
+        .await?;
         let (hep_telemetry, hep_worker) = match hep_built {
-            Some((t, w)) => (Some(t), Some(w)),
+            Some((t, w)) => (Some(t), w),
             None => (None, None),
         };
 
@@ -1732,28 +1751,61 @@ impl siphon_ai_telemetry::RegistrationAdminHandle for RegistrationAdmin {
     }
 }
 
-/// Build the daemon's HEP3 plumbing from compiled `[hep]` config.
-/// Returns `Ok(None)` when disabled, `Ok(Some(...))` when wired —
-/// installing both `sip-hep` and `forge-hep` global emitters as a
-/// side effect so siphon-rs and forge-media start shipping the
+/// Build the daemon's HEP3 plumbing from compiled `[hep]` config, plus
+/// the in-process SIP ladder ring from `[observability]`.
+///
+/// Installs the `sip-hep` and `forge-hep` global emitters as a side
+/// effect, so siphon-rs and forge-media start feeding the sink the
 /// moment the first packet flows.
+///
+/// Returns `Ok(None)` only when **both** consumers are off. Either one
+/// alone is enough to build the packet stream, which is the point of
+/// DESIGN_SIP_LADDER.md §3.1: teeing off the UDP sink would leave the
+/// ladder silently empty on a node that ships nothing to Homer, and
+/// "empty" reads as "no messages" rather than "not enabled". The
+/// returned `HepWorkerHandle` is `None` in the ring-only case — no
+/// collector, no socket, no worker to drain.
 async fn build_hep_telemetry(
     node: &NodeConfig,
     cfg: HepConfig,
-) -> Result<Option<(Arc<HepTelemetry>, HepWorkerHandle)>> {
-    if !cfg.enabled {
-        debug!("[hep].enabled = false; HEP shipping disabled");
+    sip_ring_size: usize,
+    sip_ring_max_messages: usize,
+    local_ips: Vec<std::net::IpAddr>,
+) -> Result<Option<(Arc<HepTelemetry>, Option<HepWorkerHandle>)>> {
+    // Sized before the sink exists so capture can never run at the
+    // default capacity against a config that asked for something
+    // else — including `0`, which must mean "never held".
+    siphon_ai_telemetry::sip_ring::set_capacity(sip_ring_size, sip_ring_max_messages);
+
+    let mut extra_sinks: Vec<siphon_ai_telemetry::SinkHandle> = Vec::new();
+    if sip_ring_size > 0 {
+        extra_sinks.push(Arc::new(siphon_ai_telemetry::SipRingSink::new(
+            local_ips.clone(),
+        )));
+    }
+
+    if !cfg.enabled && extra_sinks.is_empty() {
+        debug!("[hep].enabled = false and SIP ladder disabled; no HEP plumbing built");
         return Ok(None);
     }
-    // Compile-time validation guarantees these are Some when enabled,
-    // but be defensive — surface a clear startup error rather than
-    // panicking inside the builder.
-    let collector = cfg
-        .collector
-        .ok_or_else(|| anyhow!("[hep].collector unexpectedly empty when enabled"))?;
-    let capture_id = cfg
-        .capture_id
-        .ok_or_else(|| anyhow!("[hep].capture_id unexpectedly empty when enabled"))?;
+
+    let (collector, capture_id) = if cfg.enabled {
+        // Compile-time validation guarantees these are Some when
+        // enabled, but be defensive — surface a clear startup error
+        // rather than panicking inside the builder.
+        (
+            Some(
+                cfg.collector
+                    .ok_or_else(|| anyhow!("[hep].collector unexpectedly empty when enabled"))?,
+            ),
+            cfg.capture_id
+                .ok_or_else(|| anyhow!("[hep].capture_id unexpectedly empty when enabled"))?,
+        )
+    } else {
+        // Ring-only: nothing reaches a collector, so the capture id
+        // labels nothing. Zero keeps the packets well-formed.
+        (None, 0)
+    };
 
     let (telemetry, worker) = HepTelemetry::build(HepTelemetryBuild {
         collector,
@@ -1761,15 +1813,27 @@ async fn build_hep_telemetry(
         capture_password: cfg.capture_password,
         queue_capacity: cfg.queue_capacity,
         node_id: node.id.clone(),
+        extra_sinks,
     })
     .await
-    .with_context(|| format!("build HEP UDP sink for collector {collector}"))?;
+    .with_context(|| match collector {
+        Some(c) => format!("build HEP UDP sink for collector {c}"),
+        None => "build in-process HEP sink for the SIP ladder".to_string(),
+    })?;
 
-    info!(
-        collector = %collector,
-        capture_id,
-        "HEP3 shipping active (SIP + RTCP + RTP-QoS + log + CDR chunks)"
-    );
+    match collector {
+        Some(collector) => info!(
+            collector = %collector,
+            capture_id,
+            sip_ladder = sip_ring_size > 0,
+            "HEP3 shipping active (SIP + RTCP + RTP-QoS + log + CDR chunks)"
+        ),
+        None => info!(
+            sip_ring_size,
+            sip_ring_max_messages,
+            "SIP ladder capture active; HEP shipping disabled (no collector)"
+        ),
+    }
     Ok(Some((Arc::new(telemetry), worker)))
 }
 
@@ -2252,6 +2316,13 @@ impl siphon_ai_cdr::CdrSink for RingCdrSink {
     async fn emit(&self, record: siphon_ai_cdr::CdrRecord) {
         // A CdrRecord that fails to serialize would already have
         // broken every real sink; the ring stays quiet about it.
+        // The SIP ladder's completion signal (DESIGN_SIP_LADDER.md
+        // §3.2): a CDR is emitted exactly once per call end, which is
+        // what moves that call's trace from the pending population
+        // into the retained-completed window. Taken before the
+        // serialize so a record that somehow fails to serialize still
+        // retains its ladder.
+        siphon_ai_telemetry::sip_ring::complete(&record.sip_call_id);
         if let Ok(v) = serde_json::to_value(&record) {
             siphon_ai_telemetry::cdr_ring::push(v);
         }

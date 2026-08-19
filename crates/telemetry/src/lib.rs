@@ -29,6 +29,7 @@ pub mod log_filter;
 pub mod metrics;
 pub mod otel;
 pub mod readiness;
+pub mod sip_ring;
 pub mod transport;
 
 pub use admin::{
@@ -40,7 +41,7 @@ pub use admin::{
     RegistrationRow, RetrieveRequest,
 };
 pub use auth::{AdminAuth, AdminToken, AuthReject, Role};
-pub use hep::{HepBuildError, HepTelemetry, HepTelemetryBuild, HepWorkerHandle};
+pub use hep::{HepBuildError, HepTelemetry, HepTelemetryBuild, HepWorkerHandle, SinkHandle};
 pub use http::{AdminServer, AdminTlsConfigFn, ObservabilityServer};
 pub use log_filter::{LogFilterError, LogFilterHandle};
 pub use otel::{OtelConfig, OtelError, OtelTelemetry, OTEL_SCOPE};
@@ -61,4 +62,5 @@ pub use metrics::{
 };
 pub use metrics_exporter_prometheus::PrometheusHandle;
 pub use readiness::ReadinessFlag;
+pub use sip_ring::{FanOutHepSink, SipRingSink};
 pub use transport::{install as install_transport_metrics, SiphonTransportMetrics};

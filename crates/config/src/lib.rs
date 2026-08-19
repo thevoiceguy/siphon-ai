@@ -62,6 +62,19 @@ pub const DEFAULT_ERROR_RING_SIZE: usize = 256;
 /// `DEFAULT_ERROR_RING_SIZE` with the same sync rule.
 pub const DEFAULT_CDR_RING_SIZE: usize = 50;
 
+/// Default `[observability].sip_ring_size` (DESIGN_SIP_LADDER.md) —
+/// completed calls whose SIP ladder is retained. Deliberately equal to
+/// [`DEFAULT_CDR_RING_SIZE`]: the recent-calls pane and the ladder show
+/// the same window, so "in the list" and "has a ladder" mean the same
+/// thing. `0` disables capture. Same sync rule as its siblings.
+pub const DEFAULT_SIP_RING_SIZE: usize = 50;
+
+/// Default `[observability].sip_ring_max_messages` — per-call message
+/// cap for the SIP ladder. A normal call is 6–20 messages; 64 absorbs
+/// re-INVITE churn, auth retries and a REFER without letting one
+/// pathological dialog evict everything else.
+pub const DEFAULT_SIP_RING_MAX_MESSAGES: usize = 64;
+
 /// Top-level error type. Loaders surface this; consumers match on
 /// the underlying variants when they need to discriminate.
 #[derive(Debug, Error)]

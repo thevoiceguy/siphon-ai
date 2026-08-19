@@ -451,6 +451,12 @@ pub struct ObservabilityConfig {
     /// (0.49.0). Default 50; `0` disables. Independent of `enabled`
     /// and of `[cdr]` sinks.
     pub cdr_ring_size: usize,
+    /// Completed calls whose SIP ladder is retained for
+    /// `GET /admin/v1/calls/{id}/sip` (DESIGN_SIP_LADDER.md). Default
+    /// 50, matching `cdr_ring_size`; `0` disables capture.
+    pub sip_ring_size: usize,
+    /// Per-call SIP message cap for the ladder ring. Default 64.
+    pub sip_ring_max_messages: usize,
     /// `Some` when `[observability.otlp].enabled` — OTLP/gRPC trace export
     /// (0.22.0). Independent of `enabled`/`http_listen` (traces without
     /// metrics scraping is a valid setup). The daemon maps this to
@@ -868,6 +874,20 @@ pub enum CompileError {
          sink for retention"
     )]
     CdrRingTooLarge(usize),
+
+    #[error(
+        "[observability].sip_ring_size {0} exceeds the 65536 cap — the ladder is \
+         a nice-to-have tail for operators, not signaling storage; ship SIP to \
+         Homer via [hep] for anything in depth"
+    )]
+    SipRingTooLarge(usize),
+
+    #[error(
+        "[observability].sip_ring_max_messages {0} exceeds the 4096 cap — a \
+         per-call ladder that long is a retransmit storm, not a call; the \
+         whole exchange belongs in Homer"
+    )]
+    SipRingMessagesTooLarge(usize),
 
     #[error(
         "{scope} resolves on_ws_failure = \"play_prompt\" but no \
@@ -3044,6 +3064,18 @@ fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, C
     if cdr_ring_size > 65536 {
         return Err(CompileError::CdrRingTooLarge(cdr_ring_size));
     }
+    // The SIP ladder ring feeds the admin listener too, so it shares
+    // the independence from `enabled` above.
+    let sip_ring_size = raw.sip_ring_size.unwrap_or(crate::DEFAULT_SIP_RING_SIZE);
+    if sip_ring_size > 65536 {
+        return Err(CompileError::SipRingTooLarge(sip_ring_size));
+    }
+    let sip_ring_max_messages = raw
+        .sip_ring_max_messages
+        .unwrap_or(crate::DEFAULT_SIP_RING_MAX_MESSAGES);
+    if sip_ring_max_messages > 4096 {
+        return Err(CompileError::SipRingMessagesTooLarge(sip_ring_max_messages));
+    }
 
     if !raw.enabled {
         // Disabled means "don't spawn the HTTP server" — sub-block
@@ -3056,6 +3088,8 @@ fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, C
             metrics_token: None,
             error_ring_size,
             cdr_ring_size,
+            sip_ring_size,
+            sip_ring_max_messages,
             otlp,
         });
     }
@@ -3081,6 +3115,8 @@ fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, C
         metrics_token,
         error_ring_size,
         cdr_ring_size,
+        sip_ring_size,
+        sip_ring_max_messages,
         otlp,
     })
 }

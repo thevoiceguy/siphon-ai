@@ -201,6 +201,23 @@ pub const METRICS_REQUESTS_TOTAL: &str = "siphon_ai_metrics_requests_total";
 /// `siphon-ai-telemetry::error_ring`.
 pub const ERROR_RING_CAPTURED_TOTAL: &str = "siphon_ai_error_ring_captured_total";
 
+/// SIP messages offered to the per-call ladder ring
+/// (DESIGN_SIP_LADDER.md), by `result`: `captured`,
+/// `dropped_call_cap` (the per-call message cap evicted an older
+/// message from the same trace), `dropped_trace_cap` (the pending
+/// bound evicted a whole least-recently-touched trace — REGISTER /
+/// OPTIONS / scanner noise pushing live calls out is what this
+/// catches). A rising `dropped_call_cap` says the per-call cap is
+/// wrong for this deployment, or something is retransmitting.
+/// Literal must match the call site in `siphon-ai-telemetry::sip_ring`.
+pub const SIP_RING_MESSAGES_TOTAL: &str = "siphon_ai_sip_ring_messages_total";
+
+/// Traces currently held by the SIP ladder ring — live calls,
+/// retained completed calls, and the non-call SIP dialogs (REGISTER,
+/// OPTIONS, rejected INVITEs) that also carry a Call-ID. Named
+/// `traces` rather than `calls` for exactly that reason.
+pub const SIP_RING_TRACES: &str = "siphon_ai_sip_ring_traces";
+
 /// WS-failure prompt playbacks (0.34.0,
 /// `[bridge].on_ws_failure = "play_prompt"`). Labeled by `result`:
 /// `played` (EOF reached), `cut_short` (caller hung up / teardown
@@ -793,6 +810,10 @@ pub fn register_descriptions() {
         "warn/error tracing events captured into the recent-errors ring (GET /admin/v1/errors), by level (warn, error)."
     );
     describe_counter!(
+        SIP_RING_MESSAGES_TOTAL,
+        "SIP messages offered to the per-call ladder ring (GET /admin/v1/calls/{id}/sip), by result (captured, dropped_call_cap, dropped_trace_cap)."
+    );
+    describe_counter!(
         DELAYED_OFFER_TOTAL,
         "Inbound delayed-offer (offerless INVITE) outcomes, by result (answered, ack_timeout, missing_sdp_answer, invalid_sdp_answer, no_compatible_codec, invalid_remote_media, caller_hangup)."
     );
@@ -849,6 +870,11 @@ pub fn register_descriptions() {
         "Per-[[register]] status. 1 = current state for that name; 0 = other states."
     );
     describe_gauge!(CONFERENCES_ACTIVE, Unit::Count, "Live conference rooms.");
+    describe_gauge!(
+        SIP_RING_TRACES,
+        Unit::Count,
+        "SIP dialogs currently held by the per-call ladder ring (live calls, retained completed calls, and non-call dialogs such as REGISTER)."
+    );
     describe_gauge!(
         CONFERENCE_PARTICIPANTS,
         Unit::Count,
@@ -1142,6 +1168,7 @@ pub const ALL_COUNTERS: &[&str] = &[
     ADMIN_REQUESTS_TOTAL,
     METRICS_REQUESTS_TOTAL,
     ERROR_RING_CAPTURED_TOTAL,
+    SIP_RING_MESSAGES_TOTAL,
     WS_FAILURE_PROMPTS_TOTAL,
     DELAYED_OFFER_TOTAL,
     OUTBOUND_DELAYED_OFFER_TOTAL,
@@ -1177,6 +1204,7 @@ pub const ALL_GAUGES: &[&str] = &[
     OUTBOUND_CALLS_ACTIVE,
     REGISTER_STATE,
     CONFERENCES_ACTIVE,
+    SIP_RING_TRACES,
     CONFERENCE_PARTICIPANTS,
     PARKED_CALLS_ACTIVE,
     DRAINING,

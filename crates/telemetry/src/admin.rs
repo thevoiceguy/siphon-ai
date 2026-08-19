@@ -76,11 +76,11 @@ use crate::HepTelemetry;
 // `siphon_ai_telemetry::admin::…` paths keep working; the server-side
 // traits and error enums below stay in this crate.
 pub use siphon_ai_admin_api_types::{
-    AddParticipantRequest, AdminCallRow, CallsResponse, ConferenceRow, ConferencesResponse,
-    CreateConferenceRequest, DrainStartResponse, DrainStatus, ErrorEntry, ErrorsResponse,
-    LogFilterResponse, OriginateRequest, ParkRequest, ParkedResponse, ParkedRow,
+    AddParticipantRequest, AdminCallRow, CallSipResponse, CallsResponse, ConferenceRow,
+    ConferencesResponse, CreateConferenceRequest, DrainStartResponse, DrainStatus, ErrorEntry,
+    ErrorsResponse, LogFilterResponse, OriginateRequest, ParkRequest, ParkedResponse, ParkedRow,
     RecentCdrsResponse, RegistrationRow, RegistrationsResponse, RegistrationsSummary,
-    RetrieveRequest, SetLogFilterResponse, StatusResponse,
+    RetrieveRequest, SetLogFilterResponse, SipMessageEntry, StatusResponse,
 };
 
 /// Bundle of dependencies the admin handlers may need. Each is
@@ -428,6 +428,17 @@ pub async fn dispatch(
             call_stats(state, id)
         }
         (m, p)
+            if *m == hyper::Method::GET
+                && p.starts_with("/admin/v1/calls/")
+                && p.ends_with("/sip") =>
+        {
+            let id = p
+                .strip_prefix("/admin/v1/calls/")
+                .and_then(|s| s.strip_suffix("/sip"))
+                .unwrap_or("");
+            call_sip(state, id)
+        }
+        (m, p)
             if *m == hyper::Method::POST
                 && p.starts_with("/admin/v1/calls/")
                 && p.ends_with("/hangup") =>
@@ -619,6 +630,93 @@ fn call_stats(state: &AdminState, call_id: &str) -> Response<Full<Bytes>> {
             &json!({ "error": "no active call with that call_id" }),
         ),
     }
+}
+
+/// `GET /admin/v1/calls/:id/sip` (DESIGN_SIP_LADDER.md) — the SIP
+/// messages captured for one call, oldest first.
+///
+/// **Operator role** (`auth::operator_pattern`): the messages are
+/// verbatim and unredacted, `Authorization` headers included.
+///
+/// Takes the bridge `call_id` like its `/stats`, `/park`, `/retrieve`
+/// and `/hangup` siblings, and resolves it to the SIP `Call-ID` the
+/// ring is keyed by — first through the live registry, then through
+/// the recent-CDR ring, which is what makes a **just-ended** call
+/// inspectable. That second lookup is the point: a call is most worth
+/// looking at just after it failed, and by then the registry has
+/// dropped it. Both rings share the `cdr_ring_size` window by default
+/// (design §2), so "in the recent-calls pane" and "has a ladder" mean
+/// the same thing.
+fn call_sip(state: &AdminState, call_id: &str) -> Response<Full<Bytes>> {
+    if call_id.is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({ "error": "empty call_id" }),
+        );
+    }
+    if !crate::sip_ring::is_enabled() {
+        return json_response(
+            StatusCode::NOT_IMPLEMENTED,
+            &json!({ "error": "SIP ladder capture not enabled ([observability].sip_ring_size = 0)" }),
+        );
+    }
+
+    // Live call first; then the recent-CDR ring for one that just
+    // ended. A wrong-namespace id is simply an unknown id → 404.
+    let sip_call_id = state
+        .call_registry
+        .as_ref()
+        .and_then(|reg| {
+            reg.snapshot_calls()
+                .into_iter()
+                .find(|r| r.call_id == call_id)
+                .map(|r| r.sip_call_id)
+        })
+        .or_else(|| {
+            crate::cdr_ring::snapshot().into_iter().find_map(|rec| {
+                (rec.get("call_id").and_then(|v| v.as_str()) == Some(call_id))
+                    .then(|| {
+                        rec.get("sip_call_id")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
+                    .flatten()
+            })
+        });
+
+    let Some(sip_call_id) = sip_call_id else {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            &json!({ "error": "no active or recent call with that call_id" }),
+        );
+    };
+
+    // The call is known but its trace is gone — capture was off while
+    // it ran, or the pending bound evicted it. Distinguished from the
+    // 404 above because the answer to "why is this empty?" differs.
+    let Some((messages, truncated)) = crate::sip_ring::snapshot(&sip_call_id) else {
+        return json_response(
+            StatusCode::OK,
+            &json!(CallSipResponse {
+                call_id: call_id.to_string(),
+                sip_call_id,
+                truncated: false,
+                count: 0,
+                messages: Vec::new(),
+            }),
+        );
+    };
+
+    json_response(
+        StatusCode::OK,
+        &json!(CallSipResponse {
+            call_id: call_id.to_string(),
+            sip_call_id,
+            truncated,
+            count: messages.len(),
+            messages,
+        }),
+    )
 }
 
 /// `POST /admin/v1/calls/:id/hangup` (0.43.0, #362) — force-shutdown
@@ -1807,6 +1905,110 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ─── SIP ladder (DESIGN_SIP_LADDER.md) ──────────────────────────
+
+    #[tokio::test]
+    async fn sip_ladder_reports_disabled_capture_as_501_not_an_empty_200() {
+        let _serial = crate::sip_ring::test_mutex().lock().await;
+        crate::sip_ring::set_capacity(0, 64);
+        let (status, body) = conf(
+            hyper::Method::GET,
+            "/admin/v1/calls/abc/sip",
+            "",
+            &AdminState::default(),
+        )
+        .await;
+        // An empty 200 would read as "this call had no signaling",
+        // which is a different and wrong conclusion. Clients key the
+        // "disabled" note off this status.
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("sip_ring_size"));
+        crate::sip_ring::set_capacity(
+            crate::sip_ring::DEFAULT_CAPACITY,
+            crate::sip_ring::DEFAULT_MAX_MESSAGES,
+        );
+    }
+
+    #[tokio::test]
+    async fn sip_ladder_404s_an_unknown_call_and_400s_an_empty_id() {
+        let _serial = crate::sip_ring::test_mutex().lock().await;
+        crate::sip_ring::set_capacity(10, 8);
+        let (status, _) = conf(
+            hyper::Method::GET,
+            "/admin/v1/calls/nope/sip",
+            "",
+            &AdminState::default(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "unknown in both id namespaces"
+        );
+
+        let (status, _) = conf(
+            hyper::Method::GET,
+            "/admin/v1/calls//sip",
+            "",
+            &AdminState::default(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        crate::sip_ring::set_capacity(
+            crate::sip_ring::DEFAULT_CAPACITY,
+            crate::sip_ring::DEFAULT_MAX_MESSAGES,
+        );
+    }
+
+    // A call that just *ended* is the case you most want the ladder
+    // for, and by then the live registry has dropped it — so the
+    // handler falls back to the recent-CDR ring for the id join.
+    #[tokio::test]
+    async fn sip_ladder_serves_a_just_ended_call_through_the_cdr_ring() {
+        let _serial = crate::sip_ring::test_mutex().lock().await;
+        crate::sip_ring::set_capacity(10, 8);
+        crate::cdr_ring::set_capacity(10);
+        crate::sip_ring::push(
+            "sip-call-id-9",
+            SipMessageEntry {
+                ts_ms: 1_755_000_000_000,
+                direction: "in".into(),
+                src: "203.0.113.9:5060".into(),
+                dst: "10.0.0.2:5060".into(),
+                payload: "INVITE sip:x SIP/2.0\r\n".into(),
+            },
+        );
+        crate::cdr_ring::push(json!({
+            "call_id": "bridge-9",
+            "sip_call_id": "sip-call-id-9",
+        }));
+
+        // Registry absent entirely — exactly the post-hangup shape.
+        let (status, body) = conf(
+            hyper::Method::GET,
+            "/admin/v1/calls/bridge-9/sip",
+            "",
+            &AdminState::default(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["sip_call_id"], "sip-call-id-9");
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["truncated"], false);
+        assert_eq!(body["messages"][0]["direction"], "in");
+        assert!(body["messages"][0]["payload"]
+            .as_str()
+            .unwrap()
+            .starts_with("INVITE"));
+        crate::sip_ring::set_capacity(
+            crate::sip_ring::DEFAULT_CAPACITY,
+            crate::sip_ring::DEFAULT_MAX_MESSAGES,
+        );
     }
 
     // ─── Park admin routes (0.7.0) ──────────────────────────────────

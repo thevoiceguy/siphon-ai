@@ -13,12 +13,24 @@
 use std::collections::VecDeque;
 
 use siphon_ai_admin_api_types::{
-    AdminCallRow, ConferenceRow, DrainStatus, ErrorEntry, ParkedRow, RegistrationRow,
-    StatusResponse,
+    AdminCallRow, CallSipResponse, ConferenceRow, DrainStatus, ErrorEntry, ParkedRow,
+    RegistrationRow, SipMessageEntry, StatusResponse,
 };
+
+use crate::client::LadderError;
 
 /// Index into [`App::nodes`]. Display name lives on the node itself.
 pub type NodeId = usize;
+
+/// What each per-node poller should fetch for the focused call.
+/// Broadcast over a `watch` from the UI thread.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PollFocus {
+    /// `(node, call_id)` under the cursor, if any.
+    pub call: Option<(NodeId, String)>,
+    /// The SIP ladder overlay is open, so fetch it too.
+    pub ladder: bool,
+}
 
 /// Samples kept for sparklines (~2 minutes at the 1 s default poll).
 const HISTORY_LEN: usize = 120;
@@ -403,6 +415,62 @@ pub enum RoomsRowKind {
     },
 }
 
+/// What the SIP ladder pane is currently showing for the focused
+/// call. Every non-`Ready` variant renders as a note *inside the
+/// pane* — none of them is a node-health signal (DESIGN_SIGHTGLASS.md
+/// §6.1's rule, applied here: a node that answers everything else is
+/// up whether or not it serves a ladder).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum LadderState {
+    /// Open, first fetch not back yet.
+    #[default]
+    Loading,
+    Ready(Box<CallSipResponse>),
+    /// `[observability].sip_ring_size = 0` on that node.
+    Disabled,
+    /// The token is `readonly`; raw SIP needs `operator`.
+    Forbidden,
+    /// Unknown call, or a daemon predating the endpoint.
+    Unavailable(String),
+    Error(String),
+}
+
+/// The SIP ladder overlay on the calls tab (DESIGN_SIP_LADDER.md §5).
+///
+/// Closed by default and **only polled while open** — it is the one
+/// payload here measured in kilobytes rather than tens of bytes, so
+/// leaving it on would change this tool's poll cost for everyone who
+/// never opens it.
+#[derive(Debug, Clone, Default)]
+pub struct LadderPane {
+    pub open: bool,
+    /// `(node, call_id)` the pane is showing. Cleared on focus change
+    /// so a new selection never renders the previous call's messages.
+    pub key: Option<(NodeId, String)>,
+    pub state: LadderState,
+    /// Selected message index, for `⏎` expand and `y` copy.
+    pub selected: usize,
+    /// One message expanded to its full raw text.
+    pub expanded: bool,
+}
+
+impl LadderPane {
+    /// The focused message, when the pane holds any.
+    pub fn selected_message(&self) -> Option<&SipMessageEntry> {
+        match &self.state {
+            LadderState::Ready(r) => r.messages.get(self.selected),
+            _ => None,
+        }
+    }
+
+    pub fn message_count(&self) -> usize {
+        match &self.state {
+            LadderState::Ready(r) => r.messages.len(),
+            _ => 0,
+        }
+    }
+}
+
 /// Live-stats pane for the focused call: latest snapshot plus
 /// client-side history rings (§2 — the daemon stores no history).
 #[derive(Debug, Default)]
@@ -432,6 +500,13 @@ pub enum Msg {
         node: NodeId,
         call_id: String,
         stats: serde_json::Value,
+    },
+    /// SIP ladder arrived for the focused call. Boxed for the same
+    /// reason `Snapshot` is — a full ladder dwarfs every other variant.
+    Ladder {
+        node: NodeId,
+        call_id: String,
+        result: Box<Result<CallSipResponse, LadderError>>,
     },
     /// 1 s cadence: sample fleet history for the overview sparkline.
     Tick,
@@ -464,6 +539,8 @@ pub struct App {
     /// Selection index into [`App::visible_system_nodes`].
     pub selected_system: usize,
     pub stats: StatsPane,
+    /// SIP ladder overlay for the focused call (calls tab, `s`).
+    pub ladder: LadderPane,
     /// Fleet-wide active-call totals, one sample per tick, newest last.
     pub fleet_history: VecDeque<u64>,
     /// Blocking modal, if any. While set, all keys route to it.
@@ -484,6 +561,7 @@ impl App {
             selected_room: 0,
             selected_system: 0,
             stats: StatsPane::default(),
+            ladder: LadderPane::default(),
             fleet_history: VecDeque::new(),
             modal: None,
             toasts: Vec::new(),
@@ -537,6 +615,33 @@ impl App {
                     extract_scaled(&stats, "avg_jitter_ms", 1.0),
                 );
                 self.stats.latest = Some(stats);
+            }
+            Msg::Ladder {
+                node,
+                call_id,
+                result,
+            } => {
+                // Same staleness guard as `Stats`: a fetch in flight
+                // when the selection moved must not paint the new
+                // call's pane with the old call's messages.
+                if self.ladder.key.as_ref() != Some(&(node, call_id)) {
+                    return;
+                }
+                self.ladder.state = match *result {
+                    Ok(resp) => LadderState::Ready(Box::new(resp)),
+                    Err(LadderError::Disabled) => LadderState::Disabled,
+                    Err(LadderError::Forbidden) => LadderState::Forbidden,
+                    Err(LadderError::Unavailable(d)) => LadderState::Unavailable(d),
+                    Err(LadderError::Other(d)) => LadderState::Error(d),
+                };
+                let count = self.ladder.message_count();
+                if count == 0 {
+                    self.ladder.selected = 0;
+                } else if self.ladder.selected >= count {
+                    // A refresh that shrank the ladder (per-call cap
+                    // evicting) must not strand the cursor past the end.
+                    self.ladder.selected = count - 1;
+                }
             }
             Msg::Tick => {
                 let total: u64 = self.nodes.iter().map(|n| n.calls.len() as u64).sum();
@@ -710,6 +815,17 @@ impl App {
             .map(|(id, c)| (*id, c.call_id.clone()))
     }
 
+    /// What the pollers should fetch for the focused call. The ladder
+    /// flag rides along so a node only pays for the kilobyte-scale
+    /// SIP payload while someone is actually looking at it — the
+    /// stats fetch is unconditional as before.
+    pub fn poll_focus(&self) -> PollFocus {
+        PollFocus {
+            call: self.focus(),
+            ladder: self.ladder.open,
+        }
+    }
+
     pub fn select_next(&mut self) {
         if self.tab == Tab::System {
             self.selected_system = self.selected_system.saturating_add(1);
@@ -803,10 +919,46 @@ impl App {
         let focus = self.focus();
         if self.stats.key != focus {
             self.stats = StatsPane {
-                key: focus,
+                key: focus.clone(),
                 ..StatsPane::default()
             };
         }
+        if self.ladder.key != focus {
+            // Keep `open` across a selection change — an operator
+            // stepping down the call list with the ladder up expects
+            // it to stay up and follow the cursor.
+            self.ladder = LadderPane {
+                open: self.ladder.open,
+                key: focus,
+                ..LadderPane::default()
+            };
+        }
+    }
+
+    /// Toggle the ladder overlay. Opening re-arms the fetch by
+    /// resetting to `Loading`, so a pane closed on an error and
+    /// reopened retries rather than showing the stale failure.
+    pub fn toggle_ladder(&mut self) {
+        self.ladder.open = !self.ladder.open;
+        if self.ladder.open {
+            self.ladder.key = self.focus();
+            self.ladder.state = LadderState::Loading;
+            self.ladder.selected = 0;
+            self.ladder.expanded = false;
+        } else {
+            self.ladder.expanded = false;
+        }
+    }
+
+    pub fn ladder_select_next(&mut self) {
+        let count = self.ladder.message_count();
+        if count > 0 {
+            self.ladder.selected = (self.ladder.selected + 1).min(count - 1);
+        }
+    }
+
+    pub fn ladder_select_prev(&mut self) {
+        self.ladder.selected = self.ladder.selected.saturating_sub(1);
     }
 
     // ─── Fleet rollups for the header/overview ─────────────────────
@@ -941,6 +1093,146 @@ mod tests {
         });
         assert_eq!(app.selected_call, 0);
         assert_eq!(app.focus(), Some((1, "a".to_string())));
+    }
+
+    // ─── SIP ladder (DESIGN_SIP_LADDER.md) ──────────────────────
+
+    fn sip_resp(call_id: &str, n: usize) -> CallSipResponse {
+        CallSipResponse {
+            call_id: call_id.into(),
+            sip_call_id: format!("sip-{call_id}"),
+            truncated: false,
+            count: n,
+            messages: (0..n)
+                .map(|i| SipMessageEntry {
+                    ts_ms: 1_000 + i as u64 * 10,
+                    direction: "in".into(),
+                    src: "203.0.113.9:5060".into(),
+                    dst: "10.0.0.2:5060".into(),
+                    payload: format!("MSG{i} SIP/2.0"),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn ladder_is_closed_until_toggled_so_a_closed_pane_costs_no_polling() {
+        let mut app = two_node_app();
+        app.select_first();
+        assert!(!app.ladder.open);
+        assert!(
+            !app.poll_focus().ladder,
+            "pollers must not fetch kilobyte payloads for a pane nobody opened"
+        );
+        app.toggle_ladder();
+        assert!(app.poll_focus().ladder);
+        app.toggle_ladder();
+        assert!(!app.poll_focus().ladder);
+    }
+
+    #[test]
+    fn ladder_ignores_a_response_for_a_call_that_is_no_longer_focused() {
+        let mut app = two_node_app();
+        app.select_first();
+        app.toggle_ladder();
+        let focused = app.ladder.key.clone().expect("a call is focused");
+
+        // A fetch for some *other* call lands late.
+        app.update(Msg::Ladder {
+            node: focused.0,
+            call_id: "not-the-focused-call".into(),
+            result: Box::new(Ok(sip_resp("not-the-focused-call", 3))),
+        });
+        assert!(
+            matches!(app.ladder.state, LadderState::Loading),
+            "a stale fetch must never paint the focused call's pane"
+        );
+    }
+
+    #[test]
+    fn ladder_follows_the_selection_but_stays_open() {
+        let mut app = two_node_app();
+        app.select_first();
+        app.toggle_ladder();
+        let first = app.ladder.key.clone();
+        app.update(Msg::Ladder {
+            node: first.clone().unwrap().0,
+            call_id: first.clone().unwrap().1,
+            result: Box::new(Ok(sip_resp("a", 3))),
+        });
+        assert_eq!(app.ladder.message_count(), 3);
+
+        app.select_next();
+        assert!(app.ladder.open, "stepping the call list keeps the pane up");
+        assert_ne!(app.ladder.key, first, "and re-points it at the new call");
+        assert!(
+            matches!(app.ladder.state, LadderState::Loading),
+            "showing the previous call's messages under a new title would be a lie"
+        );
+    }
+
+    #[test]
+    fn ladder_error_variants_each_survive_to_the_pane() {
+        let cases = [
+            (LadderError::Disabled, LadderState::Disabled),
+            (LadderError::Forbidden, LadderState::Forbidden),
+        ];
+        for (err, want) in cases {
+            let mut app = two_node_app();
+            app.select_first();
+            app.toggle_ladder();
+            let (node, call_id) = app.ladder.key.clone().unwrap();
+            app.update(Msg::Ladder {
+                node,
+                call_id,
+                result: Box::new(Err(err)),
+            });
+            assert_eq!(app.ladder.state, want);
+            // None of these is a node-health signal.
+            assert_eq!(app.nodes[0].health, NodeHealth::Up);
+        }
+    }
+
+    #[test]
+    fn reopening_after_an_error_retries_rather_than_showing_the_stale_failure() {
+        let mut app = two_node_app();
+        app.select_first();
+        app.toggle_ladder();
+        let (node, call_id) = app.ladder.key.clone().unwrap();
+        app.update(Msg::Ladder {
+            node,
+            call_id,
+            result: Box::new(Err(LadderError::Other("connection refused".into()))),
+        });
+        assert!(matches!(app.ladder.state, LadderState::Error(_)));
+        app.toggle_ladder(); // close
+        app.toggle_ladder(); // reopen
+        assert!(matches!(app.ladder.state, LadderState::Loading));
+    }
+
+    // A refresh that shrinks the ladder (the daemon's per-call cap
+    // evicting older messages) must not strand the cursor past the end.
+    #[test]
+    fn selection_is_clamped_when_a_refresh_returns_fewer_messages() {
+        let mut app = two_node_app();
+        app.select_first();
+        app.toggle_ladder();
+        let (node, call_id) = app.ladder.key.clone().unwrap();
+        app.update(Msg::Ladder {
+            node,
+            call_id: call_id.clone(),
+            result: Box::new(Ok(sip_resp("a", 5))),
+        });
+        for _ in 0..10 {
+            app.ladder_select_next();
+        }
+        assert_eq!(app.ladder.selected, 4);
+        app.update(Msg::Ladder {
+            node,
+            call_id,
+            result: Box::new(Ok(sip_resp("a", 2))),
+        });
+        assert_eq!(app.ladder.selected, 1, "clamped to the new last index");
     }
 
     #[test]

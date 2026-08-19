@@ -5,6 +5,7 @@
 mod calls;
 mod chrome;
 mod errors;
+mod ladder;
 mod modal;
 mod overview;
 mod rooms;

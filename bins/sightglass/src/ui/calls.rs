@@ -32,6 +32,10 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     draw_table(frame, app, theme, active_area);
     draw_history(frame, app, theme, history_area);
     draw_detail(frame, app, theme, detail_area);
+    // The SIP ladder takes the detail pane's space when open: a
+    // call's exchange needs the height, and the stats it covers are
+    // one keypress away (DESIGN_SIP_LADDER.md §5).
+    super::ladder::draw(frame, app, theme, detail_area);
 }
 
 /// Recent completed calls (0.49.0+ daemons): a dim tail under the

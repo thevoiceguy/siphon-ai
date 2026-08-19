@@ -10,9 +10,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use siphon_ai_admin_api_types::{
-    CallsResponse, ConferencesResponse, DrainStatus, ErrorBody, ErrorsResponse, LogFilterResponse,
-    ParkedResponse, RecentCdrsResponse, RegistrationsResponse, SetLogFilterResponse,
-    StatusResponse,
+    CallSipResponse, CallsResponse, ConferencesResponse, DrainStatus, ErrorBody, ErrorsResponse,
+    LogFilterResponse, ParkedResponse, RecentCdrsResponse, RegistrationsResponse,
+    SetLogFilterResponse, StatusResponse,
 };
 
 use crate::config::Node;
@@ -24,6 +24,24 @@ use crate::model::Role;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiError {
     Forbidden,
+    Other(String),
+}
+
+/// Why a SIP-ladder fetch failed. The three named cases each render
+/// differently in the pane and **none of them marks the node down** —
+/// a node that answers everything else is healthy whether or not it
+/// serves a ladder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LadderError {
+    /// `501` — `[observability].sip_ring_size = 0` on that node.
+    Disabled,
+    /// `403` — the token is `readonly`; the ladder needs `operator`
+    /// because it returns unredacted SIP.
+    Forbidden,
+    /// `404` — either an unknown call id, or a daemon older than the
+    /// endpoint. Deliberately not split: the daemon's own text is
+    /// shown, and the operator action is the same either way.
+    Unavailable(String),
     Other(String),
 }
 
@@ -91,6 +109,42 @@ impl AdminClient {
     /// as `status`/`errors`.
     pub async fn recent_cdrs(&self) -> Result<RecentCdrsResponse, String> {
         self.get_json("/admin/v1/cdrs/recent").await
+    }
+
+    /// Per-call SIP ladder (DESIGN_SIP_LADDER.md). Errors are typed
+    /// rather than stringly so the pane can distinguish "capture is
+    /// off on this node" from "this token may not read raw SIP" from
+    /// "this daemon is too old" — three different things for an
+    /// operator to do, and all of them are notes in the pane rather
+    /// than node-down.
+    pub async fn call_sip(&self, call_id: &str) -> Result<CallSipResponse, LadderError> {
+        let path = format!("/admin/v1/calls/{call_id}/sip");
+        let mut req = self.http.get(format!("{}{}", self.base, path));
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| LadderError::Other(connect_error(e)))?;
+        let status = resp.status();
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| LadderError::Other(connect_error(e)))?;
+        if status.is_success() {
+            return serde_json::from_slice(&body)
+                .map_err(|e| LadderError::Other(format!("bad response from {path}: {e}")));
+        }
+        let detail = serde_json::from_slice::<ErrorBody>(&body)
+            .map(|e| e.error)
+            .unwrap_or_else(|_| status.to_string());
+        Err(match status.as_u16() {
+            501 => LadderError::Disabled,
+            403 => LadderError::Forbidden,
+            404 => LadderError::Unavailable(detail),
+            code => LadderError::Other(format!("{code}: {detail}")),
+        })
     }
 
     /// Live quality snapshot for one active call. Kept as a loose

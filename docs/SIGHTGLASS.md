@@ -77,7 +77,13 @@ Unicode status glyphs for ASCII.
 | `1`–`6`, `⇥` / `⇧⇥` | switch tab (overview / trunks / calls / rooms / errors / system) |
 | `n` | cycle the node filter (all → node → … → all); scopes every tab |
 | `j`/`k`, `↓`/`↑`, `g`/`G` | move the call selection |
+| `s` | calls tab: open / close the **SIP ladder** for the focused call |
 | `q`, `Esc`, `Ctrl-C` | quit |
+
+With the SIP ladder open, `j`/`k` scroll its messages instead of the
+call table, `⏎` expands the focused message to full raw text, `y`
+copies it, and `Esc` collapses-then-closes the pane before it quits
+the app — one layer at a time, the same way modals behave.
 
 - **overview** — fleet health grid (one row per node: reachability,
   **version and uptime** from `GET /admin/v1/status` on 0.49.0+
@@ -122,6 +128,55 @@ Unicode status glyphs for ASCII.
 | `u` | retrieve — optional new `ws_url` (move a live call to a different WS server) | `POST …/retrieve` | operator |
 | `c` | add the focused call to a conference room | `POST /admin/v1/conferences/{room}/participants` | operator |
 | `o` | originate an outbound call (dial form) | `POST /admin/v1/calls` | admin (billable) |
+
+### SIP ladder (`s`)
+
+Select a call and press `s` to see its **signaling** — the SIP
+messages the daemon captured for it, oldest first, one line each:
+
+```
+┌ sip · prod-2 · 01J8ZX… ───────────────────────── 7 msgs ┐
+│  +0.000 → INVITE sip:+1555…@carrier (SDP 214 B)         │
+│  +0.001 ← 100 Trying                                    │
+│  +0.035 ← 407 Proxy Authentication Required             │
+│  +0.036 → ACK                                           │
+│  +0.037 → INVITE sip:+1555…@carrier (SDP 214 B)         │
+│  +0.427 ← 200 OK (SDP 198 B)                            │
+│  +0.428 → ACK                                           │
+└ j/k move · ⏎ expand · y copy · esc/s close ─────────────┘
+```
+
+Timestamps are **relative to the call's first message**, because what
+a ladder is usually read for is the gaps — a 32-second pause before a
+BYE is the finding, and absolute times make you do the subtraction.
+`⏎` expands one message to its full raw text; `y` copies it to your
+clipboard via OSC 52, which works over SSH.
+
+Reading this needs an **`operator`** token
+(`GET /admin/v1/calls/{id}/sip`): the messages are returned verbatim,
+`Authorization` headers included, so the access boundary is the role
+rather than redaction — see DEPLOY.md → *Admin auth & RBAC*. This is
+the one read on the admin API above `readonly`, and `--read-only`
+mode does **not** block it: the ladder changes nothing on the node.
+
+Three things render as a note inside the pane rather than as an error,
+and **none of them marks the node down**:
+
+| What you see | Why |
+|---|---|
+| *capture is off on this node* | `[observability].sip_ring_size = 0` there (`501`) |
+| *this token may not read raw SIP* | the token is `readonly` (`403`) |
+| *no ladder for this call* | unknown call id, or a daemon older than the endpoint (`404`) |
+
+The pane is polled **only while it is open** — it is the one payload
+sightglass fetches measured in kilobytes, so a closed pane costs
+nothing. History is bounded on the daemon side (default: 64 messages
+per call, the last 50 completed calls); a call whose older messages
+were dropped says so at the top of the pane.
+
+**This is a nice-to-have, not a Homer replacement.** Minutes of
+history, one node, no search, no cross-node correlation, no RTCP. For
+anything in depth, ship SIP to Homer with `[hep]` — see `docs/HEP.md`.
 
 Every action targets exactly one node, and the confirm modal names it
 ("hangup abc-123 **on prod-2**?") — on a fleet you always know which

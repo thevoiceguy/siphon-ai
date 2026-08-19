@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.3] - 2026-08-19
+
+Two additions, both operator-facing: a per-call SIP ladder you can read
+without leaving the terminal, and advisory scanning in CI so the next
+RUSTSEC finding arrives as a failing check rather than a hand run. **No
+protocol change** (WS stays `version: "1"`), **no CDR change** (still
+v8), and no upstream dependency movement — siphon-rs and forge-media are
+pinned exactly where 0.49.2 left them.
+
+Upgrade note: `[observability].sip_ring_size` defaults to `50`, so SIP
+capture is **on** after this upgrade. It holds recent messages
+unredacted in memory and the endpoint serving them is `operator`-gated —
+see *Admin auth & RBAC* in `docs/DEPLOY.md`, and set it to `0` to opt
+out.
+
 ### Added
 
 - **Per-call SIP ladder: `GET /admin/v1/calls/{id}/sip` and sightglass's `s` pane** (DESIGN_SIP_LADDER.md). Select a call on sightglass's calls tab, press `s`, and see its signaling — the SIP messages the daemon captured for it, oldest first, timestamped relative to the call's first message because the gaps are what a ladder is read for. `⏎` expands one message to full raw text, `y` copies it via OSC 52 (works over SSH; no clipboard dependency added).

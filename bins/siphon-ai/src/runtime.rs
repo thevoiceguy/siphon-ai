@@ -260,6 +260,7 @@ impl Runtime {
             observability.sip_ring_size,
             observability.sip_ring_max_messages,
             local_ips,
+            sip.listen_addr.port(),
         )
         .await?;
         let (hep_telemetry, hep_worker) = match hep_built {
@@ -1771,6 +1772,7 @@ async fn build_hep_telemetry(
     sip_ring_size: usize,
     sip_ring_max_messages: usize,
     local_ips: Vec<std::net::IpAddr>,
+    local_sip_port: u16,
 ) -> Result<Option<(Arc<HepTelemetry>, Option<HepWorkerHandle>)>> {
     // Sized before the sink exists so capture can never run at the
     // default capacity against a config that asked for something
@@ -1781,6 +1783,7 @@ async fn build_hep_telemetry(
     if sip_ring_size > 0 {
         extra_sinks.push(Arc::new(siphon_ai_telemetry::SipRingSink::new(
             local_ips.clone(),
+            local_sip_port,
         )));
     }
 

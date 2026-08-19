@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.4] - 2026-08-19
+
+### Fixed
+
+- **The SIP ladder's `direction` field was `"unknown"` for every message on a wildcard-bound node — i.e. on nearly every real deployment** (shipped in 0.49.3; found by running the 0.49.3 release artifact against a production-shaped node rather than in a test). siphon-rs stamps a HEP packet's local end with the **socket's** address, so on the usual `listen = "0.0.0.0:5060"` our own end is literally `0.0.0.0`. The derivation matched only `[node].public_address` and a non-wildcard bind IP, so neither end matched and the field fell through to `"unknown"` — sightglass drew `·` for every message and the ladder's arrows never rendered. Confirmed from a production node's own Homer capture: inbound `srcIp <peer> / dstIp 0.0.0.0`, outbound the reverse.
+  - The **loopback** case failed the opposite way: both ends are `127.0.0.1`, both match, the `src` arm wins, and every message read `"out"` — including inbound INVITEs. That is how it surfaced, driving a real call through the shipped binary in a lab second instance.
+  - **Fix:** an unspecified IP (`0.0.0.0` / `::`) counts as one of ours, which is exactly what siphon-rs means by it; and when *both* ends look local, the SIP bind port breaks the tie. Port is consulted **only after** IP has failed, never before — a port-first test mislabels inbound traffic, because SIP peers overwhelmingly send *from* 5060 too, and that earlier regression test still passes unchanged.
+  - No API, config or schema change: `direction` already documented `in`/`out`/`unknown`, and `src`/`dst` were correct throughout, so this is a label fix rather than data recovery. Nodes on 0.49.3 lose nothing by upgrading; their captured messages were always accurate.
+
 ## [0.49.3] - 2026-08-19
 
 Two additions, both operator-facing: a per-call SIP ladder you can read

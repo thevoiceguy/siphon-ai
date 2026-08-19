@@ -276,32 +276,69 @@ pub struct SipRingSink {
     /// configured `[node].public_address` and the SIP bind IP when it
     /// is not a wildcard.
     ///
-    /// Matching on **IP**, never on port: a node bound to `0.0.0.0`
-    /// has no discriminating IP of its own, and port alone is useless
-    /// because SIP peers overwhelmingly send *from* 5060 as well — a
-    /// port-only test labels almost every inbound message "out". A
-    /// unit test locks this.
+    /// Primarily matched on **IP**, never on port alone: SIP peers
+    /// overwhelmingly send *from* 5060 as well, so a port-only test
+    /// labels almost every inbound message "out". Port is consulted
+    /// only to break a tie when both ends look local — see
+    /// [`Self::direction`]. Unit tests lock both halves.
     local_ips: Vec<IpAddr>,
+    /// The SIP listener's port, for the tie-break above.
+    local_port: u16,
 }
 
 impl SipRingSink {
-    pub fn new(local_ips: Vec<IpAddr>) -> Self {
-        Self { local_ips }
+    pub fn new(local_ips: Vec<IpAddr>, local_port: u16) -> Self {
+        Self {
+            local_ips,
+            local_port,
+        }
     }
 
-    /// `"out"` when the message left one of our addresses, `"in"`
-    /// when it arrived at one, and `"unknown"` when neither end is
-    /// recognisably us — which happens only on a wildcard bind with
-    /// no `public_address` configured. Guessing there would be worse
-    /// than saying so: `src`/`dst` are in every entry, so a client
-    /// can always decide for itself.
+    /// Is this address one of ours?
+    ///
+    /// **An unspecified IP (`0.0.0.0` / `::`) counts as ours**, and
+    /// that case is the common one rather than an edge: siphon-rs
+    /// stamps a HEP packet's local end with the *socket's* address,
+    /// which on the usual `listen = "0.0.0.0:5060"` is literally
+    /// `0.0.0.0`. Without this, a wildcard-bound node — i.e. nearly
+    /// every real deployment — matches neither end and renders every
+    /// message `"unknown"`. Confirmed against a production node's own
+    /// Homer capture: inbound `srcIp <peer> / dstIp 0.0.0.0`, outbound
+    /// the reverse.
+    fn is_local(&self, ip: IpAddr) -> bool {
+        ip.is_unspecified() || self.local_ips.contains(&ip)
+    }
+
+    /// `"out"` when the message left us, `"in"` when it arrived, and
+    /// `"unknown"` when neither end is recognisably this node.
+    ///
+    /// Three cases, in order:
+    ///
+    /// 1. **Exactly one end is ours** — that end decides. This is
+    ///    every routed deployment.
+    /// 2. **Both ends are ours** — a loopback lab, where src and dst
+    ///    are both `127.0.0.1`. IP cannot discriminate, so the SIP
+    ///    bind *port* does: a message leaving our listener is
+    ///    outbound. This is the only place port is consulted, and
+    ///    only after IP has already failed.
+    /// 3. **Neither** — say so rather than guess. `src`/`dst` are in
+    ///    every entry, so a client can always decide for itself.
     fn direction(&self, packet: &HepPacket) -> &'static str {
-        if self.local_ips.contains(&packet.src.ip()) {
-            "out"
-        } else if self.local_ips.contains(&packet.dst.ip()) {
-            "in"
-        } else {
-            "unknown"
+        let src_local = self.is_local(packet.src.ip());
+        let dst_local = self.is_local(packet.dst.ip());
+        match (src_local, dst_local) {
+            (true, false) => "out",
+            (false, true) => "in",
+            (true, true) => {
+                if packet.src.port() == self.local_port {
+                    "out"
+                } else if packet.dst.port() == self.local_port {
+                    "in"
+                } else {
+                    "unknown"
+                }
+            }
+            (false, false) => "unknown",
         }
     }
 }
@@ -506,7 +543,7 @@ mod tests {
     fn sink_ignores_non_sip_protocols_and_packets_without_a_call_id() {
         let _serial = serial();
         reset(10, 8);
-        let sink = SipRingSink::new(vec!["10.0.0.2".parse().unwrap()]);
+        let sink = SipRingSink::new(vec!["10.0.0.2".parse().unwrap()], 5060);
 
         let base = HepPacket {
             capture_id: 1,
@@ -547,7 +584,7 @@ mod tests {
     fn direction_is_out_when_the_source_is_our_own_bind() {
         let _serial = serial();
         reset(10, 8);
-        let sink = SipRingSink::new(vec!["139.177.205.140".parse().unwrap()]);
+        let sink = SipRingSink::new(vec!["139.177.205.140".parse().unwrap()], 5060);
         sink.send(HepPacket {
             capture_id: 1,
             capture_password: None,
@@ -570,7 +607,7 @@ mod tests {
     fn inbound_from_a_peer_on_port_5060_is_not_labelled_outbound() {
         let _serial = serial();
         reset(10, 8);
-        let sink = SipRingSink::new(vec!["139.177.205.140".parse().unwrap()]);
+        let sink = SipRingSink::new(vec!["139.177.205.140".parse().unwrap()], 5060);
         sink.send(HepPacket {
             capture_id: 1,
             capture_password: None,
@@ -586,12 +623,92 @@ mod tests {
         assert_eq!(snapshot("peer-5060").unwrap().0[0].direction, "in");
     }
 
+    // Found by running the 0.49.3 artifact against a production-shaped
+    // node. siphon-rs stamps a HEP packet's local end with the
+    // *socket's* address, so on `listen = "0.0.0.0:5060"` — nearly
+    // every real deployment — our own end is literally 0.0.0.0.
+    // Matching only the configured public address meant neither end
+    // matched and every message rendered "unknown". Taken verbatim
+    // from prod's Homer capture.
+    #[test]
+    fn wildcard_bind_stamps_our_end_unspecified_and_still_resolves() {
+        let _serial = serial();
+        reset(10, 8);
+        let sink = SipRingSink::new(vec!["139.177.205.140".parse().unwrap()], 5060);
+        let base = HepPacket {
+            capture_id: 1,
+            capture_password: None,
+            protocol: HepProtocol::Sip,
+            transport: hep_rs::IpProto::Udp,
+            src: "194.195.208.34:5060".parse().unwrap(),
+            dst: "0.0.0.0:5060".parse().unwrap(),
+            timestamp: SystemTime::now(),
+            correlation_id: Some("wildcard-in".into()),
+            payload: b"SIP/2.0 401 Unauthorized\r\n".to_vec(),
+        };
+        sink.send(base.clone());
+        assert_eq!(
+            snapshot("wildcard-in").unwrap().0[0].direction,
+            "in",
+            "arrived at our wildcard-bound listener"
+        );
+
+        sink.send(HepPacket {
+            src: "0.0.0.0:5060".parse().unwrap(),
+            dst: "194.195.208.34:5060".parse().unwrap(),
+            correlation_id: Some("wildcard-out".into()),
+            ..base
+        });
+        assert_eq!(
+            snapshot("wildcard-out").unwrap().0[0].direction,
+            "out",
+            "left our wildcard-bound listener"
+        );
+    }
+
+    // The other half of the same bug: on loopback both ends are ours,
+    // so IP cannot discriminate and everything read "out". The SIP
+    // bind port breaks the tie — and only here, after IP has failed,
+    // because a port-first test mislabels inbound traffic (peers send
+    // *from* 5060 too, locked by the test above).
+    #[test]
+    fn loopback_uses_the_bind_port_to_break_the_tie() {
+        let _serial = serial();
+        reset(10, 8);
+        let sink = SipRingSink::new(vec!["127.0.0.1".parse().unwrap()], 5070);
+        let base = HepPacket {
+            capture_id: 1,
+            capture_password: None,
+            protocol: HepProtocol::Sip,
+            transport: hep_rs::IpProto::Udp,
+            src: "127.0.0.1:52620".parse().unwrap(),
+            dst: "127.0.0.1:5070".parse().unwrap(),
+            timestamp: SystemTime::now(),
+            correlation_id: Some("lo-in".into()),
+            payload: b"INVITE sip:x SIP/2.0\r\n".to_vec(),
+        };
+        sink.send(base.clone());
+        assert_eq!(
+            snapshot("lo-in").unwrap().0[0].direction,
+            "in",
+            "an INVITE arriving at our listener is inbound, even on loopback"
+        );
+
+        sink.send(HepPacket {
+            src: "127.0.0.1:5070".parse().unwrap(),
+            dst: "127.0.0.1:52620".parse().unwrap(),
+            correlation_id: Some("lo-out".into()),
+            ..base
+        });
+        assert_eq!(snapshot("lo-out").unwrap().0[0].direction, "out");
+    }
+
     #[test]
     fn direction_is_unknown_when_neither_end_is_recognisably_us() {
         let _serial = serial();
         reset(10, 8);
         // Wildcard bind, no public_address configured.
-        let sink = SipRingSink::new(vec![]);
+        let sink = SipRingSink::new(vec![], 5060);
         sink.send(HepPacket {
             capture_id: 1,
             capture_password: None,

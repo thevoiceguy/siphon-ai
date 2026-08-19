@@ -79,6 +79,7 @@ mod tests {
                 log_filter: Some("siphon_ai=info".into()),
                 recent_cdrs: None,
                 errors: None,
+                trunks: vec![],
             })),
         });
         app.update(Msg::Snapshot {
@@ -138,6 +139,27 @@ mod tests {
     // Shipped in 0.49.3 with the `s` key bound but absent from the
     // hint line, so the ladder was undiscoverable — a user with a live
     // call reported it. The keymap is only half the feature.
+    // Reported from a live session: prod has one [[register]] and two
+    // [[trunk]] blocks, and the tab showed only the registration — so
+    // a configured Twilio trunk looked identical to a missing one.
+    #[test]
+    fn trunks_tab_lists_ip_auth_trunks_beside_registrations() {
+        use siphon_ai_admin_api_types::TrunkRow;
+        let mut app = fixture_app();
+        app.tab = Tab::Trunks;
+        app.nodes[0].trunks = vec![TrunkRow {
+            name: "twilio".into(),
+            peer_addrs: vec!["54.172.60.0/30".into()],
+        }];
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("twilio"), "{screen}");
+        assert!(screen.contains("54.172.60.0/30"), "{screen}");
+        assert!(
+            screen.contains("ip-auth"),
+            "a trunk has no live state and must say so, not read as up: {screen}"
+        );
+    }
+
     #[test]
     fn calls_tab_advertises_the_sip_ladder_key() {
         let mut app = fixture_app();

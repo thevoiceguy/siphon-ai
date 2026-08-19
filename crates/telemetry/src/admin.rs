@@ -80,7 +80,8 @@ pub use siphon_ai_admin_api_types::{
     ConferencesResponse, CreateConferenceRequest, DrainStartResponse, DrainStatus, ErrorEntry,
     ErrorsResponse, LogFilterResponse, OriginateRequest, ParkRequest, ParkedResponse, ParkedRow,
     RecentCdrsResponse, RegistrationRow, RegistrationsResponse, RegistrationsSummary,
-    RetrieveRequest, SetLogFilterResponse, SipMessageEntry, StatusResponse,
+    RetrieveRequest, SetLogFilterResponse, SipMessageEntry, StatusResponse, TrunkRow,
+    TrunksResponse,
 };
 
 /// Bundle of dependencies the admin handlers may need. Each is
@@ -90,6 +91,10 @@ pub use siphon_ai_admin_api_types::{
 pub struct AdminState {
     pub call_registry: Option<AdminCallRegistry>,
     pub registration_snapshot: Option<RegistrationSnapshotFn>,
+    /// Configured `[[trunk]]` allowlists. `None` on a daemon built
+    /// without the wiring; the endpoint then answers an empty list
+    /// rather than 404, since "no trunks configured" is a real state.
+    pub trunk_snapshot: Option<TrunkSnapshotFn>,
     pub log_filter: Option<LogFilterHandle>,
     pub hep: Option<Arc<HepTelemetry>>,
     /// Outbound-origination handle (0.6.0). `None` when `[outbound]` is
@@ -192,6 +197,10 @@ pub type AdminCallRegistry = Arc<dyn CallRegistryHandle>;
 /// admin request. Same indirection rationale as `CallRegistryHandle`
 /// — keeps `siphon-ai-sip-glue` out of the telemetry crate's deps.
 pub type RegistrationSnapshotFn = Arc<dyn Fn() -> Vec<RegistrationRow> + Send + Sync>;
+
+/// Same indirection rationale as [`RegistrationSnapshotFn`] — keeps
+/// `siphon-ai-config` out of this crate's dependency graph.
+pub type TrunkSnapshotFn = Arc<dyn Fn() -> Vec<TrunkRow> + Send + Sync>;
 
 /// Why an originate request was refused synchronously (before the call is
 /// placed). The admin layer maps each to an HTTP status.
@@ -360,6 +369,7 @@ pub async fn dispatch(
         (&hyper::Method::GET, "/admin/registrations" | "/admin/v1/registrations") => {
             list_registrations(state)
         }
+        (&hyper::Method::GET, "/admin/v1/trunks") => list_trunks(state),
         (&hyper::Method::GET, "/admin/log" | "/admin/v1/log") => get_log_filter(state),
         (&hyper::Method::PUT, "/admin/log" | "/admin/v1/log") => set_log_filter(state, &body),
         (&hyper::Method::POST, "/admin/hep/test" | "/admin/v1/hep/test") => hep_test(state),
@@ -630,6 +640,30 @@ fn call_stats(state: &AdminState, call_id: &str) -> Response<Full<Bytes>> {
             &json!({ "error": "no active call with that call_id" }),
         ),
     }
+}
+
+/// `GET /admin/v1/trunks` — the configured `[[trunk]]` allowlists.
+///
+/// These are **IP-authenticated** peers: no credentials, no
+/// registration, and so no live state to report. Served anyway
+/// because a trunk absent from every listing is indistinguishable
+/// from a trunk missing from the config, which is the confusion this
+/// endpoint exists to remove (DESIGN_SIGHTGLASS.md §6.6). Readonly:
+/// peer CIDRs are already in the config an operator can read, and
+/// nothing here is a secret.
+fn list_trunks(state: &AdminState) -> Response<Full<Bytes>> {
+    let trunks = state
+        .trunk_snapshot
+        .as_ref()
+        .map(|f| f())
+        .unwrap_or_default();
+    json_response(
+        StatusCode::OK,
+        &json!(TrunksResponse {
+            count: trunks.len(),
+            trunks,
+        }),
+    )
 }
 
 /// `GET /admin/v1/calls/:id/sip` (DESIGN_SIP_LADDER.md) — the SIP

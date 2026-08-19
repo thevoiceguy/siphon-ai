@@ -29,7 +29,18 @@ pub fn spawn(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            let (calls, registrations, drain, errors, conferences, parked, status, recent, log) = tokio::join!(
+            let (
+                calls,
+                registrations,
+                drain,
+                errors,
+                conferences,
+                parked,
+                status,
+                trunks,
+                recent,
+                log,
+            ) = tokio::join!(
                 client.calls(),
                 client.registrations(),
                 client.drain(),
@@ -37,6 +48,7 @@ pub fn spawn(
                 client.conferences(),
                 client.parked(),
                 client.status(),
+                client.trunks(),
                 client.recent_cdrs(),
                 client.log_filter()
             );
@@ -48,6 +60,9 @@ pub fn spawn(
             let conferences = conferences.map(|c| c.conferences).unwrap_or_default();
             let parked = parked.map(|p| p.parked).unwrap_or_default();
             let status = status.ok();
+            // 0.49.6+; an older daemon 404s it and the tab shows no
+            // trunk rows rather than marking the node down.
+            let trunks = trunks.map(|t| t.trunks).unwrap_or_default();
             let recent_cdrs = recent.ok().map(|r| r.cdrs);
             let log_filter = log.ok().map(|l| l.filter);
             let result = calls
@@ -61,6 +76,7 @@ pub fn spawn(
                             conferences,
                             parked,
                             status,
+                            trunks,
                             log_filter,
                             recent_cdrs,
                             errors,

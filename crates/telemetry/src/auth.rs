@@ -214,6 +214,9 @@ pub fn min_role(method: &hyper::Method, path: &str) -> Option<Role> {
         // GET snapshots.
         | (&Method::GET, "/admin/v1/errors")
         | (&Method::GET, "/admin/v1/status")
+        // Configured [[trunk]] allowlists — config an operator can
+        // already read, and no live state; readonly like its siblings.
+        | (&Method::GET, "/admin/v1/trunks")
         | (&Method::GET, "/admin/v1/cdrs/recent") => Some(Role::ReadOnly),
 
         // ── Admin (billable / config / observability-blinding) ──
@@ -310,6 +313,7 @@ pub fn route_label(method: &hyper::Method, path: &str) -> &'static str {
         (&Method::POST, "/admin/v1/conferences") => "POST /admin/v1/conferences",
         (&Method::GET, "/admin/v1/parked") => "GET /admin/v1/parked",
         (&Method::GET, "/admin/v1/drain") => "GET /admin/v1/drain",
+        (&Method::GET, "/admin/v1/trunks") => "GET /admin/v1/trunks",
         (m, p)
             if *m == Method::POST && p.starts_with("/admin/calls/") && p.ends_with("/hangup") =>
         {

@@ -136,9 +136,34 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # `branch = "main"` would mean a tagged release could build different code
 # later if upstream moves. To bump, run `git ls-remote` for the upstream's
 # main branch and replace the rev hashes here (see CLAUDE.md §7.5).
+# siphon-rs tags releases as of `v2026.08.19`; we still pin the rev rather
+# than the tag, because a tag is a movable ref and the reason above is
+# immutability. Name the release in the comment, pin the commit in the
+# field.
 
 # siphon-rs — RFC 3261 SIP stack.
-# Bumped 2026-08-18 `15303bf847e6` → `99da91f599e2` = siphon-rs #109 + #110
+# Bumped 2026-08-20 `99da91f599e2` → `9b7b238fd11f` = **siphon-rs
+# v2026.08.19**, its first tagged release (#111, #112, #113). Upstream main
+# is two commits further on, both docs-only (#114 a changelog entry, #115 a
+# RELEASING.md); the tag is the clean point to sit on.
+# #111 gives the crates real version numbers for the first time — sip-uac
+# 0.5.0, sip-uas 0.3.0, and so on, where every crate had read 0.1.x since
+# the repo began. No code change; the numbers are what #113 then consumes.
+# #112 is README prose. No code.
+# #113 derives the default `User-Agent` / `Server` product tokens from
+# those crate versions instead of the hardcoded `"siphon-rs/0.1.0"` frozen
+# there before any release. **This one is visible on our wire.** The
+# upstream note reasons that embedders setting `user_agent` themselves are
+# unaffected — but we are not such an embedder: neither the `IntegratedUAS`
+# at `runtime.rs:866` nor either `IntegratedUAC` passes a config, so all
+# three take the stack default. Our 100 Trying / 405 / 481 / 501 responses
+# and every UAC request advertised `siphon-rs/0.1.0`, and now advertise
+# `sip-uas/0.3.0` / `sip-uac/0.5.0`. More accurate, still not the product
+# name: `[sip].user_agent` is documented to brand these headers and is in
+# fact dead code, which is siphon-ai #539. Fixing that issue is what makes
+# this token say `siphon-ai/<version>`; this bump only moves it off a
+# number that was never true.
+# (Prior: 2026-08-18 `15303bf847e6` → `99da91f599e2` = siphon-rs #109 + #110
 # (its issues #107 and #108, both filed from this project). Two log levels;
 # no behaviour change and nothing to configure.
 # #109: `IntegratedUAC` warned on every 401/407 while `auto_retry_auth` was
@@ -160,7 +185,7 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # sustained 566 txn/s, and a 20 MB log in 70 s of driving.
 # **No code change here**: both are log-level changes inside siphon-rs.
 # Anyone running `RUST_LOG=siphon=info` gets a quieter journal; anything
-# already at `debug` is unaffected.
+# already at `debug` is unaffected.)
 # (Prior: 2026-08-18 `9ad33983b0e9` → `15303bf847e6` = siphon-rs #104
 # (its issue #103, filed from this project): client transactions that
 # completed normally never left the manager's table. The terminal wait
@@ -251,31 +276,31 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 #  `6fd432270bb8` = #67 dialog_manager share, siphon-ai #324;
 #  `fcaff011f9c6` = #65 invite_with_from, siphon-ai #316;
 #  `3a4fc312ade3` = #64 TLS-SNI-is-hostname, siphon-ai #312.)
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9b7b238fd11f" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9b7b238fd11f" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9b7b238fd11f", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9b7b238fd11f" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9b7b238fd11f" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9b7b238fd11f" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9b7b238fd11f" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9b7b238fd11f" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9b7b238fd11f" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
 # (distinct from forge-media's pinned sip-sdp). Used by the outbound
 # delayed-offer answer generator to hand the UAC a SessionDescription it
 # accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9b7b238fd11f" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9b7b238fd11f" }
 # sip-observe — the transport-layer observability seam. We implement its
 # `TransportMetrics` trait in siphon-ai-telemetry and install it with
 # `set_transport_metrics`, which is the only way to see ingress
 # rate-limit drops: the hook is defaulted to a no-op upstream, so an
 # embedder that installs nothing (as we did until 0.48.11) silently gets
 # the `NoopTransportMetrics` fallback (siphon-ai #459).
-sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
+sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9b7b238fd11f" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "99da91f599e2" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", rev = "9b7b238fd11f" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #

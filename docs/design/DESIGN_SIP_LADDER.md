@@ -164,9 +164,27 @@ The three bounds:
   which is precisely the retention the recent-calls pane already has,
   so the two panes never disagree about which calls you can inspect.
 
-Worst case at defaults: 50 calls × 64 messages × ~1.5 KB ≈ **4.8 MB**,
-and that is the pathological bound, not the expectation — a realistic
-50-call window with 12 messages each is ~900 KB. `0` disables.
+Worst case at defaults is **~55 MB** — not the ~4.8 MB that
+`cap_calls × 64 × ~1.5 KB` suggests, which is what an earlier revision
+of this note published. That arithmetic counts only the completed
+window and silently drops the two populations introduced immediately
+above it. The real bound is `MAX_PENDING (256) + MAX_LIVE (512) +
+cap_calls (50)` = **818 traces**, each up to `sip_ring_max_messages`
+(64) messages, at a **measured ~1.05 kB per message**: an order of
+magnitude more than the completed window alone implies.
+
+It is still a bound rather than an expectation, and not one reached by
+accident — it needs 512 concurrent calls *each* having exchanged 64+
+messages, where real calls carry 4–8. The figures that describe a
+running node are far smaller: **~1.9 MB at a realistic 200-concurrent
+shape**, about **2.5 %** of the 77 MB that node's whole daemon
+occupied at that load, and **~17 MB** with the pending population
+saturated at the per-call cap. Per-message cost is roughly `1.34 ×
+payload + 285 B`, the slope above 1.0 being allocator size-class
+rounding rather than bookkeeping — so the total scales linearly with
+`sip_ring_max_messages`, which is the knob to reach for if it ever
+matters. Measured on the shipped 0.49.7 binary in
+`test-harness/load/RESULTS-0.49.7-ring-ab.md`. `0` disables.
 
 ### 3.3 The id join
 

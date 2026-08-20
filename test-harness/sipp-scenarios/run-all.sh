@@ -38,13 +38,22 @@ cd "$SCRIPT_DIR"
 # configs/local-dev.toml — so a colliding run is the expected case, not
 # an exotic one:
 #
-#   AUX_OBS_PORT=9591 SIPHON_AI_CONFIG=my-dev.toml ./run-all.sh
+#   AUX_OBS_PORT=9591 ./run-all.sh
 #
-# A collision does not fail cleanly. The daemon exits with "bind
+# That one variable is enough for every phase, the main one included:
+# its config is copied with the [observability] / [admin] listeners
+# rewritten onto these ports before the daemon sees it (issue #541 —
+# until then AUX_OBS_PORT moved the auxiliary phases and left the main
+# phase colliding, which cost six red scenarios that were pure ports).
+# SIPHON_AI_CONFIG still selects *which* config to run; it is no longer
+# needed to dodge a port.
+#
+# A collision used not to fail cleanly. The daemon exits with "bind
 # observability HTTP 127.0.0.1:9091: Address already in use" and every
-# affected scenario reports as a *scenario* failure, which reads like a
-# product regression: on 2026-08-19 that cost a red 17-of-40 run that
-# was entirely ports.
+# affected scenario reported as a *scenario* failure, which reads like
+# a product regression: on 2026-08-19 that cost a red 17-of-40 run that
+# was entirely ports. A daemon that dies during startup now aborts the
+# run with its log instead.
 SIPP_PORT="${SIPP_PORT:-5080}"       # SIPp's listen port (any free port works)
 DAEMON_PORT="${DAEMON_PORT:-5070}"   # SiphonAI's listen port (matches local-dev.toml)
 # Admin API (0.10.0): /admin/* moved to its own authenticated listener,
@@ -128,8 +137,10 @@ MSG
 fi
 
 # Same class of problem as the echo server above, and it bit harder.
-# The auxiliary phases bind an [observability] listener on
-# $AUX_OBS_PORT and an admin API on $ADMIN_API_PORT; the defaults match
+# Every phase binds an [observability] listener on $AUX_OBS_PORT and an
+# admin API on $ADMIN_API_PORT — the auxiliary phases because they
+# generate their configs with those values, the main phase because its
+# config is rewritten onto them further down. The defaults match
 # configs/local-dev.toml, which is also what a daemon already running on
 # this box is using. When they collide the daemon exits at startup with
 # "Address already in use" and every affected phase reports as a scenario
@@ -195,23 +206,74 @@ run_scenario() {
     fi
 }
 
+# The main phase is the only one that runs a config it did not write:
+# $DAEMON_CONFIG, i.e. configs/local-dev.toml unless SIPHON_AI_CONFIG
+# says otherwise. That is deliberate — running the shipped config shape
+# is part of what these scenarios check — but it used to mean the
+# listeners in that file were outside every override this script
+# offers. On a box with a daemon already on :9091 the preflight above
+# passed (it probes what the *auxiliary* phases bind), this daemon then
+# died with "Address already in use", and its six scenarios reported as
+# scenario failures. 6 red at the top and everything after it green was
+# ports, every time (issue #541).
+#
+# So the main phase now gets the same treatment as every other phase:
+# a copy of the config with its listeners moved onto the harness's own
+# ports. One AUX_OBS_PORT override covers the whole run. Only lines
+# that already exist are rewritten — a config with no [observability]
+# binds no metrics listener, and there is nothing to move.
+MAIN_CONFIG=$(mktemp -t siphon-ai-sipp.XXXXXX.toml)
+awk -v obs="$AUX_OBS_PORT" -v admin="$ADMIN_API_PORT" '
+    /^[[:space:]]*\[/ { table = $0; sub(/^[[:space:]]+/, "", table) }
+    table ~ /^\[observability\]/ && /^[[:space:]]*http_listen[[:space:]]*=/ {
+        print "http_listen = \"127.0.0.1:" obs "\""; next
+    }
+    table ~ /^\[admin\]/ && /^[[:space:]]*listen[[:space:]]*=/ {
+        print "listen = \"127.0.0.1:" admin "\""; next
+    }
+    { print }
+' "$DAEMON_CONFIG" >"$MAIN_CONFIG"
+
 # Spawn the daemon; keep its log so a failed scenario has something
 # to grep.
 DAEMON_LOG=$(mktemp -t siphon-ai-sipp.XXXXXX.log)
 echo "starting siphon-ai (log: $DAEMON_LOG)"
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$DAEMON_CONFIG" >"$DAEMON_LOG" 2>&1 &
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$MAIN_CONFIG" >"$DAEMON_LOG" 2>&1 &
 DAEMON_PID=$!
 cleanup() {
     if kill -0 "$DAEMON_PID" 2>/dev/null; then
         kill "$DAEMON_PID" 2>/dev/null || true
         wait "$DAEMON_PID" 2>/dev/null || true
     fi
+    # Kept when the daemon failed to start: the message printed then
+    # names this file, and a path that has already been deleted is
+    # worse than no path at all.
+    [[ -n "${KEEP_MAIN_CONFIG:-}" ]] || rm -f "$MAIN_CONFIG"
 }
 trap cleanup EXIT
 
 # Give the daemon a beat to bind. A real wait-for-port helper would
 # be tidier; for a regression script this is fine.
 sleep 1
+
+# A daemon that never started must never be reported as a failing
+# scenario. Whatever the cause — a port still taken, a config the
+# daemon rejects, a binary built from a broken tree — the answer is
+# its log, not 40 lines of sipp output.
+if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+    KEEP_MAIN_CONFIG=1
+    cat >&2 <<MSG
+the daemon exited during startup — no scenario was run
+
+config: $DAEMON_CONFIG
+        (harness copy with rewritten listeners: $MAIN_CONFIG)
+log:    $DAEMON_LOG
+
+last lines:
+MSG
+    tail -n 15 "$DAEMON_LOG" >&2
+    exit 2
+fi
 
 failures=0
 total=${#scenarios[@]}

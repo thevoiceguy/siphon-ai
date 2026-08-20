@@ -1,0 +1,66 @@
+# A/B arm 'off' for RESULTS-0.49.7-ring-ab.md. The two files are
+# byte-identical but for [observability].sip_ring_size below — keep
+# them that way or the difference stops meaning anything.
+#
+# Ports: SIP 5070, metrics 9591, admin 9592. Change them together
+# in BOTH files if they collide with a daemon on this box; the
+# harness lesson from run-all.sh applies here too.
+# Lab config for verifying the 0.49.3 SIP ladder on the SHIPPED binary.
+# Ports deliberately clear of prod (5060/5061, 9091, 9092, 40000-41000).
+[node]
+id = "lab-ladder"
+
+[sip]
+# Identical in both arms. The default 200 pps/source silently drops
+# most of the flood (3,162 of 16,384 landed), which would measure a
+# fraction of the ring rather than its bounds. docs/CONFIG.md says to
+# raise it before load-testing from a single generator.
+udp_rate_limit_pps = 0
+listen = "127.0.0.1:5070"
+transports = ["udp"]
+
+[media]
+codecs = ["pcmu", "pcma"]
+rtp_port_range = [41500, 41600]
+inactivity_timeout_secs = 0
+
+[bridge]
+ws_url = "ws://127.0.0.1:8765/"
+
+# No trunk covers loopback, so every INVITE is rejected 403 — which is
+# exactly the "non-call dialog" the ring's third bound exists for.
+[[trunk]]
+name = "loopback"
+peer_addrs = ["127.0.0.1/32"]
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+
+# rtp_call_uac.py expects a 401 challenge — it aborts with
+# "expected 401, got 200" against a config with no [sip.auth].
+[sip.auth]
+realm = "lab"
+
+[[sip.auth.user]]
+username = "labuser"
+password = "labpw123"
+
+[observability]
+sip_ring_size = 0
+enabled = true
+http_listen = "127.0.0.1:9591"
+
+[admin]
+listen = "127.0.0.1:9592"
+
+[[admin.token]]
+name = "ro"
+token = "lab-readonly-token"
+role = "readonly"
+
+[[admin.token]]
+name = "op"
+token = "lab-operator-token"
+role = "operator"

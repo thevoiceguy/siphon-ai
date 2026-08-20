@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **`test-harness/load/RESULTS-0.49.7-ring-ab.md` — the SIP-ladder ring's memory cost, measured.** `RESULTS-0.49.5-sip-ring.md` recorded it as unquantified because a call-based comparison could not resolve it: the expected signal is 1–2 MB against run-to-run RSS variance larger than that, and at 203 concurrent that rig loses 19 % of its calls to the WS server, so the two arms would not carry the same load. Isolating the ring instead — synthetic SIP from loopback, no media, no WS, no call setup, identical flood in both arms so transaction memory cancels — puts it at **~1.9 MB at a realistic 200-concurrent shape** (about 2.5 % of that node's 77 MB), **~17 MB with the pending bound saturated at its per-call cap**, and a computed **~55 MB** ceiling at the bounds that needs 512 concurrent calls each having exchanged 64+ messages. Per-message cost is roughly `1.34 × payload + 285 B`, the slope being allocator size-class rounding. Carries `abrun.sh`, `ringflood.py` and the two configs into the harness.
+
+
 ## [0.49.7] - 2026-08-19
 
 One sightglass fix. **Sightglass-only** — the daemon is behaviourally

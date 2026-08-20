@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`[sip].user_agent` was documented to brand the `User-Agent` and `Server` headers and was wired to nothing** ([#539](https://github.com/thevoiceguy/siphon-ai/issues/539)). The compiled value reached exactly one call site — `sip_local_uri()`, where a helper ignored its argument and returned the literal `"siphon"` — so the key parsed, validated, and did nothing, with no warning to say so. Every response this daemon sent carried the SIP stack's own default instead: `siphon-rs/0.1.0` historically, `sip-uas/<version>` since the v2026.08.19 bump above.
+  - **Responses are fixed.** `[sip].user_agent` now reaches the `Server` header, and an unset key means **`siphon-ai/<version>`** — this product and its own version, rather than whichever stack crate emitted the message. It applies to responses the UAS synthesizes (100 Trying, 405, 481, 501, the OPTIONS 200) and to the ones the routing handler builds and fills itself (the trunk 403, the no-route 404 / 488).
+  - **Requests are not, and cannot be from here.** `sip-uac`'s request builders — `create_register`, `create_options`, `create_invite_with_from`, `create_invite_with_body`, `create_reinvite`, `create_update`, `create_publish`, `create_subscribe` — each push the crate constant `DEFAULT_USER_AGENT` onto `User-Agent` directly. `UACConfig.user_agent` exists but is consumed only as an SDP session name, so REGISTER, INVITE, REFER and BYE still say `sip-uac/<version>` no matter what is configured here. That is the same shape of bug one layer down, and it needs a siphon-rs change; #539 stays open for it, with an `#[ignore]`d test in `bins/siphon-ai/tests/startup.rs` stating the intended behaviour.
+  - The dead `extract_user_part()` helper is gone. `sip_local_uri()` uses the `siphon` user-part directly, which is what it always produced — a `User-Agent` is product info, not a user, and routing one through the other is what disguised the dead code as a live path.
+  - **Operator note:** a node that never set this key moves from `sip-uas/0.3.0` to `siphon-ai/<version>` on responses. Combined with the bump above, that is two changes to the same header in one release for anyone matching on it.
+
 ### Changed
 
 - **Bumped siphon-rs `99da91f599e2` → `9b7b238fd11f`** — [v2026.08.19](https://github.com/thevoiceguy/siphon-rs/releases/tag/v2026.08.19), upstream's **first tagged release**, carrying [siphon-rs#111](https://github.com/thevoiceguy/siphon-rs/pull/111), [#112](https://github.com/thevoiceguy/siphon-rs/pull/112) and [#113](https://github.com/thevoiceguy/siphon-rs/pull/113). Upstream `main` is two commits further on, both docs-only (a changelog entry and a `RELEASING.md`), so the tag is the clean point to sit on. We still pin the **rev**, not the tag: a tag is a movable ref, and reproducibility is the whole reason these are pinned.

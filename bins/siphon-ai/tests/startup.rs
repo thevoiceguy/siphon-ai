@@ -372,6 +372,9 @@ async fn register_advertises_public_address_not_wildcard_bind() {
         contact.contains(&format!("127.0.0.1:{listen_port}")),
         "Contact must advertise public_address:port, got: {contact}"
     );
+    // The `User-Agent` on this REGISTER is *not* asserted here — see
+    // `register_names_the_product_once_upstream_threads_the_token`
+    // below for why it still reads `sip-uac/<version>`.
 
     shutdown_tx.send(()).expect("shutdown signal");
     tokio::time::timeout(Duration::from_secs(2), run_handle)
@@ -495,4 +498,198 @@ async fn runtime_with_hep_enabled_binds_and_drains_worker_on_shutdown() {
     // Keep `homer` alive until here so the daemon's UDP sink had a
     // real socket to `connect()` to.
     drop(homer);
+}
+
+// ─── Product token on the wire (issue #539) ────────────────────────
+//
+// `[sip].user_agent` was documented to brand the `User-Agent` and
+// `Server` headers and did nothing at all: the compiled value reached
+// one call site, which discarded it. These tests assert the header a
+// peer actually receives, not that a field was threaded somewhere —
+// the bug was invisible precisely because the plumbing looked right
+// from inside.
+//
+// OPTIONS is the cheapest probe: one request, one stack-synthesized
+// 200, no dialog, no media, no WS server.
+
+/// Fixture without `[sip].user_agent`, to pin the default.
+const NO_UA_FIXTURE: &str = r#"
+[node]
+id = "siphon-ai-ua-default-test"
+public_address = "127.0.0.1"
+
+[sip]
+listen = "${TEST_SIP_LISTEN}"
+transports = ["udp"]
+
+[media]
+codecs = ["pcmu", "pcma"]
+rtp_port_range = [${TEST_RTP_MIN}, ${TEST_RTP_MAX}]
+
+[bridge]
+ws_url = "wss://example.test/sip-bridge"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+
+/// Build the runtime on an ephemeral port, send one OPTIONS, return the
+/// response text. Tears the runtime down before returning.
+async fn options_response(fixture: &str, rtp_min: &'static str, rtp_max: &'static str) -> String {
+    install_crypto_provider();
+    let env = MapEnv::new([
+        ("TEST_SIP_LISTEN", "127.0.0.1:0"),
+        ("TEST_RTP_MIN", rtp_min),
+        ("TEST_RTP_MAX", rtp_max),
+    ]);
+    let cfg = load_from_str_with_env(fixture, &env).expect("config compiles");
+    let runtime = Runtime::build(cfg, siphon_ai_telemetry::LogFilterHandle::noop())
+        .await
+        .expect("runtime builds");
+    let bound = runtime.local_addr().expect("local_addr");
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let run_handle = tokio::spawn(async move {
+        let _ = runtime
+            .run(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+    // Let the UDP reader task get polled before we send at it.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("probe socket");
+    let from = sock.local_addr().expect("probe addr");
+    let request = format!(
+        "OPTIONS sip:probe@127.0.0.1 SIP/2.0\r\n\
+         Via: SIP/2.0/UDP {from};branch=z9hG4bK-ua-probe\r\n\
+         From: <sip:probe@127.0.0.1>;tag=uaprobe\r\n\
+         To: <sip:probe@127.0.0.1>\r\n\
+         Call-ID: ua-probe@127.0.0.1\r\n\
+         CSeq: 1 OPTIONS\r\n\
+         Max-Forwards: 70\r\n\
+         Contact: <sip:probe@{from}>\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    sock.send_to(request.as_bytes(), bound)
+        .await
+        .expect("probe sends");
+
+    let mut buf = vec![0u8; 4096];
+    let n = tokio::time::timeout(Duration::from_secs(2), sock.recv(&mut buf))
+        .await
+        .expect("daemon answers the OPTIONS within 2s")
+        .expect("recv succeeds");
+    let response = String::from_utf8_lossy(&buf[..n]).to_string();
+
+    shutdown_tx.send(()).expect("shutdown signal");
+    let _ = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
+    response
+}
+
+/// Pull one header's value out of a SIP message, case-insensitively.
+fn header(message: &str, name: &str) -> Option<String> {
+    message.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim().to_string())
+    })
+}
+
+#[tokio::test]
+async fn options_response_carries_configured_user_agent() {
+    // The smoke fixture sets `user_agent = "SiphonAI/0.1.0-test"`. It
+    // had done so since the fixture was written, with no effect.
+    let response = options_response(FIXTURE, "40600", "40700").await;
+    assert!(
+        response.starts_with("SIP/2.0 200"),
+        "expected a 200 to OPTIONS, got: {response}"
+    );
+    assert_eq!(
+        header(&response, "Server").as_deref(),
+        Some("SiphonAI/0.1.0-test"),
+        "[sip].user_agent must reach the Server header; full response: {response}"
+    );
+}
+
+#[tokio::test]
+async fn options_response_defaults_to_the_product_token() {
+    let response = options_response(NO_UA_FIXTURE, "40800", "40900").await;
+    let expected = concat!("siphon-ai/", env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        header(&response, "Server").as_deref(),
+        Some(expected),
+        "unset [sip].user_agent must name this product and version, \
+         not whichever SIP-stack crate emitted the response; \
+         full response: {response}"
+    );
+}
+
+/// The other half of #539, which this workspace cannot fix.
+///
+/// `Server` on responses is ours — `UASConfig.user_agent` is what
+/// `IntegratedUAS::prepare_response` stamps, so the two OPTIONS tests
+/// above pass. `User-Agent` on **requests** is not: every builder in
+/// `sip-uac`'s `UserAgentClient` (`create_register`, `create_options`,
+/// `create_invite_with_from`, `create_invite_with_body`,
+/// `create_reinvite`, `create_update`, `create_publish`,
+/// `create_subscribe`, and both notify variants) pushes the crate
+/// constant `DEFAULT_USER_AGENT` directly. `UACConfig.user_agent`
+/// exists but is consumed only as an SDP session name, so no amount of
+/// configuring from here changes the header — the same shape of bug as
+/// #539 itself, one layer down.
+///
+/// Ignored rather than deleted: it states the intended behaviour, and
+/// flipping it to a real test is the natural last step once siphon-rs
+/// threads its configured token into those builders.
+#[tokio::test]
+#[ignore = "needs siphon-rs to thread UACConfig.user_agent into UserAgentClient request builders"]
+async fn register_names_the_product_once_upstream_threads_the_token() {
+    install_crypto_provider();
+    let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("registrar bind");
+    let registrar_addr = registrar.local_addr().expect("registrar addr");
+    let registrar_str: &'static str = Box::leak(registrar_addr.to_string().into_boxed_str());
+    let env = MapEnv::new([
+        ("TEST_SIP_LISTEN", "127.0.0.1:0"),
+        ("TEST_RTP_MIN", "41000"),
+        ("TEST_RTP_MAX", "41100"),
+        ("TEST_REGISTRAR", registrar_str),
+    ]);
+    let cfg = load_from_str_with_env(REGISTER_WILDCARD_FIXTURE, &env).expect("config compiles");
+    let runtime = Runtime::build(cfg, siphon_ai_telemetry::LogFilterHandle::noop())
+        .await
+        .expect("runtime builds");
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let run_handle = tokio::spawn(async move {
+        let _ = runtime
+            .run(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+
+    let mut buf = vec![0u8; 4096];
+    let (n, _) = tokio::time::timeout(Duration::from_secs(5), registrar.recv_from(&mut buf))
+        .await
+        .expect("REGISTER arrives within 5s")
+        .expect("registrar recv");
+    let register = String::from_utf8_lossy(&buf[..n]).to_string();
+
+    shutdown_tx.send(()).expect("shutdown signal");
+    let _ = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
+
+    assert_eq!(
+        header(&register, "User-Agent").as_deref(),
+        Some(concat!("siphon-ai/", env!("CARGO_PKG_VERSION"))),
+        "requests must name this product, not the stack crate that built them"
+    );
 }

@@ -72,8 +72,8 @@ use sip_transport::{
     run_tcp, run_tls_with_swappable_config, run_udp, send_stream, send_udp, InboundPacket,
     TransportKind as TpTransportKind,
 };
-use sip_uac::integrated::IntegratedUAC;
-use sip_uas::integrated::{IntegratedUAS, UasRequestHandler};
+use sip_uac::integrated::{IntegratedUAC, UACConfig};
+use sip_uas::integrated::{IntegratedUAS, UASConfig, UasRequestHandler};
 use siphon_ai_audit::{
     AuditSinkHandle, FanoutSink as AuditFanoutSink, FileSink as AuditFileSink,
     FilteredSink as AuditFilteredSink, HttpSink as AuditHttpSink,
@@ -863,7 +863,16 @@ impl Runtime {
         let local_uri = sip_local_uri(&node, &sip);
         let contact_uri = sip.contact.as_deref().unwrap_or(&local_uri).to_string();
         let uas: Arc<dyn UasRequestHandler> = Arc::clone(&routing_handler) as _;
+        // `Server` on every response the UAS synthesizes (100 Trying,
+        // 405, 481, 501, the OPTIONS 200) and on the ones the routing
+        // handler builds itself and runs through `prepare_response`
+        // (the trunk 403, the no-route 404 / 488).
+        let user_agent = sip_user_agent(&sip);
         let mut uas_builder = IntegratedUAS::builder()
+            .config(UASConfig {
+                user_agent: user_agent.clone(),
+                ..Default::default()
+            })
             .local_uri(&local_uri)
             .contact_uri(&contact_uri)
             .transaction_manager(Arc::clone(&transaction_mgr))
@@ -918,6 +927,7 @@ impl Runtime {
                 dispatcher: Arc::clone(&dispatcher),
                 sip_resolver: Arc::clone(&sip_resolver),
                 tls_server_name: sip.tls_server_name.as_deref(),
+                user_agent: &user_agent,
             },
             Arc::clone(&dialog_manager),
         )?;
@@ -966,6 +976,7 @@ impl Runtime {
             Arc::clone(&sip_resolver),
             &registration_advertised_addr,
             Arc::clone(&webhook_sink_for_registrations),
+            &user_agent,
         );
 
         // ─── Spawn the inbound UDP/TCP/TLS readers + pump ─────────
@@ -1019,6 +1030,7 @@ impl Runtime {
                 // `build_outbound_uac` for why this is required and not
                 // merely tidy.
                 dialog_manager: uas.dialog_manager(),
+                user_agent: user_agent.clone(),
             };
             let gateways = build_gateways(&outbound, &gateway_deps)?;
             let guard = OutboundGuard::new(outbound.max_concurrent, outbound.rate_limit_per_sec);
@@ -2491,6 +2503,10 @@ struct TransferUacBuild<'a> {
     /// gateway's `proxy_host` when it is a hostname. Upstream ignores it
     /// for hostname targets and non-TLS transports.
     tls_server_name: Option<&'a str>,
+    /// Product token for `User-Agent` on requests this UAC sends —
+    /// [`sip_user_agent`]. Threaded through rather than recomputed so
+    /// every leg of one daemon says the same thing.
+    user_agent: &'a str,
 }
 
 /// Build the daemon-wide UAC used by `BridgeIn::Transfer` to send
@@ -2517,7 +2533,10 @@ fn build_transfer_uac(
     args: TransferUacBuild<'_>,
     dialog_manager: Arc<sip_dialog::DialogManager>,
 ) -> Result<IntegratedUAC> {
+    // `.config()` first — see [`uac_config`]; the setters below write
+    // into the same struct it replaces.
     let mut builder = IntegratedUAC::builder()
+        .config(uac_config(args.user_agent))
         .local_uri(args.local_uri)
         .contact_uri(args.contact_uri)
         .transaction_manager(args.transaction_mgr)
@@ -2559,6 +2578,12 @@ pub struct GatewayBuildDeps {
     /// dispatch`. Without this the far end's in-dialog BYE is answered
     /// `481` and the call lingers to the media watchdog (#324).
     pub dialog_manager: Arc<sip_dialog::DialogManager>,
+    /// Product token for `User-Agent` on every gateway leg. Held here
+    /// rather than recomputed per gateway so a SIGHUP gateway reload
+    /// keeps the token the running daemon started with — `[sip]` is
+    /// restart-required, and a reload must not quietly change what we
+    /// advertise mid-flight.
+    pub user_agent: String,
 }
 
 /// Build the `name → OutboundGateway` table from `[outbound]` config.
@@ -2597,6 +2622,7 @@ pub(crate) fn build_gateways(
                 // reference identity, so leave it unset.
                 tls_server_name: (!siphon_ai_config::compile::host_is_ip_literal(&gw.proxy_host))
                     .then_some(gw.proxy_host.as_str()),
+                user_agent: &deps.user_agent,
             },
             gw.credentials.as_ref(),
             Some(answerer),
@@ -2657,7 +2683,12 @@ fn build_outbound_uac(
     sdp_answer_generator: Option<Arc<dyn sip_uac::integrated::SdpAnswerGenerator>>,
     dialog_manager: Arc<sip_dialog::DialogManager>,
 ) -> Result<IntegratedUAC> {
+    // `.config()` first — see [`uac_config`]. This builder in
+    // particular goes on to set `tls_server_name`, `credential_provider`
+    // and `sdp_answer_generator`, all of which live in the config struct
+    // `.config()` replaces.
     let mut builder = IntegratedUAC::builder()
+        .config(uac_config(args.user_agent))
         .local_uri(args.local_uri)
         .contact_uri(args.contact_uri)
         .transaction_manager(args.transaction_mgr)
@@ -2744,26 +2775,53 @@ fn rtp_port_pool(media: &MediaConfig) -> Result<PortPoolConfig> {
 /// `sip:siphon@<host>` derived from `[sip].listen` (or
 /// `[node].public_address` if it's not loopback). Used as the daemon's
 /// SIP identity in From / To / Contact headers it generates.
+///
+/// The user-part is the fixed literal `siphon`. It used to be routed
+/// through `[sip].user_agent` by way of a helper that ignored its
+/// argument and returned this same literal — dead code that made a
+/// documented-but-unwired config key look live (#539). A `User-Agent`
+/// is product info, not a user; if a deployment ever needs to choose
+/// the user-part, that is its own config key.
 fn sip_local_uri(node: &NodeConfig, sip: &SipConfig) -> String {
     let host = if node.public_address.is_empty() {
         sip.listen_addr.ip().to_string()
     } else {
         node.public_address.clone()
     };
-    let user = sip
-        .user_agent
-        .as_deref()
-        .map(extract_user_part)
-        .unwrap_or("siphon");
-    format!("sip:{user}@{host}")
+    format!("sip:siphon@{host}")
 }
 
-fn extract_user_part(_user_agent: &str) -> &str {
-    // The User-Agent header is product info, not a user. We always
-    // use a fixed user-part so the daemon's SIP identity is stable;
-    // this helper exists so future deployments can plug in a
-    // configured value without changing call sites.
-    "siphon"
+/// Product token stamped on `User-Agent` (requests we send) and
+/// `Server` (responses we synthesize) when `[sip].user_agent` is unset.
+///
+/// Names *this* product and its version. The SIP stack's own default
+/// names whichever of its crates emitted the message (`sip-uas/0.3.0`,
+/// `sip-uac/0.5.0`) — accurate but useless to a carrier reading a
+/// trace, and it leaks the dependency layout.
+const DEFAULT_USER_AGENT: &str = concat!("siphon-ai/", env!("CARGO_PKG_VERSION"));
+
+/// Resolve the product token for this daemon: `[sip].user_agent` when
+/// set, [`DEFAULT_USER_AGENT`] otherwise.
+fn sip_user_agent(sip: &SipConfig) -> String {
+    sip.user_agent
+        .clone()
+        .unwrap_or_else(|| DEFAULT_USER_AGENT.to_string())
+}
+
+/// `UACConfig` carrying our product token, defaults for everything else.
+///
+/// **Apply this to a builder before any other setter.**
+/// `IntegratedUACBuilder::config` *replaces* the config wholesale, and
+/// several builder methods — `tls_server_name`, `credential_provider`,
+/// `sdp_answer_generator`, `local_audio_port` — write into that same
+/// struct. Calling `.config()` after them silently discards credentials
+/// or a TLS reference identity, which fails as a 401 loop or a
+/// certificate error a long way from here.
+fn uac_config(user_agent: &str) -> UACConfig {
+    UACConfig {
+        user_agent: user_agent.to_string(),
+        ..Default::default()
+    }
 }
 
 fn sip_public_addr(node: &NodeConfig, sip: &SipConfig) -> Option<SocketAddr> {

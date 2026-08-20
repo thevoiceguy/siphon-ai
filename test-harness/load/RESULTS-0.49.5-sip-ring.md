@@ -103,6 +103,10 @@ should not be read as a daemon result.
 
 - **A ring-on/ring-off A/B.** The RSS delta above is not attributable; the
   ring's own cost is still unquantified.
+  **CLOSED by `RESULTS-0.49.7-ring-ab.md`**: isolating the ring from media,
+  WS and call setup puts it at **~1.9 MB** at this run's shape — about
+  2.5 % of the 77 MB measured here, and well inside the variance that made
+  this figure unattributable in the first place.
 - **The bounds actually tripping.** 203 concurrent did not reach
   `MAX_PENDING`. Reaching it needs ~250 concurrent, or a node up long enough
   for noise alone to fill 256 — on this node's scanner rate, hours.

@@ -241,10 +241,12 @@ cd test-harness/sipp-scenarios
 ./run-all.sh
 
 # On a box that already runs a daemon, move the harness off the ports
-# it shares with configs/local-dev.toml. The script preflights this and
-# exits 2 with the override to use — heed it: a collision otherwise
-# surfaces as a pile of scenario failures that look like a regression.
-AUX_OBS_PORT=9591 SIPHON_AI_CONFIG=/path/to/dev.toml ./run-all.sh
+# it shares with configs/local-dev.toml. This one variable covers every
+# phase — the main phase's config is copied with its listeners rewritten
+# onto it. The script preflights the ports and exits 2 with the override
+# to use, and a daemon that dies during startup aborts the run with its
+# log rather than reporting 40 lines of scenario failures.
+AUX_OBS_PORT=9591 ./run-all.sh
 ```
 
 Every port the harness binds (`SIPP_PORT`, `DAEMON_PORT`,

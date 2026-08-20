@@ -89,6 +89,11 @@ pub const MAX_PENDING: usize = 256;
 /// run), and it bounds memory: worst case is
 /// `(MAX_PENDING + MAX_LIVE + cap_calls) × cap_messages` entries,
 /// though a real call is 6–20 messages rather than the 64 cap.
+///
+/// In bytes: a retained message measures ~1.05 kB at a realistic
+/// payload, so that ceiling is ~55 MB, while a prod-shaped node at
+/// 200 concurrent pays ~1.9 MB — see
+/// `test-harness/load/RESULTS-0.49.7-ring-ab.md`.
 pub const MAX_LIVE: usize = 512;
 
 #[derive(Clone)]

@@ -372,9 +372,8 @@ async fn register_advertises_public_address_not_wildcard_bind() {
         contact.contains(&format!("127.0.0.1:{listen_port}")),
         "Contact must advertise public_address:port, got: {contact}"
     );
-    // The `User-Agent` on this REGISTER is *not* asserted here — see
-    // `register_names_the_product_once_upstream_threads_the_token`
-    // below for why it still reads `sip-uac/<version>`.
+    // The `User-Agent` on this REGISTER is asserted separately, in
+    // `register_names_the_product` below.
 
     shutdown_tx.send(()).expect("shutdown signal");
     tokio::time::timeout(Duration::from_secs(2), run_handle)
@@ -631,34 +630,35 @@ async fn options_response_defaults_to_the_product_token() {
     );
 }
 
-/// The other half of #539, which this workspace cannot fix.
+/// The other half of #539: `User-Agent` on requests we send.
 ///
-/// `Server` on responses is ours — `UASConfig.user_agent` is what
-/// `IntegratedUAS::prepare_response` stamps, so the two OPTIONS tests
-/// above pass. `User-Agent` on **requests** is not: every builder in
-/// `sip-uac`'s `UserAgentClient` (`create_register`, `create_options`,
-/// `create_invite_with_from`, `create_invite_with_body`,
-/// `create_reinvite`, `create_update`, `create_publish`,
-/// `create_subscribe`, and both notify variants) pushes the crate
-/// constant `DEFAULT_USER_AGENT` directly. `UACConfig.user_agent`
-/// exists but is consumed only as an SDP session name, so no amount of
-/// configuring from here changes the header — the same shape of bug as
-/// #539 itself, one layer down.
-///
-/// Ignored rather than deleted: it states the intended behaviour, and
-/// flipping it to a real test is the natural last step once siphon-rs
-/// threads its configured token into those builders.
+/// This was `#[ignore]`d when the fix landed for responses only, because
+/// every builder in `sip-uac`'s `UserAgentClient` pushed the crate
+/// constant `DEFAULT_USER_AGENT` directly and `UACConfig.user_agent` was
+/// consumed only as an SDP session name — no amount of configuring from
+/// here reached the header. siphon-rs #116 threads the configured token
+/// into those builders, and the v2026.08.20 pin makes this assertable:
+/// the REGISTER a registrar sees now names this product.
 #[tokio::test]
-#[ignore = "needs siphon-rs to thread UACConfig.user_agent into UserAgentClient request builders"]
-async fn register_names_the_product_once_upstream_threads_the_token() {
+async fn register_names_the_product() {
     install_crypto_provider();
     let registrar = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("registrar bind");
     let registrar_addr = registrar.local_addr().expect("registrar addr");
     let registrar_str: &'static str = Box::leak(registrar_addr.to_string().into_boxed_str());
+    // A real port, not `:0`. The registration UAC builds its Contact from
+    // the advertised address, and `sip:user@127.0.0.1:0` does not parse —
+    // `IntegratedUACBuilder::contact_uri` drops the unparseable URI on the
+    // floor and `build()` then panics in its default-Contact path. Grab a
+    // free port and release it, the way the wildcard test above does.
+    let listen_port = {
+        let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("scratch bind");
+        s.local_addr().expect("scratch addr").port()
+    };
+    let listen: &'static str = Box::leak(format!("127.0.0.1:{listen_port}").into_boxed_str());
     let env = MapEnv::new([
-        ("TEST_SIP_LISTEN", "127.0.0.1:0"),
+        ("TEST_SIP_LISTEN", listen),
         ("TEST_RTP_MIN", "41000"),
         ("TEST_RTP_MAX", "41100"),
         ("TEST_REGISTRAR", registrar_str),

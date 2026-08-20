@@ -37,7 +37,7 @@ use chrono::{DateTime, Utc};
 use sip_core::Response;
 use sip_dns::SipResolver;
 use sip_transaction::{TransactionManager, TransportDispatcher};
-use sip_uac::integrated::{IntegratedUAC, RequestTarget};
+use sip_uac::integrated::{IntegratedUAC, RequestTarget, UACConfig};
 use siphon_ai_config::{RegisterConfig, SipTransport};
 use siphon_ai_sip_glue::{
     refresh_delay, RegistrationCommand, RegistrationManager, RegistrationStatus, ShutdownSignal,
@@ -75,6 +75,7 @@ mod outcome {
 /// All tasks share the same shutdown signal, so a single
 /// `manager.shutdown()` call from the runtime's teardown wakes all of
 /// them at once.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_registration_tasks(
     manager: &RegistrationManager,
     configs: &[RegisterConfig],
@@ -83,6 +84,7 @@ pub fn spawn_registration_tasks(
     resolver: Arc<SipResolver>,
     advertised_addr: &str,
     webhook_sink: WebhookSinkHandle,
+    user_agent: &str,
 ) -> Vec<JoinHandle<()>> {
     // Seed every `siphon_ai_register_state` row so a /metrics scrape
     // before the first attempt completes already shows the row at
@@ -112,11 +114,13 @@ pub fn spawn_registration_tasks(
             Arc::clone(&resolver),
             advertised_addr.to_string(),
             Arc::clone(&webhook_sink),
+            user_agent.to_string(),
         ));
     }
     handles
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_one(
     manager: RegistrationManager,
     cfg: RegisterConfig,
@@ -125,6 +129,7 @@ fn spawn_one(
     resolver: Arc<SipResolver>,
     local_addr_str: String,
     webhook_sink: WebhookSinkHandle,
+    user_agent: String,
 ) -> JoinHandle<()> {
     let signal = manager.shutdown_signal();
     // Registered synchronously at spawn time so the admin endpoints
@@ -141,6 +146,7 @@ fn spawn_one(
             webhook_sink,
             commands,
             signal,
+            user_agent,
         )
         .await
         {
@@ -189,9 +195,17 @@ async fn drive(
     webhook_sink: WebhookSinkHandle,
     commands: mpsc::Receiver<RegistrationCommand>,
     signal: ShutdownSignal,
+    user_agent: String,
 ) -> anyhow::Result<()> {
     let backend = UacBackend {
-        uac: build_uac(cfg, transaction_mgr, dispatcher, resolver, &local_addr_str)?,
+        uac: build_uac(
+            cfg,
+            transaction_mgr,
+            dispatcher,
+            resolver,
+            &local_addr_str,
+            &user_agent,
+        )?,
         registrar: registrar_target(cfg)?,
     };
     run_loop(
@@ -523,6 +537,7 @@ fn build_uac(
     dispatcher: Arc<dyn TransportDispatcher>,
     resolver: Arc<SipResolver>,
     local_addr_str: &str,
+    user_agent: &str,
 ) -> anyhow::Result<IntegratedUAC> {
     // From URI is the AOR we register: sip:<username>@<server_host>.
     let local_uri = format!("sip:{}@{}", cfg.username, cfg.server_host);
@@ -535,7 +550,14 @@ fn build_uac(
     // us). `local_addr` below feeds the Via sent-by the same way.
     let contact_uri = build_contact_uri(&cfg.username, local_addr_str, cfg.transport);
 
+    // `.config()` before every other setter: it replaces the config
+    // wholesale, and `credential_provider` / `tls_server_name` below
+    // write into that same struct. See `runtime::uac_config`.
     let mut builder = IntegratedUAC::builder()
+        .config(UACConfig {
+            user_agent: user_agent.to_string(),
+            ..Default::default()
+        })
         .local_uri(&local_uri)
         .contact_uri(&contact_uri)
         .transaction_manager(transaction_mgr)

@@ -191,8 +191,12 @@ pub struct RawSip {
     /// that.
     #[serde(default = "default_transports")]
     pub transports: Vec<String>,
-    /// Value of the `User-Agent` header on outbound responses. The
-    /// SIP stack has its own default; this overrides it.
+    /// Product token for the `Server` header on responses this daemon
+    /// sends. Unset means `siphon-ai/<version>`.
+    ///
+    /// Not the `User-Agent` on outbound *requests*, despite the name:
+    /// `sip-uac` stamps its own crate constant there and accepts no
+    /// configured value (siphon-ai #539).
     #[serde(default)]
     pub user_agent: Option<String>,
     /// SIP `Contact` URI — `sip:user@host[:port]`. Optional; if

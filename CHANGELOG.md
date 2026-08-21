@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.8] - 2026-08-21
+
+`[sip].user_agent` finally does what this repo has documented it doing
+since it was added, a `[[register]]` block can no longer be silently
+dead, and the SIPp harness stops reporting its own port collisions as
+product regressions. Three siphon-rs releases are absorbed along the
+way, two of them cut for fixes this project filed.
+
+**Upgrade note: this changes what your node says on the wire**, so it
+wants a restart to take effect. No config change is required (the new
+validation only refuses a combination that never worked), no protocol
+change (WS stays version `"1"`), and no CDR change (still v8).
+
+### On the wire: one change to `User-Agent` / `Server`
+
+Four entries below touch these two headers, which reads like four
+changes. For anyone who deploys **releases**, it is exactly one:
+
+| | 0.49.7 and every release before it | 0.49.8 |
+|---|---|---|
+| `Server` on responses | `siphon-rs/0.1.0` | **`siphon-ai/0.49.8`** |
+| `User-Agent` on requests | `siphon-rs/0.1.0` | **`siphon-ai/0.49.8`** |
+| with `[sip].user_agent` set | *ignored* — still `siphon-rs/0.1.0` | **the configured value**, both headers |
+
+`siphon-rs/0.1.0` was a version number that never corresponded to
+anything: it was hardcoded upstream before any release existed, and
+this daemon took it because `[sip].user_agent` was wired to nothing.
+The intermediate values you will see in the entries below —
+`sip-uas/0.3.0`, `sip-uac/0.5.0`, `sip-uac/0.6.0` — existed only in
+unreleased builds between the dependency bumps; no tagged siphon-ai
+ever shipped them.
+
+**What to check before upgrading:** anything that matches on either
+header — a carrier-side rule, a Homer search, a log or capture filter,
+an SBC's UA-based routing. If you would rather keep a stable string
+across this transition, set `[sip].user_agent` to whatever you were
+matching on; it is honoured now.
+
 ### Fixed
 
 - **A `[[register]]` block on an ephemeral SIP port is now refused at config load, instead of dying quietly at runtime.** The Contact a registrar routes calls back through is built from the *configured* `[sip].listen` port — `[node].public_address` replaces only the host — so `listen = "0.0.0.0:0"` produced `sip:user@0.0.0.0:0`, which is not a valid SIP URI. Until siphon-rs v2026.08.20.1 that panicked the registration's drive task; after it, the task ends with a `warn!` and that registration is simply dead on a daemon whose `/ready`, metrics and other registrations all look fine. CLAUDE.md §4.6 puts this class of check at load time, so `siphon-ai check` and startup both refuse it now, naming the block and quoting the listen. An ephemeral bind with no `[[register]]` blocks is untouched — nothing needs advertising.

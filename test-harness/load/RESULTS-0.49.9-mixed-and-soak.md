@@ -5,10 +5,12 @@ Run 2026-08-21 against the **shipped 0.49.9 `.deb`** binary
 left open: what the two directions do to each other, and what the
 origination path does over an hour.
 
-**Result: pass on all three.** The directions compose linearly with no
-interaction penalty; the shared RTP pool fails outbound cleanly and leaves
-inbound untouched; and 3,745 originated calls over 75 minutes leaked
-nothing — the RSS growth is arena, proven by re-load, not a leak.
+**Result: pass on all three, with one bug found.** The directions compose
+linearly with no interaction penalty; the shared pool fails cleanly in both
+directions and leaves the other untouched; and 3,745 originated calls over
+75 minutes leaked nothing — the RSS growth is arena, proven by re-load, not
+a leak. The bug is the *code* the inbound side answers when the pool is
+empty: `500` where it should be `503` (#554).
 
 ---
 
@@ -85,7 +87,44 @@ admission refusals (`503` `max_concurrent`, `429` `rate_limit_per_sec`),
 not resource failures, which surface later on the `outbound_failed`
 webhook and the metric.
 
-**What to do about it**, since the daemon is behaving correctly here:
+### 2.1 The other direction is not symmetric — and answers the wrong code
+
+Same pool, order reversed: 50 **outbound** legs established first, then 20
+INVITEs arrived. Ten got ports; ten were rejected.
+
+| | inbound holds the pool | **outbound holds the pool** |
+|---|---|---|
+| who loses | outbound | inbound |
+| how it surfaces | `outbound_failed` webhook + `{result="failed"}` | a SIP response on the wire |
+| what the caller is told | nothing synchronous — the API said `202` | **`500 Server Internal Error`** |
+| the other direction | untouched | untouched |
+| leaks | none | none |
+
+SIPp's own view of the ten rejected INVITEs:
+
+```
+10 Aborting call
+10 500 Server Internal Error
+```
+
+🐛 **`500` is the wrong code, and it is filed as #554.** This is a capacity
+condition — the daemon is working exactly as designed and is simply full —
+but `500` tells the peer we have a bug. RFC 3261 §21.5.4 reserves `503` for
+"temporary overloading", and a proxy that receives one SHOULD try the next
+server in the target set, which is the behaviour you want when one node's
+pool is full and a sibling's is not. Carrier SBCs act on the difference, and
+some route away from an endpoint emitting non-`503` `5xx`.
+
+It is also inconsistent with the daemon's own overload signalling:
+`[sip.admission]` answers `503` + `Retry-After` for the concurrency cap and
+the rate limit, and the drain path answers `503`. An operator whose alerting
+says "503 means siphon-ai is full" gets an internal-error page instead.
+
+The type information to fix it already exists — `forge-core` has a typed
+`ForgeError::ResourceLimit`, and `crates/media-glue/src/setup.rs` discards
+it by flattening every forge error into `SetupError::Session(String)`.
+
+**What to do about it**, since the daemon is otherwise behaving correctly:
 
 - size `rtp_port_range` for the **sum** of both directions plus headroom,
   not for the busier one (§1.1);
@@ -158,9 +197,9 @@ warm.
   at 200 + 200, though nothing suggests it breaks either.
 - **Mixed direction over time.** §13 is a steady-state snapshot; there is
   no hour-long *mixed* soak.
-- **Pool exhaustion from the other side.** Inbound won the race here
-  because it was established first. What an *outbound*-saturated pool does
-  to arriving INVITEs (a 503? a 488? a hang?) is untested and is the
-  obvious next question.
+- **Pool exhaustion under *concurrent* pressure.** Both runs established one
+  direction first and then applied the other. What happens when both ramp
+  into a too-small pool simultaneously — whether they interleave fairly or
+  one wins — is untested.
 - **The carrier path.** All of this is loopback; §10.3's tier 3 covers the
   live trunk, at one call at a time.

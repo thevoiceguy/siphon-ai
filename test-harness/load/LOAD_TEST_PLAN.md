@@ -1076,8 +1076,22 @@ Consequences for a node that both answers and originates:
 - to protect origination from inbound, cap inbound with `[sip.admission]` —
   there is no pool-level reservation to configure.
 
+### 13.2.1 Run it in BOTH orders — they are not symmetric
+
+`ORDER=outbound-first` reverses which direction gets the pool first, and the
+two answers differ in kind. When inbound holds it, outbound fails through
+the originate API's webhook and metric. When **outbound** holds it, inbound
+has to be refused on the wire — and measured on 0.49.9 that refusal is
+**`500 Server Internal Error`**, which is wrong for a capacity condition and
+inconsistent with the `503` + `Retry-After` that `[sip.admission]` and the
+drain path both use. Filed as **#554**; expect this row to change to `503`.
+
+A phase that only runs one order tests half the behaviour and would have
+missed it entirely.
+
 ### 13.3 Not covered
 
 Mixed at 200 + 200 rather than 50 + 50; a mixed *soak* rather than a
-steady-state snapshot; and exhaustion from the other side — what an
-outbound-saturated pool does to an arriving INVITE is untested.
+steady-state snapshot; and exhaustion under *concurrent* pressure — both
+runs let one direction establish first, so whether two simultaneous ramps
+into a too-small pool interleave fairly or one wins is untested.

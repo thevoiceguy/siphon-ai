@@ -10,6 +10,12 @@
 # EXHAUST=1 swaps in a port range too small for the combined load, so the
 # pool empties mid-run and the failure mode becomes observable rather than
 # theoretical.
+#
+# ORDER decides WHICH direction gets there first, and the two answers are
+# not symmetric — one side fails through the originate API and its webhook,
+# the other has to fail on the wire with a SIP response code. Run both.
+#   inbound-first  (default) — inbound establishes, then originates fail
+#   outbound-first           — originates establish, then INVITEs arrive
 set -uo pipefail
 BIN=${1:?usage: phase-mixed.sh <daemon-binary> <label> <inbound> <outbound>}
 LABEL=${2:?}; IN_N=${3:-50}; OUT_N=${4:-50}
@@ -36,27 +42,44 @@ echo "mixed: ${IN_N} inbound + ${OUT_N} outbound, ${HOLD}s hold"
 echo "--- idle baseline"
 "$OB/obstat.sh" "$DAEMON_PID" "$OBS_PORT" | tee "$SP/$LABEL-idle.json"
 
-# Inbound first, so the outbound side has to find ports in a pool that is
-# already partly consumed — the ordering that makes contention observable.
 UAC_SCEN=$SP/uac_hold.$$.xml
 sed "s/PAUSE_MS/$(( HOLD * 1000 ))/" "$HERE/uac_hold.xml" > "$UAC_SCEN"
-sipp -i 127.0.0.1 -sf "$UAC_SCEN" 127.0.0.1:5070 -m "$IN_N" -r "$CPS" -l "$IN_N" \
-     -s loadtest -timeout 3600s -trace_err -bg > /dev/null 2>&1
-UAC_PID=$(pgrep -n -f "sipp -i 127.0.0.1 -sf $UAC_SCEN")
+UAC_ERR=$SP/$LABEL-inbound-sipp
 
+# SIPp answering outbound legs is started up front either way — it is
+# passive until the daemon dials it, so it cannot affect the ordering.
 sipp -i 127.0.0.1 -sf "$OB/uas_hold.xml" -p 5075 -m "$OUT_N" -l "$OUT_N" \
      -timeout 3600s -trace_err -bg > /dev/null 2>&1
 UAS_PID=$(pgrep -n -f "sipp -i 127.0.0.1 -sf $OB/uas_hold.xml")
-sleep $(( IN_N / CPS + 5 ))
-echo "--- inbound settled"
-"$OB/obstat.sh" "$DAEMON_PID" "$OBS_PORT" | tee "$SP/$LABEL-inbound-only.json"
 
-SP="$SP" OBS_PORT="$OBS_PORT" "$OB/ob_ramp.sh" "$OUT_N" "$CPS" "$HOLD" local &
-RAMP_PID=$!
-sleep $(( OUT_N / CPS + 10 ))
+start_inbound() {
+  sipp -i 127.0.0.1 -sf "$UAC_SCEN" 127.0.0.1:5070 -m "$IN_N" -r "$CPS" -l "$IN_N" \
+       -s loadtest -timeout 3600s -trace_err -error_file "$UAC_ERR" -bg > /dev/null 2>&1
+  UAC_PID=$(pgrep -n -f "sipp -i 127.0.0.1 -sf $UAC_SCEN")
+  sleep $(( IN_N / CPS + 5 ))
+}
+start_outbound() {
+  SP="$SP" OBS_PORT="$OBS_PORT" "$OB/ob_ramp.sh" "$OUT_N" "$CPS" "$HOLD" local &
+  RAMP_PID=$!
+  sleep $(( OUT_N / CPS + 10 ))
+}
+
+if [[ "${ORDER:-inbound-first}" == "outbound-first" ]]; then
+  echo "--- outbound first"
+  start_outbound
+  "$OB/obstat.sh" "$DAEMON_PID" "$OBS_PORT" | tee "$SP/$LABEL-outbound-only.json"
+  echo "--- now the inbound INVITEs arrive"
+  start_inbound
+else
+  echo "--- inbound first"
+  start_inbound
+  "$OB/obstat.sh" "$DAEMON_PID" "$OBS_PORT" | tee "$SP/$LABEL-inbound-only.json"
+  echo "--- now the originates go out"
+  start_outbound
+fi
 echo "--- both directions up"
 "$OB/obstat.sh" "$DAEMON_PID" "$OBS_PORT" | tee "$SP/$LABEL-mixed.json"
-wait "$RAMP_PID"
+wait "${RAMP_PID:-$$}" 2>/dev/null
 
 # Inbound legs BYE themselves at the end of their own hold; wait them out
 # rather than killing SIPp, which would orphan them.
@@ -74,8 +97,14 @@ for i in $(seq 1 50); do
 done
 "$OB/obstat.sh" "$DAEMON_PID" "$OBS_PORT" | tee "$SP/$LABEL-drained.json"
 
+echo "=== what the inbound caller was told (SIPp's own view)"
+if [[ -f "$UAC_ERR" ]]; then
+  grep -oE "Aborting call|[0-9]{3} [A-Za-z ]+|Unexpected" "$UAC_ERR" | sort | uniq -c | sort -rn | head -5
+else
+  echo "  (no SIPp error file — every INVITE was answered as the scenario expected)"
+fi
 echo "=== rejections seen by the daemon"
-curl -s "http://127.0.0.1:$OBS_PORT/metrics" | grep -E '^siphon_ai_(calls_total|outbound_calls_total|rtp_port)' | head
+curl -s "http://127.0.0.1:$OBS_PORT/metrics" | grep -E '^siphon_ai_(calls_total|calls_rejected|outbound_calls_total|rtp_port|sip_response)' | head -12
 echo "=== WARN/ERROR"
 grep -cE "\bWARN\b|\bERROR\b" "$SP/daemon-$LABEL.log"
 grep -E "\bWARN\b|\bERROR\b" "$SP/daemon-$LABEL.log" | sed 's/call_id=[a-z0-9-]*//g' | sort | uniq -c | sort -rn | head -5

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.9] - 2026-08-21
+
+Two fixes to the **outbound** call path, both found while verifying the
+0.49.8 deploy and both older than it. Neither affects a node that only
+accepts inbound calls; both matter to one that originates.
+
+**No config change, no protocol change** (still `1`), CDR still v8. Wants
+a restart to take effect.
+
 ### Fixed
 
 - **In-dialog requests on outbound legs stop swapping their `From` URI

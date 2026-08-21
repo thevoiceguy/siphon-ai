@@ -215,8 +215,15 @@ any = true
 #[tokio::test]
 async fn registrations_seed_into_manager_on_startup() {
     install_crypto_provider();
+    // A real port: a `[[register]]` block advertises a Contact built
+    // from the configured listen port, so `:0` is refused at load.
+    let listen_port = {
+        let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("scratch bind");
+        s.local_addr().expect("scratch addr").port()
+    };
+    let listen: &'static str = Box::leak(format!("127.0.0.1:{listen_port}").into_boxed_str());
     let env = MapEnv::new([
-        ("TEST_SIP_LISTEN", "127.0.0.1:0"),
+        ("TEST_SIP_LISTEN", listen),
         ("TEST_RTP_MIN", "40600"),
         ("TEST_RTP_MAX", "40700"),
     ]);

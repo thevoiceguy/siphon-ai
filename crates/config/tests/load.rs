@@ -2019,6 +2019,63 @@ any = true
     assert!(err.to_string().contains("smoke"));
 }
 
+/// A `[[register]]` block on an ephemeral SIP port is refused at load.
+///
+/// The Contact a registrar routes calls back through is built from the
+/// *configured* listen port, so `:0` produces `sip:user@host:0` — not a
+/// valid SIP URI. Before siphon-rs v2026.08.20.1 that panicked the
+/// drive task; it still leaves the registration dead on a daemon that
+/// otherwise looks healthy, which is exactly what CLAUDE.md §4.6 says
+/// to catch at load time.
+#[test]
+fn register_with_ephemeral_sip_port_errors() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:0"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[register]]
+name = "cucm"
+server = "10.0.0.5"
+username = "u"
+password = "p"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    let err = load_from_str_with_env(toml, &env).unwrap_err().to_string();
+    assert!(err.contains("cucm"), "error should name the block: {err}");
+    assert!(
+        err.contains("fixed SIP port") && err.contains("127.0.0.1:0"),
+        "error should say what is wrong and quote the listen: {err}"
+    );
+}
+
+/// The same config on a real port is fine — the check must not reject
+/// an ephemeral bind on a daemon that registers nowhere, either.
+#[test]
+fn ephemeral_sip_port_is_fine_without_register_blocks() {
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:0"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "d"
+[route.match]
+any = true
+"#;
+    load_from_str_with_env(toml, &env).expect("no [[register]] blocks, so nothing to advertise");
+}
+
 #[test]
 fn register_auth_username_defaults_to_username() {
     let env = MapEnv::new([]);

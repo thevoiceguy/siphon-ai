@@ -1309,6 +1309,14 @@ pub enum CompileError {
     #[error("[[register]] {name:?} unknown transport {transport:?}; expected udp / tcp / tls")]
     RegisterUnknownTransport { name: String, transport: String },
 
+    #[error(
+        "[[register]] {name:?} needs a fixed SIP port, but [sip].listen is {listen:?}. \
+         A registrar routes calls back through the Contact we advertise, and port 0 \
+         cannot be advertised — the kernel picks the real port at bind time, after the \
+         Contact has been built. Set an explicit port in [sip].listen."
+    )]
+    RegisterEphemeralSipPort { name: String, listen: String },
+
     #[error(transparent)]
     Routes(#[from] siphon_ai_routes::RouteError),
 }
@@ -1321,6 +1329,21 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let bridge_defaults = compile_bridge(raw.bridge, &raw.media)?;
     let routes = compile_dialplan(raw.routes)?;
     let registrations = compile_registrations(raw.registrations)?;
+    // A `[[register]]` block advertises a Contact built from the
+    // *configured* listen port (`[node].public_address` replaces only
+    // the host), so an ephemeral `:0` bind produces `sip:user@host:0` —
+    // which is not a valid SIP URI. Caught here rather than at first
+    // REGISTER: before siphon-rs v2026.08.20.1 it panicked the drive
+    // task, and it still leaves that registration dead on a daemon that
+    // otherwise looks healthy (§4.6: fail loud at startup).
+    if sip.listen_addr.port() == 0 {
+        if let Some(first) = registrations.first() {
+            return Err(CompileError::RegisterEphemeralSipPort {
+                name: first.name.clone(),
+                listen: sip.listen_addr.to_string(),
+            });
+        }
+    }
     let trunks = compile_trunks(raw.trunks)?;
     let security = compile_security(raw.security)?;
     let mut raw_recording = raw.recording;

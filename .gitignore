@@ -17,6 +17,8 @@ Thumbs.db
 *.local.toml
 # Load-rig configs are copied from their .example and edited per box
 test-harness/load/**/outbound-lab.toml
+test-harness/load/**/mixed-lab.toml
+test-harness/load/**/mixed-exhaust.toml
 test-harness/load/**/tier2-lab.toml
 test-harness/load/**/tier2-tls.toml
 .env

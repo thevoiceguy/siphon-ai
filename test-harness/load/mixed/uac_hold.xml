@@ -1,0 +1,80 @@
+<!--
+  uac_hold — SIPp as the CALLER, for the mixed-direction phase
+  (`../LOAD_TEST_PLAN.md` §13).
+
+  Derived from `../concurrent_burst_500.xml`; the only substantive change
+  is that the hold is `PAUSE_MS`, substituted by `phase-mixed.sh` so the
+  inbound legs live exactly as long as the outbound ones they are sharing
+  the box with. Killing SIPp instead would orphan the legs on the daemon
+  until a watchdog noticed, which is not a teardown anyone measures.
+
+  No RTP is streamed, deliberately — the daemon still negotiates SDP and
+  allocates a port pair per leg, which is the resource this phase is about.
+  `inactivity_timeout_secs` must therefore be 0 (§1.3).
+
+  The scenario is not runnable as-is: PAUSE_MS is a placeholder.
+-->
+<scenario name="uac_hold">
+  <send retrans="500">
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp-mixed@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp-mixed@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [auto_media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+  <recv response="200" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp-mixed@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- Substituted from the phase's HOLD. -->
+  <pause milliseconds="PAUSE_MS"/>
+
+  <send retrans="500">
+<![CDATA[
+BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-bye
+Max-Forwards: 70
+From: <sip:sipp-mixed@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 BYE
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="200"/>
+
+  <ResponseTimeRepartition value="200, 500, 1000, 2000"/>
+</scenario>

@@ -676,8 +676,52 @@ run is enough.
 
 **The run:** 15 minutes at **30–50 concurrent**, after tiers 1 and 2. Only
 capture the deltas: per-call CPU against the tier-2 TLS+SRTP figure, MOS
-distribution against the netem figure, and carrier setup latency
-(`sdp_negotiate_seconds` p95).
+distribution against the netem figure, and carrier setup latency.
+
+🪤 **Setup latency is not `sdp_negotiate_seconds`.** That histogram times
+`prepare_call` — negotiate, port alloc, tap attach — which is *our* local
+work and says nothing about the carrier. On an outbound leg the number you
+want is INVITE → 200 OK, which is the CDR's `answered_at − started_at`, or
+the gap between the `outbound_initiated` and `outbound_answered` webhooks.
+Earlier revisions of this section named the wrong metric.
+
+**Your concurrency limit may make the run above impossible, and the test is
+still worth running.** Elastic SIP Trunking's concurrent-channel cap depends
+on the account's Customer Profile: an approved *Business* profile is
+effectively unlimited, but *Individual* is **3**, unapproved is 2, and trial
+is 4. Below ~30 channels, run it **sequentially** instead — see §10.3.1. What
+tier 3 uniquely supplies is per-call constants, and those come from *many
+calls*, not from *simultaneous* ones. A sequential run actually yields a
+better latency distribution: 60 samples spread over half an hour, rather than
+60 set up inside one 60-second window.
+
+### 10.3.1 The sequential (low-channel) form
+
+Rig in `tier3/`. Each call is a **trombone**: originate through the carrier
+gateway to a DID that routes back to this node, so the call returns as a
+second inbound leg and real media flows both ways with no human at either
+end and no AI spend.
+
+```
+siphon-ai ──INVITE──► carrier SBC ──► carrier routes the DID back
+    ▲                                          │
+    └────────────── inbound leg ◄──────────────┘
+```
+
+**A trombone occupies two channels**, one out and one back in. On a
+3-channel trunk that means exactly one call at a time, with one channel
+left free — deliberately, so a genuine inbound call is not rejected because
+a test is running. Do not parallelise it without recounting channels.
+
+What that costs you in the published claim is honesty about concurrency:
+
+> *Confirmed against a live carrier trunk, N sequential calls: setup p50/p95
+> X/Y ms, MOS p50 z.zz, packet loss L%.*
+
+No concurrency statement at all — §10.4's template assumes the 50-concurrent
+form. Tier 2 already carries concurrency scaling, so little is lost, but do
+not let the sentence imply a carrier concurrency number that was never
+measured.
 
 **Cost model:** `concurrent × minutes × per-minute rate × legs`. Both legs
 count if you trombone through Twilio to reach your own DID. The shape
@@ -701,6 +745,11 @@ Validated from a separate FreeSWITCH box over TLS + SRTP at M concurrent:
 Confirmed against a live Twilio trunk at 50 concurrent: setup p95 z ms.
 RTP port range caps concurrency at range/2 — size it for your target.
 ```
+
+If tier 3 ran in the §10.3.1 sequential form, its line becomes
+*"confirmed against a live trunk, N sequential calls: setup p95 z ms"* —
+and the claim carries no carrier-concurrency number, because none was
+measured.
 
 That is more credible than a single large loopback number, precisely
 because it shows the difference between the three is understood.

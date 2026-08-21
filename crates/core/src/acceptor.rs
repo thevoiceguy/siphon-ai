@@ -28,7 +28,8 @@
 //! |---------------------------------------------|---------------------------|
 //! | INVITE has no body or wrong Content-Type    | 415 Unsupported Media Type|
 //! | Offer parse / no common codec               | 488 Not Acceptable Here   |
-//! | Forge port pool exhausted, internal error   | 500 Server Internal Error |
+//! | Forge port pool exhausted (`[media].rtp_port_range`) | 503 Service Unavailable + `Retry-After` |
+//! | Forge session error, tap/VAD failure        | 500 Server Internal Error |
 //! | Route's `ws_url` unset and no global default| 503 Service Unavailable   |
 //!
 //! Per CLAUDE.md §4.6 the last case should fail at config-load time;
@@ -466,6 +467,13 @@ pub enum AcceptError {
     },
 }
 
+/// `Retry-After` (seconds) advertised when the RTP port pool is exhausted
+/// (#554). Two seconds, matching `[sip.admission]`'s
+/// `ADMISSION_RETRY_AFTER_SECS`: both mean "this node is full right now",
+/// and a caller should not have to learn two different back-off shapes for
+/// the same answer.
+pub const PORT_EXHAUSTION_RETRY_AFTER_SECS: u32 = 2;
+
 impl AcceptError {
     /// Status / reason pair to return in a SIP final response.
     /// Centralised so the async wrapper has one source of truth and
@@ -488,6 +496,12 @@ impl AcceptError {
             AcceptError::Setup(SetupError::Sdp(SdpError::Negotiate(_))) => {
                 (488, "Not Acceptable Here")
             }
+            // Capacity, not a fault: the RTP port pool is full. 503 is
+            // what RFC 3261 §21.5.4 reserves for temporary overload, it
+            // invites a proxy to try the next server in its target set,
+            // and it is what `[sip.admission]` and the drain path already
+            // answer when this daemon is full (#554).
+            AcceptError::Setup(SetupError::ResourceLimit(_)) => (503, "Service Unavailable"),
             AcceptError::Setup(SetupError::Session(_))
             | AcceptError::Setup(SetupError::Tap(_))
             // SetupError::Srtp only arises on the outbound apply_answer
@@ -506,13 +520,34 @@ impl AcceptError {
     /// The `result` label this rejection contributes to
     /// `siphon_ai_invites_total`. STIR/SHAKEN policy rejections get their
     /// own `rejected_attestation` bucket so they're separately alertable
-    /// from ordinary routing/media rejections.
+    /// from ordinary routing/media rejections, and capacity rejections get
+    /// `rejected_capacity` for the same reason: "we are full" is an
+    /// operational signal that wants a different alert — and a different
+    /// response — from "this call was malformed" (#554).
     pub fn reject_metric_label(&self) -> &'static str {
         match self {
             AcceptError::IdentityRequired | AcceptError::AttestationRejected { .. } => {
                 "rejected_attestation"
             }
+            AcceptError::Setup(SetupError::ResourceLimit(_)) => "rejected_capacity",
             _ => "rejected",
+        }
+    }
+
+    /// `Retry-After` (seconds) for the final response, if the condition is
+    /// one the caller should retry.
+    ///
+    /// Only capacity rejections get one. The value is deliberately short:
+    /// unlike an admission cap, whose window the operator chooses, a port
+    /// frees the moment any call ends — on a busy node that is a matter of
+    /// seconds, and a long value would park traffic that could have been
+    /// served.
+    pub fn retry_after_secs(&self) -> Option<u32> {
+        match self {
+            AcceptError::Setup(SetupError::ResourceLimit(_)) => {
+                Some(PORT_EXHAUSTION_RETRY_AFTER_SECS)
+            }
+            _ => None,
         }
     }
 
@@ -3620,6 +3655,14 @@ impl CallAcceptor for BridgingAcceptor {
                 if let Some(reason_value) = e.reason_header() {
                     let _ = response.headers_mut().set_or_push("Reason", reason_value);
                 }
+                // Capacity rejections tell the caller when to come back —
+                // the same contract `[sip.admission]`'s 503 already offers
+                // (#554).
+                if let Some(secs) = e.retry_after_secs() {
+                    let _ = response
+                        .headers_mut()
+                        .set_or_push("Retry-After", secs.to_string().as_str());
+                }
                 call.handle.send_final(response).await;
                 // The acceptor's contract with the routing layer is
                 // "MUST send a final response" — we did, so this is
@@ -4487,15 +4530,25 @@ impl BridgingAcceptor {
         {
             Ok(o) => o,
             Err(e) => {
-                warn!(error = %e, "delayed-offer media allocation failed; rejecting 500");
-                metrics::counter!(INVITES_TOTAL, "result" => "rejected").increment(1);
-                call.handle
-                    .send_final(UserAgentServer::create_response(
-                        call.request,
-                        500,
-                        "Server Internal Error",
-                    ))
-                    .await;
+                // Route through the shared table rather than hardcoding a
+                // status: this site allocates the same media as the
+                // early-offer path, so an exhausted port pool must answer
+                // 503 + Retry-After here too. It used to hardcode 500 and
+                // the flat `rejected` label, which meant delayed-offer
+                // callers got a different answer to the same condition
+                // (#554).
+                let err = AcceptError::Setup(e);
+                let (code, reason) = err.sip_status();
+                warn!(error = %err, code, "delayed-offer media allocation failed; rejecting");
+                metrics::counter!(INVITES_TOTAL, "result" => err.reject_metric_label())
+                    .increment(1);
+                let mut response = UserAgentServer::create_response(call.request, code, reason);
+                if let Some(secs) = err.retry_after_secs() {
+                    let _ = response
+                        .headers_mut()
+                        .set_or_push("Retry-After", secs.to_string().as_str());
+                }
+                call.handle.send_final(response).await;
                 return Ok(());
             }
         };
@@ -6587,9 +6640,18 @@ a=sendrecv\r\n";
                 AcceptError::Setup(SetupError::Sdp(SdpError::Negotiate("oops".into()))),
                 (488, "Not Acceptable Here"),
             ),
+            // A forge session fault is still an internal error — the
+            // *label* on this one matters: it is NOT the port pool.
             (
-                AcceptError::Setup(SetupError::Session("port pool empty".into())),
+                AcceptError::Setup(SetupError::Session("session id collision".into())),
                 (500, "Server Internal Error"),
+            ),
+            // Capacity is not a fault (#554).
+            (
+                AcceptError::Setup(SetupError::ResourceLimit(
+                    "No available ports in pool".into(),
+                )),
+                (503, "Service Unavailable"),
             ),
             (
                 AcceptError::Controller("spawn refused".into()),
@@ -6599,6 +6661,50 @@ a=sendrecv\r\n";
         for (err, (code, reason)) in cases {
             assert_eq!(err.sip_status(), (*code, *reason), "for {err:?}");
         }
+    }
+
+    /// An exhausted port pool is a capacity condition, and every part of
+    /// the answer has to say so: the status, a `Retry-After` the caller
+    /// can act on, and a metric label an operator can alert on separately
+    /// from "this call was malformed" (#554).
+    #[test]
+    fn port_exhaustion_answers_503_with_retry_after_and_its_own_label() {
+        let full = AcceptError::Setup(SetupError::ResourceLimit(
+            "No available ports in pool".into(),
+        ));
+        assert_eq!(full.sip_status(), (503, "Service Unavailable"));
+        assert_eq!(
+            full.retry_after_secs(),
+            Some(PORT_EXHAUSTION_RETRY_AFTER_SECS)
+        );
+        assert_eq!(full.reject_metric_label(), "rejected_capacity");
+
+        // The neighbouring variant must not have moved with it: a genuine
+        // forge fault is still a 500, still `rejected`, and still carries
+        // no Retry-After, because there is nothing useful to retry into.
+        let fault = AcceptError::Setup(SetupError::Session("session id collision".into()));
+        assert_eq!(fault.sip_status(), (500, "Server Internal Error"));
+        assert_eq!(fault.retry_after_secs(), None);
+        assert_eq!(fault.reject_metric_label(), "rejected");
+    }
+
+    /// The type has to survive the trip from forge, or the acceptor can
+    /// never tell the two apart — this conversion is where #554 actually
+    /// lived: every `ForgeError` was flattened into `Session(String)`.
+    #[test]
+    fn forge_resource_limit_survives_conversion_to_setup_error() {
+        let converted: SetupError =
+            forge_core::ForgeError::ResourceLimit("No available ports in pool".into()).into();
+        assert!(
+            matches!(converted, SetupError::ResourceLimit(_)),
+            "ForgeError::ResourceLimit must not be flattened into Session; got {converted:?}"
+        );
+
+        let other: SetupError = forge_core::ForgeError::Internal("boom".into()).into();
+        assert!(
+            matches!(other, SetupError::Session(_)),
+            "only the resource-limit variant should be split out; got {other:?}"
+        );
     }
 
     /// Compile-time check: `BridgingAcceptor` actually satisfies the

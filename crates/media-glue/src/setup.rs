@@ -347,10 +347,25 @@ pub enum SetupError {
     #[error(transparent)]
     Sdp(#[from] SdpError),
 
-    /// Forge couldn't create or update the media session — e.g.,
-    /// the port pool is exhausted, or the session id collides.
+    /// Forge couldn't create or update the media session — a session id
+    /// collision, a codec the engine refused, and so on. **Not** capacity:
+    /// exhaustion has its own variant below, because the two want
+    /// different SIP responses.
     #[error("forge session error: {0}")]
     Session(String),
+
+    /// Forge ran out of a bounded resource — in practice the RTP port
+    /// pool (`[media].rtp_port_range`).
+    ///
+    /// Split out from [`SetupError::Session`] because it is a *capacity*
+    /// condition, not a fault: the daemon is working exactly as
+    /// configured and is simply full. Bucketing it with genuine internal
+    /// errors made an exhausted pool answer `500 Server Internal Error`,
+    /// which tells the peer we have a bug and, unlike `503`, does not
+    /// invite a proxy to try the next server in its target set
+    /// (RFC 3261 §21.5.4). See siphon-ai #554.
+    #[error("forge resource limit: {0}")]
+    ResourceLimit(String),
 
     /// `MediaBridgeManager::attach_call` failed or the negotiated
     /// sample rate isn't supported by the bridge crate.
@@ -372,7 +387,13 @@ pub enum SetupError {
 
 impl From<ForgeError> for SetupError {
     fn from(value: ForgeError) -> Self {
-        SetupError::Session(value.to_string())
+        // Keep forge's own distinction instead of flattening every error
+        // into one stringly variant — the capacity case has to reach the
+        // acceptor as a *type* for it to answer 503 rather than 500 (#554).
+        match value {
+            ForgeError::ResourceLimit(detail) => SetupError::ResourceLimit(detail),
+            other => SetupError::Session(other.to_string()),
+        }
     }
 }
 

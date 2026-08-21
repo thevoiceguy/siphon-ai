@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An exhausted RTP port pool now answers `503 Service Unavailable` +
+  `Retry-After`, not `500 Server Internal Error`** (#554). A full pool is a
+  capacity condition — the daemon is working exactly as configured and is
+  simply out of ports — but `500` tells the peer we have a defect. RFC 3261
+  §21.5.4 reserves `503` for temporary overload, a proxy that receives one
+  SHOULD try the next server in its target set, and carrier SBCs treat the
+  two very differently. It was also inconsistent with this daemon's own
+  overload signalling: `[sip.admission]` and the drain path already answer
+  `503` + `Retry-After`, so alerting built on "503 means siphon-ai is full"
+  got an internal-error page instead.
+  * `forge-core` has always distinguished `ForgeError::ResourceLimit`;
+    `media-glue` was flattening every forge error into one stringly
+    `SetupError::Session`, so the acceptor could not tell capacity from a
+    fault. The type now survives the conversion.
+  * The delayed-offer path hardcoded `500` and the flat `rejected` label
+    instead of consulting the shared status table, so a delayed-offer
+    caller got a different answer to the same condition. It routes through
+    the table now.
+  * New metric label **`siphon_ai_invites_total{result="rejected_capacity"}`**,
+    separately alertable from `rejected`. On a node that also originates the
+    pool is shared with outbound, so this counter is the only inbound-side
+    signal that a surge in the other direction is refusing calls — see
+    `test-harness/load/RESULTS-0.49.9-mixed-and-soak.md` §2.1.
+
 ## [0.49.9] - 2026-08-21
 
 Two fixes to the **outbound** call path, both found while verifying the

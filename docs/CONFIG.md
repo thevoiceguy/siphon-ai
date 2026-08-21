@@ -88,7 +88,7 @@ credentials. Resolved secret values are never logged.
 
 | Field        | Type             | Default    | Notes |
 |--------------|------------------|------------|-------|
-| `listen`     | `host:port`      | required   | UDP/TCP bind. UDP and TCP share this port. |
+| `listen`     | `host:port`      | required   | UDP/TCP bind. UDP and TCP share this port. **A `[[register]]` block requires a fixed port here** — the Contact a registrar routes calls back through is built from this port, and `:0` (ephemeral) cannot be advertised, since the kernel only picks the real port at bind time. Config load refuses that combination rather than leaving one registration dead on an otherwise healthy daemon. |
 | `transports` | `["udp","tcp","tls"]` | `["udp"]` | Subset enabled. `"tls"` requires `[sip.tls]`. |
 | `user_agent` | string           | `siphon-ai/<version>` | Product token this daemon stamps on the `Server` header of its responses and the `User-Agent` of the requests it originates (REGISTER, INVITE, REFER, BYE) — set it to brand the node (`"Acme Voice Bridge/2.1"`), leave it unset for the product and its own version (`siphon-ai/<version>`, e.g. `siphon-ai/0.49.7`). Until the releases carrying [#539](https://github.com/thevoiceguy/siphon-ai/issues/539) this key was documented but wired to nothing at all — responses read `siphon-rs/0.1.0`, then `sip-uas/<version>`, and requests `sip-uac/<version>`, whatever was configured here. Restart-required. |
 | `contact`    | string           | derived    | Override the `Contact` URI; otherwise built from `[node].public_address` + the bound port. |

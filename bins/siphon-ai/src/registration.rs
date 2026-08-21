@@ -559,7 +559,9 @@ fn build_uac(
             ..Default::default()
         })
         .local_uri(&local_uri)
+        .map_err(|e| anyhow::anyhow!("[[register]] {} local_uri: {e}", cfg.name))?
         .contact_uri(&contact_uri)
+        .map_err(|e| anyhow::anyhow!("[[register]] {} contact_uri: {e}", cfg.name))?
         .transaction_manager(transaction_mgr)
         .dispatcher(dispatcher)
         .resolver(resolver)

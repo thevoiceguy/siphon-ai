@@ -874,7 +874,9 @@ impl Runtime {
                 ..Default::default()
             })
             .local_uri(&local_uri)
+            .map_err(|e| anyhow!("UAS local_uri: {e}"))?
             .contact_uri(&contact_uri)
+            .map_err(|e| anyhow!("UAS contact_uri: {e}"))?
             .transaction_manager(Arc::clone(&transaction_mgr))
             .dispatcher(Arc::clone(&dispatcher))
             .request_handler(uas);
@@ -2538,7 +2540,9 @@ fn build_transfer_uac(
     let mut builder = IntegratedUAC::builder()
         .config(uac_config(args.user_agent))
         .local_uri(args.local_uri)
+        .map_err(|e| anyhow!("transfer UAC local_uri: {e}"))?
         .contact_uri(args.contact_uri)
+        .map_err(|e| anyhow!("transfer UAC contact_uri: {e}"))?
         .transaction_manager(args.transaction_mgr)
         .dispatcher(args.dispatcher)
         .resolver(args.sip_resolver)
@@ -2690,7 +2694,9 @@ fn build_outbound_uac(
     let mut builder = IntegratedUAC::builder()
         .config(uac_config(args.user_agent))
         .local_uri(args.local_uri)
+        .map_err(|e| anyhow!("outbound UAC local_uri: {e}"))?
         .contact_uri(args.contact_uri)
+        .map_err(|e| anyhow!("outbound UAC contact_uri: {e}"))?
         .transaction_manager(args.transaction_mgr)
         .dispatcher(args.dispatcher)
         .resolver(args.sip_resolver)

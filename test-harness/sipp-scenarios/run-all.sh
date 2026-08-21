@@ -689,6 +689,56 @@ else
     failures=$((failures + 1))
 fi
 
+# ─── The finished leg's dialog must leave the shared store (#548) ──
+# The gateway UACs are built with the UAS's DialogManager (#324), so an
+# originated call's confirmed dialog lands in the store the reaper
+# sweeps. Until #548 only the *inbound* teardown retired one, so this
+# gauge climbed by one per originated call and never came back down —
+# and past sip-dialog's MAX_CONFIRMED_DIALOGS (10,000) `insert` fails
+# silently and in-dialog requests stop matching for every call.
+#
+# This is the one assertion in the suite that has to wait out a real
+# timer: removal is deliberately deferred by DialogReaper::DEFAULT_GRACE
+# (32 s = Timer H/J) so a retransmitted BYE still matches, and that
+# window is not configurable. Polls rather than sleeps flat, so it costs
+# only what it must, and only when the preceding call actually answered.
+total=$((total + 1))
+echo "─── outbound_dialog_reclaimed ────────────────────────"
+ob_reclaim_ok=0
+ob_gauge() {
+    curl -s "http://127.0.0.1:$OB_ADMIN_PORT/metrics" \
+        | awk '/^siphon_ai_dialogs_active /{print $2}'
+}
+if (( ob_ok )); then
+    # Two-step on purpose. The gauge is republished by the reaper's
+    # sweep (every 5 s), and the UAC inserts the dialog when it sends
+    # the BYE — so for a few seconds after teardown it still reads the
+    # pre-BYE `0`. Asserting `== 0` straight away passes on that stale
+    # sample even against a daemon that never reclaims anything, which
+    # is exactly how a first cut of this check went green on the bug.
+    # So: wait for the store to publish the dialog, *then* wait for it
+    # to go away.
+    ob_tracked=0
+    for _ in $(seq 1 12); do
+        [[ "$(ob_gauge)" != "0" ]] && { ob_tracked=1; break; }
+        sleep 1
+    done
+    if (( ob_tracked )); then
+        for _ in $(seq 1 50); do
+            [[ "$(ob_gauge)" == "0" ]] && { ob_reclaim_ok=1; break; }
+            sleep 1
+        done
+    else
+        echo "  (dialog never published as tracked — check the gauge//metrics wiring)"
+    fi
+fi
+if (( ob_reclaim_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (dialog not reclaimed past the 32s grace: gauge=$(ob_gauge); daemon: $OB_DAEMON_LOG)"
+    failures=$((failures + 1))
+fi
+
 ob_cleanup
 trap - EXIT
 

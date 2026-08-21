@@ -147,7 +147,21 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # impossible type mismatches.
 
 # siphon-rs — RFC 3261 SIP stack.
-# Bumped 2026-08-20 **v2026.08.20** → **v2026.08.20.1** = siphon-rs #119
+# Bumped 2026-08-21 **v2026.08.20.1** → **v2026.08.21** = siphon-rs #121
+# (opened from this project against its own #549, found while verifying the
+# 0.49.8 deploy): a UAC dialog's local URI now comes from the dialog-forming
+# request's `From` instead of the client's configured identity, per RFC 3261
+# §12.2.1.1. The two agree for a client that always dials as itself and
+# diverge for one that sets a per-call `From` — which every outbound leg here
+# does, since a `[[gateway]]`'s `from` (or its `[[register]]` AOR) is the
+# caller-ID. So our BYE went out as `sip:siphon@<public>` on a dialog the
+# INVITE had opened as `sip:1000@<pbx>`, same tag: FreeSWITCH tolerated it
+# (it matches Call-ID + tags), a URI-validating peer answers 481, and
+# From-based CDR correlation splits one call in two. The same release stamps
+# `User-Agent` on the 15 of 27 request builders that never did — our ACK and
+# BYE carried none. No API change, so this is a tag bump and nothing else;
+# sip-uac 0.7.0 → 0.7.1, every other crate unchanged.
+# (Prior: 2026-08-20 **v2026.08.20** → **v2026.08.20.1** = siphon-rs #119
 # (its #118, filed from this project while bumping onto v2026.08.20): the
 # integrated builders' `local_uri` / `contact_uri` now return `Result`
 # instead of parsing with `.ok()` and discarding the failure. A rejected
@@ -158,7 +172,7 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # on `listen = "0.0.0.0:0"` took down its task. **Breaking**: the four
 # call sites below (UAS, transfer UAC, gateway UAC, per-`[[register]]`
 # UAC) now carry the `?` and name themselves in the error. sip-uac
-# 0.6.0 → 0.7.0, sip-uas 0.3.0 → 0.4.0; every other crate unchanged.
+# 0.6.0 → 0.7.0, sip-uas 0.3.0 → 0.4.0; every other crate unchanged.)
 # (Prior: 2026-08-20 **v2026.08.19** → **v2026.08.20** = siphon-rs #116,
 # opened from this project against its own #539: `UACConfig::user_agent`
 # now reaches the `User-Agent` header. The field was documented as the
@@ -305,31 +319,31 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 #  `6fd432270bb8` = #67 dialog_manager share, siphon-ai #324;
 #  `fcaff011f9c6` = #65 invite_with_from, siphon-ai #316;
 #  `3a4fc312ade3` = #64 TLS-SNI-is-hostname, siphon-ai #312.)
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.20.1" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.20.1" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.20.1", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.20.1" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.20.1" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.20.1" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.20.1" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.20.1" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.20.1" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
 # (distinct from forge-media's pinned sip-sdp). Used by the outbound
 # delayed-offer answer generator to hand the UAC a SessionDescription it
 # accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.20.1" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.20.1" }
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
 # sip-observe — the transport-layer observability seam. We implement its
 # `TransportMetrics` trait in siphon-ai-telemetry and install it with
 # `set_transport_metrics`, which is the only way to see ingress
 # rate-limit drops: the hook is defaulted to a no-op upstream, so an
 # embedder that installs nothing (as we did until 0.48.11) silently gets
 # the `NoopTransportMetrics` fallback (siphon-ai #459).
-sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.20.1" }
+sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.20.1" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #

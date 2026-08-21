@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **In-dialog requests on outbound legs stop swapping their `From` URI
+  mid-dialog** (#549), via siphon-rs `v2026.08.20.1` → `v2026.08.21`
+  (its #121, opened from here). A UAC dialog's local URI now comes from
+  the dialog-forming request's `From` rather than the client's configured
+  identity, per RFC 3261 §12.2.1.1. Every outbound leg sets a per-call
+  `From` — a `[[gateway]]`'s `from`, or its `[[register]]` AOR, is the
+  caller-ID — so our BYE went out as `sip:siphon@<public_address>` on a
+  dialog the INVITE had opened as the AOR, same tag. FreeSWITCH tolerated
+  it (it matches on Call-ID + tags); a URI-validating peer answers `481`
+  and the leg then hangs to the far end's media timeout, and From-based
+  CDR correlation splits one call across two identities. The same release
+  stamps `User-Agent` on the 15 of 27 upstream request builders that never
+  did — our ACK and BYE carried none, so 0.49.8's product token covered
+  only part of a call's traffic. Tag bump only; no API change, no config
+  change, sip-uac 0.7.0 → 0.7.1.
+
 - **Outbound calls no longer leak a dialog apiece** (#548). Gateway UACs
   are built with the UAS's `DialogManager` (#324), so an originated
   call's confirmed dialog lands in the shared store — but only the

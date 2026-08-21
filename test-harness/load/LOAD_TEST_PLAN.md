@@ -295,10 +295,22 @@ calls have ended:
 
 ```sh
 curl -s :9091/metrics | grep -E 'calls_active|conferences_active|parked_calls_active'   # all 0
+curl -s :9091/metrics | grep dialogs_active    # 0, but only after the 32s grace window
 ss -lnu | grep -c ':4[0-9]{4}'      # RTP ports released
 ls /proc/<pid>/fd | wc -l           # back to the idle count from §3
 ps -o rss= -p <pid>                 # within ~10% of pre-load idle
 ```
+
+**`dialogs_active` needs the grace window and a two-step read.** Removal is
+deferred by `DialogReaper::DEFAULT_GRACE` (32 s = SIP Timer H/J) so a
+retransmitted BYE still matches, and the gauge is only republished on the
+reaper's 5 s sweep — so a read taken immediately after teardown returns the
+*pre-BYE* value. Against an outbound run that is `0`, because the UAC inserts
+the dialog when it sends the BYE: assert `== 0` straight away and the audit
+goes green against a daemon that reclaims nothing. Wait for the gauge to
+publish non-zero, *then* wait for it to return to 0. This gauge was in §6.1's
+pass criteria and missing from this list, which is part of why #548 survived
+every audit run before §12 existed.
 
 **Pass:** every counter returns to its idle value. A gauge that doesn't come
 back down is a leak, and it matters more than the peak number.
@@ -496,7 +508,17 @@ claims we haven't tested:
 - **TLS + SRTP under load** — §§3–6 are plaintext loopback. §10 tier 2
   closes this; don't quote a secure-trunk number until it's run.
 - **Mid-call WS reconnect** — post-v1, and not exercised here.
-- **Sustained multi-hour behaviour** beyond the 1-hour soak.
+- **Sustained multi-hour behaviour** beyond the 1-hour soak. (Partly closed
+  by `RESULTS-convergence-8h.md`.)
+- **Outbound origination under load** was untested until §12 — every phase in
+  §§3–6 and every tier in §10 drives calls *into* the daemon, including the
+  `originate` commands in §10.2, which are FreeSWITCH originating **at** us.
+  Nothing exercised `POST /admin/v1/calls`, so no leak audit could see a
+  resource that only an originated leg allocates. Issue #548 — one dialog
+  leaked per originated call, for the life of the process — survived every
+  run in this document, including the 8-hour convergence soak, and was found
+  by hand during a deploy verification instead. §12 closes the gap; treat the
+  §§3–6 numbers as *inbound* numbers until an outbound run says otherwise.
 
 ---
 
@@ -826,3 +848,96 @@ If it passes, the honest headline is not a number at all:
 > *A live PSTN call placed while 500 concurrent calls were active was
 > indistinguishable from an idle one — same MOS, same first-audio latency,
 > no audible degradation.*
+
+---
+
+## 12. Outbound origination under load
+
+Everything above drives calls **into** the daemon. This phase drives them
+**out** of it, through `POST /admin/v1/calls`.
+
+The distinction is not cosmetic. An originated leg runs a different
+teardown path, a different dialog lifecycle, and a different admission
+gate (`[outbound].max_concurrent` / `rate_limit_per_sec`) from an accepted
+one, and none of it had ever been under load. The cost of that showed up as
+**issue #548**: one dialog leaked into the shared store per originated call,
+for the life of the process, until `sip-dialog`'s `MAX_CONFIRMED_DIALOGS`
+(10,000) is reached and in-dialog requests silently stop matching — for
+inbound calls too, since the store is shared. It survived every phase in
+this document, the 8-hour convergence soak included, and was found by hand
+while verifying a deploy. A leak audit cannot see a resource no phase
+allocates.
+
+Read the §§3–6 figures as **inbound** figures. This phase is what lets you
+say anything about the other direction.
+
+### 12.1 The rig
+
+`outbound/` in this directory. SIPp is the callee, the daemon is the caller,
+and `paced_sink.mjs` holds the WS side up for the duration:
+
+```
+ob_ramp.sh ──POST /admin/v1/calls──► siphon-ai ──INVITE──► SIPp (uas_hold.xml)
+                                         │
+                                         └──WS──► paced_sink.mjs
+```
+
+| | what it is |
+|---|---|
+| `phase-outbound.sh` | the driver: steps, sampling, drain, leak audit |
+| `ob_ramp.sh` | originate N at C cps, hold, tear down, wait for drain |
+| `obstat.sh` | one-shot JSON sample (CPU as a *rate*, RSS, fds, the gauges) |
+| `uas_hold.xml` | SIPp answers and holds until **we** BYE |
+| `uas_hold_remote_bye.xml` | SIPp answers, holds, then **it** BYEs |
+| `outbound-lab.toml.example` | daemon config — ports clear of a prod install |
+
+```sh
+cd test-harness/load/outbound
+cp outbound-lab.toml.example outbound-lab.toml
+export SP=/var/tmp/outbound-load
+HOLD=120 CPS=5 ./phase-outbound.sh /usr/bin/siphon-ai run-label 25 50 100
+TEARDOWN=remote ./phase-outbound.sh /usr/bin/siphon-ai run-label-remote 50
+```
+
+### 12.2 Run both teardown directions
+
+Who hangs up decides which branch of the teardown executes, and #548 sat on
+one of them. `uas_hold.xml` has the driver hang up through the admin API, so
+**we** send the BYE; `uas_hold_remote_bye.xml` has SIPp send it. A fix that
+retires the dialog in only one branch passes half this phase — which is why
+the phase runs both rather than picking the convenient one.
+
+### 12.3 What to measure
+
+Per step, the §§3–6 quantities plus the two the originate path adds:
+
+- `siphon_ai_outbound_calls_total{result}` — everything should be
+  `answered`. A `rejected`/`unreachable` count is the far end or the trunk,
+  not the daemon, and invalidates the step's per-call arithmetic.
+- **Originates the daemon refused.** `ob_ramp.sh` counts non-202 responses
+  and says so. A `503` is `max_concurrent`, a `429` is `rate_limit_per_sec`
+  — both are the daemon's own guardrails, and a step that silently ran at
+  half its target because of them is worse than no step at all.
+
+### 12.4 Pass criteria
+
+Everything in §6.3, run **with `dialogs_active` in it** and read the
+two-step way that section describes. Plus:
+
+- Every originate returns `202`, and every call ends `answered`.
+- `dialogs_active` returns to 0 after the grace window at **every** step, in
+  **both** teardown directions. This is the assertion #548 would have failed.
+- RTP ports released — an originated leg holds two, exactly like an accepted
+  one, so §1.1's ceiling is a ceiling on the *sum* of both directions.
+
+### 12.5 Traps
+
+- **The inactivity watchdog reaps originated legs too.** They are held open
+  by the driver, not by media, and the sink only feeds them once the bridge
+  is up. Set `inactivity_timeout_secs = 0` (§1.3).
+- **Don't use the echo server's `--auto-hangup-after-ms`.** It ends the call
+  from the WS side after a beat, which is right for a conformance scenario
+  and fatal for a hold.
+- **`[outbound]` is fail-closed**: unset `max_concurrent` means outbound is
+  *disabled*, and every originate returns `501`. That reads like a broken
+  rig rather than a config gap.

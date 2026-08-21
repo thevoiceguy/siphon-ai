@@ -15,6 +15,10 @@ Thumbs.db
 
 # Local config / secrets
 *.local.toml
+# Load-rig configs are copied from their .example and edited per box
+test-harness/load/**/outbound-lab.toml
+test-harness/load/**/tier2-lab.toml
+test-harness/load/**/tier2-tls.toml
 .env
 .env.*
 !.env.example

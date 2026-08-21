@@ -1,0 +1,122 @@
+<!--
+  uas_hold_remote_bye — SIPp as the CALLEE for an outbound load run, with
+  the FAR END tearing down.
+
+  Roles are inverted from every other load scenario in this tree: SiphonAI
+  is the UAC here, placing each call through `POST /admin/v1/calls`, and
+  SIPp answers. That direction is the whole point of this phase — every
+  other rig drives calls *into* the daemon, so nothing had ever exercised
+  the origination path under load (`../LOAD_TEST_PLAN.md` §12).
+
+  This is the sibling of `uas_hold.xml`, and the difference is who hangs
+  up. Here SIPp holds the call for `PAUSE_MS` and then sends the BYE, which
+  drives the `remote_bye_received()` branch of the outbound teardown — the
+  other half of the path issue #548 leaked a dialog on. A fix that retires
+  the dialog in only one branch passes half of §12, which is why the phase
+  runs both.
+
+  `PAUSE_MS` is substituted by `phase-outbound.sh` so the far end's hold
+  matches the run's step; the scenario is not runnable as-is.
+
+  Derived from `test-harness/sipp-scenarios/outbound_remote_bye.xml`,
+  including its Contact/From/To capture — the macros do NOT work here, and
+  the comments below say why.
+-->
+<scenario name="uas_hold_remote_bye">
+  <recv request="INVITE" rtd="true">
+    <action>
+      <!-- SiphonAI's Contact becomes our in-dialog Request-URI.
+           check_it fails the scenario loudly if the INVITE somehow
+           carries no Contact, rather than sending a BYE to an empty
+           URI and failing later with a confusing parse error. -->
+      <ereg regexp="sip:[^;&gt;]*"
+            search_in="hdr" header="Contact:"
+            check_it="true"
+            assign_to="remote_contact"/>
+      <!-- Header *values*, not whole lines. The `[last_From:]` /
+           `[last_To:]` macros expand to the complete header including
+           its field name, which is fine when echoing a header back
+           verbatim (the responses above) but wrong here: as the UAS our
+           From is built from the INVITE's To and vice versa, so echoing
+           the macro would emit `From: To: <...>`. Capture the values
+           and place them under the right field names instead. -->
+      <ereg regexp="&lt;sip:[^&gt;]*&gt;.*"
+            search_in="hdr" header="From:"
+            check_it="true"
+            assign_to="caller_from"/>
+      <ereg regexp="&lt;sip:[^&gt;]*&gt;"
+            search_in="hdr" header="To:"
+            check_it="true"
+            assign_to="callee_to"/>
+    </action>
+  </recv>
+
+  <send>
+<![CDATA[
+SIP/2.0 180 Ringing
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="200"/>
+
+  <send retrans="500">
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv request="ACK" rtd="true"/>
+
+  <!-- The hold. Substituted by phase-outbound.sh from the step's HOLD, so
+       the leg lives as long as a locally-torn-down one does and the two
+       teardown directions are compared over the same call duration. -->
+  <pause milliseconds="PAUSE_MS"/>
+
+  <!-- The callee hangs up. As the UAS, From/To are the mirror of the
+       INVITE's — our From carries the tag we generated in the 180/200,
+       our To carries the caller's own tag as it arrived. CSeq runs in
+       our own sequence space, independent of the caller's. -->
+  <send retrans="500">
+<![CDATA[
+BYE [$remote_contact] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+From: [$callee_to];tag=[pid]SIPpTag01[call_number]
+To: [$caller_from]
+[last_Call-ID:]
+CSeq: 1 BYE
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Max-Forwards: 70
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- THE assertion. A 481 here is the #324 regression; under load it
+       would also mean the leg never reaches the teardown whose dialog
+       reclamation §12 is measuring. -->
+  <recv response="200" rtd="true"/>
+</scenario>

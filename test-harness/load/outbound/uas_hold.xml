@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  uas_hold — SIPp as the CALLEE for an outbound load run.
+
+  Roles are inverted from every other load scenario in this tree: SiphonAI
+  is the UAC here, placing each call through `POST /admin/v1/calls`, and
+  SIPp answers. That direction is the whole point of this phase — every
+  other rig drives calls *into* the daemon, so nothing has ever exercised
+  the origination path under load (see `../LOAD_TEST_PLAN.md` §12).
+
+  The call is held until SiphonAI tears it down: `ob_ramp.sh` hangs each
+  leg up through the admin API after the hold, so the teardown under test
+  is **our own** BYE — the branch where issue #548 leaked a dialog. Use
+  `uas_hold_remote_bye.xml` for the other branch.
+
+  No auto-hangup on the WS side: the sink must keep the leg up for the
+  whole hold, so run `paced_sink.mjs`, not the echo server's
+  `--auto-hangup-after-ms`.
+-->
+<scenario name="uas_hold">
+  <recv request="INVITE" rtd="true"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 180 Ringing
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Length: 0
+
+]]>
+  </send>
+
+  <pause milliseconds="100"/>
+
+  <send retrans="500">
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=sipp 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv request="ACK" rtd="true"/>
+
+  <!-- Media flows for the hold; the driver ends the call from our side. -->
+  <recv request="BYE" rtd="true" timeout="3600000"/>
+
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+
+]]>
+  </send>
+</scenario>

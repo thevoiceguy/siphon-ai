@@ -83,6 +83,26 @@ backgrounds SIPp as the callee, then POSTs `/admin/v1/calls`. Pass = SIPp
 completed INVITE → ACK → BYE **and** the daemon's
 `siphon_ai_outbound_calls_total{result="answered"}` metric reads 1.
 
+That phase is followed by **outbound_dialog_reclaimed** (#548), which reuses
+the same daemon and asserts `siphon_ai_dialogs_active` returns to `0` after
+the leg ends. Outbound gateway UACs share the UAS's `DialogManager` (#324),
+so an originated call's dialog lands in the store the reaper sweeps; before
+#548 only the inbound teardown retired one and the gauge climbed by one per
+originated call forever, until `MAX_CONFIRMED_DIALOGS` silently broke
+in-dialog matching for every call. It is the **slowest check in the suite**
+(up to ~50 s): removal is deferred by `DialogReaper::DEFAULT_GRACE` — 32 s,
+SIP Timer H/J — so a retransmitted BYE still matches, and that window is not
+configurable. It polls once a second rather than sleeping flat, and runs only
+when the outbound phase itself passed.
+
+It asserts in two steps — gauge becomes non-zero, *then* returns to `0` —
+and the order matters. The UAC inserts the dialog into the store when it
+sends the BYE, and the reaper republishes the gauge only on its 5 s sweep,
+so for a few seconds after teardown the gauge still reads the pre-BYE `0`.
+A single `== 0` assertion passes on that stale sample even against a daemon
+that reclaims nothing: the first cut of this check went green against the
+unfixed binary for exactly that reason.
+
 And an always-on **outbound_srtp** auxiliary phase (0.7.1): the same setup
 but the `[[gateway]]` sets `srtp = "required"`, so SiphonAI's INVITE offers
 `RTP/SAVP` + `a=crypto` (SDES). `outbound_srtp_uas_answer.xml` answers SAVP

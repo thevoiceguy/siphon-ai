@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Outbound calls no longer leak a dialog apiece** (#548). Gateway UACs
+  are built with the UAS's `DialogManager` (#324), so an originated
+  call's confirmed dialog lands in the shared store — but only the
+  inbound teardown retired one, so the store grew by one entry per
+  originated call for the life of the process and
+  `siphon_ai_dialogs_active` never came back down. Past `sip-dialog`'s
+  `MAX_CONFIRMED_DIALOGS` (10,000) `insert` fails silently and in-dialog
+  requests stop matching — for inbound calls too, since the store is
+  shared. The outbound teardown now retires its dialog after the BYE
+  exchange, on the same deferred grace window the inbound path uses
+  (#458), whichever side hung up. Present since #458 first shipped in
+  0.48.13; a node that only accepts inbound calls was never affected.
+
 ## [0.49.8] - 2026-08-21
 
 `[sip].user_agent` finally does what this repo has documented it doing

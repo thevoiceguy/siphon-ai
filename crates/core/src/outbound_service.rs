@@ -245,6 +245,13 @@ pub struct OutboundService {
     /// INVITEs. `None` in tests / when the runtime never installs one, in
     /// which case origination is never gated (issue #343).
     drain: Option<siphon_ai_sip_glue::DrainFlag>,
+    /// Reclaims each finished outbound leg's dialog from the shared store
+    /// (#548). The gateway UACs are built with the UAS's `DialogManager`
+    /// (#324), so an originated call's confirmed dialog lands in the very
+    /// store the reaper sweeps — but only the inbound teardown retired it,
+    /// so the store grew by one entry per originated call for the life of
+    /// the process. `None` in tests / when the runtime never installs one.
+    dialog_reaper: Option<crate::dialog_reaper::DialogReaper>,
 }
 
 impl OutboundService {
@@ -275,6 +282,7 @@ impl OutboundService {
             recording_upload: None,
             session_timers: None,
             drain: None,
+            dialog_reaper: None,
         }
     }
 
@@ -298,6 +306,20 @@ impl OutboundService {
     /// refused while draining (issue #343). Unset → never gated.
     pub fn with_drain(mut self, drain: siphon_ai_sip_glue::DrainFlag) -> Self {
         self.drain = Some(drain);
+        self
+    }
+
+    /// Share the daemon's dialog reaper so a finished outbound leg's
+    /// dialog is reclaimed from the shared store (#548).
+    ///
+    /// Unset → the dialog is never removed and `siphon_ai_dialogs_active`
+    /// climbs by one per originated call for the life of the process,
+    /// which is the pre-#548 behaviour. Past `sip-dialog`'s
+    /// `MAX_CONFIRMED_DIALOGS` (10,000) `insert` fails silently and
+    /// in-dialog requests stop matching — on inbound legs too, since the
+    /// store is shared (#458).
+    pub fn with_dialog_reaper(mut self, reaper: crate::dialog_reaper::DialogReaper) -> Self {
+        self.dialog_reaper = Some(reaper);
         self
     }
 
@@ -502,6 +524,7 @@ impl OutboundOriginateHandle for OutboundService {
         let control_registry = self.control_registry.clone();
         let call_registry = self.call_registry.clone();
         let park = self.park.clone();
+        let dialog_reaper = self.dialog_reaper.clone();
         // WS reconnect (0.7.3) — outbound legs reconnect on the same daemon
         // defaults as inbound; extracted before the spawn (no `self` inside).
         let ws_reconnect_enabled = self.defaults.ws_reconnect_enabled;
@@ -586,6 +609,7 @@ impl OutboundOriginateHandle for OutboundService {
                         recording_upload,
                         barge_in_mode,
                         ws_failure_prompt,
+                        dialog_reaper,
                     };
                     run_call(originator, call, bridge, ctx).await;
                 }
@@ -682,6 +706,10 @@ struct OutboundCallContext {
     /// WS-failure prompt (0.34.0), from the daemon `[bridge]` defaults
     /// (no route on originated calls). `None` = plain hangup.
     ws_failure_prompt: Option<std::path::PathBuf>,
+    /// Retires this leg's dialog once the BYE exchange is done (#548).
+    /// `None` leaves the dialog in the shared store forever, exactly as
+    /// before — which is what the CDR-shape tests below expect.
+    dialog_reaper: Option<crate::dialog_reaper::DialogReaper>,
 }
 
 /// Run an answered outbound call's audio bridge to completion, tear it
@@ -765,9 +793,14 @@ async fn run_call(
     // Outbound legs are transferable too (DEV_PLAN_0.6.1 §2.4): the
     // bot can consult an agent and hand this callee off. The REFER
     // goes through this gateway's own UAC (digest credentials), on
-    // the dialog we hold directly — each gateway UAC keeps a private
-    // DialogManager, so the shared lookup the inbound path uses
-    // can't see this dialog.
+    // the dialog we hold directly — resolved from the `Direct` source
+    // below rather than by call-id lookup, because this task already
+    // owns the dialog. (The store itself *is* shared: `build_outbound_uac`
+    // is built with the UAS's `DialogManager` so the far end's in-dialog
+    // requests dispatch against a dialog it can see — #324. An earlier
+    // version of this comment claimed the gateway UACs kept private
+    // stores; they do not, which is why their dialogs must be retired at
+    // teardown — #548.)
     // One shared, advancing dialog for every in-dialog request on this
     // leg — transfer REFER, hold/resume re-INVITE, and the teardown BYE
     // below all resolve from and commit back to it, so its local CSeq
@@ -1113,6 +1146,16 @@ async fn run_call(
         let final_dialog = shared_dialog.lock().clone();
         originator.hangup(&final_dialog).await;
     }
+    // Retire the dialog now that the BYE exchange is done, whichever side
+    // sent it. Removal is deferred by the reaper's grace window, so a BYE
+    // retransmit arriving after this still matches — the same ordering the
+    // inbound teardown keeps (#458). Outbound legs share the UAS's store
+    // (#324), so without this the store grew by one entry per originated
+    // call until `MAX_CONFIRMED_DIALOGS` silently broke in-dialog matching
+    // for *every* call, inbound ones included (#548).
+    if let Some(reaper) = ctx.dialog_reaper.as_ref() {
+        reaper.retire(outbound_dialog_id.clone());
+    }
     originator.stop_session(&call_id).await;
     drop(call_handle); // stop keepalives / session-timer tasks
 
@@ -1429,6 +1472,7 @@ mod tests {
             recording_upload: None,
             barge_in_mode: siphon_ai_bridge::BargeInModeInfo::AutoClear,
             ws_failure_prompt: None,
+            dialog_reaper: None,
         };
         let view = CallTerminationView {
             cause: CdrTerminationCause::ServerHangup,

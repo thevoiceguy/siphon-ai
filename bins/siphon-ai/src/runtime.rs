@@ -951,7 +951,10 @@ impl Runtime {
             Arc::clone(&transfer_uac),
             dialog_manager,
             consult_registry.clone(),
-            dialog_reaper,
+            // Cloned, not moved: the outbound service needs the same
+            // reaper to retire its own legs' dialogs (#548). The gateway
+            // UACs share this store, so both paths must reclaim.
+            dialog_reaper.clone(),
         );
 
         // ─── Per-registration UAC drive tasks ──────────────────────
@@ -1064,6 +1067,12 @@ impl Runtime {
             // Refuse origination while draining, same DrainFlag the
             // inbound routing handler uses to 503 new INVITEs (#343).
             service = service.with_drain(drain.clone());
+            // Reclaim each finished outbound leg's dialog from the shared
+            // store. The gateway UACs are built with the UAS's
+            // DialogManager (#324), so without this the store grew by one
+            // entry per originated call for the process's lifetime and
+            // `siphon_ai_dialogs_active` never came back down (#548).
+            service = service.with_dialog_reaper(dialog_reaper.clone());
             // Hold music for the WS-reconnect gap on outbound legs (0.7.3) —
             // the same [media].moh_file the inbound acceptor uses.
             service = service.with_moh_file(media.moh_file.clone());

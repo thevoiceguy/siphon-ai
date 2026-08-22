@@ -27,8 +27,8 @@ pub use sdp::{
     SdesOfferMode, SdpError,
 };
 pub use setup::{
-    InboundAccepted, InboundCall, MediaSetup, OutboundAccepted, OutboundOffer,
-    OutboundOfferRequest, OutboundSrtp, SetupError, TapOptions, VadBackend,
+    rtp_pool_capacity_calls, InboundAccepted, InboundCall, MediaSetup, OutboundAccepted,
+    OutboundOffer, OutboundOfferRequest, OutboundSrtp, SetupError, TapOptions, VadBackend,
 };
 pub use tap::{
     AnnounceEnd, BargeInAction, MediaTap, MediaTapError, TapCommand, TapDisconnect, TimeoutVerdict,

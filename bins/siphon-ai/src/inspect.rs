@@ -129,6 +129,12 @@ pub fn render_config(config: &Config, show_secrets: bool) -> String {
     );
     let _ = writeln!(
         s,
+        "  reserved_outbound_calls = {} of {} pool call(s)",
+        config.media.reserved_outbound_calls,
+        siphon_ai_media_glue::rtp_pool_capacity_calls(config.media.rtp_port_range)
+    );
+    let _ = writeln!(
+        s,
         "  moh_file       = {}",
         config
             .media
@@ -535,6 +541,8 @@ pub fn render_config_json(config: &Config, show_secrets: bool) -> String {
         "media": {
             "srtp": format!("{:?}", config.media.srtp),
             "rtp_port_range": config.media.rtp_port_range.map(|(lo, hi)| format!("{lo}-{hi}")),
+            "reserved_outbound_calls": config.media.reserved_outbound_calls,
+            "rtp_pool_calls": siphon_ai_media_glue::rtp_pool_capacity_calls(config.media.rtp_port_range),
             "moh_file": config.media.moh_file.as_ref().map(|p| p.display().to_string()),
         },
         "bridge": {

@@ -263,6 +263,29 @@ pub const DELAYED_OFFER_TOTAL: &str = "siphon_ai_delayed_offer_total";
 /// Literal must match the call sites in `siphon-ai-core::outbound`.
 pub const OUTBOUND_DELAYED_OFFER_TOTAL: &str = "siphon_ai_outbound_delayed_offer_total";
 
+/// Inbound INVITEs refused because the RTP port pool had reached the
+/// outbound reservation (`[media].reserved_outbound_calls`, #556) —
+/// ports were still free, but they are held for origination.
+///
+/// The reject itself is indistinguishable on the wire and in
+/// `siphon_ai_invites_total` from a genuinely exhausted pool: both are
+/// `503` + `Retry-After` and both count as `rejected_capacity`, which
+/// is deliberate (the caller's answer must not depend on *why* we are
+/// full). This counter is the operator-side split — non-zero means the
+/// reservation is actively shedding inbound load, which is the knob
+/// working, not a fault. Zero is the healthy value, so it is published
+/// as a baseline (see [`publish_zero_baselines`]); unlabeled, because
+/// the interesting dimension is the rate, not a category. Literal must
+/// match the call site in `siphon-ai-media-glue::setup`.
+pub const RTP_RESERVE_BLOCKS_TOTAL: &str = "siphon_ai_rtp_reserve_blocks_total";
+
+/// The configured outbound reservation in port pairs (= concurrent
+/// calls), published once at startup so the shed threshold is readable
+/// next to the counter above rather than living only in the TOML.
+/// `0` = no reservation. Literal must match the call site in
+/// `siphon-ai` (`runtime`).
+pub const RTP_RESERVED_OUTBOUND_CALLS: &str = "siphon_ai_rtp_reserved_outbound_calls";
+
 /// Caller-leg 20 ms frames dropped because the negotiated direction
 /// forbade our send — we answered a peer hold with `recvonly` /
 /// `inactive` (RFC 3264 §6.1, #417). Counts every suppressed push
@@ -1036,6 +1059,15 @@ pub fn register_descriptions() {
         Unit::Seconds,
         "Time the shutdown drain took (drain start to registry empty or deadline)."
     );
+    describe_counter!(
+        RTP_RESERVE_BLOCKS_TOTAL,
+        "Inbound INVITEs refused because the RTP port pool hit [media].reserved_outbound_calls."
+    );
+    describe_gauge!(
+        RTP_RESERVED_OUTBOUND_CALLS,
+        Unit::Count,
+        "Configured RTP port pairs held back from inbound for origination ([media].reserved_outbound_calls)."
+    );
 }
 
 /// Publish a zero for the counters whose *healthy* value is zero, so
@@ -1065,6 +1097,10 @@ pub fn register_descriptions() {
 /// Public so tests can call it inside a `with_local_recorder` scope.
 pub fn publish_zero_baselines() {
     counter!(OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL).absolute(0);
+    // #556: with a reservation configured, "the reserve has never had
+    // to shed an inbound call" and "this daemon does not have the knob"
+    // otherwise render identically as a missing series.
+    counter!(RTP_RESERVE_BLOCKS_TOTAL).absolute(0);
 }
 
 /// Buckets for `ws_connect_seconds`. The first bucket (25ms) catches
@@ -1195,6 +1231,7 @@ pub const ALL_COUNTERS: &[&str] = &[
     BARGE_IN_DECISIONS_TOTAL,
     SIP_TLS_RELOAD_ATTEMPTS_TOTAL,
     ADMIN_TLS_RELOAD_ATTEMPTS_TOTAL,
+    RTP_RESERVE_BLOCKS_TOTAL,
 ];
 
 /// Every gauge this module declares. See [`ALL_COUNTERS`].
@@ -1211,6 +1248,7 @@ pub const ALL_GAUGES: &[&str] = &[
     WEBHOOK_SPOOL_DEPTH,
     RECORDING_UPLOAD_SPOOL_DEPTH,
     INVITE_ADMISSION_SOURCES,
+    RTP_RESERVED_OUTBOUND_CALLS,
 ];
 
 /// Every histogram this module declares. See [`ALL_COUNTERS`]. Each of
@@ -1297,10 +1335,15 @@ mod tests {
         );
 
         let out = with_recorder(publish_zero_baselines);
-        assert!(
-            out.contains(&format!("{OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL} 0")),
-            "expected a zero baseline for {OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL} in:\n{out}"
-        );
+        for name in [
+            OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL,
+            RTP_RESERVE_BLOCKS_TOTAL,
+        ] {
+            assert!(
+                out.contains(&format!("{name} 0")),
+                "expected a zero baseline for {name} in:\n{out}"
+            );
+        }
     }
 
     /// The baseline must not clobber a real count — `absolute(0)` runs

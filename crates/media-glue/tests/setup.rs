@@ -13,7 +13,9 @@ use forge_engine::{
 use forge_rtp::PortPoolConfig;
 use forge_sdp::{MediaType, SessionDescription, SessionDescriptionExt};
 use siphon_ai_bridge::{pack_pcm16_le, unpack_pcm16_le};
-use siphon_ai_media_glue::{Codec, InboundCall, MediaSetup, SdpError, SetupError};
+use siphon_ai_media_glue::{
+    Codec, InboundCall, MediaSetup, OutboundOfferRequest, OutboundSrtp, SdpError, SetupError,
+};
 use tokio::sync::mpsc;
 
 mod common;
@@ -348,4 +350,144 @@ async fn energy_vad_call_keeps_engine_default_detector() {
         .stop_session(&CallId::new("c-energy"))
         .await
         .expect("teardown");
+}
+
+// ─── #556: outbound reservation on the shared RTP port pool ──────────
+//
+// Inbound and outbound draw port pairs from one pool. Without a
+// reservation whichever direction asks first keeps what it takes, so an
+// inbound surge starves origination completely and nothing on the
+// inbound side says so. `[media].reserved_outbound_calls` is the floor
+// the inbound allocator refuses at.
+
+/// A `MediaSetup` over a fresh pool holding `reserved` pairs back from
+/// inbound. Ranges must span >= 100 ports (forge's minimum), so the
+/// pool is 50 pairs and the reservations below are sized against that.
+fn reserved_setup(
+    min_port: u16,
+    max_port: u16,
+    reserved: usize,
+) -> (MediaSetup, Arc<SessionManager>) {
+    let session_mgr = small_session_manager(min_port, max_port);
+    let setup = MediaSetup::new(
+        Arc::clone(&session_mgr),
+        Arc::new(MediaBridgeManager::new()),
+        Arc::new(forge_core::EventBus::new()),
+        "192.168.1.10",
+    )
+    .with_reserved_outbound_calls(reserved);
+    (setup, session_mgr)
+}
+
+fn outbound_req(call_id: &str) -> OutboundOfferRequest {
+    OutboundOfferRequest {
+        call_id: CallId::new(call_id),
+        codecs: vec![Codec::Pcmu],
+        dtmf_payload_type: Some(101),
+        participant_a: ParticipantId::generate(),
+        participant_b: ParticipantId::generate(),
+        from_tag: Some("ftag".into()),
+        to_tag: None,
+        srtp: OutboundSrtp::Off,
+        vad: ::siphon_ai_media_glue::VadBackend::default(),
+    }
+}
+
+#[tokio::test]
+async fn reserve_refuses_inbound_while_ports_remain_and_leaves_them_to_outbound() {
+    // 50-pair pool, 49 held for origination: exactly one inbound call
+    // fits, and everything after it must be refused *while 49 pairs are
+    // still free* — that is the whole point of the knob.
+    let (setup, session_mgr) = reserved_setup(42000, 42100, 49);
+
+    setup
+        .accept_inbound(pcmu_call("c-res-1", LINPHONE_PCMU_OFFER))
+        .await
+        .expect("first inbound fits under the reservation");
+
+    let (allocated, available) = session_mgr.port_pool_stats().await;
+    assert_eq!(allocated, 1);
+    assert_eq!(available, 49, "the reserved band, and nothing more");
+
+    let refused = setup
+        .accept_inbound(pcmu_call("c-res-2", LINPHONE_PCMU_OFFER))
+        .await;
+    assert!(
+        matches!(refused, Err(SetupError::ResourceLimit(_))),
+        "inbound at the reservation must take the exhausted-pool path \
+         (503 + Retry-After, rejected_capacity); got {refused:?}"
+    );
+
+    // Refusing must not have cost a port, or the reservation would
+    // erode itself under a sustained surge.
+    let (allocated, available) = session_mgr.port_pool_stats().await;
+    assert_eq!(allocated, 1, "a refused INVITE allocates nothing");
+    assert_eq!(available, 49);
+
+    // And the reserved band is genuinely usable by origination — the
+    // outbound allocator is not gated.
+    setup
+        .originate_offer(outbound_req("c-res-out"))
+        .await
+        .expect("origination draws from the reserved band");
+    let (allocated, _) = session_mgr.port_pool_stats().await;
+    assert_eq!(allocated, 2);
+
+    session_mgr
+        .stop_session(&CallId::new("c-res-1"))
+        .await
+        .expect("teardown");
+    session_mgr
+        .stop_session(&CallId::new("c-res-out"))
+        .await
+        .expect("teardown");
+}
+
+#[tokio::test]
+async fn reserve_of_zero_leaves_the_pool_unreserved() {
+    // The default. Pre-0.50 behaviour must be byte-for-byte unchanged:
+    // inbound may take the last pair in the pool.
+    let (setup, session_mgr) = reserved_setup(42200, 42300, 0);
+
+    for i in 0..50 {
+        setup
+            .accept_inbound(pcmu_call(&format!("c-unres-{i}"), LINPHONE_PCMU_OFFER))
+            .await
+            .unwrap_or_else(|e| panic!("inbound {i} of 50 must fit an unreserved pool: {e}"));
+    }
+
+    let (allocated, available) = session_mgr.port_pool_stats().await;
+    assert_eq!((allocated, available), (50, 0));
+
+    // 51st is a genuinely exhausted pool — same error type, different
+    // cause, which is exactly why the split lives in a metric and not
+    // on the wire.
+    let exhausted = setup
+        .accept_inbound(pcmu_call("c-unres-51", LINPHONE_PCMU_OFFER))
+        .await;
+    assert!(matches!(exhausted, Err(SetupError::ResourceLimit(_))));
+
+    for i in 0..50 {
+        session_mgr
+            .stop_session(&CallId::new(format!("c-unres-{i}")))
+            .await
+            .expect("teardown");
+    }
+}
+
+#[tokio::test]
+async fn reserve_is_checked_after_the_offer_parse() {
+    // Ordering matters for the caller's answer: a malformed offer is
+    // the peer's bug (488) and must not be reported as our capacity
+    // (503) just because the pool happens to be at the floor.
+    let (setup, _session_mgr) = reserved_setup(42400, 42500, 50);
+
+    let mut call = pcmu_call("c-res-parse", LINPHONE_PCMU_OFFER);
+    call.offer_sdp = "not actually sdp";
+    let result = setup.accept_inbound(call).await;
+
+    assert!(
+        matches!(result, Err(SetupError::Sdp(SdpError::Parse(_)))),
+        "parse must fail before the reservation check; got {result:?}"
+    );
 }

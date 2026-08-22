@@ -53,6 +53,7 @@ use forge_engine::{
     ParticipantMediaUpdate, SessionManager,
 };
 use forge_sdp::sdes::{CryptoAttribute, CryptoSuite};
+use siphon_ai_telemetry::metrics::RTP_RESERVE_BLOCKS_TOTAL;
 use thiserror::Error;
 use tracing::{debug, info, instrument, warn};
 
@@ -84,6 +85,34 @@ pub struct MediaSetup {
     /// default ones — set via
     /// [`with_session_config_template`](Self::with_session_config_template).
     session_config_template: MediaSessionConfig,
+    /// `[media].reserved_outbound_calls` — RTP port pairs the inbound
+    /// allocator must leave free for origination (siphon-ai #556).
+    /// `0` (the default) = one unreserved pool, the pre-0.50 behaviour.
+    /// Enforced in [`accept_inbound`](Self::accept_inbound) only;
+    /// [`originate_offer`](Self::originate_offer) may draw the pool
+    /// dry, which is the point.
+    reserved_outbound_calls: usize,
+}
+
+/// RTP port *pairs* — equivalently, concurrent calls — a pool spanning
+/// `range` can hand out. `None` = forge's default range.
+///
+/// Lives here rather than in `config` so the number a
+/// `[media].reserved_outbound_calls` value is validated against is
+/// derived from the same `PortPoolConfig` the daemon actually builds,
+/// instead of a constant in our crate that silently rots the next time
+/// forge changes its default.
+#[must_use]
+pub fn rtp_pool_capacity_calls(range: Option<(u16, u16)>) -> usize {
+    match range {
+        // A malformed range is `[media].rtp_port_range`'s own error to
+        // report (`CompileError::BadRtpPortRange`); don't mask it with a
+        // reserve error, so fall back to forge's default capacity here.
+        Some((min, max)) => forge_rtp::PortPoolConfig::new(min, max)
+            .map(|c| c.capacity())
+            .unwrap_or_else(|_| forge_rtp::PortPoolConfig::default().capacity()),
+        None => forge_rtp::PortPoolConfig::default().capacity(),
+    }
 }
 
 /// Per-call inputs to [`MediaSetup::accept_inbound`].
@@ -410,7 +439,53 @@ impl MediaSetup {
             event_bus,
             local_ip: local_ip.into(),
             session_config_template: MediaSessionConfig::default(),
+            reserved_outbound_calls: 0,
         }
+    }
+
+    /// Hold `calls` port pairs back from the inbound allocator for
+    /// origination (`[media].reserved_outbound_calls`, siphon-ai #556).
+    /// `0` disables the reservation.
+    #[must_use]
+    pub fn with_reserved_outbound_calls(mut self, calls: usize) -> Self {
+        self.reserved_outbound_calls = calls;
+        self
+    }
+
+    /// The configured outbound reservation, in port pairs / calls.
+    #[must_use]
+    pub fn reserved_outbound_calls(&self) -> usize {
+        self.reserved_outbound_calls
+    }
+
+    /// Refuse an inbound call once the pool's free pairs have fallen to
+    /// the outbound reservation (`[media].reserved_outbound_calls`).
+    ///
+    /// Returns [`SetupError::ResourceLimit`] so the refusal takes the
+    /// existing exhausted-pool path — `503` + `Retry-After`, counted as
+    /// `rejected_capacity` (#554/#555). A caller must not be able to
+    /// tell "the pool is empty" from "the rest is spoken for": both
+    /// mean try another node. The split is operator-side, on
+    /// [`RTP_RESERVE_BLOCKS_TOTAL`].
+    async fn check_outbound_reserve(&self) -> Result<(), SetupError> {
+        let reserved = self.reserved_outbound_calls;
+        if reserved == 0 {
+            return Ok(());
+        }
+        let (_allocated, available) = self.session_manager.port_pool_stats().await;
+        if available > reserved {
+            return Ok(());
+        }
+        metrics::counter!(RTP_RESERVE_BLOCKS_TOTAL).increment(1);
+        warn!(
+            available_pairs = available,
+            reserved_pairs = reserved,
+            "refusing inbound call: RTP port pool is down to the outbound reservation"
+        );
+        Err(SetupError::ResourceLimit(format!(
+            "RTP port pool at the outbound reservation: {available} pair(s) free, \
+             {reserved} held for origination ([media].reserved_outbound_calls)"
+        )))
     }
 
     /// Set the base `MediaSessionConfig` used when a call needs a
@@ -497,6 +572,25 @@ impl MediaSetup {
         // resources, which matters when an attacker sprays malformed
         // INVITEs.
         let offer = parse_offer(call.offer_sdp)?;
+
+        // (1a) Outbound reservation (#556). Inbound and outbound draw
+        //      from one pool, so whichever direction asks first keeps
+        //      what it takes and an inbound surge starves origination
+        //      outright. Refuse here while free pairs remain, leaving
+        //      them for `originate_offer`, which is not gated.
+        //
+        //      After the parse, so a malformed offer still answers 488
+        //      rather than a misleading 503; before the allocation, so
+        //      we never take a port we would have to hand straight back.
+        //
+        //      The read and the allocation are not atomic: N inbound
+        //      setups in flight can each see the same free count and
+        //      dip the pool up to N-1 pairs below the floor before any
+        //      of them lands. Bounded by concurrent INVITE setup, never
+        //      unbounded, and the alternative — serialising every
+        //      inbound `create_session` behind one lock — costs more at
+        //      the CPS this is meant to survive than the slack does.
+        self.check_outbound_reserve().await?;
 
         // (2) Allocate the session. This is what gives us the port.
         //     A non-default VAD backend rides in as a per-session

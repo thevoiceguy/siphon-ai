@@ -119,6 +119,32 @@ DTMF, and the WebSocket protocol:
   (`siphon-ai-testkit`) that plays the daemon side against any WS server
   and validates its behavior (`docs/CONFORMANCE.md`).
 
+### Measured capacity
+
+Numbers, not adjectives — all on **4 vCPU / 7.9 GB, Debian 13**, G.711
+µ-law, from `test-harness/load/`. Each row names the release it was
+measured on; the load plan and its results documents are in that
+directory.
+
+| | measured |
+|---|---|
+| **Sustained concurrent calls** | **≥ 250**, every quality SLO held — *not* a measured ceiling: nothing had degraded at the top of the ramp (0.48.13) |
+| **Setup rate** | **≥ 75 cps**, p95 ≤ 0.5 ms, zero failures (0.48.13) |
+| CPU per call | **0.54 %** of one core at 250 concurrent, *falling* with concurrency; **0.65 %** at 200 against a real FreeSWITCH (0.48.19) |
+| CPU at 250 concurrent | 134.5 % of one core = **33.6 % of the box** (0.48.13) |
+| Cost of TLS + SRTP | **+2 %** daemon CPU at 200 concurrent — the generator paid far more than we did (0.48.19) |
+| Memory | ~0.43 MB/call at 200 concurrent, measured at two hours (0.48.13); RSS **converges by hour 4** of an 8-hour soak — the last four hours added 1.6 MB (0.48.19) |
+| Quality over a **live carrier** | MOS p50 **4.435**, jitter p50 **1.94 ms**, loss **0.001 %**, setup p95 **460 ms** — 60 calls out through Twilio (TLS + SRTP) and back in (0.49.9) |
+| Behaviour past the cap | admission shed is **503**, exact, admitted calls unaffected (0.48.13); an exhausted RTP pool answers **503 + `Retry-After`** (0.49.10) |
+
+**State the limit with the number.** Concurrency is capped by
+`[media].rtp_port_range` before it is capped by CPU — every call holds two
+UDP ports, so a 4,000-port range is 2,000 calls and no amount of CPU
+changes that. The runs above used `[41000, 45000]`. On a node that both
+answers and originates, both directions draw from that one pool with no
+reservation between them ([#556](https://github.com/thevoiceguy/siphon-ai/issues/556)),
+so size it for the sum.
+
 See [`docs/DEV_PLAN.md`](docs/DEV_PLAN.md) for design rationale. Still
 deliberately out of scope: multi-tenancy, video, and WebRTC client support.
 

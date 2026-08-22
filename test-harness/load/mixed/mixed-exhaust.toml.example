@@ -1,0 +1,74 @@
+# Daemon config for the mixed-direction phase (LOAD_TEST_PLAN.md §13).
+#
+# Ports are deliberately clear of a prod-shaped install on the same box
+# (5060/5061, 9091, 9092, 40000-41000). Copy, adjust, pass with --config.
+[node]
+id = "lab-mixed-exhaust"
+public_address = "127.0.0.1"
+
+[sip]
+listen = "127.0.0.1:5070"
+transports = ["udp"]
+
+[media]
+codecs = ["pcmu"]
+# DELIBERATELY TOO SMALL: 120 ports = 60 calls total across BOTH
+# directions. The phase fills most of it with inbound and then originates
+# into the remainder, so the pool runs out mid-run. The question is not
+# whether it runs out — it is which direction notices, what the caller
+# sees, and whether the other direction stays healthy.
+rtp_port_range = [42000, 42120]
+# The originated legs are held open by the driver, not by media activity,
+# and paced_sink.mjs only feeds them once the bridge is up. Leave the
+# watchdog off so §1.3 can't reap a leg mid-hold.
+inactivity_timeout_secs = 0
+
+[bridge]
+ws_url = "ws://127.0.0.1:8770/"
+
+[observability]
+enabled = true
+http_listen = "127.0.0.1:9591"
+
+[admin]
+listen = "127.0.0.1:9592"
+
+[[admin.token]]
+name = "load"
+token = "lab-admin-token"
+role = "admin"
+
+# The originate endpoint's own guardrails, and the first thing to check
+# when a step plateaus below its target: `max_concurrent` 503s the excess
+# and `rate_limit_per_sec` 429s it. Both are deliberately above what the
+# steps ask for, so the daemon under test is the constraint and not its
+# own admission policy.
+[outbound]
+max_concurrent     = 250
+rate_limit_per_sec = 50
+
+# SIPp answers here (uas_hold.xml / uas_hold_remote_bye.xml).
+[[gateway]]
+name  = "sipp"
+proxy = "127.0.0.1:5075"
+# A caller-ID that is NOT the daemon's own `sip:siphon@<host>` identity —
+# the shape every real gateway has, and the one that exposed #549.
+from  = "sip:loadgen@127.0.0.1"
+
+# Inbound legs from SIPp arrive on loopback, so a trunk must cover it or
+# every INVITE is 403'd before it can allocate anything.
+[[trunk]]
+name = "loopback"
+peer_addrs = ["127.0.0.1/32"]
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+
+[cdr]
+enabled = true
+
+[cdr.file]
+enabled = true
+path = "/var/tmp/mixed-load/cdr.jsonl"

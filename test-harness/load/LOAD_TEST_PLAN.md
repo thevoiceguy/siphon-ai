@@ -295,10 +295,22 @@ calls have ended:
 
 ```sh
 curl -s :9091/metrics | grep -E 'calls_active|conferences_active|parked_calls_active'   # all 0
+curl -s :9091/metrics | grep dialogs_active    # 0, but only after the 32s grace window
 ss -lnu | grep -c ':4[0-9]{4}'      # RTP ports released
 ls /proc/<pid>/fd | wc -l           # back to the idle count from §3
 ps -o rss= -p <pid>                 # within ~10% of pre-load idle
 ```
+
+**`dialogs_active` needs the grace window and a two-step read.** Removal is
+deferred by `DialogReaper::DEFAULT_GRACE` (32 s = SIP Timer H/J) so a
+retransmitted BYE still matches, and the gauge is only republished on the
+reaper's 5 s sweep — so a read taken immediately after teardown returns the
+*pre-BYE* value. Against an outbound run that is `0`, because the UAC inserts
+the dialog when it sends the BYE: assert `== 0` straight away and the audit
+goes green against a daemon that reclaims nothing. Wait for the gauge to
+publish non-zero, *then* wait for it to return to 0. This gauge was in §6.1's
+pass criteria and missing from this list, which is part of why #548 survived
+every audit run before §12 existed.
 
 **Pass:** every counter returns to its idle value. A gauge that doesn't come
 back down is a leak, and it matters more than the peak number.
@@ -496,7 +508,17 @@ claims we haven't tested:
 - **TLS + SRTP under load** — §§3–6 are plaintext loopback. §10 tier 2
   closes this; don't quote a secure-trunk number until it's run.
 - **Mid-call WS reconnect** — post-v1, and not exercised here.
-- **Sustained multi-hour behaviour** beyond the 1-hour soak.
+- **Sustained multi-hour behaviour** beyond the 1-hour soak. (Partly closed
+  by `RESULTS-convergence-8h.md`.)
+- **Outbound origination under load** was untested until §12 — every phase in
+  §§3–6 and every tier in §10 drives calls *into* the daemon, including the
+  `originate` commands in §10.2, which are FreeSWITCH originating **at** us.
+  Nothing exercised `POST /admin/v1/calls`, so no leak audit could see a
+  resource that only an originated leg allocates. Issue #548 — one dialog
+  leaked per originated call, for the life of the process — survived every
+  run in this document, including the 8-hour convergence soak, and was found
+  by hand during a deploy verification instead. §12 closes the gap; treat the
+  §§3–6 numbers as *inbound* numbers until an outbound run says otherwise.
 
 ---
 
@@ -654,8 +676,52 @@ run is enough.
 
 **The run:** 15 minutes at **30–50 concurrent**, after tiers 1 and 2. Only
 capture the deltas: per-call CPU against the tier-2 TLS+SRTP figure, MOS
-distribution against the netem figure, and carrier setup latency
-(`sdp_negotiate_seconds` p95).
+distribution against the netem figure, and carrier setup latency.
+
+🪤 **Setup latency is not `sdp_negotiate_seconds`.** That histogram times
+`prepare_call` — negotiate, port alloc, tap attach — which is *our* local
+work and says nothing about the carrier. On an outbound leg the number you
+want is INVITE → 200 OK, which is the CDR's `answered_at − started_at`, or
+the gap between the `outbound_initiated` and `outbound_answered` webhooks.
+Earlier revisions of this section named the wrong metric.
+
+**Your concurrency limit may make the run above impossible, and the test is
+still worth running.** Elastic SIP Trunking's concurrent-channel cap depends
+on the account's Customer Profile: an approved *Business* profile is
+effectively unlimited, but *Individual* is **3**, unapproved is 2, and trial
+is 4. Below ~30 channels, run it **sequentially** instead — see §10.3.1. What
+tier 3 uniquely supplies is per-call constants, and those come from *many
+calls*, not from *simultaneous* ones. A sequential run actually yields a
+better latency distribution: 60 samples spread over half an hour, rather than
+60 set up inside one 60-second window.
+
+### 10.3.1 The sequential (low-channel) form
+
+Rig in `tier3/`. Each call is a **trombone**: originate through the carrier
+gateway to a DID that routes back to this node, so the call returns as a
+second inbound leg and real media flows both ways with no human at either
+end and no AI spend.
+
+```
+siphon-ai ──INVITE──► carrier SBC ──► carrier routes the DID back
+    ▲                                          │
+    └────────────── inbound leg ◄──────────────┘
+```
+
+**A trombone occupies two channels**, one out and one back in. On a
+3-channel trunk that means exactly one call at a time, with one channel
+left free — deliberately, so a genuine inbound call is not rejected because
+a test is running. Do not parallelise it without recounting channels.
+
+What that costs you in the published claim is honesty about concurrency:
+
+> *Confirmed against a live carrier trunk, N sequential calls: setup p50/p95
+> X/Y ms, MOS p50 z.zz, packet loss L%.*
+
+No concurrency statement at all — §10.4's template assumes the 50-concurrent
+form. Tier 2 already carries concurrency scaling, so little is lost, but do
+not let the sentence imply a carrier concurrency number that was never
+measured.
 
 **Cost model:** `concurrent × minutes × per-minute rate × legs`. Both legs
 count if you trombone through Twilio to reach your own DID. The shape
@@ -679,6 +745,11 @@ Validated from a separate FreeSWITCH box over TLS + SRTP at M concurrent:
 Confirmed against a live Twilio trunk at 50 concurrent: setup p95 z ms.
 RTP port range caps concurrency at range/2 — size it for your target.
 ```
+
+If tier 3 ran in the §10.3.1 sequential form, its line becomes
+*"confirmed against a live trunk, N sequential calls: setup p95 z ms"* —
+and the claim carries no carrier-concurrency number, because none was
+measured.
 
 That is more credible than a single large loopback number, precisely
 because it shows the difference between the three is understood.
@@ -826,3 +897,201 @@ If it passes, the honest headline is not a number at all:
 > *A live PSTN call placed while 500 concurrent calls were active was
 > indistinguishable from an idle one — same MOS, same first-audio latency,
 > no audible degradation.*
+
+---
+
+## 12. Outbound origination under load
+
+Everything above drives calls **into** the daemon. This phase drives them
+**out** of it, through `POST /admin/v1/calls`.
+
+The distinction is not cosmetic. An originated leg runs a different
+teardown path, a different dialog lifecycle, and a different admission
+gate (`[outbound].max_concurrent` / `rate_limit_per_sec`) from an accepted
+one, and none of it had ever been under load. The cost of that showed up as
+**issue #548**: one dialog leaked into the shared store per originated call,
+for the life of the process, until `sip-dialog`'s `MAX_CONFIRMED_DIALOGS`
+(10,000) is reached and in-dialog requests silently stop matching — for
+inbound calls too, since the store is shared. It survived every phase in
+this document, the 8-hour convergence soak included, and was found by hand
+while verifying a deploy. A leak audit cannot see a resource no phase
+allocates.
+
+Read the §§3–6 figures as **inbound** figures. This phase is what lets you
+say anything about the other direction.
+
+### 12.1 The rig
+
+`outbound/` in this directory. SIPp is the callee, the daemon is the caller,
+and `paced_sink.mjs` holds the WS side up for the duration:
+
+```
+ob_ramp.sh ──POST /admin/v1/calls──► siphon-ai ──INVITE──► SIPp (uas_hold.xml)
+                                         │
+                                         └──WS──► paced_sink.mjs
+```
+
+| | what it is |
+|---|---|
+| `phase-outbound.sh` | the driver: steps, sampling, drain, leak audit |
+| `ob_ramp.sh` | originate N at C cps, hold, tear down, wait for drain |
+| `obstat.sh` | one-shot JSON sample (CPU as a *rate*, RSS, fds, the gauges) |
+| `uas_hold.xml` | SIPp answers and holds until **we** BYE |
+| `uas_hold_remote_bye.xml` | SIPp answers, holds, then **it** BYEs |
+| `outbound-lab.toml.example` | daemon config — ports clear of a prod install |
+
+```sh
+cd test-harness/load/outbound
+cp outbound-lab.toml.example outbound-lab.toml
+export SP=/var/tmp/outbound-load
+HOLD=120 CPS=5 ./phase-outbound.sh /usr/bin/siphon-ai run-label 25 50 100
+TEARDOWN=remote ./phase-outbound.sh /usr/bin/siphon-ai run-label-remote 50
+```
+
+### 12.2 Run both teardown directions
+
+Who hangs up decides which branch of the teardown executes, and #548 sat on
+one of them. `uas_hold.xml` has the driver hang up through the admin API, so
+**we** send the BYE; `uas_hold_remote_bye.xml` has SIPp send it. A fix that
+retires the dialog in only one branch passes half this phase — which is why
+the phase runs both rather than picking the convenient one.
+
+### 12.3 What to measure
+
+Per step, the §§3–6 quantities plus the two the originate path adds:
+
+- `siphon_ai_outbound_calls_total{result}` — everything should be
+  `answered`. A `rejected`/`unreachable` count is the far end or the trunk,
+  not the daemon, and invalidates the step's per-call arithmetic.
+- **Originates the daemon refused.** `ob_ramp.sh` counts non-202 responses
+  and says so. A `503` is `max_concurrent`, a `429` is `rate_limit_per_sec`
+  — both are the daemon's own guardrails, and a step that silently ran at
+  half its target because of them is worse than no step at all.
+
+### 12.4 Pass criteria
+
+Everything in §6.3, run **with `dialogs_active` in it** and read the
+two-step way that section describes. Plus:
+
+- Every originate returns `202`, and every call ends `answered`.
+- `dialogs_active` returns to 0 after the grace window at **every** step, in
+  **both** teardown directions. This is the assertion #548 would have failed.
+- RTP ports released — an originated leg holds two, exactly like an accepted
+  one, so §1.1's ceiling is a ceiling on the *sum* of both directions.
+
+### 12.6 The outbound soak — make it churn
+
+§6.1's soak, in this direction, with one requirement that is easy to get
+wrong: **hold the concurrency by replacing calls as they end**, do not
+simply hold N calls open for an hour. Per-call leaks scale with
+*completions*, not with concurrency — #548 leaked one dialog per call, and
+a soak that parked 50 calls for an hour would have completed 50 and seen
+nothing. `ob_soak.sh` churns: an hour at 50 concurrent with a 60 s hold is
+~3,000 completed calls.
+
+**`dialogs_active` sits above concurrency during a churning soak, and that
+is correct.** Finished dialogs stay in the store for the 32 s grace window,
+so the steady-state reading is `concurrency + churn_rate × grace` — 76 at
+50 concurrent and ~50 calls/min. §6.1's "returns to 0 after the grace
+window" applies once load *stops*. A flat value above concurrency is
+health; a *climbing* one is the leak.
+
+**Finish with §6.3's test 1 — re-load the same process.** A churning soak
+grows RSS (measured: ~21 KB per completed call at constant concurrency,
+against ~6–10 KB/call for inbound), and that figure on its own cannot
+distinguish a leak from untrimmed arena. Re-loading the drained process
+settles it in fifteen minutes: measured 1.9 KB/call on the second pass
+against 21.4 on the first, i.e. the memory is reused. Quote the *second*
+number for capacity planning; the first is a fresh process reaching its
+working set.
+
+### 12.5 Traps
+
+- **The inactivity watchdog reaps originated legs too.** They are held open
+  by the driver, not by media, and the sink only feeds them once the bridge
+  is up. Set `inactivity_timeout_secs = 0` (§1.3).
+- **Don't use the echo server's `--auto-hangup-after-ms`.** It ends the call
+  from the WS side after a beat, which is right for a conformance scenario
+  and fatal for a hold.
+- **`[outbound]` is fail-closed**: unset `max_concurrent` means outbound is
+  *disabled*, and every originate returns `501`. That reads like a broken
+  rig rather than a config gap.
+
+---
+
+## 13. Both directions at once
+
+§§3–6 load inbound. §12 loads outbound. Neither says anything about what
+they do to each other — and they share three things: **one RTP port pool,
+one dialog store, one fd table**.
+
+Rig in `mixed/` (it reuses `outbound/`'s ramp, sampler and UAS scenario).
+`phase-mixed.sh` establishes the inbound legs first and then originates
+into a pool that is already partly consumed, which is the ordering that
+makes contention visible.
+
+```sh
+cd test-harness/load/mixed
+cp mixed-lab.toml.example mixed-lab.toml
+cp mixed-exhaust.toml.example mixed-exhaust.toml
+export SP=/var/tmp/mixed-load
+HOLD=120 CPS=5 ./phase-mixed.sh /usr/bin/siphon-ai run-label 50 50
+EXHAUST=1 HOLD=60 ./phase-mixed.sh /usr/bin/siphon-ai run-label-exhaust 50 20
+```
+
+### 13.1 What to expect
+
+Measured on 0.49.9 (`RESULTS-0.49.9-mixed-and-soak.md`): the two directions
+**compose linearly**. `fds = 13 + 3N` and `udp_sockets = 2N + 1` hold with
+N the *total* across both, and 100 mixed calls cost the same CPU as 100
+outbound-only. A mixed call costs what either kind costs alone.
+
+### 13.2 The pool has no reservation, and that is the finding
+
+Run the `EXHAUST` variant, whose port range is deliberately too small for
+the combined load. Measured: the inbound legs took the pool first and
+**every** subsequent originate failed —
+
+```
+WARN outbound call did not connect
+     error=forge session error: Resource limit exceeded: No available ports in pool
+siphon_ai_outbound_calls_total{result="failed"} N
+```
+
+— while inbound continued undisturbed. The failure is clean (no hang, no
+panic, no leaked dialog), but it is entirely one-sided: **an inbound surge
+can starve origination completely, with no inbound symptom.**
+
+🪤 **It is invisible on the originate API.** `POST /admin/v1/calls` returns
+`202` and the failure arrives later on the `outbound_failed` webhook. A
+driver that counts non-202 responses — `ob_ramp.sh` does — reports zero
+rejections for a run in which half the calls failed. Admission refusals
+(`503`/`429`) are the ones that show up synchronously; resource failures
+are not.
+
+Consequences for a node that both answers and originates:
+
+- size `rtp_port_range` for the **sum** of both directions plus headroom;
+- alert on `siphon_ai_outbound_calls_total{result="failed"}`;
+- to protect origination from inbound, cap inbound with `[sip.admission]` —
+  there is no pool-level reservation to configure.
+
+### 13.2.1 Run it in BOTH orders — they are not symmetric
+
+`ORDER=outbound-first` reverses which direction gets the pool first, and the
+two answers differ in kind. When inbound holds it, outbound fails through
+the originate API's webhook and metric. When **outbound** holds it, inbound
+has to be refused on the wire — and measured on 0.49.9 that refusal is
+**`500 Server Internal Error`**, which is wrong for a capacity condition and
+inconsistent with the `503` + `Retry-After` that `[sip.admission]` and the
+drain path both use. Filed as **#554**; expect this row to change to `503`.
+
+A phase that only runs one order tests half the behaviour and would have
+missed it entirely.
+
+### 13.3 Not covered
+
+Mixed at 200 + 200 rather than 50 + 50; a mixed *soak* rather than a
+steady-state snapshot; and exhaustion under *concurrent* pressure — both
+runs let one direction establish first, so whether two simultaneous ramps
+into a too-small pool interleave fairly or one wins is untested.

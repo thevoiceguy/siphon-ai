@@ -32,12 +32,15 @@ the burst's signalling-only calls at the one-minute mark.
 
 | | |
 |---|---|
-| `RESULTS-*.md` | published runs — `0.48.10`, `0.48.13`, `0.48.18`, `0.48.19` (RTP port-bind A/B), `tier2` (FreeSWITCH / TLS+SRTP / netem), `convergence-8h`, `0.49.0-reference-call` (§11), `0.49.5-sip-ring`, and `0.49.7-ring-ab` |
+| `RESULTS-*.md` | published runs — `0.48.10`, `0.48.13`, `0.48.18`, `0.48.19` (RTP port-bind A/B), `tier2` (FreeSWITCH / TLS+SRTP / netem), `convergence-8h`, `0.49.0-reference-call` (§11), `0.49.5-sip-ring`, `0.49.7-ring-ab`, `0.49.9-outbound` (§12), `0.49.9-tier3` (§10.3 — live carrier), and `0.49.9-mixed-and-soak` (§13 + §12.6) |
 | `ringstat.sh` | one-shot snapshot of the SIP-ladder ring gauges + RSS + concurrency, for sampling during a run (`RESULTS-0.49.5-sip-ring.md`) |
 | `abrun.sh` + `ringflood.py` + `ab-{on,off}.toml` | the ring-memory A/B (`RESULTS-0.49.7-ring-ab.md`) — one arm per invocation, fresh daemon each time |
 | `tier2/` | the two-box FreeSWITCH rig behind `RESULTS-tier2.md` (§10.2) — generator scripts, phase drivers, lab configs |
 | `paced_sink.mjs` | the WS sink the §6.1 and tier-2 numbers were measured through. **Use this, not a `setInterval`-paced sink** — see §8's first trap |
 | `squat.py` | holds RTP ports the way an ephemeral socket does, to reproduce #504 on demand |
+| `mixed/` | both directions at once (§13) — including the deliberately-too-small port range that proves there is no reservation between them |
+| `tier3/` | the live-carrier rig (§10.3) behind `RESULTS-0.49.9-tier3.md` — **dials the public PSTN and bills both legs**; read its README first |
+| `outbound/` | the origination load rig (§12) behind `RESULTS-0.49.9-outbound.md` — the only phase here that drives calls **out** of the daemon rather than into it |
 
 ## Prerequisites
 

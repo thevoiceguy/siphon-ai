@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.10] - 2026-08-22
+
+One fix to the **inbound** call path: a full RTP port pool is a capacity
+condition, and it now answers like one. Relevant to any node that can run
+out of ports — most sharply to a node that also originates, since both
+directions draw from the same pool.
+
+**No config change, no protocol change** (still `1`), CDR still v8. Adds
+one metric label. Wants a restart to take effect.
+
 ### Fixed
 
 - **An exhausted RTP port pool now answers `503 Service Unavailable` +
@@ -31,7 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     separately alertable from `rejected`. On a node that also originates the
     pool is shared with outbound, so this counter is the only inbound-side
     signal that a surge in the other direction is refusing calls — see
-    `test-harness/load/RESULTS-0.49.9-mixed-and-soak.md` §2.1.
+    `test-harness/load/RESULTS-0.49.9-mixed-and-soak.md` §2.1. That pool
+    has no reservation between the two directions, which is tracked
+    separately as #556; this release changes only the answer given, not
+    who gets a port.
 
 ## [0.49.9] - 2026-08-21
 

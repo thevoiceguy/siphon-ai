@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The SIPp harness asserts the outbound delayed-offer counter, not just
+  "answered"** (#558). The `outbound_delayed_uas` phase drives a full
+  RFC 3264 delayed offer — offerless INVITE out, the peer's offer in its
+  2xx, our answer in the ACK — but asserted only
+  `siphon_ai_outbound_calls_total{result="answered"}`, which *any*
+  originate satisfies. `siphon_ai_outbound_delayed_offer_total` (#406) is
+  the counter that says the negotiation itself succeeded, and nothing in
+  CI asserted it, so its documented result set could rot unnoticed. The
+  scenario's own `check_it` proves the ACK carried an m-line; this adds
+  the daemon's side of the same claim, and catches an originate that
+  answers while the negotiation lands on `missing_sdp_offer`,
+  `invalid_remote_media`, `media_activate` or an `srtp_*` label.
+
 ## [0.49.10] - 2026-08-22
 
 One fix to the **inbound** call path: a full RTP port pool is a capacity
@@ -45,6 +60,31 @@ one metric label. Wants a restart to take effect.
     has no reservation between the two directions, which is tracked
     separately as #556; this release changes only the answer given, not
     who gets a port.
+
+### Documentation
+
+- **The load test plan is complete — outbound origination, a live-carrier
+  tier, both directions at once, and a churning soak** (#553). Everything
+  through §11 loaded *inbound* only, which is how a per-originated-call
+  dialog leak (#548) reached production unnoticed; the plan now has a §12
+  outbound phase, §13 mixed-direction phase, and the tier-3 live run its
+  three tiers always promised. Three results documents land with it:
+  - `RESULTS-0.49.9-outbound.md` — origination under load. `fds = 13 + 3N`
+    and two RTP ports per originated leg; a 60-minute churning soak
+    (2,995 placed / 2,995 completed / 0 failed / 0 WARN) whose RSS growth
+    is **arena, not a leak** — the same drained process absorbed 750 more
+    calls at 1.9 KB each where a leak needed ~16 MB.
+  - `RESULTS-0.49.9-tier3.md` — 60 sequential calls over a live Twilio
+    trunk (TLS + SRTP), out through the carrier and back in to the same
+    node. MOS p50 **4.435**, jitter p50 **1.94 ms**, loss **0.001 %**,
+    setup p95 **460 ms**. It also proves the tier-2 netem model
+    *pessimistic*: live jitter 1.94 ms against netem's 3.35, live loss
+    0.001 % against 0.495 %.
+  - `RESULTS-0.49.9-mixed-and-soak.md` — the two directions compose
+    linearly (`fds = 13 + 3N`, `udp_sockets = 2N + 1`, N the *total*), and
+    the shared RTP pool is first-come-first-served with **no reservation
+    between them** (#556). Running the exhaustion test in the reverse
+    order is what found #554, fixed above.
 
 ## [0.49.9] - 2026-08-21
 

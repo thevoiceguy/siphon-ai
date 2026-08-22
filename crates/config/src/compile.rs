@@ -794,6 +794,11 @@ pub struct MediaConfig {
     /// enum lives in media-glue (below core), same layering as
     /// `OutboundSrtp`.
     pub vad: siphon_ai_media_glue::VadBackend,
+    /// `[media].reserved_outbound_calls` — RTP port pairs held back
+    /// from the inbound allocator for origination (#556). `0` = one
+    /// unreserved pool, the pre-0.50 behaviour. Validated at load
+    /// against the pool's capacity.
+    pub reserved_outbound_calls: u32,
 }
 
 #[derive(Debug, Error)]
@@ -1139,6 +1144,13 @@ pub enum CompileError {
 
     #[error("[media].moh_file {0:?} does not exist or is not a file")]
     MediaMohMissing(String),
+
+    #[error(
+        "[media].reserved_outbound_calls = {reserved} leaves no inbound capacity; \
+         the RTP port pool holds {capacity} concurrent call(s). Reserve fewer, widen \
+         [media].rtp_port_range, or cap inbound with [sip.admission] instead"
+    )]
+    ReservedOutboundCallsTooLarge { reserved: u32, capacity: usize },
 
     #[error("[media].rtp_port_range {min}-{max} is invalid (min must be < max and even)")]
     BadRtpPortRange { min: u16, max: u16 },
@@ -1943,11 +1955,27 @@ fn compile_media(raw: &RawMedia) -> Result<MediaConfig, CompileError> {
         }
     };
     let vad = compile_vad_backend(raw.vad.as_deref())?;
+    // #556: the reservation only means something inside a pool that can
+    // still serve inbound. Reserving the whole pool (or more) would make
+    // the daemon answer 503 to every INVITE forever, which is a capacity
+    // cap dressed up as a media knob — `[sip.admission]` is that. Fail
+    // loud at load rather than at the first call (CLAUDE.md §4.6).
+    let reserved_outbound_calls = raw.reserved_outbound_calls.unwrap_or(0);
+    if reserved_outbound_calls > 0 {
+        let capacity = siphon_ai_media_glue::rtp_pool_capacity_calls(raw.rtp_port_range);
+        if reserved_outbound_calls as usize >= capacity {
+            return Err(CompileError::ReservedOutboundCallsTooLarge {
+                reserved: reserved_outbound_calls,
+                capacity,
+            });
+        }
+    }
     Ok(MediaConfig {
         rtp_port_range: raw.rtp_port_range,
         srtp,
         moh_file,
         vad,
+        reserved_outbound_calls,
     })
 }
 

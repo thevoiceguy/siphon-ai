@@ -441,6 +441,22 @@ pub struct RawMedia {
     /// unset, forge's default range is used.
     #[serde(default)]
     pub rtp_port_range: Option<(u16, u16)>,
+    /// How many concurrent **outbound** calls' worth of RTP port pairs
+    /// to hold back from the inbound allocator (siphon-ai #556).
+    ///
+    /// Inbound and outbound draw from one pool first-come-first-served,
+    /// so an inbound surge can starve origination completely with no
+    /// inbound-side symptom. This is the floor: once the pool's free
+    /// pairs drop to this many, an arriving INVITE is refused
+    /// `503` + `Retry-After` and the remainder stays available to
+    /// origination. `None` / `0` (the default) keeps the pre-0.50
+    /// behaviour — one unreserved pool.
+    ///
+    /// Counted in **calls**, not ports: one call is one pair, so `N`
+    /// here holds back `2N` ports. Must be less than the pool's
+    /// capacity; validated at load time (CLAUDE.md §4.6).
+    #[serde(default)]
+    pub reserved_outbound_calls: Option<u32>,
     /// Tear the call down after this many seconds with no inbound RTP.
     /// `None` (unset) → defaults to 60 s at compile time. `Some(0)` →
     /// watchdog disabled. Per-route `[route.media].inactivity_timeout_secs`

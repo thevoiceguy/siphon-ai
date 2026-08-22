@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`[media].reserved_outbound_calls`: hold RTP ports back for
+  origination** (#556). Inbound and outbound draw port pairs from one
+  pool, first-come-first-served, with no reservation between them, so on
+  a node that both answers and originates an inbound surge starves
+  origination *completely* — and there is no inbound-side symptom while
+  it happens. Measured on 0.49.9 with the pool shrunk to 60 calls and 50
+  inbound + 20 outbound asked for: inbound established **50/50** and
+  stayed healthy for the whole window while **10 of 20 originates
+  failed** (`test-harness/load/RESULTS-0.49.9-mixed-and-soak.md` §2). The
+  starved direction is usually the one with a deadline attached — a
+  scheduled callback or a notification, versus a caller who will redial —
+  so the default allocation is the opposite of how an operator would
+  prioritise it, and the only lever was `[sip.admission]`: a global
+  inbound concurrency cap standing in for a pool reservation, with the
+  two numbers drifting apart the moment `rtp_port_range` changed.
+
+  Set `reserved_outbound_calls = N` and the **inbound** allocator refuses
+  once the pool's free pairs reach `N`, leaving the rest to origination,
+  which is not gated. Counted in calls, not ports (one call is one pair).
+  The refusal reuses the exhausted-pool path from #554/#555 unchanged —
+  `503 Service Unavailable` + `Retry-After`, counted as
+  `siphon_ai_invites_total{result="rejected_capacity"}` — deliberately:
+  a caller must not be able to tell "we are empty" from "the rest is
+  spoken for", since both mean try another node. The split is
+  operator-side, on the new **`siphon_ai_rtp_reserve_blocks_total`**
+  (published as a zero baseline, so "the reserve has never had to shed"
+  reads as `0` rather than as a missing series) alongside
+  **`siphon_ai_rtp_reserved_outbound_calls`**, the configured threshold as
+  a gauge. Startup logs the split (`pool_calls` / `reserved_outbound_calls`
+  / `inbound_calls`) and `--inspect-config` prints it.
+
+  Default `0` — unreserved, byte-for-byte the pre-0.50 behaviour.
+  Restart-required. A value at or above the pool's capacity fails at load
+  with the capacity in the message: reserving the whole pool would answer
+  `503` to every INVITE forever, which is a concurrency cap wearing a
+  media knob's clothes. Two caveats, both documented in `docs/CONFIG.md`:
+  the floor is **not atomic** — the free-pair read and the allocation are
+  separate, so `K` inbound setups in flight can dip up to `K-1` pairs
+  below it before any lands (bounded by concurrent INVITE setup; size `N`
+  with a little slack) — and the knob decides *who loses* when the pool
+  is too small, it does not make it bigger. `rtp_port_range` must still
+  be sized for the sum of both directions; `docs/DEPLOY.md` now says so
+  under its own heading, with the measurement and the reason an operator
+  watching HTTP status codes sees none of it (`POST /admin/v1/calls`
+  answers `202` and the port failure arrives later on the
+  `outbound_failed` webhook).
+
 - **The SIPp harness asserts the outbound delayed-offer counter, not just
   "answered"** (#558). The `outbound_delayed_uas` phase drives a full
   RFC 3264 delayed offer — offerless INVITE out, the peer's offer in its

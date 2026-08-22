@@ -166,6 +166,42 @@ kernel simply stops handing them to anyone else. The alternative is to
 choose an `rtp_port_range` above `ip_local_port_range`'s ceiling, which
 works equally well but leaves less room to grow.
 
+### Sizing the pool on a node that also originates
+
+**One pool serves both directions.** An originated leg holds a port pair
+exactly like an accepted one, so `rtp_port_range` must be sized for the
+**sum** of inbound and outbound concurrency plus headroom — two ports per
+concurrent call, whichever way it is going.
+
+By default the two directions are **unreserved and first-come-first-served**,
+which is not how an operator would prioritise them. Measured on 0.49.9 with
+the pool shrunk to 60 calls and 50 inbound + 20 outbound asked for
+(`test-harness/load/RESULTS-0.49.9-mixed-and-soak.md` §2), inbound
+established **50/50 and stayed healthy for the whole window** while
+**10 of 20 originates failed** — the direction that usually has a deadline
+attached absorbed the entire shortfall, and nothing in the inbound metrics,
+logs, or CDRs said so.
+
+Two things follow:
+
+- **`[media].reserved_outbound_calls = N`** holds `N` pairs back from the
+  inbound allocator (0.50.0, [#556]). Inbound is refused `503` +
+  `Retry-After` once free pairs reach `N`; origination is not gated and may
+  use them. Sizing: set it to your peak concurrent originations plus a pair
+  or two of slack — the floor is not atomic, so inbound setups in flight can
+  dip a little below it. It is **not** a substitute for sizing the range;
+  it decides who loses when the range is too small.
+- **Watch the failure from the outbound side.** `POST /admin/v1/calls`
+  returns `202` and a port-pool failure arrives later on the
+  `outbound_failed` webhook, so an HTTP status code will never show it.
+  The signals are `siphon_ai_outbound_calls_total{result="failed"}` and
+  that webhook. On the inbound side,
+  `siphon_ai_invites_total{result="rejected_capacity"}` covers both an
+  exhausted pool and a reservation refusal;
+  `siphon_ai_rtp_reserve_blocks_total` isolates the latter.
+
+[#556]: https://github.com/thevoiceguy/siphon-ai/issues/556
+
 ## TLS deployment (SIP/TLS + WSS)
 
 A production deployment encrypts both legs: SIP/TLS for signaling
@@ -1313,7 +1349,9 @@ applied (and test-enforced) in our `prometheus_builder()` (issue #437).
 
 | Metric                                  | Type      | Labels                                | What it measures |
 |-----------------------------------------|-----------|---------------------------------------|------------------|
-| `siphon_ai_invites_total`               | counter   | `result=accepted\|rejected\|rejected_attestation\|rejected_capacity\|no_match` | INVITEs by acceptance outcome. `rejected_attestation` is a STIR/SHAKEN policy reject (`min_attestation` gate or `require_identity`) — separately alertable from ordinary routing/media `rejected`. **`rejected_capacity`** (#554) is the RTP port pool being full: the call was refused `503 Service Unavailable` + `Retry-After` because `[media].rtp_port_range` had nothing left, not because anything was wrong with it. **Alert on it** — on a node that also originates, the pool is shared and an outbound surge can exhaust it, with this counter the only inbound-side signal. It is a sizing problem, not a fault; see `test-harness/load/RESULTS-0.49.9-mixed-and-soak.md`. |
+| `siphon_ai_invites_total`               | counter   | `result=accepted\|rejected\|rejected_attestation\|rejected_capacity\|no_match` | INVITEs by acceptance outcome. `rejected_attestation` is a STIR/SHAKEN policy reject (`min_attestation` gate or `require_identity`) — separately alertable from ordinary routing/media `rejected`. **`rejected_capacity`** (#554) is the RTP port pool being full: the call was refused `503 Service Unavailable` + `Retry-After` because `[media].rtp_port_range` had nothing left, not because anything was wrong with it. **Alert on it** — on a node that also originates, the pool is shared and an outbound surge can exhaust it, with this counter the only inbound-side signal. It also covers a `[media].reserved_outbound_calls` refusal, where free ports remain but are held for origination; `siphon_ai_rtp_reserve_blocks_total` (below) separates the two. It is a sizing problem, not a fault; see `test-harness/load/RESULTS-0.49.9-mixed-and-soak.md`. |
+| `siphon_ai_rtp_reserve_blocks_total`    | counter   | none                                  | Inbound INVITEs refused because the RTP port pool had reached `[media].reserved_outbound_calls` — ports were still free, but held for origination (#556). The refusal is indistinguishable from a genuinely exhausted pool on the wire and in `siphon_ai_invites_total` (both `503` + `Retry-After`, both `rejected_capacity`); this is the operator-side split. Non-zero means the reservation is actively shedding inbound load — the knob working, not a fault — but a sustained rate means `rtp_port_range` is too small for the traffic you are carrying. **Published as a zero baseline**, so "never shed" reads as `0` rather than as a missing series. |
+| `siphon_ai_rtp_reserved_outbound_calls` | gauge     | none                                  | The configured value of `[media].reserved_outbound_calls`, in port pairs (= concurrent calls), published once at startup. `0` = unreserved pool. Sits next to the counter above so a dashboard can show the shed rate against the threshold that produced it without reading the TOML. |
 | `siphon_ai_calls_total`                 | counter   | `cause=caller_hangup\|server_hangup\|local_shutdown\|drain_forced\|bridge_ended\|ws_disconnect\|tap_ended\|transfer` | Ended calls by termination cause. `caller_hangup` (0.40.0) = the far end sent BYE, split out of `local_shutdown`, which now means admin force-hangup / CANCEL / session expiry only. `drain_forced` (0.17.0) = force-ended at the graceful-shutdown drain deadline. `transfer` (0.41.x) = the call was handed off via REFER. `ws_disconnect` (0.45.0) = the WS dropped unexpectedly mid-call (or reconnect never recovered), split out of `bridge_ended` — alert on this one; it's the WS server crashing or the network failing, not a call ending. Counts inbound **and** outbound legs (#373 — outbound legs were previously invisible here, so `ws_disconnect` alerting missed outbound WS crashes). |
 | `siphon_ai_calls_active`                | gauge     | —                                     | Currently-running bridged calls, inbound and outbound (#373 — previously inbound-only). An outbound leg joins at answer; before that it counts only on `siphon_ai_outbound_calls_active`. |
 | `siphon_ai_route_match_total`           | counter   | `route`                               | Calls per matched route. |

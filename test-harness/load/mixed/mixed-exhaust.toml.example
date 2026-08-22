@@ -18,6 +18,12 @@ codecs = ["pcmu"]
 # whether it runs out — it is which direction notices, what the caller
 # sees, and whether the other direction stays healthy.
 rtp_port_range = [42000, 42120]
+# #556: uncomment to hold 20 of the 60 pairs back for origination and
+# re-run the same command. The shortfall moves to the direction you chose
+# to lose: inbound is capped at 40 and sheds the rest on the wire (503 +
+# Retry-After), outbound gets what it asked for. Measured 2026-08-22 —
+# without it 50 inbound / 9 outbound, with it 40 inbound / 19 outbound.
+# reserved_outbound_calls = 20
 # The originated legs are held open by the driver, not by media activity,
 # and paced_sink.mjs only feeds them once the bridge is up. Leave the
 # watchdog off so §1.3 can't reap a leg mid-hold.

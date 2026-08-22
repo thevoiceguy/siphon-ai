@@ -49,6 +49,28 @@ both directions** — that shared-pool arithmetic is the whole point. The
 The phase also prints what the inbound caller was told, parsed out of
 SIPp's error file, which is the only place an on-the-wire refusal shows up.
 
+## #556: re-running `exhaust-in` with a reservation
+
+`[media].reserved_outbound_calls` (0.50.0) holds N pairs back from the
+inbound allocator. Uncomment it in `mixed-exhaust.toml` and re-run the
+same `exhaust-in` command to see the shortfall move to the direction you
+chose to lose. Measured 2026-08-22, 50 inbound + 20 outbound into a
+60-pair pool:
+
+| | inbound established | outbound answered | inbound told |
+|---|---|---|---|
+| unreserved (default) | 50 / 50 | **9 / 20** | nothing — no refusals |
+| `reserved_outbound_calls = 20` | 40 / 50 | **19 / 20** | 10 × `503 Service Unavailable` |
+
+Note the pool yields **59 usable pairs, not 60**, in both runs: `42057`
+(the RTCP half of pair `42056`) is squatted by an unrelated socket,
+because this range sits inside the kernel's `ip_local_port_range` and is
+not in `ip_local_reserved_ports`. That is the trap `docs/CONFIG.md` warns
+about on `rtp_port_range`, it is not a daemon bug, and it is why the
+reserved run answers 19 rather than 20. Check with
+`python3 -c 'import socket;socket.socket(2,2).bind(("127.0.0.1",42057))'`
+before reading one lost call as a regression.
+
 ## Traps
 
 - **The exhaust config is deliberately too small** (120 ports = 60 calls).

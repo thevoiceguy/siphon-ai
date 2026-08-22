@@ -3247,3 +3247,79 @@ spool_dir = "/tmp/siphon-test-spool"
     let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
     assert_eq!(cfg.webhooks.spool_max_age_secs, 0);
 }
+
+// ─── #556: `[media].reserved_outbound_calls` ─────────────────────────
+
+/// `rtp_port_range = [30000, 30200]` is a 100-pair pool, so the
+/// reservations below are sized against a number the test states rather
+/// than forge's default.
+const RESERVE_TOML: &str = r#"
+[node]
+public_address = "203.0.113.10"
+[sip]
+listen = "127.0.0.1:5060"
+[media]
+rtp_port_range = [30000, 30200]
+RESERVED
+[bridge]
+ws_url = "wss://x.example.com/b"
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+
+#[test]
+fn reserved_outbound_calls_defaults_to_no_reservation() {
+    let toml = RESERVE_TOML.replace("RESERVED\n", "");
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    assert_eq!(
+        cfg.media.reserved_outbound_calls, 0,
+        "an unreserved pool is the pre-0.50 default"
+    );
+}
+
+#[test]
+fn reserved_outbound_calls_compiles_under_pool_capacity() {
+    let toml = RESERVE_TOML.replace("RESERVED", "reserved_outbound_calls = 20");
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    assert_eq!(cfg.media.reserved_outbound_calls, 20);
+}
+
+#[test]
+fn reserved_outbound_calls_at_or_above_capacity_fails_at_load() {
+    // 100 pairs in the pool: reserving all of them would answer 503 to
+    // every INVITE for the process lifetime. That is a concurrency cap
+    // ([sip.admission]), not a media knob — refuse it at load rather
+    // than at the first call (CLAUDE.md §4.6).
+    for reserved in [100, 101, 5000] {
+        let toml =
+            RESERVE_TOML.replace("RESERVED", &format!("reserved_outbound_calls = {reserved}"));
+        let err = load_from_str_with_env(&toml, &MapEnv::new([])).unwrap_err();
+        assert!(
+            matches!(err, LoadError::Compile(_)),
+            "reserved_outbound_calls = {reserved} must fail load, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("reserved_outbound_calls"),
+            "the error must name the key it is about: {err}"
+        );
+    }
+}
+
+#[test]
+fn reserved_outbound_calls_validates_against_forge_default_pool() {
+    // With `rtp_port_range` unset the pool is forge's default. The
+    // validation must still bite — the capacity it checks comes from
+    // the same `PortPoolConfig` the daemon builds, so this stays
+    // correct if forge changes that default.
+    let capacity = siphon_ai_media_glue::rtp_pool_capacity_calls(None);
+    let base = RESERVE_TOML.replace("rtp_port_range = [30000, 30200]\n", "");
+
+    let ok = base.replace("RESERVED", "reserved_outbound_calls = 1");
+    load_from_str_with_env(&ok, &MapEnv::new([])).expect("one reserved pair fits any pool");
+
+    let too_big = base.replace("RESERVED", &format!("reserved_outbound_calls = {capacity}"));
+    let err = load_from_str_with_env(&too_big, &MapEnv::new([])).unwrap_err();
+    assert!(matches!(err, LoadError::Compile(_)), "got {err:?}");
+}

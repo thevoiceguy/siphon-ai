@@ -406,8 +406,12 @@ impl Runtime {
             // Calls that need a per-session config (a non-default VAD
             // backend) must inherit the same base the manager applies
             // to default sessions.
-            .with_session_config_template(session_config),
+            .with_session_config_template(session_config)
+            // #556: hold this many port pairs back from inbound so an
+            // inbound surge cannot starve origination outright.
+            .with_reserved_outbound_calls(media.reserved_outbound_calls as usize),
         );
+        log_outbound_reserve(&media);
 
         // ─── Bridging acceptor + dialog registry ───────────────────
         // Built without the IntegratedUAS here because the routing
@@ -2775,6 +2779,32 @@ fn apply_ingress_rate_limit(
             key,
             per_sec = value,
             "per-source SIP ingress rate limit set (applies below [sip.admission])"
+        );
+    }
+}
+
+/// Say at startup whether the RTP pool is reserved, and how much of it
+/// is left for inbound. An operator reading a `503` in the journal
+/// should be able to find the number that produced it without
+/// re-deriving it from `rtp_port_range` (#556). Also publishes the
+/// threshold as a gauge so the shed counter has something to sit next
+/// to on a dashboard.
+fn log_outbound_reserve(media: &MediaConfig) {
+    let capacity = siphon_ai_media_glue::rtp_pool_capacity_calls(media.rtp_port_range);
+    let reserved = media.reserved_outbound_calls;
+    metrics::gauge!(siphon_ai_telemetry::metrics::RTP_RESERVED_OUTBOUND_CALLS)
+        .set(f64::from(reserved));
+    if reserved == 0 {
+        debug!(
+            pool_calls = capacity,
+            "RTP port pool is unreserved; inbound and outbound compete for all of it"
+        );
+    } else {
+        info!(
+            pool_calls = capacity,
+            reserved_outbound_calls = reserved,
+            inbound_calls = capacity.saturating_sub(reserved as usize),
+            "RTP port pool reserved for origination ([media].reserved_outbound_calls)"
         );
     }
 }

@@ -936,8 +936,16 @@ odo_resp=$(curl -s -o /dev/null -w "%{http_code}" \
     -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$ADMIN_API_PORT/admin/v1/calls" \
     -d '{"to": "7001", "gateway": "sipp", "delayed_offer": true}')
 if [[ "$odo_resp" == "202" ]] && wait "$ODO_SIPP_PID"; then
-    if curl -s "http://127.0.0.1:$ODO_ADMIN_PORT/metrics" \
-        | grep -q 'siphon_ai_outbound_calls_total{result="answered"} 1'; then
+    # Two counters, two different claims. `outbound_calls_total` says the
+    # call answered — true of any originate. `outbound_delayed_offer_total`
+    # (#406) says the *negotiation* reached `answered`: the peer's 2xx offer
+    # parsed and the ACK answer generator built a reply. The scenario's
+    # check_it proves the ACK carried an m-line; this proves the daemon
+    # agrees it negotiated, and is the only assertion anywhere in CI on
+    # that counter.
+    odo_metrics=$(curl -s "http://127.0.0.1:$ODO_ADMIN_PORT/metrics")
+    if grep -q 'siphon_ai_outbound_calls_total{result="answered"} 1' <<<"$odo_metrics" \
+        && grep -q 'siphon_ai_outbound_delayed_offer_total{result="answered"} 1' <<<"$odo_metrics"; then
         odo_ok=1
     fi
 fi

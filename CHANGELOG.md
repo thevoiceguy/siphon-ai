@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-08-23
+
+**One new config key and one dependency bump that reaches the wire.**
+
+`[media].reserved_outbound_calls` closes the last gap the load plan found:
+inbound and outbound calls draw RTP ports from one pool, first-come-first-served,
+so on a node that both answers and originates an inbound surge could starve
+origination *completely* with no inbound-side symptom. Set it and the inbound
+allocator stops at a floor, leaving the rest to origination. Default `0` is the
+old unreserved behaviour, so **upgrading changes nothing until you set it**.
+
+⚠️ **DTLS-SRTP deployments read the forge-media bump below before upgrading.**
+The certificate moves from RSA-2048 to ECDSA P-256, which is live wherever
+`[media].srtp_offer = "dtls"` is set. Almost every peer prefers P-256 already —
+it is what browsers present — but a peer that can only do RSA key exchange
+would newly fail.
+
+**No protocol change** (still `1`), CDR still v8. Adds one config key, two
+metrics, and a `--inspect-config` line. Wants a restart to take effect.
+
 ### Changed
 
 - **forge-media pinned to `1fe94a502efa`** — nine commits, three of them

@@ -359,6 +359,12 @@ async fn energy_vad_call_keeps_engine_default_detector() {
 // inbound surge starves origination completely and nothing on the
 // inbound side says so. `[media].reserved_outbound_calls` is the floor
 // the inbound allocator refuses at.
+//
+// The floor is enforced inside forge's allocator, under the same lock
+// that removes the port (forge-media #120), so it is exact rather than
+// the soft target the original `port_pool_stats()` pre-check gave.
+// `the_floor_is_exact_under_concurrent_inbound_setup` is the test that
+// would have failed against the pre-check.
 
 /// A `MediaSetup` over a fresh pool holding `reserved` pairs back from
 /// inbound. Ranges must span >= 100 ports (forge's minimum), so the
@@ -369,14 +375,20 @@ fn reserved_setup(
     reserved: usize,
 ) -> (MediaSetup, Arc<SessionManager>) {
     let session_mgr = small_session_manager(min_port, max_port);
-    let setup = MediaSetup::new(
-        Arc::clone(&session_mgr),
+    let setup = reserved_setup_on(&session_mgr, reserved);
+    (setup, session_mgr)
+}
+
+/// A `MediaSetup` with a given floor over an *existing* pool, for tests
+/// that need two views of the same pool.
+fn reserved_setup_on(session_mgr: &Arc<SessionManager>, reserved: usize) -> MediaSetup {
+    MediaSetup::new(
+        Arc::clone(session_mgr),
         Arc::new(MediaBridgeManager::new()),
         Arc::new(forge_core::EventBus::new()),
         "192.168.1.10",
     )
-    .with_reserved_outbound_calls(reserved);
-    (setup, session_mgr)
+    .with_reserved_outbound_calls(reserved)
 }
 
 fn outbound_req(call_id: &str) -> OutboundOfferRequest {
@@ -489,5 +501,99 @@ async fn reserve_is_checked_after_the_offer_parse() {
     assert!(
         matches!(result, Err(SetupError::Sdp(SdpError::Parse(_)))),
         "parse must fail before the reservation check; got {result:?}"
+    );
+}
+
+/// The floor holds when inbound setups race, which the pre-#120
+/// `port_pool_stats()`-then-allocate gate could not promise: `K`
+/// concurrent callers each read the same free count and each decided
+/// they were clear, dipping up to `K-1` pairs under. Now the check
+/// happens inside the allocation's own critical section.
+///
+/// 100-pair pool, floor 60: exactly 40 inbound calls may land no matter
+/// how they interleave, leaving exactly 60 for origination.
+#[tokio::test]
+async fn the_floor_is_exact_under_concurrent_inbound_setup() {
+    let session_mgr = small_session_manager(42600, 42800);
+    let setup = Arc::new(
+        MediaSetup::new(
+            Arc::clone(&session_mgr),
+            Arc::new(MediaBridgeManager::new()),
+            Arc::new(forge_core::EventBus::new()),
+            "192.168.1.10",
+        )
+        .with_reserved_outbound_calls(60),
+    );
+
+    let mut tasks = Vec::new();
+    for i in 0..64 {
+        let setup = Arc::clone(&setup);
+        tasks.push(tokio::spawn(async move {
+            setup
+                .accept_inbound(pcmu_call(&format!("c-race-{i}"), LINPHONE_PCMU_OFFER))
+                .await
+                .is_ok()
+        }));
+    }
+    let mut admitted = 0;
+    for t in tasks {
+        if t.await.unwrap() {
+            admitted += 1;
+        }
+    }
+
+    assert_eq!(
+        admitted, 40,
+        "capacity 100 minus a floor of 60 — exactly, not approximately"
+    );
+    let (allocated, available) = session_mgr.port_pool_stats().await;
+    assert_eq!((allocated, available), (40, 60));
+}
+
+/// The metric that splits "pool empty" from "the rest is reserved"
+/// classifies forge's message. Pin it against an error a *real* pool at
+/// its floor produces, so an upstream rewording fails here instead of
+/// silently zeroing `siphon_ai_rtp_reserve_blocks_total`.
+#[tokio::test]
+async fn reserve_refusal_is_recognised_from_the_real_forge_error() {
+    let session_mgr = small_session_manager(42800, 43000); // 100 pairs
+    let setup = reserved_setup_on(&session_mgr, 99);
+
+    setup
+        .accept_inbound(pcmu_call("c-msg-1", LINPHONE_PCMU_OFFER))
+        .await
+        .expect("one call fits under a floor of 99");
+
+    let err = setup
+        .accept_inbound(pcmu_call("c-msg-2", LINPHONE_PCMU_OFFER))
+        .await
+        .expect_err("the second is at the floor");
+    let SetupError::ResourceLimit(detail) = err else {
+        panic!("expected ResourceLimit, got {err:?}");
+    };
+    assert!(
+        detail.contains("reserved floor"),
+        "media-glue classifies the reserve refusal on this substring; forge \
+         reworded it and the reserve metric is now silently dead: {detail}"
+    );
+
+    // And an exhausted pool must NOT look like a floor refusal.
+    let plain = reserved_setup_on(&session_mgr, 0);
+    for i in 0..99 {
+        plain
+            .accept_inbound(pcmu_call(&format!("c-msg-fill-{i}"), LINPHONE_PCMU_OFFER))
+            .await
+            .unwrap_or_else(|e| panic!("fill {i}: {e}"));
+    }
+    let empty = plain
+        .accept_inbound(pcmu_call("c-msg-empty", LINPHONE_PCMU_OFFER))
+        .await
+        .expect_err("pool is empty");
+    let SetupError::ResourceLimit(detail) = empty else {
+        panic!("expected ResourceLimit");
+    };
+    assert!(
+        !detail.contains("reserved floor"),
+        "an exhausted pool must not be counted as a reservation refusal: {detail}"
     );
 }

@@ -458,34 +458,43 @@ impl MediaSetup {
         self.reserved_outbound_calls
     }
 
-    /// Refuse an inbound call once the pool's free pairs have fallen to
-    /// the outbound reservation (`[media].reserved_outbound_calls`).
+    /// Convert a failed inbound session allocation, splitting "the pool
+    /// is empty" from "the rest is reserved for origination" for the
+    /// operator (`RTP_RESERVE_BLOCKS_TOTAL`) — #556.
     ///
-    /// Returns [`SetupError::ResourceLimit`] so the refusal takes the
-    /// existing exhausted-pool path — `503` + `Retry-After`, counted as
-    /// `rejected_capacity` (#554/#555). A caller must not be able to
-    /// tell "the pool is empty" from "the rest is spoken for": both
-    /// mean try another node. The split is operator-side, on
-    /// [`RTP_RESERVE_BLOCKS_TOTAL`].
-    async fn check_outbound_reserve(&self) -> Result<(), SetupError> {
-        let reserved = self.reserved_outbound_calls;
-        if reserved == 0 {
-            return Ok(());
+    /// Both stay [`SetupError::ResourceLimit`], so the *caller* still
+    /// gets one answer: `503` + `Retry-After`, counted as
+    /// `rejected_capacity` (#554/#555). A peer must not be able to tell
+    /// "we are empty" from "the rest is spoken for" — both mean try
+    /// another node. Only our own telemetry distinguishes them.
+    ///
+    /// Forge deliberately gives the two conditions the same error
+    /// variant with different messages (forge-media #120), so this
+    /// classifies on the message. That is a string dependency on an
+    /// upstream we own; `reserve_refusal_is_recognised_from_the_real_
+    /// forge_error` pins it against an error produced by a real pool at
+    /// its floor rather than a hand-copied literal, so an upstream
+    /// rewording fails our tests instead of silently zeroing the metric.
+    fn classify_inbound_alloc_error(&self, err: ForgeError) -> SetupError {
+        let setup = SetupError::from(err);
+        if let SetupError::ResourceLimit(detail) = &setup {
+            if Self::is_reserve_refusal(detail) {
+                metrics::counter!(RTP_RESERVE_BLOCKS_TOTAL).increment(1);
+                warn!(
+                    reserved_pairs = self.reserved_outbound_calls,
+                    detail = %detail,
+                    "refusing inbound call: RTP port pool is down to the outbound reservation"
+                );
+            }
         }
-        let (_allocated, available) = self.session_manager.port_pool_stats().await;
-        if available > reserved {
-            return Ok(());
-        }
-        metrics::counter!(RTP_RESERVE_BLOCKS_TOTAL).increment(1);
-        warn!(
-            available_pairs = available,
-            reserved_pairs = reserved,
-            "refusing inbound call: RTP port pool is down to the outbound reservation"
-        );
-        Err(SetupError::ResourceLimit(format!(
-            "RTP port pool at the outbound reservation: {available} pair(s) free, \
-             {reserved} held for origination ([media].reserved_outbound_calls)"
-        )))
+        setup
+    }
+
+    /// Whether a forge `ResourceLimit` detail describes the reserved
+    /// floor rather than an exhausted pool. See
+    /// [`classify_inbound_alloc_error`](Self::classify_inbound_alloc_error).
+    fn is_reserve_refusal(detail: &str) -> bool {
+        detail.contains("reserved floor")
     }
 
     /// Set the base `MediaSessionConfig` used when a call needs a
@@ -498,14 +507,29 @@ impl MediaSetup {
         self
     }
 
-    /// `MediaSessionConfig` to create a session with, or `None` to
-    /// run the manager's defaults (energy VAD — the common case).
-    fn session_config_for(&self, vad: VadBackend) -> Option<MediaSessionConfig> {
-        vad.vad_config(VadBackend::PRE_NEGOTIATION_RATE)
-            .map(|vad_config| MediaSessionConfig {
-                vad_config,
-                ..self.session_config_template.clone()
-            })
+    /// `MediaSessionConfig` to create a session with, or `None` to run
+    /// the manager's defaults (energy VAD, no reserved floor — the
+    /// common case, and the only one that costs nothing).
+    ///
+    /// `min_free_port_pairs` is the RTP pool floor this call must leave
+    /// behind (#556): the inbound reservation on `accept_inbound`, and
+    /// always `0` on `originate_offer`, which is the direction the
+    /// reservation exists to protect.
+    fn session_config_for(
+        &self,
+        vad: VadBackend,
+        min_free_port_pairs: usize,
+    ) -> Option<MediaSessionConfig> {
+        let vad_config = vad.vad_config(VadBackend::PRE_NEGOTIATION_RATE);
+        if vad_config.is_none() && min_free_port_pairs == 0 {
+            return None;
+        }
+        Some(MediaSessionConfig {
+            vad_config: vad_config
+                .unwrap_or_else(|| self.session_config_template.vad_config.clone()),
+            min_free_port_pairs,
+            ..self.session_config_template.clone()
+        })
     }
 
     /// Re-align a session's VAD detector with the *negotiated* bridge
@@ -573,30 +597,18 @@ impl MediaSetup {
         // INVITEs.
         let offer = parse_offer(call.offer_sdp)?;
 
-        // (1a) Outbound reservation (#556). Inbound and outbound draw
-        //      from one pool, so whichever direction asks first keeps
-        //      what it takes and an inbound surge starves origination
-        //      outright. Refuse here while free pairs remain, leaving
-        //      them for `originate_offer`, which is not gated.
-        //
-        //      After the parse, so a malformed offer still answers 488
-        //      rather than a misleading 503; before the allocation, so
-        //      we never take a port we would have to hand straight back.
-        //
-        //      The read and the allocation are not atomic: N inbound
-        //      setups in flight can each see the same free count and
-        //      dip the pool up to N-1 pairs below the floor before any
-        //      of them lands. Bounded by concurrent INVITE setup, never
-        //      unbounded, and the alternative — serialising every
-        //      inbound `create_session` behind one lock — costs more at
-        //      the CPS this is meant to survive than the slack does.
-        self.check_outbound_reserve().await?;
-
         // (2) Allocate the session. This is what gives us the port.
         //     A non-default VAD backend rides in as a per-session
         //     config (built at 16 kHz; step 3a re-aligns the rate once
         //     the codec is negotiated).
-        let session = self
+        //     The outbound reservation (#556) rides in as the session's
+        //     `min_free_port_pairs`, so forge evaluates it under the
+        //     same lock that removes the port: an inbound surge cannot
+        //     dip below the floor no matter how many setups are in
+        //     flight. This used to be a `port_pool_stats()` read here,
+        //     which was two critical sections and therefore only a soft
+        //     floor (forge-media #120 moved it into the allocator).
+        let session = match self
             .session_manager
             .create_session_with_config(
                 call.call_id.clone(),
@@ -605,9 +617,13 @@ impl MediaSetup {
                 Some(call.offer_sdp.to_string()),
                 call.from_tag.clone(),
                 call.to_tag.clone(),
-                self.session_config_for(call.vad),
+                self.session_config_for(call.vad, self.reserved_outbound_calls),
             )
-            .await?;
+            .await
+        {
+            Ok(session) => session,
+            Err(e) => return Err(self.classify_inbound_alloc_error(e)),
+        };
 
         // From here on, any failure must release the session.
         let mut guard = SessionGuard::new(&self.session_manager, &call.call_id);
@@ -719,7 +735,9 @@ impl MediaSetup {
                 None,
                 req.from_tag.clone(),
                 req.to_tag.clone(),
-                self.session_config_for(req.vad),
+                // Floor of 0: origination is the direction the
+                // reservation protects, so it may draw the pool dry.
+                self.session_config_for(req.vad, 0),
             )
             .await?;
 

@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **forge-media pinned to `1fe94a502efa`** — nine commits, three of them
+  filed from this project. [#120](https://github.com/thevoiceguy/forge-media/pull/120)
+  adds `PortPool::allocate_reserving(min_free)` and
+  `MediaSessionConfig::min_free_port_pairs`, which is what makes
+  `[media].reserved_outbound_calls` above an *exact* floor: the check now
+  happens inside the allocator's own critical section instead of as a
+  free-pair read taken just before it, so concurrent INVITE setup can no
+  longer dip below the reservation. Both land in the same release, so no
+  published build ever had the softer version.
+  [#122](https://github.com/thevoiceguy/forge-media/pull/122) fixed
+  forge's broken-link CI step (it grepped for a word rustdoc never
+  prints, so it had passed unconditionally while eleven unresolved links
+  accumulated) and [#123](https://github.com/thevoiceguy/forge-media/pull/123)
+  gave `forge-vad` a types-only `forge-core` dependency so two of them
+  could be live links. Neither changes anything we compile.
+
+  **One upstream change reaches our wire without us asking for it:**
+  forge-media #117 + #118 move the DTLS-SRTP certificate from **RSA-2048
+  to ECDSA P-256** and offer ECDHE-ECDSA first. We build `forge-engine`
+  with `dtls`, so this is live wherever `[media].srtp_offer = "dtls"`
+  (0.9.4) is set. The SDP `a=fingerprint` stays `sha-256` — only the key
+  type, and therefore the hash value, change — and P-256 is what browsers
+  and webrtc-rs present, so it is the more interoperable default as well
+  as ~100× faster to generate. A peer that can only do RSA key exchange
+  would now fail where it previously worked. The `delayed_offer_dtls`
+  SIPp scenario covers the handshake.
+
+  The remaining commits (#116, #119, #121) are WebRTC/ICE work in
+  `forge-webrtc` / `forge-ice`, neither of which we depend on. #115 bumps
+  forge-media's own siphon-rs submodule to v2026.08.19; we pin siphon-rs
+  directly at v2026.08.21 and the two stay separate package sources, but
+  the version skew closed — forge's vendored `sip-sdp` goes 0.3.0 → 0.3.1,
+  matching what our tag carries.
+
 ### Added
 
 - **`[media].reserved_outbound_calls`: hold RTP ports back for
@@ -44,11 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Restart-required. A value at or above the pool's capacity fails at load
   with the capacity in the message: reserving the whole pool would answer
   `503` to every INVITE forever, which is a concurrency cap wearing a
-  media knob's clothes. Two caveats, both documented in `docs/CONFIG.md`:
-  the floor is **not atomic** — the free-pair read and the allocation are
-  separate, so `K` inbound setups in flight can dip up to `K-1` pairs
-  below it before any lands (bounded by concurrent INVITE setup; size `N`
-  with a little slack) — and the knob decides *who loses* when the pool
+  media knob's clothes. **The floor is exact** — it is evaluated inside
+  the RTP pool allocator's own critical section, so no amount of
+  concurrent INVITE setup can dip below it and `N` needs no slack (that
+  took an upstream change; see the forge-media bump below). The one
+  caveat, in `docs/CONFIG.md`: the knob decides *who loses* when the pool
   is too small, it does not make it bigger. `rtp_port_range` must still
   be sized for the sum of both directions; `docs/DEPLOY.md` now says so
   under its own heading, with the measurement and the reason an operator

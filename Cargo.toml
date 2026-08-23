@@ -353,7 +353,44 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v20
 # AI logic belongs in the WS server, never here. See CLAUDE.md §4.1 and the
 # upstream gate at https://github.com/thevoiceguy/forge-media/pull/39.
 #
-# forge-media is pinned to a `main` rev. Bumped 2026-08-18 to b161adedee5d
+# forge-media is pinned to a `main` rev. Bumped 2026-08-23 to 1fe94a502efa
+# = nine commits, of which **three were filed from this project** and two
+# more reach our build.
+#
+# What we came for (#556): **forge-media #120** adds
+# `PortPool::allocate_reserving(min_free)` and
+# `MediaSessionConfig::min_free_port_pairs`, so the outbound RTP
+# reservation added in #560 implemented as a `port_pool_stats()` read in
+# `media-glue` moves *inside* the allocator's own critical section. That
+# turns a soft floor — two critical sections, so K concurrent inbound
+# setups could dip K-1 pairs under it — into an exact one. Both land in
+# the same release, so no published build ever had the soft version. `#122` fixed
+# forge's "Check for broken links" CI step, which grepped for a word
+# rustdoc never prints and so had passed unconditionally while eleven
+# unresolved links accumulated; `#123` gave `forge-vad` a types-only
+# `forge-core` dep so two of those links could be live rather than prose
+# (one Cargo.lock line — every consumer already had forge-core).
+#
+# **Reaches our build without us asking: #117 + #118 change the DTLS-SRTP
+# certificate from RSA-2048 to ECDSA P-256** and put ECDHE-ECDSA first in
+# the cipher list. We compile forge-engine with `dtls`, so this is live on
+# `[media].srtp_offer = "dtls"` (0.9.4). The SDP `a=fingerprint` stays
+# `sha-256` — only the key type and therefore the hash value change — and
+# P-256 is what browsers and webrtc-rs present, so it is the more
+# interoperable default; it is also ~100x faster to generate. A peer that
+# can only do RSA key exchange would now fail where it used to work.
+# `delayed_offer_dtls` in the SIPp suite covers the handshake and passes.
+#
+# The rest is WebRTC/ICE work we do not compile: #116 (PeerConnection),
+# #119 (TURN client), #121 (media over TURN relay) live in forge-webrtc /
+# forge-ice, neither of which is in our dependency list — WebRTC client
+# support is a CLAUDE.md §8 non-goal. #115 bumps forge-media's *own*
+# siphon-rs submodule to v2026.08.19; we pin siphon-rs directly at
+# v2026.08.21, and the two remain separate package sources in the
+# lockfile, but the skew closed — forge's vendored `sip-sdp` goes 0.3.0 →
+# 0.3.1, the same version our tag carries.
+#
+# (Prior: 2026-08-18 to b161adedee5d
 # = six commits, all dependency bumps: #106 bytes 1.12.1, #109 base64
 # 0.23.1, #110 validator 0.21.0, #113 a 7-crate patch group, #114 h2 0.4.16
 # (RUSTSEC-2026-0258) plus the deletion of forge-ai-stream's unused reqwest
@@ -438,20 +475,20 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v20
 # comment for the current rev.) Prior forge pins: forge 1c996ae5fb4f = #86
 # neural VAD; forge 3c59b5f6e464 = #82-#85 dependency migrations; forge
 # 5fa76fb38675 = #81.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
-forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
-forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
+forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
+forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
 # Conference rooms (0.7.0): forge-mixer is the per-room AudioMixer;
 # forge-injection provides ToneGenerator (join/leave tones now, MOH
 # for park later). Deliberately NOT forge-conference — its DTMF
 # IVR/PIN/host-control layer is unused per DEV_PLAN_0.7.0.md §9.4.
-forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
-forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "b161adedee5d" }
+forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
+forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.

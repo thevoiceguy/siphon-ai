@@ -187,10 +187,11 @@ Two things follow:
 - **`[media].reserved_outbound_calls = N`** holds `N` pairs back from the
   inbound allocator (0.50.0, [#556]). Inbound is refused `503` +
   `Retry-After` once free pairs reach `N`; origination is not gated and may
-  use them. Sizing: set it to your peak concurrent originations plus a pair
-  or two of slack — the floor is not atomic, so inbound setups in flight can
-  dip a little below it. It is **not** a substitute for sizing the range;
-  it decides who loses when the range is too small.
+  use them. Sizing: set it to your peak concurrent originations. The floor is
+  exact — evaluated inside the pool allocator's own critical section, so
+  concurrent INVITE setup cannot dip below it and no slack is needed. It is
+  **not** a substitute for sizing the range; it decides who loses when the
+  range is too small.
 - **Watch the failure from the outbound side.** `POST /admin/v1/calls`
   returns `202` and a port-pool failure arrives later on the
   `outbound_failed` webhook, so an HTTP status code will never show it.

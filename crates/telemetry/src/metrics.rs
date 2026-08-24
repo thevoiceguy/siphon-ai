@@ -51,11 +51,16 @@ use thiserror::Error;
 // ─── Counters ───────────────────────────────────────────────────────
 
 /// Total INVITEs the daemon has seen. Labeled by `result`:
-/// `accepted`, `rejected`, `rejected_attestation`, `no_match`. `rejected`
-/// covers every 4xx/5xx final response from the routing/media layer (see
-/// `siphon_ai_core::AcceptError::sip_status`); `rejected_attestation` is
-/// carved out for STIR/SHAKEN policy rejections (`min_attestation` gate or
-/// `require_identity`) so fraud-control alerts don't bury in routing noise.
+/// `accepted`, `rejected`, `rejected_attestation`, `rejected_capacity`,
+/// `rejected_trunk`, `no_match`. `rejected` covers every other 4xx/5xx
+/// final response from the routing/media layer (see
+/// `siphon_ai_core::AcceptError::sip_status`); the carve-outs keep their
+/// own alerts out of routing noise: `rejected_attestation` is a
+/// STIR/SHAKEN policy rejection (`min_attestation` gate or
+/// `require_identity`), `rejected_capacity` is RTP port-pool exhaustion
+/// (#554), and `rejected_trunk` is the `[[trunk]]` allowlist gate's 403 —
+/// the one result incremented from sip-glue's dispatch layer rather than
+/// the acceptor, because that gate runs before the acceptor exists (#564).
 pub const INVITES_TOTAL: &str = "siphon_ai_invites_total";
 
 /// Calls that completed (controller exited), inbound and outbound
@@ -777,7 +782,7 @@ pub fn install_recorder() -> Result<PrometheusHandle, InitError> {
 pub fn register_descriptions() {
     describe_counter!(
         INVITES_TOTAL,
-        "Inbound INVITEs by result (accepted, rejected, rejected_attestation, no_match)."
+        "Inbound INVITEs by result (accepted, rejected, rejected_attestation, rejected_capacity, rejected_trunk, no_match)."
     );
     describe_counter!(
         CALLS_TOTAL,

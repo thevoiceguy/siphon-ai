@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.50.1] - 2026-08-24
+
+**Two observability blind-spot fixes and routine upstream pin rolls.**
+
+Both fixes came out of validating the 0.50.0 getting-started flow: the
+`[[trunk]]` gate's 403s — the exact scanner traffic the gate exists to
+shed — were invisible on `/metrics`, and four 0.49.0 admin endpoints
+reported as `endpoint="unknown"`. No protocol change (still `1`), CDR
+still v8, no new config keys. Drop-in upgrade; alerting can now key on
+`siphon_ai_invites_total{result="rejected_trunk"}`.
+
+### Changed
+
+- **siphon-rs pinned to `v2026.08.24`** (from `v2026.08.21`) — picks up
+  [sip-identity 0.3.0](https://github.com/thevoiceguy/siphon-rs/pull/124):
+  PASSporT **signing** behind a new `sign` feature
+  ([siphon-rs #123](https://github.com/thevoiceguy/siphon-rs/pull/123)),
+  the provider-side complement to the ES256 verification SiphonAI already
+  uses. SiphonAI does not enable the feature, so verification behaviour is
+  unchanged — this makes outbound STIR/SHAKEN signing (long demand-gated)
+  buildable against the current pin when it's picked up.
+- **forge-media pinned to `c277860cd123`** (from `1fe94a502efa`) — one
+  commit: aligns forge-media's own siphon-rs submodule to `v2026.08.24`,
+  keeping both pins on the same upstream revision (the media path sees
+  siphon-rs through that submodule).
+
 ### Fixed
 
 - **`[[trunk]]`-gate 403s now count in `siphon_ai_invites_total` as

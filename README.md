@@ -258,7 +258,7 @@ selected via env vars at startup:
 | OpenRouter | `https://openrouter.ai/api/v1` |
 | Local Ollama | `http://127.0.0.1:11434/v1` |
 
-In practice with Groq + `llama-3.3-70b-versatile`,
+In practice with Groq + `openai/gpt-oss-120b`,
 user-stop-to-agent-audio runs ~600 ms steady-state, with the
 ~1 s floor from Deepgram's `utterance_end_ms` minimum.
 

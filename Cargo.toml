@@ -475,20 +475,20 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v20
 # comment for the current rev.) Prior forge pins: forge 1c996ae5fb4f = #86
 # neural VAD; forge 3c59b5f6e464 = #82-#85 dependency migrations; forge
 # 5fa76fb38675 = #81.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
-forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
-forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24" }
+forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24" }
+forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24" }
 # Conference rooms (0.7.0): forge-mixer is the per-room AudioMixer;
 # forge-injection provides ToneGenerator (join/leave tones now, MOH
 # for park later). Deliberately NOT forge-conference — its DTMF
 # IVR/PIN/host-control layer is unused per DEV_PLAN_0.7.0.md §9.4.
-forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
-forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
+forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24" }
+forge-injection = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.

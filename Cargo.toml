@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.50.0"
+version = "0.50.1"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -319,31 +319,31 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 #  `6fd432270bb8` = #67 dialog_manager share, siphon-ai #324;
 #  `fcaff011f9c6` = #65 invite_with_from, siphon-ai #316;
 #  `3a4fc312ade3` = #64 TLS-SNI-is-hostname, siphon-ai #312.)
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21", features = ["tls"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.24" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.24" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.24", features = ["tls"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.24" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.24" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.24" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.24" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.24" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.24" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
 # (distinct from forge-media's pinned sip-sdp). Used by the outbound
 # delayed-offer answer generator to hand the UAC a SessionDescription it
 # accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.24" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.24" }
 # sip-observe — the transport-layer observability seam. We implement its
 # `TransportMetrics` trait in siphon-ai-telemetry and install it with
 # `set_transport_metrics`, which is the only way to see ingress
 # rate-limit drops: the hook is defaulted to a no-op upstream, so an
 # embedder that installs nothing (as we did until 0.48.11) silently gets
 # the `NoopTransportMetrics` fallback (siphon-ai #459).
-sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
+sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.24" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.21" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.24" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #
@@ -475,20 +475,20 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v20
 # comment for the current rev.) Prior forge pins: forge 1c996ae5fb4f = #86
 # neural VAD; forge 3c59b5f6e464 = #82-#85 dependency migrations; forge
 # 5fa76fb38675 = #81.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
-forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
-forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
+forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
+forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
 # Conference rooms (0.7.0): forge-mixer is the per-room AudioMixer;
 # forge-injection provides ToneGenerator (join/leave tones now, MOH
 # for park later). Deliberately NOT forge-conference — its DTMF
 # IVR/PIN/host-control layer is unused per DEV_PLAN_0.7.0.md §9.4.
-forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
-forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "1fe94a502efa" }
+forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
+forge-injection = { git = "https://github.com/thevoiceguy/forge-media", rev = "c277860cd123" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.

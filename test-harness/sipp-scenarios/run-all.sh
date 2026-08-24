@@ -2292,7 +2292,9 @@ ws_url = "ws://127.0.0.1:$RIA_WS_PORT/"
 # A trunk that deliberately does not match the loopback SIPp runs on,
 # so the INVITE is rejected 403 — the premise of the case. Without any
 # [[trunk]] at all the daemon accepts from anywhere and the scenario
-# would fail at its `recv 403`.
+# would fail at its 'recv 403' step. (No backticks here — this heredoc
+# is unquoted so \$vars interpolate, and a backtick would run as a
+# command substitution.)
 [[trunk]]
 name = "nowhere"
 peer_addrs = ["192.0.2.1"]

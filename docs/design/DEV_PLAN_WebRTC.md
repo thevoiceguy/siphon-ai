@@ -1,7 +1,7 @@
 # WebRTC Support for SiphonAI — Development Plan
 
 **Status:** Draft for review
-**Baseline:** siphon-ai 0.50.1, siphon-rs v2026.08.24, forge-media @ 3996e1acb894 (includes the G.711 browser-leg work below)
+**Baseline:** siphon-ai 0.50.1, siphon-rs v2026.08.24, forge-media v2026.08.24 (forge's first tagged release; includes the G.711 browser-leg work below and embeds the same siphon-rs tag)
 **Goal:** A browser can place and receive calls through SiphonAI with no SIP client installed — signaling over SIP-over-WebSocket (RFC 7118), media over ICE/DTLS-SRTP/Opus — and the WebSocket AI side sees exactly what it sees today: PCM16LE, fixed 20ms frames.
 
 ---
@@ -10,7 +10,7 @@
 
 This plan is shorter than it would have been six months ago because most of the media plane is already built upstream.
 
-**forge-webrtc (0.3.0)** is an endpoint-shaped `PeerConnection`:
+**forge-webrtc (0.4.0)** is an endpoint-shaped `PeerConnection`:
 
 - ICE (RFC 8445) with trickle (RFC 8838), both roles, checks/nomination/keepalives on the single media socket
 - DTLS-SRTP (RFC 5764) key exchange, both `a=setup` roles, fingerprint bound to signalled SDP

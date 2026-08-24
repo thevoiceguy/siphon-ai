@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   INVITE retries with credentials and is counted then) — that gate's
   brute-force signal remains `siphon_ai_sip_auth_total{result="failed"}`.
 
+- **Four admin endpoints no longer report as `endpoint="unknown"` in
+  `siphon_ai_admin_requests_total`**
+  ([#565](https://github.com/thevoiceguy/siphon-ai/issues/565)):
+  `GET /admin/v1/status`, `GET /admin/v1/errors`,
+  `GET /admin/v1/cdrs/recent`, and `POST /admin/v1/drain` — the 0.49.0
+  sightglass endpoints — got authorization arms but no metric-label
+  arms, so their traffic lost per-endpoint visibility and polluted the
+  `unknown` probing signal dashboards key on. The static route table is
+  now a single shared source (`STATIC_ROUTES`) answering both
+  `min_role` and `route_label`, so a route can no longer be known to
+  authorization yet invisible to metrics.
+
 ## [0.50.0] - 2026-08-23
 
 **One new config key and one dependency bump that reaches the wire.**

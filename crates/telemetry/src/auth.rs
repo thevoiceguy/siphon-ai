@@ -185,9 +185,167 @@ pub(crate) fn sha256(s: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Every static (fixed-path) admin route, one row per served
+/// `(method, path)`: the minimum role and the bounded metric label.
+/// The single source of truth for [`min_role`], [`route_label`], and
+/// the `every_served_route_has_a_bounded_label` test; routes with ids
+/// in the path can't live in a literal table and stay as match arms in
+/// both functions. One table because two lists drifted (#565): the
+/// 0.49.0 sightglass endpoints got `min_role` arms but no
+/// `route_label` arms, so four served routes reported
+/// `endpoint="unknown"` — a row here cannot be known to authorization
+/// yet invisible to metrics.
+///
+/// **Must mirror the static arms of `admin::dispatch`.**
+///
+/// Unversioned paths are deprecated aliases of the /admin/v1/ forms
+/// (#362). Each pair maps to the same role by definition, but gets a
+/// distinct label on purpose — the split lets a dashboard watch
+/// legacy-path traffic drain to zero before the aliases are retired.
+const STATIC_ROUTES: &[(hyper::Method, &str, Role, &str)] = {
+    use hyper::Method;
+    &[
+        // ── ReadOnly: every fixed-path GET / list ──
+        (
+            Method::GET,
+            "/admin/calls",
+            Role::ReadOnly,
+            "GET /admin/calls",
+        ),
+        (
+            Method::GET,
+            "/admin/v1/calls",
+            Role::ReadOnly,
+            "GET /admin/v1/calls",
+        ),
+        (
+            Method::GET,
+            "/admin/registrations",
+            Role::ReadOnly,
+            "GET /admin/registrations",
+        ),
+        (
+            Method::GET,
+            "/admin/v1/registrations",
+            Role::ReadOnly,
+            "GET /admin/v1/registrations",
+        ),
+        (Method::GET, "/admin/log", Role::ReadOnly, "GET /admin/log"),
+        (
+            Method::GET,
+            "/admin/v1/log",
+            Role::ReadOnly,
+            "GET /admin/v1/log",
+        ),
+        (
+            Method::GET,
+            "/admin/v1/conferences",
+            Role::ReadOnly,
+            "GET /admin/v1/conferences",
+        ),
+        (
+            Method::GET,
+            "/admin/v1/parked",
+            Role::ReadOnly,
+            "GET /admin/v1/parked",
+        ),
+        // Drain status is a plain GET snapshot, same as the list routes
+        // above. It resolved to ReadOnly before this row existed, but
+        // only by falling through to `authorize`'s unknown-path default —
+        // i.e. the right answer for the wrong reason, and silently wrong
+        // had the default ever been tightened.
+        (
+            Method::GET,
+            "/admin/v1/drain",
+            Role::ReadOnly,
+            "GET /admin/v1/drain",
+        ),
+        // Recent-errors ring + status summary + recent CDRs (0.49.0) —
+        // more plain GET snapshots.
+        (
+            Method::GET,
+            "/admin/v1/errors",
+            Role::ReadOnly,
+            "GET /admin/v1/errors",
+        ),
+        (
+            Method::GET,
+            "/admin/v1/status",
+            Role::ReadOnly,
+            "GET /admin/v1/status",
+        ),
+        (
+            Method::GET,
+            "/admin/v1/cdrs/recent",
+            Role::ReadOnly,
+            "GET /admin/v1/cdrs/recent",
+        ),
+        // Configured [[trunk]] allowlists — config an operator can
+        // already read, and no live state; readonly like its siblings.
+        (
+            Method::GET,
+            "/admin/v1/trunks",
+            Role::ReadOnly,
+            "GET /admin/v1/trunks",
+        ),
+        // ── Admin (billable / config / observability-blinding) ──
+        (Method::PUT, "/admin/log", Role::Admin, "PUT /admin/log"),
+        (
+            Method::PUT,
+            "/admin/v1/log",
+            Role::Admin,
+            "PUT /admin/v1/log",
+        ),
+        (
+            Method::POST,
+            "/admin/hep/test",
+            Role::Admin,
+            "POST /admin/hep/test",
+        ),
+        (
+            Method::POST,
+            "/admin/v1/hep/test",
+            Role::Admin,
+            "POST /admin/v1/hep/test",
+        ),
+        (
+            Method::POST,
+            "/admin/v1/calls",
+            Role::Admin,
+            "POST /admin/v1/calls",
+        ),
+        // Admin-initiated graceful drain (0.49.0): takes the node out
+        // of service — as operationally heavy as it gets.
+        (
+            Method::POST,
+            "/admin/v1/drain",
+            Role::Admin,
+            "POST /admin/v1/drain",
+        ),
+        // ── Operator (live-call control) ──
+        (
+            Method::POST,
+            "/admin/v1/conferences",
+            Role::Operator,
+            "POST /admin/v1/conferences",
+        ),
+    ]
+};
+
+/// Look up `(method, path)` in [`STATIC_ROUTES`].
+fn static_route(
+    method: &hyper::Method,
+    path: &str,
+) -> Option<&'static (hyper::Method, &'static str, Role, &'static str)> {
+    STATIC_ROUTES
+        .iter()
+        .find(|(m, p, _, _)| m == method && *p == path)
+}
+
 /// The minimum [`Role`] required for a known admin endpoint, or `None`
-/// if `(method, path)` is not a recognised admin route. **Must mirror
-/// the routes in `admin::dispatch`.**
+/// if `(method, path)` is not a recognised admin route. Static routes
+/// come from [`STATIC_ROUTES`]; only the parameterised (id-carrying)
+/// routes are matched here.
 ///
 /// - `ReadOnly`: every `GET` / list.
 /// - `Operator`: live-call control (hangup, park, retrieve, conference
@@ -195,49 +353,15 @@ pub(crate) fn sha256(s: &str) -> [u8; 32] {
 /// - `Admin`: originate (billable), log-filter change, HEP probe.
 pub fn min_role(method: &hyper::Method, path: &str) -> Option<Role> {
     use hyper::Method;
-    match (method, path) {
-        // ── ReadOnly ──
-        // Unversioned paths are deprecated aliases of the /admin/v1/
-        // forms (#362) — each pair maps to the same role by definition.
-        (&Method::GET, "/admin/calls" | "/admin/v1/calls")
-        | (&Method::GET, "/admin/registrations" | "/admin/v1/registrations")
-        | (&Method::GET, "/admin/log" | "/admin/v1/log")
-        | (&Method::GET, "/admin/v1/conferences")
-        | (&Method::GET, "/admin/v1/parked")
-        // Drain status is a plain GET snapshot, same as the list routes
-        // above. It resolved to ReadOnly before this arm existed, but
-        // only by falling through to `authorize`'s unknown-path default —
-        // i.e. the right answer for the wrong reason, and silently wrong
-        // had the default ever been tightened.
-        | (&Method::GET, "/admin/v1/drain")
-        // Recent-errors ring + status summary (0.49.0) — more plain
-        // GET snapshots.
-        | (&Method::GET, "/admin/v1/errors")
-        | (&Method::GET, "/admin/v1/status")
-        // Configured [[trunk]] allowlists — config an operator can
-        // already read, and no live state; readonly like its siblings.
-        | (&Method::GET, "/admin/v1/trunks")
-        | (&Method::GET, "/admin/v1/cdrs/recent") => Some(Role::ReadOnly),
-
-        // ── Admin (billable / config / observability-blinding) ──
-        (&Method::PUT, "/admin/log" | "/admin/v1/log")
-        | (&Method::POST, "/admin/hep/test" | "/admin/v1/hep/test")
-        | (&Method::POST, "/admin/v1/calls")
-        // Admin-initiated graceful drain (0.49.0): takes the node out
-        // of service — as operationally heavy as it gets.
-        | (&Method::POST, "/admin/v1/drain") => Some(Role::Admin),
-
-        // ── Operator (live-call control) ──
-        (&Method::POST, "/admin/v1/conferences") => Some(Role::Operator),
-        // ── ReadOnly (parameterised) ──
-        // /admin/v1/calls/:id/stats — live quality probe (0.31.0).
-        (m, p)
-            if *m == Method::GET && p.starts_with("/admin/v1/calls/") && p.ends_with("/stats") =>
-        {
-            Some(Role::ReadOnly)
-        }
-        (m, p) => operator_pattern(m, p).then_some(Role::Operator),
+    if let Some((_, _, role, _)) = static_route(method, path) {
+        return Some(*role);
     }
+    // ── ReadOnly (parameterised) ──
+    // /admin/v1/calls/:id/stats — live quality probe (0.31.0).
+    if *method == Method::GET && path.starts_with("/admin/v1/calls/") && path.ends_with("/stats") {
+        return Some(Role::ReadOnly);
+    }
+    operator_pattern(method, path).then_some(Role::Operator)
 }
 
 /// Parameterised Operator routes that `min_role`'s literal arms can't
@@ -294,26 +418,12 @@ fn operator_pattern(method: &hyper::Method, path: &str) -> bool {
 /// unrecognised path. Never the raw path (which carries call/room ids).
 pub fn route_label(method: &hyper::Method, path: &str) -> &'static str {
     use hyper::Method;
+    // Static routes come from STATIC_ROUTES (one table with min_role,
+    // #565); only the parameterised routes need arms here.
+    if let Some((_, _, _, label)) = static_route(method, path) {
+        return label;
+    }
     match (method, path) {
-        // Legacy aliases and their /admin/v1/ forms (#362) get distinct
-        // labels on purpose — the split lets a dashboard watch legacy-path
-        // traffic drain to zero before the aliases are ever retired.
-        (&Method::GET, "/admin/calls") => "GET /admin/calls",
-        (&Method::GET, "/admin/v1/calls") => "GET /admin/v1/calls",
-        (&Method::GET, "/admin/registrations") => "GET /admin/registrations",
-        (&Method::GET, "/admin/v1/registrations") => "GET /admin/v1/registrations",
-        (&Method::GET, "/admin/log") => "GET /admin/log",
-        (&Method::GET, "/admin/v1/log") => "GET /admin/v1/log",
-        (&Method::PUT, "/admin/log") => "PUT /admin/log",
-        (&Method::PUT, "/admin/v1/log") => "PUT /admin/v1/log",
-        (&Method::POST, "/admin/hep/test") => "POST /admin/hep/test",
-        (&Method::POST, "/admin/v1/hep/test") => "POST /admin/v1/hep/test",
-        (&Method::POST, "/admin/v1/calls") => "POST /admin/v1/calls",
-        (&Method::GET, "/admin/v1/conferences") => "GET /admin/v1/conferences",
-        (&Method::POST, "/admin/v1/conferences") => "POST /admin/v1/conferences",
-        (&Method::GET, "/admin/v1/parked") => "GET /admin/v1/parked",
-        (&Method::GET, "/admin/v1/drain") => "GET /admin/v1/drain",
-        (&Method::GET, "/admin/v1/trunks") => "GET /admin/v1/trunks",
         (m, p)
             if *m == Method::POST && p.starts_with("/admin/calls/") && p.ends_with("/hangup") =>
         {
@@ -627,46 +737,29 @@ mod tests {
     /// bounded route template", and dashboards key on
     /// `endpoint="unknown"` as a probing signal — so a served route
     /// falling through to `"unknown"` both loses its own visibility and
-    /// pollutes that signal. `GET /admin/v1/drain` did exactly this, and
-    /// it's the route a deploy script polls hardest during a rollout.
-    ///
-    /// This list must mirror the static arms of `admin::dispatch`. It is
-    /// spelled out rather than derived because the dispatcher's arms
-    /// aren't introspectable — but a new route added there without a
-    /// label here now fails a test instead of silently degrading a
-    /// metric.
+    /// pollutes that signal. `GET /admin/v1/drain` did exactly this;
+    /// then the 0.49.0 sightglass endpoints did it four more times
+    /// (#565), because this test's own copy of the static route list
+    /// had drifted too. Statics now come from `STATIC_ROUTES` — the
+    /// same table `min_role` and `route_label` answer from — so the
+    /// only list left to keep in sync with `admin::dispatch` is the
+    /// table itself, and what's checked here is its self-consistency:
+    /// a row whose label doesn't round-trip through `route_label`, or
+    /// doesn't spell "METHOD /path" exactly, fails.
     #[test]
     fn every_served_route_has_a_bounded_label() {
-        let statics = [
-            (Method::GET, "/admin/calls"),
-            (Method::GET, "/admin/v1/calls"),
-            (Method::GET, "/admin/registrations"),
-            (Method::GET, "/admin/v1/registrations"),
-            (Method::GET, "/admin/log"),
-            (Method::GET, "/admin/v1/log"),
-            (Method::PUT, "/admin/log"),
-            (Method::PUT, "/admin/v1/log"),
-            (Method::POST, "/admin/hep/test"),
-            (Method::POST, "/admin/v1/hep/test"),
-            (Method::POST, "/admin/v1/calls"),
-            (Method::GET, "/admin/v1/conferences"),
-            (Method::POST, "/admin/v1/conferences"),
-            (Method::GET, "/admin/v1/parked"),
-            (Method::GET, "/admin/v1/drain"),
-        ];
-        for (method, path) in &statics {
+        assert!(!STATIC_ROUTES.is_empty());
+        for (method, path, role, _) in STATIC_ROUTES {
             let label = route_label(method, path);
             assert_ne!(label, "unknown", "{method} {path} is served but unlabelled");
             // A static route's label is exactly "METHOD /path" — catches a
-            // copy-pasted arm pointing at the wrong template.
+            // copy-pasted row pointing at the wrong template.
             assert_eq!(label, format!("{method} {path}"), "label mismatch");
-            // `min_role`'s doc requires it to mirror dispatch too. Without
-            // an explicit arm a served route still *works* — `authorize`
-            // defaults an unknown path to ReadOnly — so the omission is
-            // invisible until someone tightens that default.
-            assert!(
-                min_role(method, path).is_some(),
-                "{method} {path} is served but has no explicit min_role arm"
+            assert_eq!(
+                min_role(method, path),
+                Some(*role),
+                "{method} {path}: table row shadowed by an earlier duplicate \
+                 or a parameterised arm"
             );
         }
 

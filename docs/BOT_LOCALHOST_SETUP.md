@@ -110,7 +110,7 @@ Recipes for popular providers:
 ```
 BOT_LLM_BASE_URL=https://api.groq.com/openai/v1
 BOT_LLM_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxx
-BOT_LLM_MODEL=llama-3.3-70b-versatile
+BOT_LLM_MODEL=openai/gpt-oss-120b
 ```
 
 **Anthropic Claude (via their OpenAI-compatible endpoint):**
@@ -138,7 +138,7 @@ On bot startup, the resolved configuration is logged so you can
 verify which provider is live:
 
 ```
-[llm] model=llama-3.3-70b-versatile base_url=https://api.groq.com/openai/v1 max_tokens=(provider default) temperature=(provider default)
+[llm] model=openai/gpt-oss-120b base_url=https://api.groq.com/openai/v1 max_tokens=(provider default) temperature=(provider default)
 ```
 
 ---

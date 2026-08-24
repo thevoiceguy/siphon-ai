@@ -31,7 +31,7 @@
 #                                   want a daemon-user breach to also
 #                                   own those credentials).
 #     BOT_BIND=127.0.0.1:8080
-#     BOT_LLM_MODEL                 e.g. `llama-3.3-70b-versatile`
+#     BOT_LLM_MODEL                 e.g. `openai/gpt-oss-120b`
 #     BOT_LLM_BASE_URL              e.g. `https://api.groq.com/openai/v1`
 #     BOT_LLM_MAX_TOKENS            cap response length
 #     BOT_LLM_TEMPERATURE

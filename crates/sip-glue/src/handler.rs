@@ -50,7 +50,7 @@ use sip_uas::UserAgentServer;
 use siphon_ai_routes::{CompiledRoute, RouteSet};
 // Metric names from the crate that declares them — see the note in
 // media-glue's tap.rs (#474).
-use siphon_ai_telemetry::metrics::{INVITE_ADMISSION_SOURCES, NOTIFY_TOTAL};
+use siphon_ai_telemetry::metrics::{INVITES_TOTAL, INVITE_ADMISSION_SOURCES, NOTIFY_TOTAL};
 use tracing::{debug, info, instrument, warn};
 
 use crate::dialog::{
@@ -647,6 +647,11 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
             match gate.identify(request, ctx) {
                 Some(name) => name,
                 None => {
+                    // This reject happens before the acceptor, whose
+                    // paths own every other INVITES_TOTAL increment —
+                    // without this, scanner traffic the gate sheds is
+                    // invisible on /metrics (#564).
+                    metrics::counter!(INVITES_TOTAL, "result" => "rejected_trunk").increment(1);
                     warn!(
                         peer = %ctx.peer(),
                         "INVITE rejected: no trunk matched (403 Forbidden)"
@@ -682,6 +687,13 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
                 )
                 .increment(1);
                 if let crate::digest::DigestOutcome::Challenge { stale, .. } = &outcome {
+                    // Deliberately NOT counted in INVITES_TOTAL (unlike
+                    // the trunk-gate 403 above, #564): a challenged
+                    // INVITE normally comes straight back with
+                    // credentials and is counted then, so a `rejected`
+                    // here would double-count every authenticated call.
+                    // The alertable signal for this gate is
+                    // `sip_auth_total{result="failed"}`.
                     let result = outcome.metric_result();
                     warn!(
                         peer = %ctx.peer(),

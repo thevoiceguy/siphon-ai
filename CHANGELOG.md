@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`[[trunk]]`-gate 403s now count in `siphon_ai_invites_total` as
+  `result="rejected_trunk"`**
+  ([#564](https://github.com/thevoiceguy/siphon-ai/issues/564)). The allowlist gate runs in the SIP
+  dispatch layer before the acceptor, whose paths owned every increment of
+  that counter — so the INVITEs the gate sheds (scanner traffic hammering
+  the SIP port from non-allowlisted sources) were invisible on `/metrics`
+  and unalertable without log-pipeline tooling. Per-peer detail stays in
+  the audit stream and SIP ring; the new label is alertable directly.
+  Digest-auth 401s are deliberately still not in this counter (a challenged
+  INVITE retries with credentials and is counted then) — that gate's
+  brute-force signal remains `siphon_ai_sip_auth_total{result="failed"}`.
+
 ## [0.50.0] - 2026-08-23
 
 **One new config key and one dependency bump that reaches the wire.**

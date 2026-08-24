@@ -522,6 +522,64 @@ run_scenario admission_invite_503.xml || failures=$((failures + 1))
 ad_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: trunk allowlist 403 ───────────────
+# Exercises the `[[trunk]]` gate end-to-end: a daemon whose only trunk
+# allowlists 10.0.0.0/8 rejects SIPp's loopback INVITE with 403 before
+# any media setup. Then asserts the reject is visible on /metrics as
+# `siphon_ai_invites_total{result="rejected_trunk"}` — the gate runs in
+# the dispatch layer before the acceptor, and until #564 nothing
+# counted it, so scanner traffic the gate sheds was unalertable.
+echo
+echo "─── auxiliary phase: trunk_403 ────────────────────────"
+TG_DAEMON_LOG=$(mktemp -t siphon-ai-tg.XXXXXX.log)
+TG_CONFIG=$(mktemp -t siphon-ai-tg.XXXXXX.toml)
+cat >"$TG_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-tg"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$ECHO_WS_PORT/"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$AUX_OBS_PORT"
+[[trunk]]
+name = "lan-only"
+peer_addrs = ["10.0.0.0/8"]
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$TG_CONFIG" \
+    >"$TG_DAEMON_LOG" 2>&1 &
+TG_DAEMON_PID=$!
+tg_cleanup() {
+    kill "$TG_DAEMON_PID" 2>/dev/null || true
+    wait "$TG_DAEMON_PID" 2>/dev/null || true
+}
+trap tg_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+run_scenario trunk_unauthorized_403.xml || failures=$((failures + 1))
+
+total=$((total + 1))
+echo "─── trunk_403_reject_metric ──────────────────────────"
+if curl -s "http://127.0.0.1:$AUX_OBS_PORT/metrics" \
+    | grep -q 'siphon_ai_invites_total{result="rejected_trunk"} 1'; then
+    echo "  OK"
+else
+    echo "  FAIL (rejected_trunk not on /metrics; daemon: $TG_DAEMON_LOG)"
+    failures=$((failures + 1))
+fi
+
+tg_cleanup
+trap - EXIT
+
 # ─── Always-on auxiliary phase: recording ─────────────────────────
 # Verifies `[recording].mode = "always"` writes a valid stereo WAV. A
 # fresh daemon records to a temp dir; after one basic call we assert the

@@ -105,6 +105,8 @@ Browsers sit behind NAT with unroutable Contact URIs. Handle this the way every 
 
 **Exit criteria:** SIP.js in Chrome REGISTERs over WSS, places a call that routes to a plain SIP UAS, and signaling is fully visible in Homer. Media at this phase: none negotiated or dummy — this phase is signaling only.
 
+> **Validated 2026-08-25** (`examples/browser-sip/`, headless Chromium + SIP.js 0.21 driving the real daemon): digest REGISTER over WSS with Origin enforcement → `siphon_ai_registrar_bindings 1`, binding expired via the connection-loss grace when the browser died; the full REGISTER/401/200 exchange captured in Homer with `Via: SIP/2.0/WSS`; and the browser's test INVITE was digest-challenged, re-authenticated by SIP.js, **routed** (`route=default`), then rejected by the media layer with the precise `488 offer profile UDP/TLS/RTP/SAVPF rejected under srtp_mode = Off` — which is the exact seam where Phase 2's §4.1 detection rule instantiates the WebRTC leg instead. `headless-check.sh` re-runs the whole check unattended and seeds Phase 3's nightly harness.
+
 **Estimated scope:** the largest and least parallelizable phase. The RFC 7118 framing itself is small; connection-reuse routing and registration-to-connection binding are where the time goes.
 
 ---

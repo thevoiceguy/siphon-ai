@@ -53,3 +53,5 @@ docker/.data/
 
 # browser-sip lab: generated per-machine, never committed
 examples/browser-sip/certs/
+examples/browser-sip/pw-browsers/
+examples/browser-sip/pw-libs/

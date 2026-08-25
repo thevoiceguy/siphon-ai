@@ -61,6 +61,44 @@ Proceed). The page errors — fine; the recorded exception is what lets
   *after removing* that entry from `allowed_origins` in `lab.toml` —
   the upgrade is refused 403.
 
+## No display / no Chrome on the box?
+
+```bash
+./examples/browser-sip/headless-check.sh
+```
+
+runs the whole thing self-driving: boots the lab stack, drives the
+page with headless Chromium (system `chromium` if installed, else
+Playwright's download — **no root needed**: the two NSS libraries a
+server install lacks are fetched with `apt-get download` and injected
+via `LD_LIBRARY_PATH`), asserts `siphon_ai_registrar_bindings` goes to
+1, kills the browser, and asserts the connection-loss expiry brings it
+back to 0. Prints `PASS` on a full run. Needs `cargo build -p
+siphon-ai` first, plus `node`/`npx` and network for the Playwright
+fallback. This is also the seed of the plan's Phase 3 nightly
+browser-e2e harness.
+
+**Ports.** Running this on a box that already has a siphon-ai on it is
+the expected case, so every port is overridable — `SIP_PORT`,
+`WSS_PORT`, `PAGE_PORT`, `OBS_PORT`, `ECHO_PORT` — and the script
+copies `lab.toml` with them substituted rather than editing it. A
+collision names the variable and prints the rerun for you:
+
+```
+port 9091 is already in use (OBS_PORT); rerun with e.g.
+  OBS_PORT=9101 ./examples/browser-sip/headless-check.sh
+```
+
+(For the same reason `lab.toml` binds SIP on **5070**, not the
+standard 5060.) Driving the page by hand instead? Use `lab.toml`'s
+ports as written, and stop anything already holding them.
+
+The page's `?auto=1` mode is what the script drives (auto-register,
+result breadcrumbs on the console); `?auto=1&call=1` additionally
+fires the test call — with today's daemon that ends in the precise
+`488` (`offer profile UDP/TLS/RTP/SAVPF rejected`) that marks exactly
+where Phase 2's WebRTC media leg plugs in.
+
 ## Homer (the "fully visible in Homer" criterion)
 
 ```bash

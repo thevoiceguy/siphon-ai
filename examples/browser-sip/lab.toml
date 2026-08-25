@@ -12,7 +12,11 @@
 id = "siphon-ai-browser-lab"
 
 [sip]
-listen = "127.0.0.1:5060"
+# Deliberately NOT the standard 5060: a box that runs siphon-ai at all
+# usually has something there already, and this lab's SIP-over-UDP
+# listener is incidental — browsers arrive on [sip.wss] below.
+# headless-check.sh rewrites every port here from its env overrides.
+listen = "127.0.0.1:5070"
 transports = ["udp", "wss"]
 
 [sip.wss]

@@ -1,7 +1,7 @@
 # WebRTC Support for SiphonAI — Development Plan
 
 **Status:** Draft for review
-**Baseline:** siphon-ai 0.50.1, siphon-rs v2026.08.24, forge-media @ 1fe94a502efa
+**Baseline:** siphon-ai 0.50.1, siphon-rs v2026.08.24, forge-media v2026.08.24 (forge's first tagged release; includes the G.711 browser-leg work below and embeds the same siphon-rs tag)
 **Goal:** A browser can place and receive calls through SiphonAI with no SIP client installed — signaling over SIP-over-WebSocket (RFC 7118), media over ICE/DTLS-SRTP/Opus — and the WebSocket AI side sees exactly what it sees today: PCM16LE, fixed 20ms frames.
 
 ---
@@ -10,13 +10,13 @@
 
 This plan is shorter than it would have been six months ago because most of the media plane is already built upstream.
 
-**forge-webrtc (0.3.0)** is an endpoint-shaped `PeerConnection`:
+**forge-webrtc (0.4.0)** is an endpoint-shaped `PeerConnection`:
 
 - ICE (RFC 8445) with trickle (RFC 8838), both roles, checks/nomination/keepalives on the single media socket
 - DTLS-SRTP (RFC 5764) key exchange, both `a=setup` roles, fingerprint bound to signalled SDP
 - SRTP/SRTCP (RFC 3711/7714) keyed directly from the DTLS export
 - SDP offer *and* answer (RFC 3264/8829), BUNDLE + rtcp-mux, renegotiation with rollback
-- **One audio section, Opus only.** ICE restart deliberately unsupported.
+- **One audio section — Opus and G.711 (PCMU/PCMA), preference-ordered via `PeerConfig::codecs`** ([forge-media #130](https://github.com/thevoiceguy/forge-media/pull/130); this plan originally said "Opus only" and filed that PR). ICE restart deliberately unsupported.
 - TURN client support in forge-ice (RFC 8489 long-term credentials)
 
 **forge-codecs / forge-transcoder / forge-resampler** cover the Opus↔PCM16LE path (`audiopus`, sample-rate conversion, `RtpTranscoder` with payload-type mapping).
@@ -45,14 +45,14 @@ Why this and not WHIP/WHEP or a custom HTTP offer/answer API:
 
 **Rejected alternative worth recording:** terminating WebRTC media with a custom REST signaling API. It would ship faster for a demo but forks the call model — two signaling paths through routing, admission, and CDR forever. Not worth it.
 
-### Codec decision: Opus, transcode at the bridge
+### Codec decision: Opus by default, transcode at the bridge; G.711 available upstream
 
-forge-webrtc negotiates Opus only, so the browser leg is Opus whether we like it or not. Two options:
+Two options were on the table:
 
 1. **Transcode Opus↔PCM16LE in media-glue** using forge-transcoder + forge-resampler. Works today, no upstream changes. Opus at 48kHz decoded and resampled to the bridge's PCM16LE rate. CPU cost is real but small (libopus decode is ~1–2% of a core per call).
 2. Extend forge-webrtc to also offer PCMU/PCMA (G.711 is mandatory-to-implement in WebRTC, all browsers accept it). Skips transcoding entirely and matches the SIP-side codec.
 
-**Decision: ship (1), file (2) upstream as an optimization.** Opus is also the *better* codec for the primary use case — a wideband 48kHz browser leg feeding a voice AI pipeline beats 8kHz G.711 for ASR quality. Don't engineer it away just to save a transcode.
+**Decision: ship (1) as the default; (2) is built** — it was implemented upstream ahead of the phases rather than just filed ([forge-media #130](https://github.com/thevoiceguy/forge-media/pull/130), merged 2026-08-24). forge-webrtc now negotiates a preference-ordered codec list (`PeerConfig::codecs`, default Opus-first), answers pin exactly one codec at the remote's payload type, and `negotiated_codec()`/`AudioSender::samples_per_20ms()` tell the media layer what to encode and how to frame it. Opus stays the default because it's the *better* codec for the primary use case — a wideband 48kHz browser leg feeding a voice AI pipeline beats 8kHz G.711 for ASR quality. What (2) buys Phase 2: a per-route codec preference can put PCMU/PCMA first on the browser leg to match a G.711 SIP leg and skip the transcode entirely — worth exposing in `[webrtc]`/per-route config when the leg lands, but the transcode path remains the default and must work regardless (a browser answering an Opus-preferring offer picks Opus).
 
 ### ICE role
 
@@ -127,7 +127,7 @@ Detection rule: **transport type selects eligibility, SDP shape selects the leg.
 
 ### 4.3 Audio path
 
-- Decode Opus 48kHz → forge-resampler → the bridge's internal PCM16LE rate → existing 20ms framing to the AI WebSocket. Encode path mirrors it.
+- Decode Opus 48kHz → forge-resampler → the bridge's internal PCM16LE rate → existing 20ms framing to the AI WebSocket. Encode path mirrors it. When the leg negotiated G.711 instead (per-route preference, forge-media #130), the "transcode" collapses to the same G.711 codec path classic legs use — no resampler, no libopus; `AudioSender::samples_per_20ms()` (160 vs 960) drives the framing either way.
 - The `fixed_audio_packet_size` contract on the AI WebSocket is **unchanged and non-negotiable** — the transcode happens entirely inside media-glue, and a wrong-sized frame still tears down the call. Add a transcoder-output assertion in debug builds.
 - Opus PLC/FEC: enable decoder FEC; browser networks are lossier than SIP trunks and it's a free quality win.
 
@@ -199,4 +199,4 @@ Abrupt-teardown scenarios from Phase 0 get a WebRTC variant: kill the browser pa
 2. **Registration/connection lifecycle bugs** — the same class of bug as the CUCM leak, on a new transport. Mitigation: Phase 0's grace-timer semantics are designed for this before the transport exists.
 3. **Safari.** Always Safari.
 
-**Out of scope for v1 (recorded so they're decisions, not omissions):** video, data channels, full RFC 5626 outbound with flow failover, SIP trickle-ICE (RFC 8840), ICE restart / mid-call mobility, G.711 on the browser leg (filed upstream instead), acting as a TURN server.
+**Out of scope for v1 (recorded so they're decisions, not omissions):** video, data channels, full RFC 5626 outbound with flow failover, SIP trickle-ICE (RFC 8840), ICE restart / mid-call mobility, acting as a TURN server. (G.711 on the browser leg was on this list as "filed upstream instead" — it has since shipped upstream in [forge-media #130](https://github.com/thevoiceguy/forge-media/pull/130); wiring a per-route preference for it into siphon-ai is a Phase 2 config detail, not a separate scope item.)

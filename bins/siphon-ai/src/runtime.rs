@@ -846,6 +846,22 @@ impl Runtime {
                 _ => None,
             };
 
+        // WSS listener TLS (`[sip.wss]`, RFC 7118). Same
+        // load-at-startup posture as `[sip.tls]` — a bad cert/key
+        // fails before any listener accepts. Held in an ArcSwap for
+        // shape-parity with the other listeners, but not yet wired to
+        // the SIGHUP reloader: rotating the WSS cert wants a restart
+        // (documented in CONFIG.md; the browser-facing cert is
+        // typically ACME-managed, where a restart is the norm).
+        let wss_server_config: Option<Arc<arc_swap::ArcSwap<tokio_rustls::rustls::ServerConfig>>> =
+            match sip.wss.as_ref() {
+                Some(wss) => {
+                    let initial = load_wss_server_config(wss)?;
+                    Some(Arc::new(arc_swap::ArcSwap::from(initial)))
+                }
+                None => None,
+            };
+
         // The SIGHUP handler (config reload + TLS cert reload) is
         // spawned *after* the outbound service is built (it needs the
         // gateway-reload handle). The TLS swap handle is consumed by the
@@ -1006,6 +1022,7 @@ impl Runtime {
             Arc::clone(&transaction_mgr),
             Arc::clone(&uas),
             tls_server_config,
+            wss_server_config,
             &tcp_client_pool,
             &tls_client_pool,
         )
@@ -2047,6 +2064,36 @@ fn build_tls_client_config(extra_ca: Option<&std::path::Path>) -> Result<Arc<Tls
 /// `[sip.tls]`. Failure here is fatal — operators who set
 /// `transports = ["tls"]` expect SIPS to actually work, not to
 /// silently degrade to cleartext.
+/// Load the `[sip.wss]` cert/key into a rustls `ServerConfig` — the
+/// browser-facing WSS listener's identity, independent of `[sip.tls]`
+/// (see `RawSipWss::cert`).
+pub(crate) fn load_wss_server_config(
+    wss: &siphon_ai_config::SipWssConfig,
+) -> Result<Arc<tokio_rustls::rustls::ServerConfig>> {
+    let cert = wss
+        .cert_path
+        .to_str()
+        .ok_or_else(|| anyhow!("[sip.wss].cert path is not valid UTF-8"))?;
+    let key = wss
+        .key_path
+        .to_str()
+        .ok_or_else(|| anyhow!("[sip.wss].key path is not valid UTF-8"))?;
+    let cfg = load_rustls_server_config(cert, key).with_context(|| {
+        format!(
+            "load WSS cert={} key={}",
+            wss.cert_path.display(),
+            wss.key_path.display()
+        )
+    })?;
+    info!(
+        cert = %wss.cert_path.display(),
+        key = %wss.key_path.display(),
+        listen = %wss.listen_addr,
+        "WSS (SIP over WebSocket) server config loaded"
+    );
+    Ok(cfg)
+}
+
 pub(crate) fn load_sip_tls_server_config(
     tls: &SipTlsConfig,
 ) -> Result<Arc<tokio_rustls::rustls::ServerConfig>> {
@@ -2895,6 +2942,7 @@ async fn spawn_listeners(
     transaction_mgr: Arc<TransactionManager>,
     uas: Arc<IntegratedUAS>,
     tls_server_config: Option<Arc<arc_swap::ArcSwap<tokio_rustls::rustls::ServerConfig>>>,
+    wss_server_config: Option<Arc<arc_swap::ArcSwap<tokio_rustls::rustls::ServerConfig>>>,
     tcp_client_pool: &ConnectionPool,
     tls_client_pool: &TlsPool,
 ) -> Vec<JoinHandle<()>> {
@@ -2960,6 +3008,56 @@ async fn spawn_listeners(
                 error!(
                     "TLS transport enabled but no [sip.tls] config / server config available; \
                      SIPS connections will be refused"
+                );
+            }
+        }
+    }
+
+    // WS / WSS listeners (RFC 7118) — each on its own bind, since
+    // browsers connect to a web-shaped port, not the SIP port. The
+    // Origin allow-list is enforced upstream at the upgrade
+    // (sip-transport WsAcceptPolicy); everything after the upgrade —
+    // rate limiting, HEP capture, idle timeout, the reply-down-the-
+    // same-connection routing that unroutable browser Contacts
+    // depend on — is the same machinery as TCP/TLS.
+    if let Some(ws) = sip.ws.as_ref() {
+        let bind = ws.listen_addr.to_string();
+        let policy = sip_transport::WsAcceptPolicy {
+            allowed_origins: ws.allowed_origins.clone(),
+        };
+        let tx = packet_tx.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = sip_transport::run_ws_with_policy(&bind, policy, tx).await {
+                error!(error = %e, "WS listener exited");
+            }
+        }));
+    }
+    if let Some(wss) = sip.wss.as_ref() {
+        match &wss_server_config {
+            Some(swappable) => {
+                let bind = wss.listen_addr.to_string();
+                let policy = sip_transport::WsAcceptPolicy {
+                    allowed_origins: wss.allowed_origins.clone(),
+                };
+                let swappable = Arc::clone(swappable);
+                let tx = packet_tx.clone();
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = sip_transport::run_wss_with_swappable_config_and_policy(
+                        &bind, swappable, policy, tx,
+                    )
+                    .await
+                    {
+                        error!(error = %e, "WSS listener exited");
+                    }
+                }));
+            }
+            None => {
+                // Startup loads the cert whenever [sip.wss] compiles,
+                // so this arm is unreachable without a code change —
+                // be loud if that contract ever breaks.
+                error!(
+                    "WSS transport enabled but no server config available; \
+                     browser connections will be refused"
                 );
             }
         }
@@ -3182,6 +3280,30 @@ impl TransportDispatcher for MultiTransportDispatcher {
                     }
                     _ => unreachable!(),
                 },
+            },
+            // WS/WSS (RFC 7118): replies and in-dialog requests go down
+            // the connection the client established, and ONLY that
+            // connection — a browser's Via/Contact addresses are
+            // unroutable, so there is no client-originate fallback. A
+            // missing writer means the client's connection is gone;
+            // per RFC 7118 §5.2 the request fails rather than being
+            // dialed elsewhere.
+            TxTransportKind::Ws | TxTransportKind::Wss => match ctx.stream() {
+                Some(writer) => {
+                    let target = match ctx.transport() {
+                        TxTransportKind::Ws => sip_transport::TransportKind::Ws,
+                        TxTransportKind::Wss => sip_transport::TransportKind::Wss,
+                        _ => unreachable!(),
+                    };
+                    send_stream(target, writer, payload)
+                        .await
+                        .with_context(|| format!("send over websocket to {}", ctx.peer()))
+                }
+                None => Err(anyhow!(
+                    "websocket peer {} has no live connection (browser clients \
+                     cannot be dialed back; they must reconnect and re-REGISTER)",
+                    ctx.peer()
+                )),
             },
             other => Err(anyhow!(
                 "transport {other:?} is not enabled in this build (peer={})",

@@ -527,6 +527,10 @@ fn build_contact_uri(username: &str, addr: &str, transport: SipTransport) -> Str
         SipTransport::Udp => "udp",
         SipTransport::Tcp => "tcp",
         SipTransport::Tls => "tls",
+        // Unreachable today: [[register]].transport rejects ws/wss at
+        // load (client-side WS registration is not supported — browsers
+        // register TO us). RFC 7118 §5.4 token, kept for exhaustiveness.
+        SipTransport::Ws | SipTransport::Wss => "ws",
     };
     format!("sip:{username}@{addr};transport={transport_param}")
 }

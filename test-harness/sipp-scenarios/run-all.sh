@@ -2890,6 +2890,100 @@ fi
 ts_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: ws_signaling ──────────────────────
+# SIP over WebSocket (RFC 7118, DEV_PLAN_WebRTC.md Phase 1). SIPp
+# cannot speak WS, so ws_sip_call.py (python websockets, from the
+# echo-ws venv) is the client: one full INVITE/ACK/BYE call over a
+# single WS connection with the `sip` subprotocol and an allowed
+# Origin, then an assertion that a wrong (and an absent) Origin is
+# refused 403 at the upgrade, then the usual settle-to-zero check.
+echo
+echo "─── auxiliary phase: ws_signaling ─────────────────────"
+WSP_DAEMON_LOG=$(mktemp -t siphon-ai-wsp.XXXXXX.log)
+WSP_CONFIG=$(mktemp -t siphon-ai-wsp.XXXXXX.toml)
+WSP_WS_PORT=5083
+cat >"$WSP_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-wsp"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+transports = ["udp", "ws"]
+[sip.ws]
+listen = "127.0.0.1:$WSP_WS_PORT"
+allowed_origins = ["https://ops.example.com"]
+[media]
+codecs = ["pcmu"]
+# The WS caller never sends RTP; give the watchdog room for the 1s
+# call so teardown is BYE-driven, not watchdog-driven.
+inactivity_timeout_secs = 30
+[bridge]
+ws_url = "ws://127.0.0.1:$ECHO_WS_PORT/"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$AUX_OBS_PORT"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$WSP_CONFIG" \
+    >"$WSP_DAEMON_LOG" 2>&1 &
+WSP_DAEMON_PID=$!
+wsp_cleanup() {
+    kill "$WSP_DAEMON_PID" 2>/dev/null || true
+    wait "$WSP_DAEMON_PID" 2>/dev/null || true
+}
+trap wsp_cleanup EXIT
+sleep 1.2
+
+WSP_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
+[[ -x "$WSP_PYTHON" ]] || WSP_PYTHON=python3
+
+total=$((total + 2))
+echo "─── ws_sip_call ──────────────────────────────────────"
+if WS_URL="ws://127.0.0.1:$WSP_WS_PORT" "$WSP_PYTHON" \
+    "$SCRIPT_DIR/ws_sip_call.py" call >/dev/null 2>&1; then
+    echo "  OK"
+else
+    echo "  FAIL (daemon: $WSP_DAEMON_LOG)"
+    failures=$((failures + 1))
+fi
+echo "─── ws_origin_refused ────────────────────────────────"
+if WS_URL="ws://127.0.0.1:$WSP_WS_PORT" "$WSP_PYTHON" \
+    "$SCRIPT_DIR/ws_sip_call.py" refused >/dev/null 2>&1; then
+    echo "  OK"
+else
+    echo "  FAIL (daemon: $WSP_DAEMON_LOG)"
+    failures=$((failures + 1))
+fi
+
+total=$((total + 1))
+echo "─── ws_signaling_settles_to_zero ─────────────────────"
+wsp_ok=0
+wsp_deadline=$((SECONDS + 20))
+while (( SECONDS < wsp_deadline )); do
+    wsp_state=$(curl -s "http://127.0.0.1:$AUX_OBS_PORT/metrics" | awk '
+        BEGIN { c = "?"; p = "?" }
+        /^siphon_ai_calls_active /            { c = $2 }
+        /^siphon_ai_rtp_port_pairs_allocated /{ p = $2 }
+        END { printf "calls=%s port_pairs=%s", c, p }')
+    if [[ "$wsp_state" == "calls=0 port_pairs=0" ]]; then
+        wsp_ok=1
+        break
+    fi
+    sleep 2
+done
+if (( wsp_ok )); then
+    echo "  OK"
+else
+    echo "  FAIL (stuck at: $wsp_state; daemon: $WSP_DAEMON_LOG)"
+    failures=$((failures + 1))
+fi
+
+wsp_cleanup
+trap - EXIT
+
 # ─── Always-on auxiliary phase: graceful drain ────────────────────
 # Exercises the 0.17.0 SIGTERM drain end-to-end (DESIGN_GRACEFUL_SHUTDOWN
 # §5):

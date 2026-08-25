@@ -3323,3 +3323,97 @@ fn reserved_outbound_calls_validates_against_forge_default_pool() {
     let err = load_from_str_with_env(&too_big, &MapEnv::new([])).unwrap_err();
     assert!(matches!(err, LoadError::Compile(_)), "got {err:?}");
 }
+
+// ─── SIP over WebSocket (RFC 7118) config ───────────────────────
+
+/// Minimal TOML with the given `[sip]` fragment spliced in.
+fn ws_toml(sip_extra: &str) -> String {
+    format!(
+        r#"
+[sip]
+listen = "127.0.0.1:5060"
+{sip_extra}
+
+[bridge]
+ws_url = "ws://127.0.0.1:8765/"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#
+    )
+}
+
+#[test]
+fn ws_transport_compiles_with_listener_and_origins() {
+    let toml = ws_toml(
+        r#"transports = ["udp", "ws"]
+[sip.ws]
+listen = "127.0.0.1:5082"
+allowed_origins = ["https://ops.example.com"]"#,
+    );
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    assert!(cfg.sip.transports.contains(&SipTransport::Ws));
+    let ws = cfg.sip.ws.expect("ws config present");
+    assert_eq!(ws.listen_addr.port(), 5082);
+    assert_eq!(ws.allowed_origins, vec!["https://ops.example.com"]);
+    assert!(cfg.sip.wss.is_none());
+}
+
+#[test]
+fn ws_transport_requires_a_listen_address() {
+    let toml = ws_toml(r#"transports = ["udp", "ws"]"#);
+    let err = load_from_str_with_env(&toml, &MapEnv::new([])).unwrap_err();
+    assert!(
+        format!("{err}").contains("[sip.ws].listen"),
+        "expected [sip.ws].listen error, got {err}"
+    );
+}
+
+#[test]
+fn ws_block_without_ws_transport_fails_loud() {
+    // Same typo-posture as [sip.tls]: a configured-but-unenabled
+    // block would silently never listen.
+    let toml = ws_toml(
+        r#"transports = ["udp"]
+[sip.ws]
+listen = "127.0.0.1:5082""#,
+    );
+    let err = load_from_str_with_env(&toml, &MapEnv::new([])).unwrap_err();
+    assert!(
+        format!("{err}").contains("does not include \"ws\""),
+        "expected configured-but-not-enabled error, got {err}"
+    );
+}
+
+#[test]
+fn wss_transport_requires_cert_and_key() {
+    let toml = ws_toml(
+        r#"transports = ["udp", "wss"]
+[sip.wss]
+listen = "127.0.0.1:8443""#,
+    );
+    let err = load_from_str_with_env(&toml, &MapEnv::new([])).unwrap_err();
+    assert!(
+        format!("{err}").contains("[sip.wss].cert"),
+        "expected [sip.wss].cert error, got {err}"
+    );
+}
+
+#[test]
+fn empty_allowed_origin_fails_loud() {
+    // An empty entry can never match a real Origin header — the
+    // allow-list silently becomes "refuse every browser".
+    let toml = ws_toml(
+        r#"transports = ["udp", "ws"]
+[sip.ws]
+listen = "127.0.0.1:5082"
+allowed_origins = ["https://ops.example.com", " "]"#,
+    );
+    let err = load_from_str_with_env(&toml, &MapEnv::new([])).unwrap_err();
+    assert!(
+        format!("{err}").contains("allowed_origins"),
+        "expected empty-origin error, got {err}"
+    );
+}

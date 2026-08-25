@@ -639,6 +639,12 @@ pub struct SipConfig {
     /// the webpki roots when verifying OUTGOING TLS connections
     /// (gateways / registrations with `transport = "tls"`).
     pub tls_client_extra_ca: Option<PathBuf>,
+    /// `Some` when `[sip.ws]` is supplied AND `ws` is in the
+    /// transports list (RFC 7118).
+    pub ws: Option<SipWsConfig>,
+    /// `Some` when `[sip.wss]` is supplied AND `wss` is in the
+    /// transports list.
+    pub wss: Option<SipWssConfig>,
     /// RFC 4028 Min-SE for the UAS (`[sip].min_session_expires_secs`).
     /// Defaults to 90 (RFC minimum).
     pub min_session_expires: Duration,
@@ -759,19 +765,47 @@ pub enum SipTransport {
     Udp,
     Tcp,
     Tls,
+    /// SIP over WebSocket (RFC 7118). Lab use — browsers require
+    /// secure contexts.
+    Ws,
+    /// SIP over secure WebSocket (RFC 7118).
+    Wss,
 }
 
 impl SipTransport {
     /// The `;transport=` URI parameter for a Request-URI using this
     /// transport. Empty for UDP — the RFC 3263 default; emitting it
-    /// explicitly would only churn byte-identical configs.
+    /// explicitly would only churn byte-identical configs. Both WS
+    /// variants use `ws` (RFC 7118 §5.4 — security is signalled by
+    /// the SIPS scheme, not the transport token).
     pub fn uri_param(&self) -> &'static str {
         match self {
             SipTransport::Udp => "",
             SipTransport::Tcp => ";transport=tcp",
             SipTransport::Tls => ";transport=tls",
+            SipTransport::Ws | SipTransport::Wss => ";transport=ws",
         }
     }
+}
+
+/// Compiled `[sip.ws]` — present only when `transports` includes
+/// `"ws"`.
+#[derive(Debug, Clone)]
+pub struct SipWsConfig {
+    pub listen_addr: SocketAddr,
+    /// `Origin` allow-list for the WebSocket upgrade; empty = no
+    /// check. See `RawSipWs::allowed_origins`.
+    pub allowed_origins: Vec<String>,
+}
+
+/// Compiled `[sip.wss]` — present only when `transports` includes
+/// `"wss"`.
+#[derive(Debug, Clone)]
+pub struct SipWssConfig {
+    pub listen_addr: SocketAddr,
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    pub allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -820,8 +854,37 @@ pub enum CompileError {
         max: u32,
     },
 
-    #[error("[sip].transports has unknown entry {0:?}; expected udp / tcp / tls")]
+    #[error("[sip].transports has unknown entry {0:?}; expected udp / tcp / tls / ws / wss")]
     UnknownTransport(String),
+
+    #[error("[sip.ws].listen is required when transports includes \"ws\"")]
+    SipWsListenRequired,
+
+    #[error("[sip.ws].listen {0:?} is not a valid socket address: {1}")]
+    BadSipWsListen(String, std::net::AddrParseError),
+
+    #[error("[sip.ws] is configured but transports does not include \"ws\"")]
+    SipWsConfiguredButNotEnabled,
+
+    #[error("[sip.wss].listen is required when transports includes \"wss\"")]
+    SipWssListenRequired,
+
+    #[error("[sip.wss].listen {0:?} is not a valid socket address: {1}")]
+    BadSipWssListen(String, std::net::AddrParseError),
+
+    #[error("[sip.wss].cert is required when transports includes \"wss\"")]
+    SipWssCertRequired,
+
+    #[error("[sip.wss].key is required when transports includes \"wss\"")]
+    SipWssKeyRequired,
+
+    #[error("[sip.wss] is configured but transports does not include \"wss\"")]
+    SipWssConfiguredButNotEnabled,
+
+    #[error(
+        "{0}.allowed_origins contains an empty entry, which can never match a real Origin header"
+    )]
+    EmptyAllowedOrigin(&'static str),
 
     #[error("[sip.tls].cert is required when transports includes \"tls\"")]
     SipTlsCertRequired,
@@ -1645,6 +1708,8 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
             "udp" => SipTransport::Udp,
             "tcp" => SipTransport::Tcp,
             "tls" => SipTransport::Tls,
+            "ws" => SipTransport::Ws,
+            "wss" => SipTransport::Wss,
             _ => return Err(CompileError::UnknownTransport(name.clone())),
         };
         if !transports.contains(&t) {
@@ -1654,6 +1719,9 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
 
     let tls_enabled = transports.contains(&SipTransport::Tls);
     let tls = compile_sip_tls(raw.tls, tls_enabled, &listen_addr)?;
+
+    let ws = compile_sip_ws(raw.ws, transports.contains(&SipTransport::Ws))?;
+    let wss = compile_sip_wss(raw.wss, transports.contains(&SipTransport::Wss))?;
 
     // Client-side roots are independent of the TLS *listener* — a
     // UDP-only daemon can still dial a TLS trunk. Validate the path
@@ -1706,6 +1774,8 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
         contact: raw.contact,
         tls,
         tls_client_extra_ca,
+        ws,
+        wss,
         call_progress,
         min_session_expires,
         preferred_session_expires,
@@ -1908,6 +1978,76 @@ fn compile_sip_tls(
         cert_path: PathBuf::from(cert_path),
         key_path: PathBuf::from(key_path),
     }))
+}
+
+fn compile_sip_ws(
+    raw: crate::raw::RawSipWs,
+    enabled: bool,
+) -> Result<Option<SipWsConfig>, CompileError> {
+    let has_any_field = raw.listen.is_some() || !raw.allowed_origins.is_empty();
+    if !enabled {
+        if has_any_field {
+            // Same posture as [sip.tls]: a configured-but-unenabled
+            // block is almost always a typo — fail loud rather than
+            // silently never listening.
+            return Err(CompileError::SipWsConfiguredButNotEnabled);
+        }
+        return Ok(None);
+    }
+    let listen = raw.listen.ok_or(CompileError::SipWsListenRequired)?;
+    let listen_addr = listen
+        .parse()
+        .map_err(|e| CompileError::BadSipWsListen(listen, e))?;
+    Ok(Some(SipWsConfig {
+        listen_addr,
+        allowed_origins: validate_origins(raw.allowed_origins, "[sip.ws]")?,
+    }))
+}
+
+fn compile_sip_wss(
+    raw: crate::raw::RawSipWss,
+    enabled: bool,
+) -> Result<Option<SipWssConfig>, CompileError> {
+    let has_any_field = raw.listen.is_some()
+        || raw.cert.is_some()
+        || raw.key.is_some()
+        || !raw.allowed_origins.is_empty();
+    if !enabled {
+        if has_any_field {
+            return Err(CompileError::SipWssConfiguredButNotEnabled);
+        }
+        return Ok(None);
+    }
+    let listen = raw.listen.ok_or(CompileError::SipWssListenRequired)?;
+    let listen_addr = listen
+        .parse()
+        .map_err(|e| CompileError::BadSipWssListen(listen, e))?;
+    let cert = raw.cert.filter(|c| !c.is_empty());
+    let key = raw.key.filter(|k| !k.is_empty());
+    let cert_path = cert.ok_or(CompileError::SipWssCertRequired)?;
+    let key_path = key.ok_or(CompileError::SipWssKeyRequired)?;
+    Ok(Some(SipWssConfig {
+        listen_addr,
+        cert_path: PathBuf::from(cert_path),
+        key_path: PathBuf::from(key_path),
+        allowed_origins: validate_origins(raw.allowed_origins, "[sip.wss]")?,
+    }))
+}
+
+/// An allow-list entry that is empty or whitespace can never match a
+/// real `Origin` header — it silently turns the allow-list into
+/// "refuse every browser", which reads as an outage, not a typo. Fail
+/// loud at load per CLAUDE.md §4.6.
+fn validate_origins(
+    origins: Vec<String>,
+    block: &'static str,
+) -> Result<Vec<String>, CompileError> {
+    for o in &origins {
+        if o.trim().is_empty() {
+            return Err(CompileError::EmptyAllowedOrigin(block));
+        }
+    }
+    Ok(origins)
 }
 
 fn compile_node(raw: RawNode, sip: &SipConfig) -> Result<NodeConfig, CompileError> {

@@ -452,6 +452,8 @@ fn print_check_summary(path: &Path, config: &Config) {
             siphon_ai_config::SipTransport::Udp => "udp",
             siphon_ai_config::SipTransport::Tcp => "tcp",
             siphon_ai_config::SipTransport::Tls => "tls",
+            siphon_ai_config::SipTransport::Ws => "ws",
+            siphon_ai_config::SipTransport::Wss => "wss",
         })
         .collect::<Vec<_>>()
         .join(", ");

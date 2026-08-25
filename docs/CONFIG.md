@@ -89,7 +89,7 @@ credentials. Resolved secret values are never logged.
 | Field        | Type             | Default    | Notes |
 |--------------|------------------|------------|-------|
 | `listen`     | `host:port`      | required   | UDP/TCP bind. UDP and TCP share this port. **A `[[register]]` block requires a fixed port here** — the Contact a registrar routes calls back through is built from this port, and `:0` (ephemeral) cannot be advertised, since the kernel only picks the real port at bind time. Config load refuses that combination rather than leaving one registration dead on an otherwise healthy daemon. |
-| `transports` | `["udp","tcp","tls"]` | `["udp"]` | Subset enabled. `"tls"` requires `[sip.tls]`. |
+| `transports` | `["udp","tcp","tls","ws","wss"]` | `["udp"]` | Subset enabled. `"tls"` requires `[sip.tls]`; `"ws"` requires `[sip.ws]` and `"wss"` requires `[sip.wss]` (RFC 7118, each on its own listen address). |
 | `user_agent` | string           | `siphon-ai/<version>` | Product token this daemon stamps on the `Server` header of its responses and the `User-Agent` of the requests it originates (REGISTER, INVITE, REFER, BYE) — set it to brand the node (`"Acme Voice Bridge/2.1"`), leave it unset for the product and its own version (`siphon-ai/<version>`, e.g. `siphon-ai/0.49.7`). Until the releases carrying [#539](https://github.com/thevoiceguy/siphon-ai/issues/539) this key was documented but wired to nothing at all — responses read `siphon-rs/0.1.0`, then `sip-uas/<version>`, and requests `sip-uac/<version>`, whatever was configured here. Restart-required. |
 | `contact`    | string           | derived    | Override the `Contact` URI; otherwise built from `[node].public_address` + the bound port. |
 | `allow_delayed_offer` | bool    | `true`     | Accept an inbound INVITE with **no SDP** (RFC 3264 delayed offer): SiphonAI offers in the 200 OK and reads the peer's answer from the ACK. Needed for CUCM trunks/phones without a forced MTP. `false` rejects an offerless INVITE with `488`. Early-offer INVITEs are unaffected either way. |
@@ -149,6 +149,24 @@ credentials. Resolved secret values are never logged.
 > `[[register]]` blocks with `transport = "tls"` — verify the peer
 > against the client roots below and need no `[sip.tls]` at all: a
 > UDP-only daemon can still dial a TLS trunk.
+
+### `[sip.ws]` / `[sip.wss]` — SIP over WebSocket (RFC 7118)
+
+| Field             | Type          | Default  | Notes |
+|-------------------|---------------|----------|-------|
+| `listen`          | `host:port`   | required | Where the WS/WSS listener binds — its own address, not the SIP port (browsers connect to a web-shaped port). |
+| `cert` / `key`    | path          | required (`[sip.wss]` only) | PEM cert chain + private key. **Deliberately not inherited from `[sip.tls]`**: the WSS cert must be one browsers trust (public web PKI), while the SIP TLS cert may be private-CA. Point both at the same files if they genuinely share one. Rotating the WSS cert wants a **restart** (not yet on the SIGHUP reload path). |
+| `allowed_origins` | array[string] | `[]`     | `Origin` allow-list for the WebSocket upgrade, matched case-insensitively against the full serialized origin (e.g. `https://ops.example.com`). Empty = no check. Non-empty = upgrades with an absent or unlisted `Origin` are refused `403` before subprotocol selection — browsers always send it, so this pins which pages may open signalling to the daemon. Non-browser clients can forge the header; `[sip.auth]` remains the real authentication. An empty/whitespace entry fails at load (it could never match, silently refusing every browser). |
+
+Upgrades must offer the `sip` WebSocket subprotocol (RFC 7118 §4) or
+they are refused. Replies and in-dialog requests to a WS client go
+back down the connection the client established — a browser's
+Via/Contact addresses are unroutable, so if the connection is gone the
+request fails; the client reconnects and re-REGISTERs. Plain `ws` is
+for lab use: browsers require secure contexts, so production browser
+clients need `[sip.wss]`. Client-side WS — `[[gateway]]` /
+`[[register]]` with `transport = "ws"` — is **not** supported;
+browsers register to us, not the reverse.
 
 ### `[sip.tls_client]` (0.6.2+)
 

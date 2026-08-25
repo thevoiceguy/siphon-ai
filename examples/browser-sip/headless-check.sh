@@ -26,6 +26,17 @@ DAEMON_BIN="${DAEMON_BIN:-$REPO_ROOT/target/debug/siphon-ai}"
 [[ -x "$DAEMON_BIN" ]] || { echo "build first: cargo build -p siphon-ai" >&2; exit 2; }
 [[ -f "$SCRIPT_DIR/certs/wss-key.pem" ]] || "$SCRIPT_DIR/gen-cert.sh"
 
+# Every port is overridable, because this script is routinely run on a
+# box that already has a siphon-ai on it (the same lesson run-all.sh
+# learned in #541 — a colliding run is the expected case). The config
+# is copied with these values substituted, so lab.toml itself stays
+# the readable reference.
+SIP_PORT="${SIP_PORT:-5070}"
+WSS_PORT="${WSS_PORT:-8443}"
+PAGE_PORT="${PAGE_PORT:-8088}"
+OBS_PORT="${OBS_PORT:-9091}"
+ECHO_PORT="${ECHO_PORT:-8765}"
+
 # ─── Chromium ─────────────────────────────────────────────────────
 # Resolve a binary; when it's the Playwright fallback, the two NSS
 # libraries Debian's server install lacks are fetched without root
@@ -81,41 +92,54 @@ PIDS=()
 cleanup() { for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done; }
 trap cleanup EXIT
 
-for port in 5060 8443 8088 9091; do
+declare -A PORT_VAR=([$SIP_PORT]=SIP_PORT [$WSS_PORT]=WSS_PORT
+                     [$PAGE_PORT]=PAGE_PORT [$OBS_PORT]=OBS_PORT)
+for port in "$SIP_PORT" "$WSS_PORT" "$PAGE_PORT" "$OBS_PORT"; do
     if ss -tln 2>/dev/null | grep -q ":$port "; then
-        [[ $port == 8765 ]] && continue
-        echo "port $port already in use — stop what holds it and rerun" >&2
+        echo "port $port is already in use (${PORT_VAR[$port]}); rerun with e.g." >&2
+        echo "  ${PORT_VAR[$port]}=$((port + 10)) $0" >&2
         exit 2
     fi
 done
 
-if ! ss -tln 2>/dev/null | grep -q ':8765 '; then
+# lab.toml with this run's ports substituted, so the committed config
+# stays the readable reference while a busy box picks free ports.
+# Cert paths become absolute since the copy is read from $WORK.
+CONFIG="$WORK/lab.toml"
+sed -e "s|127\.0\.0\.1:5070|127.0.0.1:$SIP_PORT|" \
+    -e "s|127\.0\.0\.1:8443|127.0.0.1:$WSS_PORT|" \
+    -e "s|127\.0\.0\.1:8088|127.0.0.1:$PAGE_PORT|g" \
+    -e "s|localhost:8088|localhost:$PAGE_PORT|g" \
+    -e "s|127\.0\.0\.1:9091|127.0.0.1:$OBS_PORT|" \
+    -e "s|127\.0\.0\.1:8765|127.0.0.1:$ECHO_PORT|" \
+    -e "s|examples/browser-sip/certs|$SCRIPT_DIR/certs|g" \
+    "$SCRIPT_DIR/lab.toml" >"$CONFIG"
+
+if ! ss -tln 2>/dev/null | grep -q ":$ECHO_PORT "; then
     ECHO_PY="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     [[ -x "$ECHO_PY" ]] || ECHO_PY=python3
     "$ECHO_PY" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
-        --bind 127.0.0.1:8765 >"$WORK/echo.log" 2>&1 &
+        --bind "127.0.0.1:$ECHO_PORT" >"$WORK/echo.log" 2>&1 &
     PIDS+=($!)
 fi
-# env --chdir (not a subshell) so $! is the daemon itself and the
-# cleanup trap really stops it. Repo-root cwd because lab.toml's cert
-# paths are repo-relative.
-env --chdir="$REPO_ROOT" RUST_LOG=siphon_ai=info \
-    "$DAEMON_BIN" --config examples/browser-sip/lab.toml \
+# Not a subshell, so $! is the daemon itself and the cleanup trap
+# really stops it (an orphaned daemon holds the ports for the rerun).
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$CONFIG" \
     >"$WORK/daemon.log" 2>&1 &
 PIDS+=($!)
-python3 -m http.server 8088 --bind 127.0.0.1 --directory "$SCRIPT_DIR" \
+python3 -m http.server "$PAGE_PORT" --bind 127.0.0.1 --directory "$SCRIPT_DIR" \
     >"$WORK/http.log" 2>&1 &
 PIDS+=($!)
 sleep 2
 
-metrics() { curl -s http://127.0.0.1:9091/metrics; }
+metrics() { curl -s "http://127.0.0.1:$OBS_PORT/metrics"; }
 gauge() { metrics | awk '/^siphon_ai_registrar_bindings /{print $2}'; }
 
 # ─── 1: the browser registers ─────────────────────────────────────
 echo "─── headless register ───"
 run_chrome --headless --disable-gpu \
     --ignore-certificate-errors --user-data-dir="$WORK/profile" \
-    "http://127.0.0.1:8088/?auto=1" >"$WORK/chrome.log" 2>&1 &
+    "http://127.0.0.1:$PAGE_PORT/?auto=1" >"$WORK/chrome.log" 2>&1 &
 CHROME_PID=$!
 PIDS+=("$CHROME_PID")
 

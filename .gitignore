@@ -50,3 +50,6 @@ __pycache__/
 
 # Docker
 docker/.data/
+
+# browser-sip lab: generated per-machine, never committed
+examples/browser-sip/certs/

@@ -207,5 +207,6 @@ async def register():
         print("REGISTER-OK")
 
 
-mode = sys.argv[1] if len(sys.argv) > 1 else "call"
-asyncio.run({"call": call, "refused": refused, "register": register}[mode]())
+if __name__ == "__main__":
+    mode = sys.argv[1] if len(sys.argv) > 1 else "call"
+    asyncio.run({"call": call, "refused": refused, "register": register}[mode]())

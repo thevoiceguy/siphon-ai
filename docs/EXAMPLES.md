@@ -111,3 +111,20 @@ call-flow view, what each chunk type contains, and how the SIP `Call-ID`
 correlates SIP messages, RTCP, and SiphonAI's own application chunks.
 
 See `docs/HEP.md` for the architecture and where each chunk type comes from.
+
+## `examples/browser-sip/`
+
+SIP.js in a real browser against the daemon over WSS — the hands-on
+exit check for Phase 1 of `docs/design/DEV_PLAN_WebRTC.md`. A
+self-contained test page (Connect & Register + a signaling-only test
+call), a lab config wiring `[sip.wss]` + `[sip.auth]` + `[registrar]`
+together with an `Origin` allow-list, and a certificate script
+(mkcert-or-openssl). Five minutes from repo checkout to a browser tab
+showing **registered**, with the binding visible in
+`siphon_ai_registrar_bindings` and expiring ~32 s after the tab
+closes. Optional Homer leg via `examples/homer-stack/`.
+
+No audio yet by design: the browser offers WebRTC media the daemon
+cannot terminate until Phase 2's `webrtc-glue`; the call button exists
+to show the INVITE arriving and routing. The README in the directory
+is the walkthrough.

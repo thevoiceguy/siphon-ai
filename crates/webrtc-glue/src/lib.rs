@@ -29,8 +29,38 @@
 //! Nothing here is reachable from a default build: the daemon depends
 //! on this crate behind its `webrtc` feature.
 
+pub mod audio;
 pub mod detect;
+pub mod leg;
 pub mod settings;
 
+pub use audio::{InboundAudio, OutboundAudio};
 pub use detect::{inspect, is_webrtc_offer, OfferShape};
+pub use leg::{Answered, WebRtcLeg};
 pub use settings::{SettingsError, WebRtcSettings};
+
+/// What can go wrong building or running a browser media leg.
+#[derive(Debug, thiserror::Error)]
+pub enum WebRtcGlueError {
+    /// The peer connection could not be created (certificate, socket).
+    #[error("WebRTC setup failed: {0}")]
+    Setup(String),
+    /// The browser's offer was not applicable — malformed, or missing
+    /// the ICE/DTLS material a leg needs.
+    #[error("WebRTC offer rejected: {0}")]
+    Offer(String),
+    /// No answer could be produced (typically no codec in common).
+    #[error("WebRTC answer failed: {0}")]
+    Answer(String),
+    /// ICE or DTLS did not complete within the setup budget.
+    #[error("WebRTC connect failed: {0}")]
+    Connect(String),
+    /// Codec construction, decode, or an unsupported bridge rate.
+    #[error("WebRTC codec error: {0}")]
+    Codec(String),
+    /// The transport refused an outbound frame.
+    #[error("WebRTC send failed: {0}")]
+    Send(String),
+}
+
+pub type Result<T> = std::result::Result<T, WebRtcGlueError>;

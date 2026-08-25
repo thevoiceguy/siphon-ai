@@ -47,6 +47,11 @@ pub struct RawConfig {
     #[serde(default)]
     pub registrar: Option<RawRegistrar>,
 
+    /// `[webrtc]` — the browser media leg (Phase 2). Absent or
+    /// `enabled = false` ⇒ browser INVITEs stay on the classic path.
+    #[serde(default)]
+    pub webrtc: Option<RawWebRtc>,
+
     /// `[[trunk]]` — peer-trunk allowlist. Identifies inbound SIP
     /// peers by source IP and/or From-URI host. When zero blocks
     /// are declared, the daemon accepts INVITEs from any source
@@ -429,6 +434,50 @@ pub struct RawSipTls {
     /// PEM-encoded private key (path on disk). Required.
     #[serde(default)]
     pub key: Option<String>,
+}
+
+/// `[webrtc]` — the browser media leg (DEV_PLAN_WebRTC.md Phase 2
+/// §4.5). Read only when the daemon is built with the `webrtc`
+/// feature; a build without it rejects the block at load rather than
+/// silently ignoring it.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawWebRtc {
+    /// Master switch. `false` (default) keeps browser INVITEs on the
+    /// classic media path, where a WebRTC offer is refused.
+    #[serde(default)]
+    pub enabled: bool,
+    /// `stun:host:port` URIs. Empty is the common single-node case:
+    /// when the daemon's own address is reachable by the browser, its
+    /// host candidates suffice.
+    #[serde(default)]
+    pub stun_servers: Vec<String>,
+    /// TURN relays for browsers behind NATs that cannot be punched.
+    /// The operator runs coturn; siphon-ai only plumbs credentials
+    /// (use `${file:}` / `${cred:}` to keep them out of the TOML).
+    #[serde(default, rename = "turn_server")]
+    pub turn_servers: Vec<RawTurnServer>,
+    /// Answer→DTLS-complete budget in seconds. A browser that signals
+    /// but never completes media must not hold a call slot.
+    #[serde(default)]
+    pub setup_timeout_secs: Option<u64>,
+    /// Prefer G.711 over Opus on the browser leg. Browsers must
+    /// implement G.711 (RFC 7874 §3), so preferring it makes the
+    /// bridge's transcode collapse into the 8 kHz path a classic leg
+    /// already uses. Default `false`: Opus at 48 kHz is the better
+    /// input to an ASR pipeline.
+    #[serde(default)]
+    pub prefer_g711: bool,
+}
+
+/// One `[[webrtc.turn_server]]` entry.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawTurnServer {
+    /// `turn:host:port` or `turns:host:port`.
+    pub uri: String,
+    pub username: String,
+    pub password: String,
 }
 
 /// `[registrar]` — serve REGISTER (DEV_PLAN_WebRTC.md Phase 1 §3.2).

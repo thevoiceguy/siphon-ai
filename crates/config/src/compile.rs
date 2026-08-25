@@ -60,6 +60,9 @@ pub struct Config {
     /// `[registrar]` — serve REGISTER. `None` ⇒ REGISTER answers 405
     /// (the pre-registrar behaviour).
     pub registrar: Option<RegistrarConfig>,
+    /// `[webrtc]` — the browser media leg (Phase 2). `None` ⇒ absent
+    /// or disabled; browser INVITEs stay on the classic media path.
+    pub webrtc: Option<WebRtcConfig>,
     /// `[[trunk]]` allowlist. Empty when no trunk blocks were
     /// declared (daemon accepts INVITEs from any source —
     /// "legacy" posture, documented as dev / behind-firewall
@@ -898,6 +901,12 @@ pub enum CompileError {
     #[error("[registrar] expires must satisfy min <= default <= max")]
     RegistrarExpiresOrder,
 
+    #[error(
+        "[webrtc].setup_timeout_secs = 0 would let a browser that never completes \
+         DTLS hold a call slot forever"
+    )]
+    WebRtcSetupTimeoutZero,
+
     #[error("[sip.tls].cert is required when transports includes \"tls\"")]
     SipTlsCertRequired,
 
@@ -1417,6 +1426,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let routes = compile_dialplan(raw.routes)?;
     let registrations = compile_registrations(raw.registrations)?;
     let registrar = compile_registrar(raw.registrar, sip.auth.is_some())?;
+    let webrtc = compile_webrtc(raw.webrtc)?;
     // A `[[register]]` block advertises a Contact built from the
     // *configured* listen port (`[node].public_address` replaces only
     // the host), so an ephemeral `:0` bind produces `sip:user@host:0` —
@@ -1677,6 +1687,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         routes,
         registrations,
         registrar,
+        webrtc,
         trunks,
         security,
         recording,
@@ -1991,6 +2002,59 @@ fn compile_sip_tls(
         listen_addr,
         cert_path: PathBuf::from(cert_path),
         key_path: PathBuf::from(key_path),
+    }))
+}
+
+/// Compiled `[webrtc]` (DEV_PLAN_WebRTC.md Phase 2 §4.5).
+///
+/// Deliberately plain data: this crate does not depend on
+/// `siphon-ai-webrtc-glue`, so a default build never links
+/// forge-webrtc. The daemon maps this into forge-webrtc's
+/// `PeerConfig` behind its `webrtc` feature, and validates the
+/// STUN/TURN URIs there at startup — the knowledge of what makes one
+/// valid lives with the code that dials them.
+#[derive(Debug, Clone)]
+pub struct WebRtcConfig {
+    pub stun_servers: Vec<String>,
+    pub turn_servers: Vec<TurnServerConfig>,
+    pub setup_timeout: Duration,
+    pub prefer_g711: bool,
+}
+
+/// One `[[webrtc.turn_server]]`.
+#[derive(Debug, Clone)]
+pub struct TurnServerConfig {
+    pub uri: String,
+    pub username: String,
+    pub password: String,
+}
+
+fn compile_webrtc(
+    raw: Option<crate::raw::RawWebRtc>,
+) -> Result<Option<WebRtcConfig>, CompileError> {
+    let Some(raw) = raw else { return Ok(None) };
+    if !raw.enabled {
+        return Ok(None);
+    }
+    // A zero budget would let a browser that never finishes DTLS hold
+    // a call slot forever — the opposite of what the knob is for.
+    let setup_timeout = match raw.setup_timeout_secs.unwrap_or(15) {
+        0 => return Err(CompileError::WebRtcSetupTimeoutZero),
+        secs => Duration::from_secs(secs),
+    };
+    Ok(Some(WebRtcConfig {
+        stun_servers: raw.stun_servers,
+        turn_servers: raw
+            .turn_servers
+            .into_iter()
+            .map(|t| TurnServerConfig {
+                uri: t.uri,
+                username: t.username,
+                password: t.password,
+            })
+            .collect(),
+        setup_timeout,
+        prefer_g711: raw.prefer_g711,
     }))
 }
 

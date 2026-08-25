@@ -365,6 +365,51 @@ re-REGISTERs on its fresh connection well inside the window). Bindings
 are in-memory: a daemon restart forgets them, and clients re-REGISTER
 on their normal refresh cycle. Live count: `siphon_ai_registrar_bindings`.
 
+## `[webrtc]` — the browser media leg (Phase 2, in progress)
+
+Terminates WebRTC media from a browser that called in over
+`[sip.wss]`, instead of the classic RTP leg. **Requires a binary built
+with the `webrtc` cargo feature** — the release `.deb` and container
+ship with it on, a plain `cargo build` does not. A config enabling it
+on a binary without the feature **fails at startup and at
+`siphon-ai check`**, rather than surfacing later as an unexplained
+browser-call failure.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `false` | Master switch. Off ⇒ browser INVITEs stay on the classic media path, which refuses a WebRTC offer. |
+| `stun_servers` | array[string] | `[]` | `stun:host:port` URIs. Empty is the common single-node case: when the daemon's own address is reachable from the browser, its host candidates suffice. |
+| `setup_timeout_secs` | integer | `15` | Answer→DTLS-complete budget. A browser that signals but never finishes media must not hold a call slot. `0` fails at load. |
+| `prefer_g711` | bool | `false` | Prefer G.711 over Opus on the browser leg. Browsers must implement G.711 (RFC 7874 §3), so preferring it makes the bridge's transcode collapse into the same 8 kHz path a classic leg uses. Default is Opus: 48 kHz is the better input to an ASR pipeline. |
+
+`[[webrtc.turn_server]]` — zero or more relays for browsers behind
+NATs that can't be punched. You run the TURN server (coturn);
+siphon-ai only plumbs credentials.
+
+| Field | Type | Notes |
+|---|---|---|
+| `uri` | string | `turn:host:port` or `turns:host:port`. |
+| `username` / `password` | string | Long-term credentials. Use `${VAR}` / `${file:}` / `${cred:}` so they live in EnvironmentFile, not the TOML. |
+
+```toml
+[webrtc]
+enabled = true
+stun_servers = ["stun:stun.l.google.com:19302"]
+setup_timeout_secs = 15
+
+[[webrtc.turn_server]]
+uri = "turn:relay.example.com:3478"
+username = "siphon"
+password = "${TURN_PASSWORD}"
+```
+
+STUN/TURN URI schemes and credential completeness are validated at
+startup, so a typo fails the boot rather than the first browser call.
+A WebRTC leg uses **one socket** (BUNDLE + rtcp-mux) where a classic
+leg uses an RTP/RTCP pair, but draws one pair from
+`[media].rtp_port_range` either way, so `reserved_outbound_calls` and
+the admission math stay coherent.
+
 ## `[[register]]` — registered-phone mode
 
 Zero or more allowed. Each block becomes a `register_source` key visible to

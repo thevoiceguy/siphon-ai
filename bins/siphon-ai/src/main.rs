@@ -281,6 +281,14 @@ fn load_or_exit(path: &Path) -> Config {
 /// (exit 0) or the error (exit 1). Never starts the daemon.
 fn run_check(path: &Path) -> ! {
     let config = load_or_exit(path);
+    // `check` is the pre-upgrade gate, so it must fail on everything
+    // startup would fail on — including a config whose features this
+    // binary was not built with. Compiling cleanly is necessary but
+    // not sufficient (DEV_PLAN_WebRTC.md Phase 2 §4.5).
+    if let Err(e) = siphon_ai::runtime::check_build_features(&config) {
+        eprintln!("config error: {e:#}");
+        std::process::exit(1);
+    }
     print_check_summary(path, &config);
     std::process::exit(0);
 }

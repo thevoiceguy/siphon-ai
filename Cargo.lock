@@ -954,7 +954,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1202,6 +1202,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-ice"
+version = "0.3.0"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.08.24#6d6bf61183ee4a38dffb82bd52e58ef3ec77371c"
+dependencies = [
+ "bytes",
+ "forge-core",
+ "futures",
+ "hex",
+ "hmac 0.13.0",
+ "if-addrs",
+ "md5",
+ "rand 0.10.1",
+ "serde",
+ "sha1 0.11.0",
+ "socket2 0.6.3",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "forge-injection"
 version = "0.1.1"
 source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.08.24#6d6bf61183ee4a38dffb82bd52e58ef3ec77371c"
@@ -1284,6 +1306,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "forge-core",
+ "forge-ice",
  "forge-rtp",
  "rand 0.10.1",
  "sip-sdp 0.3.1 (git+https://github.com/thevoiceguy/forge-media?tag=v2026.08.24)",
@@ -1312,6 +1335,26 @@ dependencies = [
  "forge-core",
  "thiserror 2.0.18",
  "tract-onnx",
+]
+
+[[package]]
+name = "forge-webrtc"
+version = "0.4.0"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.08.24#6d6bf61183ee4a38dffb82bd52e58ef3ec77371c"
+dependencies = [
+ "bytes",
+ "dashmap 6.2.1",
+ "forge-core",
+ "forge-ice",
+ "forge-rtp",
+ "forge-sdp",
+ "parking_lot",
+ "serde",
+ "smol_str",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1832,7 +1875,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -1975,6 +2018,16 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2962,7 +3015,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -3005,7 +3058,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3043,7 +3096,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.52.0",
 ]
@@ -3485,7 +3538,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4145,6 +4198,7 @@ dependencies = [
  "siphon-ai-stir-shaken",
  "siphon-ai-telemetry",
  "siphon-ai-webhooks",
+ "siphon-ai-webrtc-glue",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -4507,6 +4561,19 @@ dependencies = [
  "serde",
  "serde_json",
  "siphon-ai-http",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "siphon-ai-webrtc-glue"
+version = "0.50.1"
+dependencies = [
+ "forge-core",
+ "forge-ice",
+ "forge-sdp",
+ "forge-webrtc",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -4916,7 +4983,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5973,7 +6040,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

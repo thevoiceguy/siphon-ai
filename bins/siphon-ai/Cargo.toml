@@ -16,7 +16,17 @@ path = "src/lib.rs"
 name = "siphon-ai"
 path = "src/main.rs"
 
+[features]
+default = []
+# The browser media leg (DEV_PLAN_WebRTC.md Phase 2). Off by default so
+# a plain `cargo build` links neither forge-webrtc nor forge-ice; the
+# release artifacts turn it on and gate at runtime with
+# `[webrtc].enabled`.
+webrtc = ["dep:siphon-ai-webrtc-glue"]
+
 [dependencies]
+siphon-ai-webrtc-glue.workspace = true
+siphon-ai-webrtc-glue.optional  = true
 tokio.workspace            = true
 anyhow.workspace           = true
 async-trait.workspace      = true

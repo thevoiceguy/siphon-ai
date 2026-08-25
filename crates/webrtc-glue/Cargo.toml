@@ -1,0 +1,21 @@
+[package]
+name = "siphon-ai-webrtc-glue"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Adapter: forge-webrtc PeerConnection as a media leg (browser calls over RFC 7118 WS)"
+
+[dependencies]
+# Offer inspection only — the same SDP types the classic media path
+# parses, so detection agrees with the negotiator by construction.
+forge-sdp.workspace = true
+# The peer connection itself (ICE / DTLS-SRTP / SDP answer).
+forge-webrtc.workspace = true
+forge-ice.workspace = true
+forge-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

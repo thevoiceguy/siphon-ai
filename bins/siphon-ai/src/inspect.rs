@@ -408,6 +408,44 @@ pub fn render_config(config: &Config, show_secrets: bool) -> String {
         }
     }
 
+    // [webrtc] — the browser media leg (Phase 2). Absent when the
+    // block is missing or disabled, which is also what a browser
+    // INVITE will run into, so say so either way.
+    match config.webrtc.as_ref() {
+        Some(w) => {
+            let _ = writeln!(
+                s,
+                "[webrtc] enabled=true setup_timeout_secs={} prefer_g711={}",
+                w.setup_timeout.as_secs(),
+                w.prefer_g711
+            );
+            let _ = writeln!(
+                s,
+                "  stun_servers={} turn_servers={}",
+                if w.stun_servers.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    w.stun_servers.join(", ")
+                },
+                w.turn_servers.len()
+            );
+            for t in &w.turn_servers {
+                // Credentials are secrets: same redaction posture as
+                // every other password in this renderer.
+                let _ = writeln!(
+                    s,
+                    "  turn {} username={} password={}",
+                    t.uri,
+                    t.username,
+                    secret(&Some(t.password.clone()), show_secrets)
+                );
+            }
+        }
+        None => {
+            let _ = writeln!(s, "[webrtc] enabled=false (browser media legs refused)");
+        }
+    }
+
     // [hep]
     let _ = writeln!(s, "[hep] enabled={}", config.hep.enabled);
     if config.hep.enabled {

@@ -3502,3 +3502,104 @@ enabled = false"#,
     let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
     assert!(cfg.registrar.is_none());
 }
+
+// ─── [webrtc] (WebRTC plan Phase 2) ──────────────────────────────
+
+#[test]
+fn webrtc_block_compiles_with_defaults() {
+    let toml = ws_toml(
+        r#"transports = ["udp"]
+
+[webrtc]
+enabled = true"#,
+    );
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    let w = cfg.webrtc.expect("webrtc present");
+    assert_eq!(w.setup_timeout, Duration::from_secs(15));
+    assert!(!w.prefer_g711);
+    assert!(w.stun_servers.is_empty() && w.turn_servers.is_empty());
+}
+
+#[test]
+fn webrtc_disabled_or_absent_compiles_to_none() {
+    let disabled = ws_toml(
+        r#"transports = ["udp"]
+
+[webrtc]
+enabled = false
+stun_servers = ["stun:stun.example:3478"]"#,
+    );
+    assert!(load_from_str_with_env(&disabled, &MapEnv::new([]))
+        .expect("compiles")
+        .webrtc
+        .is_none());
+
+    let absent = ws_toml(r#"transports = ["udp"]"#);
+    assert!(load_from_str_with_env(&absent, &MapEnv::new([]))
+        .expect("compiles")
+        .webrtc
+        .is_none());
+}
+
+#[test]
+fn webrtc_carries_stun_turn_and_g711_preference() {
+    let toml = ws_toml(
+        r#"transports = ["udp"]
+
+[webrtc]
+enabled = true
+stun_servers = ["stun:stun.l.google.com:19302"]
+setup_timeout_secs = 30
+prefer_g711 = true
+
+[[webrtc.turn_server]]
+uri = "turn:relay.example:3478"
+username = "u"
+password = "p""#,
+    );
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    let w = cfg.webrtc.expect("webrtc present");
+    assert_eq!(w.stun_servers, vec!["stun:stun.l.google.com:19302"]);
+    assert_eq!(w.setup_timeout, Duration::from_secs(30));
+    assert!(w.prefer_g711);
+    assert_eq!(w.turn_servers.len(), 1);
+    assert_eq!(w.turn_servers[0].username, "u");
+}
+
+#[test]
+fn webrtc_zero_setup_timeout_fails_loud() {
+    // 0 would let a browser that never completes DTLS hold a slot
+    // forever — the opposite of the knob's purpose.
+    let toml = ws_toml(
+        r#"transports = ["udp"]
+
+[webrtc]
+enabled = true
+setup_timeout_secs = 0"#,
+    );
+    let err = load_from_str_with_env(&toml, &MapEnv::new([])).unwrap_err();
+    assert!(
+        format!("{err}").contains("setup_timeout_secs = 0"),
+        "expected zero-timeout error, got {err}"
+    );
+}
+
+#[test]
+fn webrtc_turn_credentials_expand_from_env() {
+    // Credentials belong in EnvironmentFile, not the TOML (§4.5).
+    let env = MapEnv::new([("TURN_PASS", "s3cret-relay")]);
+    let toml = ws_toml(
+        r#"transports = ["udp"]
+
+[webrtc]
+enabled = true
+
+[[webrtc.turn_server]]
+uri = "turn:relay.example:3478"
+username = "u"
+password = "${TURN_PASS}""#,
+    );
+    let cfg = load_from_str_with_env(&toml, &env).expect("compiles");
+    let w = cfg.webrtc.expect("webrtc present");
+    assert_eq!(w.turn_servers[0].password, "s3cret-relay");
+}

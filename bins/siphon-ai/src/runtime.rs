@@ -213,6 +213,7 @@ impl Runtime {
             routes,
             registrations,
             registrar,
+            webrtc,
             trunks,
             security,
             recording,
@@ -727,6 +728,13 @@ impl Runtime {
         if let Some(adm) = admission {
             routing_handler_builder = routing_handler_builder.with_admission(adm);
         }
+        // `[webrtc]` (Phase 2). Resolved before any listener accepts:
+        // a config that asks for the browser media leg on a binary
+        // built without it must fail at startup, not answer a browser
+        // with a puzzling media error at 3 a.m.
+        let webrtc_settings = compile_webrtc_settings(webrtc.as_ref())?;
+        let _ = &webrtc_settings;
+
         // The daemon's registrar ([registrar], DEV_PLAN_WebRTC.md
         // Phase 1): serve REGISTER from browsers/softphones, bind
         // stream registrations to their connection, expire on
@@ -2101,6 +2109,80 @@ fn build_tls_client_config(extra_ca: Option<&std::path::Path>) -> Result<Arc<Tls
 /// `[sip.tls]`. Failure here is fatal — operators who set
 /// `transports = ["tls"]` expect SIPS to actually work, not to
 /// silently degrade to cleartext.
+/// Resolve `[webrtc]` against what this binary was actually built
+/// with (DEV_PLAN_WebRTC.md Phase 2 §4.5).
+///
+/// The two arms are the whole point: a binary **with** the `webrtc`
+/// feature maps the block into forge-webrtc's shape and validates the
+/// STUN/TURN URIs now, at boot; a binary **without** it refuses to
+/// start rather than accepting a config whose central promise it
+/// cannot keep. Silently ignoring the block would surface much later
+/// as a browser call failing for no visible reason.
+#[cfg(feature = "webrtc")]
+fn compile_webrtc_settings(
+    cfg: Option<&siphon_ai_config::WebRtcConfig>,
+) -> Result<Option<siphon_ai_webrtc_glue::WebRtcSettings>> {
+    let Some(cfg) = cfg else { return Ok(None) };
+    let settings = siphon_ai_webrtc_glue::WebRtcSettings {
+        stun_servers: cfg.stun_servers.clone(),
+        turn_servers: cfg
+            .turn_servers
+            .iter()
+            .map(|t| siphon_ai_webrtc_glue::settings::TurnCredentials {
+                uri: t.uri.clone(),
+                username: t.username.clone(),
+                password: t.password.clone(),
+            })
+            .collect(),
+        setup_timeout: cfg.setup_timeout,
+        prefer_g711: cfg.prefer_g711,
+    };
+    settings
+        .validate()
+        .with_context(|| "[webrtc] configuration is invalid")?;
+    info!(
+        stun_servers = settings.stun_servers.len(),
+        turn_servers = settings.turn_servers.len(),
+        setup_timeout_secs = settings.setup_timeout.as_secs(),
+        prefer_g711 = settings.prefer_g711,
+        "WebRTC browser media leg enabled"
+    );
+    Ok(Some(settings))
+}
+
+#[cfg(not(feature = "webrtc"))]
+fn compile_webrtc_settings(cfg: Option<&siphon_ai_config::WebRtcConfig>) -> Result<Option<()>> {
+    check_build_features_inner(cfg)?;
+    Ok(None)
+}
+
+/// Everything a *config* can ask for that a given **binary** may not
+/// be able to deliver. Called by `Runtime::build` at startup and by
+/// `siphon-ai check`, so the pre-upgrade gate and the daemon agree —
+/// a config that passes `check` starts, and one that fails `check`
+/// would have failed at boot.
+pub fn check_build_features(config: &Config) -> Result<()> {
+    check_build_features_inner(config.webrtc.as_ref())
+}
+
+#[cfg(feature = "webrtc")]
+fn check_build_features_inner(_cfg: Option<&siphon_ai_config::WebRtcConfig>) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(feature = "webrtc"))]
+fn check_build_features_inner(cfg: Option<&siphon_ai_config::WebRtcConfig>) -> Result<()> {
+    if cfg.is_some() {
+        anyhow::bail!(
+            "[webrtc].enabled = true, but this siphon-ai was built without the \
+             `webrtc` feature — browser media legs are not compiled in. Rebuild \
+             with `--features webrtc` (the release artifacts ship with it on), \
+             or set [webrtc].enabled = false."
+        );
+    }
+    Ok(())
+}
+
 /// Load the `[sip.wss]` cert/key into a rustls `ServerConfig` — the
 /// browser-facing WSS listener's identity, independent of `[sip.tls]`
 /// (see `RawSipWss::cert`).

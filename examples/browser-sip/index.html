@@ -1,0 +1,176 @@
+<!doctype html>
+<!--
+  browser-sip: the DEV_PLAN_WebRTC.md Phase 1 exit check.
+
+  SIP.js in a real browser -> WSS -> siphon-ai: connect, digest
+  REGISTER, and a test call. Serve this directory (don't open via
+  file:// — the daemon's Origin allow-list expects an http origin):
+
+    python3 -m http.server 8088 --bind 127.0.0.1 --directory examples/browser-sip
+
+  Then open http://127.0.0.1:8088 with the daemon running on
+  examples/browser-sip/lab.toml.
+
+  What passes Phase 1 here is REGISTER: the WSS transport, Origin
+  policy, subprotocol negotiation, digest auth, and the registration
+  binding are all end-to-end real. The test call exercises signaling
+  only — the browser offers WebRTC media (ICE/DTLS) that the daemon
+  cannot terminate until Phase 2's webrtc-glue, so expect the call to
+  connect at the SIP layer at best and carry no audio; its outcome
+  either way is diagnostic and shows in the log below.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>siphon-ai browser-sip lab</title>
+<style>
+  body { font: 14px/1.45 system-ui, sans-serif; margin: 2rem auto; max-width: 46rem; padding: 0 1rem; }
+  h1 { font-size: 1.2rem; }
+  fieldset { border: 1px solid #bbb; border-radius: 6px; margin-bottom: 1rem; }
+  label { display: inline-block; min-width: 7.5rem; margin: .15rem 0; }
+  input { width: 16rem; font: inherit; }
+  button { font: inherit; padding: .35rem .9rem; margin-right: .5rem; }
+  #status { font-weight: 600; }
+  #status.ok { color: #0a7a2f; }
+  #status.bad { color: #b3261e; }
+  #log { background: #111; color: #d6d6d6; padding: .75rem; border-radius: 6px;
+         height: 20rem; overflow-y: auto; white-space: pre-wrap;
+         font: 12px/1.4 ui-monospace, monospace; }
+  .err { color: #ff8a80; } .sip { color: #8ab4f8; }
+</style>
+</head>
+<body>
+<h1>siphon-ai browser-sip lab (WebRTC plan, Phase 1)</h1>
+<p>Status: <span id="status">idle</span></p>
+
+<fieldset>
+  <legend>Server</legend>
+  <label>WSS URL</label><input id="server" value="wss://127.0.0.1:8443"><br>
+  <label>SIP domain</label><input id="domain" value="127.0.0.1"><br>
+  <label>Username</label><input id="user" value="browser"><br>
+  <label>Password</label><input id="pass" value="s3cret-ws"><br>
+</fieldset>
+
+<fieldset>
+  <legend>Actions</legend>
+  <button id="btnRegister">Connect &amp; Register</button>
+  <button id="btnUnregister" disabled>Unregister &amp; Disconnect</button>
+  <br><br>
+  <label>Call target</label><input id="target" value="1000">
+  <button id="btnCall" disabled>Test call (signaling only)</button>
+  <button id="btnHangup" disabled>Hang up</button>
+</fieldset>
+
+<audio id="remoteAudio" autoplay></audio>
+<div id="log"></div>
+
+<script src="https://unpkg.com/sip.js@0.21.2/dist/sip.min.js"></script>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const logEl = $("log");
+function log(line, cls) {
+  const div = document.createElement("div");
+  if (cls) div.className = cls;
+  div.textContent = `${new Date().toISOString().slice(11, 23)} ${line}`;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function status(text, ok) {
+  const el = $("status");
+  el.textContent = text;
+  el.className = ok === undefined ? "" : ok ? "ok" : "bad";
+}
+if (typeof SIP === "undefined") {
+  status("SIP.js failed to load (no network to unpkg?)", false);
+}
+
+let simpleUser = null;
+
+async function register() {
+  const server = $("server").value.trim();
+  const user = $("user").value.trim();
+  const aor = `sip:${user}@${$("domain").value.trim()}`;
+  simpleUser = new SIP.Web.SimpleUser(server, {
+    aor,
+    media: { remote: { audio: $("remoteAudio") } },
+    userAgentOptions: {
+      authorizationUsername: user,
+      authorizationPassword: $("pass").value,
+      displayName: "browser-sip lab",
+      logLevel: "debug",
+      // Everything SIP.js says, into the pane — the SIP messages are
+      // the point of this page.
+      logConnector: (level, category, label, content) => {
+        const cls = level === "error" ? "err"
+          : /transport|sip/i.test(category) ? "sip" : undefined;
+        log(`[${category}] ${content}`, cls);
+      },
+    },
+    delegate: {
+      onCallReceived: () => log("incoming call (unexpected in this lab)"),
+      onCallAnswered: () => { status(`in call (signaling up, media is Phase 2)`, true); $("btnHangup").disabled = false; },
+      onCallHangup: () => { status("registered", true); $("btnHangup").disabled = true; $("btnCall").disabled = false; },
+      onServerDisconnect: (err) => {
+        status(`disconnected${err ? ": " + err : ""}`, false);
+        log("server disconnected", "err");
+      },
+    },
+  });
+  try {
+    status("connecting…");
+    await simpleUser.connect();
+    log(`websocket up: ${server} (subprotocol sip)`);
+    status("registering…");
+    await simpleUser.register();
+    status("registered", true);
+    log("REGISTER accepted — Phase 1 exit check: PASS");
+    $("btnRegister").disabled = true;
+    $("btnUnregister").disabled = false;
+    $("btnCall").disabled = false;
+  } catch (e) {
+    status(`failed: ${e.message || e}`, false);
+    log(String(e), "err");
+    log("hints: cert not trusted yet? (README trust step) — wrong " +
+        "origin? (serve via http://127.0.0.1:8088) — daemon up on lab.toml?", "err");
+  }
+}
+
+async function unregister() {
+  try { await simpleUser.unregister(); } catch (e) { log(String(e), "err"); }
+  try { await simpleUser.disconnect(); } catch (e) { log(String(e), "err"); }
+  status("idle");
+  $("btnRegister").disabled = false;
+  $("btnUnregister").disabled = true;
+  $("btnCall").disabled = true;
+  $("btnHangup").disabled = true;
+}
+
+async function call() {
+  const target = `sip:${$("target").value.trim()}@${$("domain").value.trim()}`;
+  log(`calling ${target} — the browser offers WebRTC SDP; until Phase 2 the ` +
+      `daemon has no WebRTC media leg, so treat everything after the INVITE ` +
+      `as diagnostic`);
+  $("btnCall").disabled = true;
+  try {
+    await simpleUser.call(target);
+  } catch (e) {
+    log(`call failed: ${e.message || e}`, "err");
+    log("expected until Phase 2 if the failure is SDP/media-shaped; the " +
+        "INVITE itself reaching the daemon (check its log / Homer) is what " +
+        "this exercise shows", "sip");
+    $("btnCall").disabled = false;
+  }
+}
+
+async function hangup() {
+  try { await simpleUser.hangup(); } catch (e) { log(String(e), "err"); }
+}
+
+$("btnRegister").onclick = register;
+$("btnUnregister").onclick = unregister;
+$("btnCall").onclick = call;
+$("btnHangup").onclick = hangup;
+</script>
+</body>
+</html>

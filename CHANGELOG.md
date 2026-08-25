@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`examples/browser-sip/`** — the hands-on Phase 1 exit check for
+  `docs/design/DEV_PLAN_WebRTC.md`: a SIP.js test page, a lab config
+  (`[sip.wss]` + `[sip.auth]` + `[registrar]` with an Origin
+  allow-list), and a mkcert-or-openssl certificate script. Five
+  minutes from checkout to a browser tab REGISTERed over WSS, binding
+  visible in `siphon_ai_registrar_bindings` and expiring when the tab
+  closes; optional Homer leg via `examples/homer-stack/`. The whole
+  path short of the browser itself is machine-verified: a WSS probe
+  (self-signed TLS, page Origin, digest 401→200→unregister, wrong
+  origin refused 403) runs against the exact lab config.
+  `ws_sip_call.py` gained a `__main__` guard so the probe logic is
+  importable.
+
 - **`[registrar]` — the daemon serves REGISTER** (Phase 1 of
   `docs/design/DEV_PLAN_WebRTC.md` §3.2; distinct from `[[register]]`,
   which is client-side). Thin adapter over upstream `sip-registrar`

@@ -39,8 +39,8 @@ pub use compile::{
     Config, Gateway, GatewayCredentials, HepConfig, MediaConfig, NodeConfig, ObservabilityConfig,
     OtlpConfig, OutboundConfig, ParkConfig, ParkTimeoutAction, QualityConfig, QualityFileConfig,
     QualityWebhookConfig, RegisterConfig, SecurityConfig, ShutdownConfig, SipAdmissionConfig,
-    SipAuthConfig, SipAuthUser, SipConfig, SipTlsConfig, SipTransport, TrunkCidr,
-    TrunkCidrParseError, TrunkConfig, WebhooksConfig,
+    SipAuthConfig, SipAuthUser, SipConfig, SipTlsConfig, SipTransport, SipWsConfig, SipWssConfig,
+    TrunkCidr, TrunkCidrParseError, TrunkConfig, WebhooksConfig,
 };
 pub use env::{expand, expand_cow, EnvError, EnvSource, ProcessEnv};
 pub use raw::{

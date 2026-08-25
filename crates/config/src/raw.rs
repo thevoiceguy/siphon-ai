@@ -185,10 +185,11 @@ pub struct RawNode {
 pub struct RawSip {
     /// `host:port` to bind UDP / TCP on. Required.
     pub listen: String,
-    /// Transports to enable on `listen`. Default: `["udp"]`. Valid
-    /// entries: `udp`, `tcp`, `tls`. `tls` requires `[sip.tls]` to
-    /// be configured (cert/key); compile-time validation enforces
-    /// that.
+    /// Transports to enable. Default: `["udp"]`. Valid entries:
+    /// `udp`, `tcp`, `tls`, `ws`, `wss`. `udp`/`tcp` bind `listen`;
+    /// `tls` requires `[sip.tls]` (cert/key), `ws` requires
+    /// `[sip.ws]` and `wss` requires `[sip.wss]` — each on its own
+    /// listen address. Compile-time validation enforces all of it.
     #[serde(default = "default_transports")]
     pub transports: Vec<String>,
     /// Product token for the `Server` header on responses this daemon
@@ -213,6 +214,16 @@ pub struct RawSip {
     /// the server side. Unset = the bundled webpki roots only.
     #[serde(default)]
     pub tls_client: RawSipTlsClient,
+    /// SIP-over-WebSocket listener sub-block (RFC 7118). Required
+    /// when `transports` includes `"ws"`. Plain WS is for lab use —
+    /// browsers require secure contexts, so production browser
+    /// clients need `[sip.wss]`.
+    #[serde(default)]
+    pub ws: RawSipWs,
+    /// SIP over secure WebSocket listener sub-block (RFC 7118).
+    /// Required when `transports` includes `"wss"`.
+    #[serde(default)]
+    pub wss: RawSipWss,
     /// Call-progress sub-block — how the UAS responds to inbound
     /// INVITEs before the 2xx. Unset = `mode = "instant_answer"`
     /// (v0.1.0 behaviour).
@@ -410,6 +421,51 @@ pub struct RawSipTls {
     /// PEM-encoded private key (path on disk). Required.
     #[serde(default)]
     pub key: Option<String>,
+}
+
+/// `[sip.ws]` — SIP-over-WebSocket listener (RFC 7118). Read only when
+/// `[sip].transports` includes `"ws"`.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawSipWs {
+    /// `host:port` to bind the WS listener on. Required when the
+    /// transport is enabled — RFC 7118 has no SIP-specific default
+    /// port, and squatting 80 would collide with any co-hosted HTTP.
+    #[serde(default)]
+    pub listen: Option<String>,
+    /// Allowed `Origin` header values for the WebSocket upgrade,
+    /// compared case-insensitively against the full serialized origin
+    /// (e.g. `https://ops.example.com`). Empty (default) = no check.
+    /// Non-empty = upgrades whose `Origin` is absent or unlisted are
+    /// refused `403` — browsers always send it, so this pins which
+    /// pages may open signalling; non-browser clients can forge it,
+    /// which is why `[sip.auth]` stays the real authentication.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+}
+
+/// `[sip.wss]` — SIP over secure WebSocket (RFC 7118). Read only when
+/// `[sip].transports` includes `"wss"`.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawSipWss {
+    /// `host:port` to bind the WSS listener on. Required when the
+    /// transport is enabled.
+    #[serde(default)]
+    pub listen: Option<String>,
+    /// PEM-encoded certificate chain (path on disk). Required —
+    /// deliberately not inherited from `[sip.tls]`: a WSS cert is
+    /// typically a public web PKI cert the browser must trust, while
+    /// the SIP TLS cert may be private-CA. Point both at the same
+    /// files if they genuinely share one.
+    #[serde(default)]
+    pub cert: Option<String>,
+    /// PEM-encoded private key (path on disk). Required.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// Same as `[sip.ws].allowed_origins`.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
 }
 
 /// `[sip.tls_client]` — verification roots for outgoing TLS.

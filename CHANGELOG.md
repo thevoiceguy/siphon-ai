@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SIP over WebSocket listeners (RFC 7118)** — Phase 1 of
+  `docs/design/DEV_PLAN_WebRTC.md`. `[sip].transports` accepts `"ws"`
+  and `"wss"`, each with its own listener block: `[sip.ws]` /
+  `[sip.wss]` (`listen`, `cert`/`key` for WSS, `allowed_origins`).
+  Upgrades must offer the `sip` subprotocol; a non-empty
+  `allowed_origins` refuses unlisted (or absent) `Origin`s `403` at
+  the upgrade, pinning which pages may open signalling (browsers
+  always send it; `[sip.auth]` remains the real authentication).
+  Replies and in-dialog requests to a WS client route down the
+  connection the client established — browser Via/Contacts are
+  unroutable, so there is deliberately no dial-back fallback. Off
+  unless configured; the WSS cert is deliberately independent of
+  `[sip.tls]` (browsers must trust it) and rotating it wants a
+  restart. The signalling suite gains a `ws_signaling` phase
+  (`ws_sip_call.py` — SIPp can't speak RFC 7118): a full
+  INVITE/ACK/BYE call over one WS connection, origin-refusal
+  assertions, and the settle-to-zero check. Verified end-to-end:
+  OPTIONS and a full call answered over WS, wrong/absent origin
+  refused, teardown clean. siphon-rs pinned to `v2026.08.24.1`
+  (sip-transport 0.5.0: `WsAcceptPolicy` + WS idle timeout,
+  [siphon-rs #125](https://github.com/thevoiceguy/siphon-rs/pull/125));
+  the `ws` feature joins `tls` on the sip-transport dependency.
+
 - **RTP port-pool gauges + a teardown-soak harness phase** (Phase 0 of
   `docs/design/DEV_PLAN_WebRTC.md`). Two new gauges,
   `siphon_ai_rtp_port_pairs_allocated` and `_capacity`, published every

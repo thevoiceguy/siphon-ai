@@ -70,6 +70,8 @@ fn transport_str(t: &SipTransport) -> &'static str {
         SipTransport::Udp => "udp",
         SipTransport::Tcp => "tcp",
         SipTransport::Tls => "tls",
+        SipTransport::Ws => "ws",
+        SipTransport::Wss => "wss",
     }
 }
 

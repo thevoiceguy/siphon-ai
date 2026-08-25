@@ -338,6 +338,33 @@ Match keys (any combination, all AND together): `request_uri_user`,
 `request_uri_host`, `to_user`, `to_host`, `from_user`, `from_host`,
 `register_source`, `header.<NAME> = "<value>"`, `any = true`.
 
+## `[registrar]` — serve REGISTER (Phase 1 of the WebRTC plan)
+
+The daemon as *registrar*: browsers (SIP.js over `[sip.ws]`/`[sip.wss]`)
+and softphones REGISTER **to** it. Distinct from `[[register]]` below,
+which is this daemon registering as a *client* to someone else's
+registrar. Absent or `enabled = false` ⇒ REGISTER answers `405` as
+before.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `false` | Master switch. |
+| `default_expires_secs` | integer | `3600` | Granted when the client asks for none. |
+| `min_expires_secs` | integer | `60` | Shorter requests → `423 Interval Too Brief`. |
+| `max_expires_secs` | integer | `86400` | Longer requests are clamped down. |
+| `allow_unauthenticated` | bool | `false` | **Lab only.** An open registrar lets anyone claim any identity, so `enabled = true` without `[sip.auth]` is a load error unless this is set. |
+
+Authentication is `[sip.auth]`'s digest users — one credential set for
+INVITEs and REGISTERs — with the AOR-to-identity authorization step:
+user A's credentials cannot register user B's AOR (a failed attempt
+counts as `forbidden` in `siphon_ai_registrar_registers_total`; alert
+on it). A registration arriving over a stream transport (WS/WSS/TCP/
+TLS) is **bound to its connection** — the only route back to a browser
+— and is expired ~32 s after that connection dies (a page reload
+re-REGISTERs on its fresh connection well inside the window). Bindings
+are in-memory: a daemon restart forgets them, and clients re-REGISTER
+on their normal refresh cycle. Live count: `siphon_ai_registrar_bindings`.
+
 ## `[[register]]` — registered-phone mode
 
 Zero or more allowed. Each block becomes a `register_source` key visible to

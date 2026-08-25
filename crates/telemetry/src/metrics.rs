@@ -291,6 +291,24 @@ pub const RTP_RESERVE_BLOCKS_TOTAL: &str = "siphon_ai_rtp_reserve_blocks_total";
 /// `siphon-ai` (`runtime`).
 pub const RTP_RESERVED_OUTBOUND_CALLS: &str = "siphon_ai_rtp_reserved_outbound_calls";
 
+/// REGISTER requests served by the daemon's registrar (`[registrar]`,
+/// DEV_PLAN_WebRTC.md Phase 1). Labeled by `result`: `ok`,
+/// `challenged` (401 with a fresh digest challenge — the normal first
+/// leg, not an attack signal), `forbidden` (authenticated user not
+/// authorized for the AOR), `interval_too_brief` (423),
+/// `rejected` (other 4xx/5xx from the protocol machinery), `error`
+/// (internal fault). A rising `forbidden` is the signal worth
+/// alerting on: someone's credentials trying to claim someone else's
+/// identity. Literal must match `siphon-ai-sip-glue::registrar`.
+pub const REGISTRAR_REGISTERS_TOTAL: &str = "siphon_ai_registrar_registers_total";
+
+/// AORs currently registered with the daemon's registrar, republished
+/// on every register/unregister and sweeper pass. Distinct from
+/// `siphon_ai_register_state`, which is this daemon registering as a
+/// *client* to someone else's registrar. Literal must match
+/// `siphon-ai-sip-glue::registrar`.
+pub const REGISTRAR_BINDINGS: &str = "siphon_ai_registrar_bindings";
+
 /// RTP port pairs currently allocated, sampled from the pool itself
 /// every few seconds by media-glue's sampler task (Phase 0 of
 /// DEV_PLAN_WebRTC.md). Deliberately a *sample of pool truth* rather
@@ -1088,6 +1106,15 @@ pub fn register_descriptions() {
         Unit::Count,
         "Configured RTP port pairs held back from inbound for origination ([media].reserved_outbound_calls)."
     );
+    describe_counter!(
+        REGISTRAR_REGISTERS_TOTAL,
+        "REGISTER requests served by [registrar], by result (ok, challenged, forbidden, interval_too_brief, rejected, error)."
+    );
+    describe_gauge!(
+        REGISTRAR_BINDINGS,
+        Unit::Count,
+        "AORs currently registered with the daemon's registrar ([registrar])."
+    );
     describe_gauge!(
         RTP_PORT_PAIRS_ALLOCATED,
         Unit::Count,
@@ -1217,6 +1244,7 @@ pub const RTP_MOS_ESTIMATE_BUCKETS: [f64; 8] = [1.5, 2.0, 2.6, 3.1, 3.6, 4.0, 4.
 /// (`every_metric_const_is_listed`), which is what keeps the
 /// `# HELP` coverage test honest as metrics are added (#431).
 pub const ALL_COUNTERS: &[&str] = &[
+    REGISTRAR_REGISTERS_TOTAL,
     INVITES_TOTAL,
     CALLS_TOTAL,
     CALLS_DRAIN_FORCED_TOTAL,
@@ -1281,6 +1309,7 @@ pub const ALL_GAUGES: &[&str] = &[
     RTP_RESERVED_OUTBOUND_CALLS,
     RTP_PORT_PAIRS_ALLOCATED,
     RTP_PORT_PAIRS_CAPACITY,
+    REGISTRAR_BINDINGS,
 ];
 
 /// Every histogram this module declares. See [`ALL_COUNTERS`]. Each of

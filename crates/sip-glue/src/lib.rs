@@ -27,6 +27,7 @@ pub mod drain;
 pub mod handler;
 pub mod invite;
 pub mod register;
+pub mod registrar;
 pub mod route;
 
 pub use admission::{ActiveCallCountFn, AdmissionDecision, InviteAdmission};

@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`[registrar]` — the daemon serves REGISTER** (Phase 1 of
+  `docs/design/DEV_PLAN_WebRTC.md` §3.2; distinct from `[[register]]`,
+  which is client-side). Thin adapter over upstream `sip-registrar`
+  (`BasicRegistrar` does header validation, digest auth with the
+  AOR-to-identity authorization step — user A cannot register user
+  B's AOR — expires clamping, and the location store); what siphon-ai
+  adds is connection awareness: a registration arriving over a stream
+  transport (WS/WSS/TCP/TLS) is bound to its connection — the only
+  route back to a browser — and expired ~32 s after that connection
+  dies (a reload re-REGISTERs inside the window). Off by default;
+  enabling it without `[sip.auth]` is a load error unless the
+  explicit `allow_unauthenticated` lab flag is set. Credentials are
+  `[sip.auth]`'s users, so INVITE and REGISTER share one set. New
+  metrics: `siphon_ai_registrar_registers_total{result}` (alert on
+  `forbidden` — someone's credentials claiming someone else's
+  identity) and `siphon_ai_registrar_bindings`. The suite gains a
+  `ws_registrar` phase driving the SIP.js-shaped flow over WS:
+  REGISTER → 401 digest challenge → authenticated REGISTER → 200 →
+  `Expires: 0` unregister. siphon-rs pinned to `v2026.08.25`
+  (sip-uas 0.5.0: `on_register` now receives the `TransportContext`,
+  [siphon-rs #127](https://github.com/thevoiceguy/siphon-rs/pull/127)).
+
 - **SIP over WebSocket listeners (RFC 7118)** — Phase 1 of
   `docs/design/DEV_PLAN_WebRTC.md`. `[sip].transports` accepts `"ws"`
   and `"wss"`, each with its own listener block: `[sip.ws]` /

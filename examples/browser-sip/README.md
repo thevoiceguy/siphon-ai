@@ -61,6 +61,29 @@ Proceed). The page errors — fine; the recorded exception is what lets
   *after removing* that entry from `allowed_origins` in `lab.toml` —
   the upgrade is refused 403.
 
+## No display / no Chrome on the box?
+
+```bash
+./examples/browser-sip/headless-check.sh
+```
+
+runs the whole thing self-driving: boots the lab stack, drives the
+page with headless Chromium (system `chromium` if installed, else
+Playwright's download — **no root needed**: the two NSS libraries a
+server install lacks are fetched with `apt-get download` and injected
+via `LD_LIBRARY_PATH`), asserts `siphon_ai_registrar_bindings` goes to
+1, kills the browser, and asserts the connection-loss expiry brings it
+back to 0. Prints `PASS` on a full run. Needs `cargo build -p
+siphon-ai` first, plus `node`/`npx` and network for the Playwright
+fallback. This is also the seed of the plan's Phase 3 nightly
+browser-e2e harness.
+
+The page's `?auto=1` mode is what the script drives (auto-register,
+result breadcrumbs on the console); `?auto=1&call=1` additionally
+fires the test call — with today's daemon that ends in the precise
+`488` (`offer profile UDP/TLS/RTP/SAVPF rejected`) that marks exactly
+where Phase 2's WebRTC media leg plugs in.
+
 ## Homer (the "fully visible in Homer" criterion)
 
 ```bash

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`examples/browser-sip/headless-check.sh` — the Phase 1 exit check,
+  self-driving on a browserless box**, and the check itself **passed**
+  (recorded in `DEV_PLAN_WebRTC.md` §3.3): headless Chromium + SIP.js
+  digest-REGISTERed over WSS with Origin enforcement, the binding
+  expired via connection-loss grace when the browser died, the
+  exchange appeared in Homer with `Via: SIP/2.0/WSS`, and the
+  browser's test INVITE authenticated, routed, and drew the precise
+  `488 offer profile UDP/TLS/RTP/SAVPF rejected` that marks Phase 2's
+  seam. The script needs no root: system `chromium` if present, else
+  Playwright's download with the two missing NSS libraries fetched via
+  `apt-get download` into a local dir. The page loads SIP.js as
+  jsdelivr's ESM build (npm ships no UMD bundle — the unpkg `dist/`
+  path 404s) and gains `?auto=1` / `?auto=1&call=1` self-driving
+  modes.
+
 - **`examples/browser-sip/`** — the hands-on Phase 1 exit check for
   `docs/design/DEV_PLAN_WebRTC.md`: a SIP.js test page, a lab config
   (`[sip.wss]` + `[sip.auth]` + `[registrar]` with an Origin

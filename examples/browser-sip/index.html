@@ -64,8 +64,7 @@
 <audio id="remoteAudio" autoplay></audio>
 <div id="log"></div>
 
-<script src="https://unpkg.com/sip.js@0.21.2/dist/sip.min.js"></script>
-<script>
+<script type="module">
 "use strict";
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
@@ -81,8 +80,15 @@ function status(text, ok) {
   el.textContent = text;
   el.className = ok === undefined ? "" : ok ? "ok" : "bad";
 }
-if (typeof SIP === "undefined") {
-  status("SIP.js failed to load (no network to unpkg?)", false);
+// sip.js ships no prebuilt UMD bundle on npm; jsdelivr's auto-built
+// ESM of the package is the loadable form. Needs network on first
+// load (cached by the browser after).
+let Web = null;
+try {
+  ({ Web } = await import("https://cdn.jsdelivr.net/npm/sip.js@0.21.2/+esm"));
+} catch (e) {
+  status(`SIP.js failed to load: ${e.message || e}`, false);
+  console.log(`BROWSER-SIP-RESULT: FAILED sipjs load: ${e}`);
 }
 
 let simpleUser = null;
@@ -91,7 +97,7 @@ async function register() {
   const server = $("server").value.trim();
   const user = $("user").value.trim();
   const aor = `sip:${user}@${$("domain").value.trim()}`;
-  simpleUser = new SIP.Web.SimpleUser(server, {
+  simpleUser = new Web.SimpleUser(server, {
     aor,
     media: { remote: { audio: $("remoteAudio") } },
     userAgentOptions: {
@@ -171,6 +177,29 @@ $("btnRegister").onclick = register;
 $("btnUnregister").onclick = unregister;
 $("btnCall").onclick = call;
 $("btnHangup").onclick = hangup;
+
+// Headless / automated mode (?auto=1): register on load and shout the
+// outcome to the console, where `--enable-logging=stderr` (or a
+// Playwright harness) can assert on it. Used by headless-check.sh on
+// browserless boxes; harmless in an interactive tab.
+const params = new URLSearchParams(location.search);
+if (params.has("auto")) {
+  const origStatus = status;
+  status = (text, ok) => {
+    origStatus(text, ok);
+    console.log(`BROWSER-SIP-STATUS: ${text}`);
+    if (ok === true && text === "registered") {
+      console.log("BROWSER-SIP-RESULT: REGISTERED");
+    }
+    if (ok === false) console.log(`BROWSER-SIP-RESULT: FAILED ${text}`);
+  };
+  await register();
+  // ?auto=1&call=1 additionally fires the signaling-only test call
+  // after registering — diagnostic until Phase 2's WebRTC media leg.
+  if (params.has("call") && simpleUser) {
+    await call();
+  }
+}
 </script>
 </body>
 </html>

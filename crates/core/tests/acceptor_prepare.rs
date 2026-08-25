@@ -124,7 +124,7 @@ async fn prepare_happy_path_produces_runnable_call() {
     let route = routes.iter().next().expect("route exists");
 
     let prepared = acceptor
-        .prepare_call(&req, route, &facts)
+        .prepare_call(&req, route, &facts, sip_transaction::TransportKind::Udp)
         .await
         .expect("prepare succeeds");
 
@@ -180,7 +180,7 @@ async fn unsupported_media_type_maps_to_415() {
     let facts = InviteFacts::extract(&req);
 
     let err = acceptor
-        .prepare_call(&req, route, &facts)
+        .prepare_call(&req, route, &facts, sip_transaction::TransportKind::Udp)
         .await
         .unwrap_err();
     assert_eq!(err.sip_status(), (415, "Unsupported Media Type"));
@@ -199,7 +199,7 @@ async fn no_common_codec_maps_to_488() {
     let facts = InviteFacts::extract(&req);
 
     let err = acceptor
-        .prepare_call(&req, route, &facts)
+        .prepare_call(&req, route, &facts, sip_transaction::TransportKind::Udp)
         .await
         .unwrap_err();
     let (code, _) = err.sip_status();
@@ -253,7 +253,7 @@ async fn route_without_ws_url_when_no_default_yields_503() {
     let facts = InviteFacts::extract(&req);
 
     let err = acceptor
-        .prepare_call(&req, route, &facts)
+        .prepare_call(&req, route, &facts, sip_transaction::TransportKind::Udp)
         .await
         .unwrap_err();
     assert_eq!(err.sip_status(), (503, "Service Unavailable"));
@@ -277,7 +277,10 @@ async fn prepare_exposes_handle_and_sip_call_id_for_registry_use() {
     let facts = InviteFacts::extract(&req);
     let route = routes.iter().next().unwrap();
 
-    let prepared = acceptor.prepare_call(&req, route, &facts).await.unwrap();
+    let prepared = acceptor
+        .prepare_call(&req, route, &facts, sip_transaction::TransportKind::Udp)
+        .await
+        .unwrap();
     assert_eq!(prepared.sip_call_id, "abc-123@pbx.example.com");
     assert_eq!(prepared.handle.call_id().as_str(), "siphon-test-fixed");
 
@@ -338,8 +341,14 @@ async fn second_call_gets_a_fresh_forge_session() {
     );
     let facts = InviteFacts::extract(&req);
 
-    let p1 = acceptor.prepare_call(&req, route, &facts).await.unwrap();
-    let p2 = acceptor.prepare_call(&req, route, &facts).await.unwrap();
+    let p1 = acceptor
+        .prepare_call(&req, route, &facts, sip_transaction::TransportKind::Udp)
+        .await
+        .unwrap();
+    let p2 = acceptor
+        .prepare_call(&req, route, &facts, sip_transaction::TransportKind::Udp)
+        .await
+        .unwrap();
 
     assert_ne!(p1.bridge_call_id, p2.bridge_call_id);
     assert_eq!(session_mgr.session_count(), 2);

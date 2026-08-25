@@ -72,7 +72,10 @@ async fn full_call_lifecycle_emits_expected_metrics() {
     );
     let facts = InviteFacts::extract(&req);
 
-    let prepared = acceptor.prepare_call(&req, route, &facts).await.unwrap();
+    let prepared = acceptor
+        .prepare_call(&req, route, &facts, sip_transaction::TransportKind::Udp)
+        .await
+        .unwrap();
     // Mirror what on_matched does on the accept path so the
     // accepted-counter increment is exercised here too.
     metrics::counter!(INVITES_TOTAL, "result" => "accepted").increment(1);
@@ -139,7 +142,7 @@ async fn rejected_invite_increments_rejected_counter() {
     let facts = InviteFacts::extract(&req);
 
     let err = acceptor
-        .prepare_call(&req, route, &facts)
+        .prepare_call(&req, route, &facts, sip_transaction::TransportKind::Udp)
         .await
         .unwrap_err();
     // Mirror what `on_matched` does on the reject path so we hit

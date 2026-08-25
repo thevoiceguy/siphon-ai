@@ -72,7 +72,7 @@ async fn run_call_emits_cdr_when_controller_exits() {
     let facts = InviteFacts::extract(&req);
 
     let prepared = acceptor
-        .prepare_call(&req, route, &facts)
+        .prepare_call(&req, route, &facts, sip_transaction::TransportKind::Udp)
         .await
         .expect("prepare");
 
@@ -157,7 +157,7 @@ async fn null_sink_is_the_default_when_no_sink_configured() {
     );
     let facts = InviteFacts::extract(&req);
     let prepared = acceptor
-        .prepare_call(&req, route, &facts)
+        .prepare_call(&req, route, &facts, sip_transaction::TransportKind::Udp)
         .await
         .expect("prepare");
 

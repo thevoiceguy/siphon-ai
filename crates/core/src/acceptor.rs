@@ -440,6 +440,28 @@ pub enum AcceptError {
     /// `UDP/TLS/RTP/SAVPF`) is incompatible with the effective
     /// [`SrtpMode`] policy for this route. Maps to **488 Not
     /// Acceptable Here** per DEV_PLAN_0.3.0.md §4.1.
+    /// A browser called: the INVITE arrived over WS/WSS carrying a
+    /// WebRTC-shaped offer (DTLS profile + ICE + fingerprint), which
+    /// needs the forge-webrtc media leg rather than the classic RTP
+    /// one (DEV_PLAN_WebRTC.md §4.1). Maps to **488 Not Acceptable
+    /// Here** — the same status the classic path would have produced,
+    /// but named for the actual reason.
+    #[error(
+        "WebRTC offer on a {} browser media leg — this call needs [webrtc], \
+         which is {}",
+        if *enabled { "configured but not yet bridged" } else { "disabled" },
+        if *enabled {
+            "enabled but cannot terminate media yet"
+        } else {
+            "disabled (set [webrtc].enabled = true on a build with the `webrtc` feature)"
+        }
+    )]
+    WebRtcOffer {
+        /// Whether `[webrtc]` is enabled on this daemon — the operator
+        /// needs to know which of the two situations they are in.
+        enabled: bool,
+    },
+
     #[error("offer profile {offered} rejected under srtp_mode = {mode:?}")]
     SrtpModeMismatch {
         /// Wire token of the offered profile (`"RTP/AVP"` etc.).
@@ -512,6 +534,7 @@ impl AcceptError {
             | AcceptError::Setup(SetupError::Vad(_))
             | AcceptError::Controller(_) => (500, "Server Internal Error"),
             AcceptError::SrtpModeMismatch { .. } => (488, "Not Acceptable Here"),
+            AcceptError::WebRtcOffer { .. } => (488, "Not Acceptable Here"),
             AcceptError::IdentityRequired => (428, "Use Identity Header"),
             AcceptError::AttestationRejected { code, .. } => (*code, reason_phrase(*code)),
         }
@@ -530,6 +553,10 @@ impl AcceptError {
                 "rejected_attestation"
             }
             AcceptError::Setup(SetupError::ResourceLimit(_)) => "rejected_capacity",
+            // Separately alertable: a browser reached this daemon and
+            // could not be served. That is a deployment gap, not a bad
+            // call, and it should not hide in generic routing noise.
+            AcceptError::WebRtcOffer { .. } => "rejected_webrtc",
             _ => "rejected",
         }
     }
@@ -2021,6 +2048,11 @@ pub struct BridgingAcceptor {
     /// floor, no preference, no force-refresher) until the daemon's
     /// `[sip]` config calls `with_session_timer_policy`.
     session_timer_policy: SessionTimerPolicy,
+    /// Whether `[webrtc]` is enabled on this daemon. Today it only
+    /// sharpens the rejection a browser INVITE receives (§4.1); when
+    /// the media leg is wired in, it is the switch that decides
+    /// whether to build one.
+    webrtc_enabled: bool,
     /// Authoritative timer for every dialog we accepted with session
     /// timers. The fan-out task subscribed in `new()` reads its event
     /// stream and dispatches `SessionExpired` to the per-dialog
@@ -2367,6 +2399,7 @@ impl BridgingAcceptor {
             webhook_sink: Arc::new(WebhookNullSink),
             call_id_factory: default_call_id_factory(),
             session_timer_policy: SessionTimerPolicy::default(),
+            webrtc_enabled: false,
             session_timer_manager,
             dialog_handles,
             call_progress: CallProgressMode::default(),
@@ -2502,6 +2535,14 @@ impl BridgingAcceptor {
             manager: Arc::clone(&self.session_timer_manager),
             handles: Arc::clone(&self.dialog_handles),
         }
+    }
+
+    /// Record that `[webrtc]` is enabled, so a browser INVITE that
+    /// cannot be served yet says which situation the operator is in
+    /// (DEV_PLAN_WebRTC.md §4.1).
+    pub fn with_webrtc_enabled(mut self, enabled: bool) -> Self {
+        self.webrtc_enabled = enabled;
+        self
     }
 
     pub fn with_session_timer_policy(mut self, policy: SessionTimerPolicy) -> Self {
@@ -3444,7 +3485,12 @@ impl CallAcceptor for BridgingAcceptor {
         }
 
         match self
-            .prepare_call(call.request, call.route, &call.facts)
+            .prepare_call(
+                call.request,
+                call.route,
+                &call.facts,
+                call.transport.transport(),
+            )
             .await
         {
             Ok(prepared) => {
@@ -4093,9 +4139,12 @@ impl BridgingAcceptor {
         request: &Request,
         route: &CompiledRoute,
         facts: &InviteFacts,
+        transport: TransportKind,
     ) -> Result<PreparedCall, AcceptError> {
         let prepare_started = std::time::Instant::now();
-        let result = self.prepare_call_inner(request, route, facts).await;
+        let result = self
+            .prepare_call_inner(request, route, facts, transport)
+            .await;
         record_prepare_outcome(prepare_started.elapsed(), result.is_ok());
         result
     }
@@ -4105,9 +4154,34 @@ impl BridgingAcceptor {
         request: &Request,
         route: &CompiledRoute,
         facts: &InviteFacts,
+        transport: TransportKind,
     ) -> Result<PreparedCall, AcceptError> {
         let offer_sdp = extract_offer_sdp(request)?;
         let sip_call_id = extract_sip_call_id(request);
+
+        // Leg selection (DEV_PLAN_WebRTC.md §4.1): **transport selects
+        // eligibility, SDP shape selects the leg.** Only a call that
+        // arrived over WS/WSS can be a browser, and only its offer says
+        // whether it is — a non-browser RFC 7118 client sending plain
+        // RTP still gets the classic leg.
+        //
+        // This runs before the SRTP policy gate on purpose. A browser
+        // offer is `UDP/TLS/RTP/SAVPF` with ICE, so under the default
+        // `srtp_mode = off` that gate rejects it as a *policy*
+        // mismatch — technically true and completely misleading, which
+        // is exactly what the Phase 1 browser call ran into. Naming it
+        // for what it is costs one check and saves the next person an
+        // afternoon.
+        #[cfg(feature = "webrtc")]
+        if matches!(transport, TransportKind::Ws | TransportKind::Wss)
+            && siphon_ai_webrtc_glue::is_webrtc_offer(offer_sdp)
+        {
+            return Err(AcceptError::WebRtcOffer {
+                enabled: self.webrtc_enabled,
+            });
+        }
+        #[cfg(not(feature = "webrtc"))]
+        let _ = transport;
 
         // SRTP-mode policy gate (DEV_PLAN_0.3.0.md §4.1). Done before
         // any media bring-up so an incompatible offer fails fast with
@@ -5154,6 +5228,65 @@ mod tests {
             out.contains(&format!("{CALL_DURATION_SECONDS}_count 1")),
             "missing duration sample:\n{out}"
         );
+    }
+
+    /// Leg selection (DEV_PLAN_WebRTC.md §4.1): transport decides
+    /// eligibility, the offer's shape decides the leg.
+    #[cfg(feature = "webrtc")]
+    mod webrtc_leg_selection {
+        use super::super::{AcceptError, TransportKind};
+
+        /// Chrome + SIP.js, captured off the wire during the Phase 1
+        /// browser check — the same fixture webrtc-glue pins against.
+        const CHROME_OFFER: &str = include_str!("../../webrtc-glue/fixtures/chrome-offer.sdp");
+
+        const PLAIN_RTP_OFFER: &str = "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\n\
+c=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 9000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+
+        /// The rule as the acceptor applies it, isolated from the rest
+        /// of call setup.
+        fn selects_webrtc(transport: TransportKind, offer: &str) -> bool {
+            matches!(transport, TransportKind::Ws | TransportKind::Wss)
+                && siphon_ai_webrtc_glue::is_webrtc_offer(offer)
+        }
+
+        #[test]
+        fn a_browser_over_wss_selects_the_webrtc_leg() {
+            assert!(selects_webrtc(TransportKind::Wss, CHROME_OFFER));
+            assert!(selects_webrtc(TransportKind::Ws, CHROME_OFFER));
+        }
+
+        /// A non-browser RFC 7118 client is still a classic leg — the
+        /// transport alone must not decide.
+        #[test]
+        fn a_plain_rtp_offer_over_ws_stays_classic() {
+            assert!(!selects_webrtc(TransportKind::Ws, PLAIN_RTP_OFFER));
+        }
+
+        /// And the shape alone must not decide either: the same offer
+        /// arriving over UDP is not a browser we can reach.
+        #[test]
+        fn a_webrtc_shaped_offer_over_udp_stays_classic() {
+            assert!(!selects_webrtc(TransportKind::Udp, CHROME_OFFER));
+            assert!(!selects_webrtc(TransportKind::Tls, CHROME_OFFER));
+        }
+
+        /// 488 either way, but separately alertable and with a message
+        /// that names the real problem — the Phase 1 browser call hit
+        /// the SRTP-policy 488 instead, which was true and useless.
+        #[test]
+        fn the_rejection_is_a_488_labelled_for_what_it_is() {
+            for enabled in [true, false] {
+                let err = AcceptError::WebRtcOffer { enabled };
+                assert_eq!(err.sip_status(), (488, "Not Acceptable Here"));
+                assert_eq!(err.reject_metric_label(), "rejected_webrtc");
+                let text = err.to_string();
+                assert!(text.contains("WebRTC"), "{text}");
+                if !enabled {
+                    assert!(text.contains("[webrtc].enabled = true"), "{text}");
+                }
+            }
+        }
     }
 
     mod dialog_flow {

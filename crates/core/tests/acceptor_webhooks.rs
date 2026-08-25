@@ -70,7 +70,7 @@ async fn run_call_emits_call_start_then_call_end() {
     let facts = InviteFacts::extract(&req);
 
     let prepared = acceptor
-        .prepare_call(&req, route, &facts)
+        .prepare_call(&req, route, &facts, sip_transaction::TransportKind::Udp)
         .await
         .expect("prepare");
     let run_handle = acceptor.run_call(prepared, "webhook_route", None);
@@ -151,7 +151,7 @@ async fn null_webhook_sink_is_the_default() {
     );
     let facts = InviteFacts::extract(&req);
     let prepared = acceptor
-        .prepare_call(&req, route, &facts)
+        .prepare_call(&req, route, &facts, sip_transaction::TransportKind::Udp)
         .await
         .expect("prepare");
 

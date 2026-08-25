@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  abrupt_vanish — SIPp establishes a call (INVITE → 200 → ACK), holds it
+  briefly, then EXITS WITHOUT SENDING BYE. This is the browser-shaped
+  teardown (DEV_PLAN_WebRTC.md Phase 0): a tab close, page refresh, or
+  network drop produces exactly this — a confirmed dialog whose peer
+  simply stops existing, with no RTP and no signalling ever again.
+
+  Over UDP the daemon's only signal is the media-inactivity watchdog;
+  over TCP (-t t1) SIPp's exit additionally closes the connection, so
+  the peer-FIN/transport-loss path is exercised too. Either way the
+  daemon's BYE goes to a peer that no longer answers, and teardown must
+  complete regardless — dialog reaped, media session freed, port pair
+  returned.
+
+  This scenario "passing" only means the call was established and
+  abandoned on cue. The actual assertions live in run-all.sh's
+  teardown_soak phase, which afterwards polls /metrics until
+  siphon_ai_calls_active, siphon_ai_dialogs_active and
+  siphon_ai_rtp_port_pairs_allocated all return to zero.
+-->
+<scenario name="abrupt_vanish">
+  <send>
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp-vanish@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp-vanish@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio 9000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+
+  <recv response="200" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp-vanish@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- Hold the confirmed dialog long enough to be unambiguously
+       established, then vanish: scenario ends, no BYE ever sent. -->
+  <pause milliseconds="1000"/>
+</scenario>

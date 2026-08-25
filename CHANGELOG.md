@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`crates/webrtc-glue` + `[webrtc]` config** — the foundation of
+  Phase 2 in `docs/design/DEV_PLAN_WebRTC.md`, and the answer to that
+  plan's top risk. The new crate holds the §4.1 leg-selection rule
+  (**transport selects eligibility, SDP shape selects the leg**) and
+  the `[webrtc]` → forge-webrtc `PeerConfig` mapping. Everything is
+  checked against the **real Chrome offer captured off the wire**
+  during the Phase 1 browser run — kept verbatim as a fixture — and
+  forge-webrtc answers it correctly: right DTLS role for
+  `a=setup:actpass`, mirrored `mid`/BUNDLE/`rtcp-mux`, our own
+  fingerprint, and exactly one pinned codec (Opus by default; PCMU
+  with `prefer_g711`, which makes the whole call 8 kHz end-to-end and
+  skips transcoding). Two findings the plan did not anticipate are
+  pinned by tests: Chrome's host candidate is an **mDNS `.local`
+  name** (a server without an mDNS resolver needs the peer's srflx
+  candidate — an ICE failure from this otherwise looks like a network
+  problem), and a DTLS-SRTP offer *without* ICE (some SBCs) must stay
+  on the classic path, which is why ICE — not the profile — is the
+  discriminator. Behind a `webrtc` cargo feature: a plain
+  `cargo build` links neither forge-webrtc nor forge-ice, while a
+  config that enables it on a binary built without it now fails
+  **both at startup and at `siphon-ai check`** (the pre-upgrade gate
+  previously only compiled the config, so it could pass where boot
+  would fail). No media yet — offer/answer lifecycle and the audio
+  path are next.
+
 - **`examples/browser-sip/headless-check.sh` — the Phase 1 exit check,
   self-driving on a browserless box**, and the check itself **passed**
   (recorded in `DEV_PLAN_WebRTC.md` §3.3): headless Chromium + SIP.js

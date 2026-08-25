@@ -20,6 +20,7 @@ members = [
     "crates/sip-glue",
     "crates/telemetry",
     "crates/webhooks",
+    "crates/webrtc-glue",
 ]
 
 [workspace.package]
@@ -49,6 +50,7 @@ siphon-ai-stir-shaken = { path = "crates/stir-shaken" }
 siphon-ai-sip-glue    = { path = "crates/sip-glue" }
 siphon-ai-telemetry   = { path = "crates/telemetry" }
 siphon-ai-webhooks    = { path = "crates/webhooks" }
+siphon-ai-webrtc-glue = { path = "crates/webrtc-glue" }
 
 # Async runtime
 tokio       = { version = "1", features = ["full"] }
@@ -484,6 +486,11 @@ forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v20
 forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24" }
 forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24" }
 forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24" }
+# WebRTC leg (DEV_PLAN_WebRTC.md Phase 2). Only reachable through
+# siphon-ai-webrtc-glue, which the daemon pulls in behind its
+# `webrtc` feature — a default build links neither.
+forge-webrtc  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24" }
+forge-ice     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24" }
 # Conference rooms (0.7.0): forge-mixer is the per-room AudioMixer;
 # forge-injection provides ToneGenerator (join/leave tones now, MOH
 # for park later). Deliberately NOT forge-conference — its DTMF

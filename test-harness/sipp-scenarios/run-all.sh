@@ -2984,6 +2984,75 @@ fi
 wsp_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: ws_registrar ──────────────────────
+# The daemon as registrar ([registrar], DEV_PLAN_WebRTC.md Phase 1
+# §3.2): the SIP.js-shaped flow over WS — REGISTER -> 401 digest
+# challenge -> authenticated REGISTER -> 200 -> Expires:0 unregister.
+# Separate phase from ws_signaling because [sip.auth] (which the
+# registrar requires) also challenges INVITEs, and the call probe
+# doesn't authenticate.
+echo
+echo "─── auxiliary phase: ws_registrar ─────────────────────"
+WSR_DAEMON_LOG=$(mktemp -t siphon-ai-wsr.XXXXXX.log)
+WSR_CONFIG=$(mktemp -t siphon-ai-wsr.XXXXXX.toml)
+WSR_WS_PORT=5084
+cat >"$WSR_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-wsr"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+transports = ["udp", "ws"]
+[sip.ws]
+listen = "127.0.0.1:$WSR_WS_PORT"
+allowed_origins = ["https://ops.example.com"]
+[sip.auth]
+enabled = true
+realm = "siphon.example"
+# MD5: same reason as the digest_auth phase — the probe's digest
+# client computes MD5; SHA-256 is covered by unit tests upstream.
+algorithm = "MD5"
+[[sip.auth.user]]
+username = "browser"
+password = "s3cret-ws"
+[registrar]
+enabled = true
+[media]
+codecs = ["pcmu"]
+[bridge]
+ws_url = "ws://127.0.0.1:$ECHO_WS_PORT/"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$AUX_OBS_PORT"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$WSR_CONFIG" \
+    >"$WSR_DAEMON_LOG" 2>&1 &
+WSR_DAEMON_PID=$!
+wsr_cleanup() {
+    kill "$WSR_DAEMON_PID" 2>/dev/null || true
+    wait "$WSR_DAEMON_PID" 2>/dev/null || true
+}
+trap wsr_cleanup EXIT
+sleep 1.2
+
+total=$((total + 1))
+echo "─── ws_register_digest ───────────────────────────────"
+if WS_URL="ws://127.0.0.1:$WSR_WS_PORT" WS_AUTH_USER=browser \
+    WS_AUTH_PASS=s3cret-ws "$WSP_PYTHON" \
+    "$SCRIPT_DIR/ws_sip_call.py" register >/dev/null 2>&1; then
+    echo "  OK"
+else
+    echo "  FAIL (daemon: $WSR_DAEMON_LOG)"
+    failures=$((failures + 1))
+fi
+
+wsr_cleanup
+trap - EXIT
+
 # ─── Always-on auxiliary phase: graceful drain ────────────────────
 # Exercises the 0.17.0 SIGTERM drain end-to-end (DESIGN_GRACEFUL_SHUTDOWN
 # §5):

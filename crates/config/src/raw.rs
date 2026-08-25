@@ -39,6 +39,14 @@ pub struct RawConfig {
     #[serde(default, rename = "register")]
     pub registrations: Vec<RawRegister>,
 
+    /// `[registrar]` — accept REGISTER from SIP clients (browsers
+    /// over `[sip.ws]`/`[sip.wss]`, softphones over any transport).
+    /// Absent or `enabled = false` ⇒ REGISTER is answered `405` as
+    /// before. Distinct from `[[register]]`, which is this daemon
+    /// registering as a *client* to someone else's registrar.
+    #[serde(default)]
+    pub registrar: Option<RawRegistrar>,
+
     /// `[[trunk]]` — peer-trunk allowlist. Identifies inbound SIP
     /// peers by source IP and/or From-URI host. When zero blocks
     /// are declared, the daemon accepts INVITEs from any source
@@ -421,6 +429,31 @@ pub struct RawSipTls {
     /// PEM-encoded private key (path on disk). Required.
     #[serde(default)]
     pub key: Option<String>,
+}
+
+/// `[registrar]` — serve REGISTER (DEV_PLAN_WebRTC.md Phase 1 §3.2).
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawRegistrar {
+    /// Master switch. `false` (default) answers REGISTER `405`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Expires granted when the client asks for none. Default 3600.
+    #[serde(default)]
+    pub default_expires_secs: Option<u32>,
+    /// Shorter requests are rejected `423 Interval Too Brief`
+    /// (RFC 3261 §10.3). Default 60.
+    #[serde(default)]
+    pub min_expires_secs: Option<u32>,
+    /// Longer requests are clamped down. Default 86400.
+    #[serde(default)]
+    pub max_expires_secs: Option<u32>,
+    /// Serve REGISTER without digest authentication. Default `false`:
+    /// an open registrar lets anyone claim any identity, so enabling
+    /// the registrar without `[sip.auth]` is a load error unless this
+    /// is explicitly set. Lab use only.
+    #[serde(default)]
+    pub allow_unauthenticated: bool,
 }
 
 /// `[sip.ws]` — SIP-over-WebSocket listener (RFC 7118). Read only when

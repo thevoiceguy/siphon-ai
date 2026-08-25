@@ -166,6 +166,12 @@ pub fn dispatch_invite<'a>(
 /// with the `on_*` overrides below.
 const SUPPORTED_METHODS: &[&str] = &["INVITE", "ACK", "BYE", "CANCEL", "OPTIONS", "NOTIFY"];
 
+/// [`SUPPORTED_METHODS`] plus REGISTER — advertised when the daemon's
+/// registrar (`[registrar]`) is enabled.
+const SUPPORTED_METHODS_WITH_REGISTER: &[&str] = &[
+    "INVITE", "ACK", "BYE", "CANCEL", "OPTIONS", "NOTIFY", "REGISTER",
+];
+
 /// Decide the response to an inbound NOTIFY (#357).
 ///
 /// SiphonAI's only NOTIFY producer is the implicit refer subscription
@@ -390,6 +396,9 @@ pub struct RoutingHandler<A> {
     /// INVITE — per-source rate limit + global concurrency cap — so a
     /// flood is shed before any trunk/auth/route work.
     admission: Option<Arc<crate::admission::InviteAdmission>>,
+    /// The daemon's registrar (`[registrar]`, DEV_PLAN_WebRTC.md
+    /// Phase 1). `None` ⇒ REGISTER answers 405 as always.
+    registrar: Option<Arc<crate::registrar::RegistrarService>>,
 }
 
 impl<A> RoutingHandler<A> {
@@ -411,7 +420,14 @@ impl<A> RoutingHandler<A> {
             drain_retry_after_secs: 5,
             digest_auth: None,
             admission: None,
+            registrar: None,
         }
+    }
+
+    /// Serve REGISTER via the given registrar (`[registrar]`).
+    pub fn with_registrar(mut self, registrar: Arc<crate::registrar::RegistrarService>) -> Self {
+        self.registrar = Some(registrar);
+        self
     }
 
     /// Inject a weak reference to the `IntegratedUAS` whose
@@ -501,7 +517,38 @@ fn default_resolver() -> RegisterSourceResolver {
 #[async_trait]
 impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
     fn supported_methods(&self) -> &'static [&'static str] {
-        SUPPORTED_METHODS
+        if self.registrar.is_some() {
+            SUPPORTED_METHODS_WITH_REGISTER
+        } else {
+            SUPPORTED_METHODS
+        }
+    }
+
+    /// Serve REGISTER when `[registrar]` is enabled; 405 otherwise
+    /// (the upstream default this override replaces). `ctx` carries
+    /// the connection the REGISTER arrived on — for stream transports
+    /// (WS/WSS/TCP/TLS) the registrar binds the AOR to it, which is
+    /// the only route back to a browser (RFC 7118 §5.2).
+    #[instrument(skip_all, fields(method = "REGISTER", peer = %ctx.peer()))]
+    async fn on_register(
+        &self,
+        request: &Request,
+        handle: ServerTransactionHandle,
+        ctx: &TransportContext,
+    ) -> anyhow::Result<()> {
+        let mut response = match self.registrar.as_ref() {
+            Some(registrar) => registrar.handle_register(request, ctx.stream()),
+            None => {
+                let mut r = UserAgentServer::create_response(request, 405, "Method Not Allowed");
+                let _ = r
+                    .headers_mut()
+                    .set_or_push("Allow", self.supported_methods().join(", "));
+                r
+            }
+        };
+        self.fill_response(&mut response, ctx).await;
+        handle.send_final(response).await;
+        Ok(())
     }
 
     /// Refer-progress NOTIFYs (post-REFER, RFC 3515 implicit

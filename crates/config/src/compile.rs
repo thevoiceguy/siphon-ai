@@ -57,6 +57,9 @@ pub struct Config {
     pub bridge_defaults: BridgeDefaults,
     pub routes: RouteSet,
     pub registrations: Vec<RegisterConfig>,
+    /// `[registrar]` — serve REGISTER. `None` ⇒ REGISTER answers 405
+    /// (the pre-registrar behaviour).
+    pub registrar: Option<RegistrarConfig>,
     /// `[[trunk]]` allowlist. Empty when no trunk blocks were
     /// declared (daemon accepts INVITEs from any source —
     /// "legacy" posture, documented as dev / behind-firewall
@@ -886,6 +889,15 @@ pub enum CompileError {
     )]
     EmptyAllowedOrigin(&'static str),
 
+    #[error(
+        "[registrar].enabled requires [sip.auth] (an open registrar lets anyone claim any \
+         identity); set [registrar].allow_unauthenticated = true only for a lab"
+    )]
+    RegistrarRequiresAuth,
+
+    #[error("[registrar] expires must satisfy min <= default <= max")]
+    RegistrarExpiresOrder,
+
     #[error("[sip.tls].cert is required when transports includes \"tls\"")]
     SipTlsCertRequired,
 
@@ -1404,6 +1416,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let bridge_defaults = compile_bridge(raw.bridge, &raw.media)?;
     let routes = compile_dialplan(raw.routes)?;
     let registrations = compile_registrations(raw.registrations)?;
+    let registrar = compile_registrar(raw.registrar, sip.auth.is_some())?;
     // A `[[register]]` block advertises a Contact built from the
     // *configured* listen port (`[node].public_address` replaces only
     // the host), so an ephemeral `:0` bind produces `sip:user@host:0` —
@@ -1663,6 +1676,7 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
         bridge_defaults,
         routes,
         registrations,
+        registrar,
         trunks,
         security,
         recording,
@@ -1977,6 +1991,47 @@ fn compile_sip_tls(
         listen_addr,
         cert_path: PathBuf::from(cert_path),
         key_path: PathBuf::from(key_path),
+    }))
+}
+
+/// Compiled `[registrar]`.
+#[derive(Debug, Clone)]
+pub struct RegistrarConfig {
+    pub default_expires: Duration,
+    pub min_expires: Duration,
+    pub max_expires: Duration,
+    /// `true` only with the explicit lab flag; the default posture
+    /// requires `[sip.auth]`.
+    pub allow_unauthenticated: bool,
+}
+
+fn compile_registrar(
+    raw: Option<crate::raw::RawRegistrar>,
+    sip_auth_enabled: bool,
+) -> Result<Option<RegistrarConfig>, CompileError> {
+    let Some(raw) = raw else { return Ok(None) };
+    if !raw.enabled {
+        return Ok(None);
+    }
+    if !sip_auth_enabled && !raw.allow_unauthenticated {
+        // An open registrar lets anyone claim any identity and receive
+        // that identity's calls. Refuse the configuration rather than
+        // serving it (CLAUDE.md §4.6): the operator either enables
+        // [sip.auth] or states in the TOML that they want a lab-open
+        // registrar.
+        return Err(CompileError::RegistrarRequiresAuth);
+    }
+    let default_expires = Duration::from_secs(raw.default_expires_secs.unwrap_or(3600) as u64);
+    let min_expires = Duration::from_secs(raw.min_expires_secs.unwrap_or(60) as u64);
+    let max_expires = Duration::from_secs(raw.max_expires_secs.unwrap_or(86400) as u64);
+    if min_expires > default_expires || default_expires > max_expires {
+        return Err(CompileError::RegistrarExpiresOrder);
+    }
+    Ok(Some(RegistrarConfig {
+        default_expires,
+        min_expires,
+        max_expires,
+        allow_unauthenticated: raw.allow_unauthenticated,
     }))
 }
 

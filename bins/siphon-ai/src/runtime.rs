@@ -212,6 +212,7 @@ impl Runtime {
             bridge_defaults,
             routes,
             registrations,
+            registrar,
             trunks,
             security,
             recording,
@@ -725,6 +726,42 @@ impl Runtime {
         }
         if let Some(adm) = admission {
             routing_handler_builder = routing_handler_builder.with_admission(adm);
+        }
+        // The daemon's registrar ([registrar], DEV_PLAN_WebRTC.md
+        // Phase 1): serve REGISTER from browsers/softphones, bind
+        // stream registrations to their connection, expire on
+        // disconnect after the grace window (the sweeper below).
+        let mut _registrar_sweeper: Option<JoinHandle<()>> = None;
+        if let Some(reg_cfg) = registrar.as_ref() {
+            let auth = sip
+                .auth
+                .as_ref()
+                .map(|a| siphon_ai_sip_glue::registrar::RegistrarAuth {
+                    realm: a.realm.clone(),
+                    algorithm: a.algorithm.clone(),
+                    users: a
+                        .users
+                        .iter()
+                        .map(|u| (u.username.clone(), u.password.clone()))
+                        .collect(),
+                });
+            let service = Arc::new(siphon_ai_sip_glue::registrar::RegistrarService::new(
+                siphon_ai_sip_glue::registrar::RegistrarSettings {
+                    default_expires: reg_cfg.default_expires,
+                    min_expires: reg_cfg.min_expires,
+                    max_expires: reg_cfg.max_expires,
+                    auth,
+                },
+            )?);
+            _registrar_sweeper = Some(siphon_ai_sip_glue::registrar::spawn_sweeper(Arc::clone(
+                &service,
+            )));
+            info!(
+                authenticated = sip.auth.is_some(),
+                default_expires_secs = reg_cfg.default_expires.as_secs(),
+                "registrar enabled; serving REGISTER"
+            );
+            routing_handler_builder = routing_handler_builder.with_registrar(service);
         }
         let routing_handler = Arc::new(routing_handler_builder);
 

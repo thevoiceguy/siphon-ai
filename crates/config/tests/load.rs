@@ -3417,3 +3417,88 @@ allowed_origins = ["https://ops.example.com", " "]"#,
         "expected empty-origin error, got {err}"
     );
 }
+
+// ─── [registrar] ─────────────────────────────────────────────────
+
+#[test]
+fn registrar_requires_sip_auth_unless_lab_flag() {
+    let toml = ws_toml(
+        r#"transports = ["udp"]
+
+[registrar]
+enabled = true"#,
+    );
+    let err = load_from_str_with_env(&toml, &MapEnv::new([])).unwrap_err();
+    assert!(
+        format!("{err}").contains("[registrar].enabled requires [sip.auth]"),
+        "expected auth-required error, got {err}"
+    );
+
+    // The explicit lab flag lifts it.
+    let toml = ws_toml(
+        r#"transports = ["udp"]
+
+[registrar]
+enabled = true
+allow_unauthenticated = true"#,
+    );
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    let reg = cfg.registrar.expect("registrar present");
+    assert!(reg.allow_unauthenticated);
+    assert_eq!(reg.default_expires, Duration::from_secs(3600));
+}
+
+#[test]
+fn registrar_with_sip_auth_compiles_and_clamps() {
+    let toml = ws_toml(
+        r#"transports = ["udp"]
+[sip.auth]
+enabled = true
+realm = "siphon.example"
+[[sip.auth.user]]
+username = "browser"
+password = "pw"
+
+[registrar]
+enabled = true
+default_expires_secs = 600
+min_expires_secs = 120
+max_expires_secs = 7200"#,
+    );
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    let reg = cfg.registrar.expect("registrar present");
+    assert_eq!(reg.min_expires, Duration::from_secs(120));
+    assert_eq!(reg.default_expires, Duration::from_secs(600));
+    assert_eq!(reg.max_expires, Duration::from_secs(7200));
+    assert!(!reg.allow_unauthenticated);
+}
+
+#[test]
+fn registrar_expires_order_is_validated() {
+    let toml = ws_toml(
+        r#"transports = ["udp"]
+
+[registrar]
+enabled = true
+allow_unauthenticated = true
+min_expires_secs = 600
+default_expires_secs = 60"#,
+    );
+    let err = load_from_str_with_env(&toml, &MapEnv::new([])).unwrap_err();
+    assert!(
+        format!("{err}").contains("min <= default <= max"),
+        "expected expires-order error, got {err}"
+    );
+}
+
+#[test]
+fn registrar_disabled_block_compiles_to_none() {
+    let toml = ws_toml(
+        r#"transports = ["udp"]
+
+[registrar]
+enabled = false"#,
+    );
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    assert!(cfg.registrar.is_none());
+}

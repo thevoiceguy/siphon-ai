@@ -16,6 +16,7 @@ thiserror.workspace   = true
 tracing.workspace     = true
 chrono.workspace      = true
 parking_lot.workspace = true
+bytes.workspace       = true
 # Inbound digest-auth metric (siphon_ai_sip_auth_total).
 metrics.workspace     = true
 # Hot-swappable route table for SIGHUP config reload (0.12.0).
@@ -36,6 +37,7 @@ sip-dialog.workspace      = true
 sip-uas.workspace         = true
 sip-uac.workspace         = true
 sip-auth.workspace        = true
+sip-registrar.workspace   = true
 
 [dev-dependencies]
 bytes = { workspace = true }

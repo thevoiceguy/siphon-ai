@@ -14,8 +14,25 @@ forge-sdp.workspace = true
 forge-webrtc.workspace = true
 forge-ice.workspace = true
 forge-core.workspace = true
+# Decode/encode for the leg's own audio path: forge-webrtc hands over
+# codec-encoded RTP, not PCM.
+forge-codecs.workspace = true
+# Reorder/dedupe inbound RTP with forge's buffer rather than a bespoke
+# one (CLAUDE.md §4.8).
+forge-rtp.workspace = true
+# The SAME framing helpers the classic tap uses, so the 20 ms PCM16LE
+# contract cannot drift between leg types.
+siphon-ai-bridge.workspace = true
+bytes.workspace = true
+tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[features]
+default = ["opus"]
+# Opus on the browser leg. Off leaves G.711 only, which every browser
+# also implements (RFC 7874 §3).
+opus = ["forge-codecs/opus"]
 
 [dev-dependencies]
 tokio = { workspace = true }

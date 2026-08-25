@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The WebRTC media leg's lifecycle and audio path** (`crates/webrtc-glue`,
+  Phase 2 §4.2–4.3 of `docs/design/DEV_PLAN_WebRTC.md`). `WebRtcLeg`
+  answers a browser offer with **complete gathering before the answer**
+  (v1 does no SIP trickle, so both ends gather fully before signalling
+  — bounded, because a black-holing STUN server must degrade the
+  candidate list rather than stall a call), then exposes connect and
+  teardown on the `[webrtc].setup_timeout` budget. `InboundAudio` /
+  `OutboundAudio` convert between SRTP and the bridge's fixed 20 ms
+  PCM16LE frames, reusing the **same** `Reframer` / `pack_pcm16_le` as
+  the classic tap so the frame contract cannot drift between leg types,
+  and forge-rtp's `JitterBuffer` rather than a bespoke reorder queue.
+
+  Two things this pinned down that the plan had sketched differently:
+  **no resampler is needed** — libopus decodes 48 kHz straight to the
+  bridge's 16 kHz, exactly as the classic Opus path already relies on,
+  so a browser leg hands the bridge the same PCM rate a classic Opus
+  call does; and Opus's **RTP timestamp advances at 48 kHz even when
+  decoding at 16 kHz** (RFC 7587 §4.1), so a 20 ms frame is 320 samples
+  but 960 timestamp units — the increment comes from forge-webrtc's
+  `samples_per_20ms()` and never from the PCM length, because deriving
+  it from the frame would run the clock at a third of real time and
+  slowly starve the browser's jitter buffer.
+
+  Not yet wired into the acceptor — that is the next step, and the
+  reason this lands as a self-contained, separately-tested unit.
+
+### Changed
+
+- **forge-media pinned to `v2026.08.25`** (from `v2026.08.24`) —
+  forge-rtp 0.3.1, whose `JitterBuffer::pop` no longer aborts the
+  process on a reordered RTP packet
+  ([forge-media #132](https://github.com/thevoiceguy/forge-media/pull/132)).
+  Found building the leg above, which is that buffer's first consumer;
+  nothing released used it, so no shipped siphon-ai was affected.
+
+### Added
+
 - **`crates/webrtc-glue` + `[webrtc]` config** — the foundation of
   Phase 2 in `docs/design/DEV_PLAN_WebRTC.md`, and the answer to that
   plan's top risk. The new crate holds the §4.1 leg-selection rule

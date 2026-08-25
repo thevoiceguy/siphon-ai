@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **forge-media pinned by tag: `v2026.08.24`** (was `rev = "c277860cd123"`) —
+  forge-media's first tagged release under its new
+  [RELEASING.md](https://github.com/thevoiceguy/forge-media/blob/main/RELEASING.md)
+  (the siphon-rs model, adopted in
+  [forge-media #131](https://github.com/thevoiceguy/forge-media/pull/131)).
+  Both upstream pins now read as tags, and this pair is self-consistent by
+  construction: forge-media `v2026.08.24` embeds siphon-rs `v2026.08.24`,
+  the same tag `[workspace.dependencies]` pins directly. Content over the
+  old rev: forge-webrtc 0.4.0's G.711 negotiation
+  ([forge-media #130](https://github.com/thevoiceguy/forge-media/pull/130))
+  and crate-version stamps (forge-ice 0.3.0, forge-rtp 0.3.0) — none of
+  which siphon-ai compiles today (forge-webrtc is not yet a dependency;
+  the version bumps are manifest-only for the crates we use), so no
+  behaviour change.
+
 ## [0.50.1] - 2026-08-24
 
 **Two observability blind-spot fixes and routine upstream pin rolls.**

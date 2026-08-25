@@ -412,6 +412,13 @@ impl Runtime {
             .with_reserved_outbound_calls(media.reserved_outbound_calls as usize),
         );
         log_outbound_reserve(&media);
+        // Port-pool truth sampler (DEV_PLAN_WebRTC.md Phase 0): keeps
+        // siphon_ai_rtp_port_pairs_{allocated,capacity} published so a
+        // teardown path that leaks a media session is visible as a
+        // gauge that never returns to zero. Ends itself at shutdown
+        // when the session manager's other owners drop.
+        let _port_pool_sampler =
+            media_setup.spawn_port_pool_sampler(std::time::Duration::from_secs(2));
 
         // ─── Bridging acceptor + dialog registry ───────────────────
         // Built without the IntegratedUAS here because the routing

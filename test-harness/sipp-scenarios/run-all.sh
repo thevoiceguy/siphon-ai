@@ -2790,6 +2790,106 @@ fi
 ra_cleanup
 trap - EXIT
 
+# ─── Always-on auxiliary phase: teardown soak ─────────────────────
+# DEV_PLAN_WebRTC.md Phase 0: N sessions across every teardown shape —
+# clean BYE, CANCEL mid-setup, and the browser-shaped abrupt vanish
+# (established dialog, peer exits with no BYE) over both UDP and TCP
+# (the TCP variant also drops the connection, exercising the
+# transport-loss path). Afterwards, every per-call resource the daemon
+# holds must return to zero: live calls, the dialog store (after the
+# reaper's 32 s grace), and allocated RTP port pairs (sampled from the
+# pool itself). A gauge stuck above zero here IS the hung-dialog /
+# port-leak class of bug — the whole point of the phase is to fail on
+# it before a WebRTC leg multiplies the abrupt-teardown rate.
+echo
+echo "─── auxiliary phase: teardown_soak ────────────────────"
+TS_DAEMON_LOG=$(mktemp -t siphon-ai-ts.XXXXXX.log)
+TS_CONFIG=$(mktemp -t siphon-ai-ts.XXXXXX.toml)
+cat >"$TS_CONFIG" <<EOF
+[node]
+id = "siphon-ai-sipp-ts"
+[sip]
+listen = "127.0.0.1:$DAEMON_PORT"
+transports = ["udp", "tcp"]
+[media]
+codecs = ["pcmu"]
+# Small pool (forge's 100-port minimum) so a leaked pair is a visible
+# fraction of capacity.
+rtp_port_range = [40800, 40900]
+# The abrupt-vanish caller never sends RTP; this watchdog is the only
+# signal the UDP variant leaves behind. Short so the soak settles fast.
+inactivity_timeout_secs = 4
+[bridge]
+ws_url = "ws://127.0.0.1:$ECHO_WS_PORT/"
+[observability]
+enabled = true
+http_listen = "127.0.0.1:$AUX_OBS_PORT"
+[[route]]
+name = "default"
+[route.match]
+any = true
+EOF
+
+RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$TS_CONFIG" \
+    >"$TS_DAEMON_LOG" 2>&1 &
+TS_DAEMON_PID=$!
+ts_cleanup() {
+    kill "$TS_DAEMON_PID" 2>/dev/null || true
+    wait "$TS_DAEMON_PID" 2>/dev/null || true
+}
+trap ts_cleanup EXIT
+sleep 1.2
+
+TS_REPS=3
+total=$((total + TS_REPS * 4))
+for ((ts_i = 1; ts_i <= TS_REPS; ts_i++)); do
+    run_scenario basic_call_then_bye.xml || failures=$((failures + 1))
+    run_scenario caller_cancels_during_setup.xml || failures=$((failures + 1))
+    run_scenario abrupt_vanish.xml || failures=$((failures + 1))
+    echo "─── abrupt_vanish (tcp) ──────────────────────────────"
+    if sipp -i 127.0.0.1 -t t1 -sf "$SCRIPT_DIR/abrupt_vanish.xml" \
+            -m 1 -timeout 10s -trace_err -p "$SIPP_PORT" -s 1000 \
+            "127.0.0.1:$DAEMON_PORT" >/dev/null 2>&1; then
+        echo "  OK"
+    else
+        echo "  FAIL (see abrupt_vanish_*errors.log; daemon: $TS_DAEMON_LOG)"
+        failures=$((failures + 1))
+    fi
+done
+
+# Settle: media watchdog (4 s) + the daemon's BYE toward a vanished
+# UDP peer (transaction gives up at Timer F, 32 s) + dialog-reaper
+# grace (32 s) + sweep interval (5 s). Poll rather than sleep flat.
+total=$((total + 1))
+echo "─── teardown_soak_settles_to_zero ────────────────────"
+ts_ok=0
+ts_deadline=$((SECONDS + 90))
+ts_snapshot() {
+    curl -s "http://127.0.0.1:$AUX_OBS_PORT/metrics" | awk '
+        BEGIN { c = "?"; d = "?"; p = "?" }
+        /^siphon_ai_calls_active /            { c = $2 }
+        /^siphon_ai_dialogs_active /          { d = $2 }
+        /^siphon_ai_rtp_port_pairs_allocated /{ p = $2 }
+        END { printf "calls=%s dialogs=%s port_pairs=%s", c, d, p }'
+}
+while (( SECONDS < ts_deadline )); do
+    ts_state=$(ts_snapshot)
+    if [[ "$ts_state" == "calls=0 dialogs=0 port_pairs=0" ]]; then
+        ts_ok=1
+        break
+    fi
+    sleep 3
+done
+if (( ts_ok )); then
+    echo "  OK (all per-call resources returned to zero)"
+else
+    echo "  FAIL (stuck at: $ts_state after 90s — leaked per-call state; daemon: $TS_DAEMON_LOG)"
+    failures=$((failures + 1))
+fi
+
+ts_cleanup
+trap - EXIT
+
 # ─── Always-on auxiliary phase: graceful drain ────────────────────
 # Exercises the 0.17.0 SIGTERM drain end-to-end (DESIGN_GRACEFUL_SHUTDOWN
 # §5):

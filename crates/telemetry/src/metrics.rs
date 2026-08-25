@@ -291,6 +291,21 @@ pub const RTP_RESERVE_BLOCKS_TOTAL: &str = "siphon_ai_rtp_reserve_blocks_total";
 /// `siphon-ai` (`runtime`).
 pub const RTP_RESERVED_OUTBOUND_CALLS: &str = "siphon_ai_rtp_reserved_outbound_calls";
 
+/// RTP port pairs currently allocated, sampled from the pool itself
+/// every few seconds by media-glue's sampler task (Phase 0 of
+/// DEV_PLAN_WebRTC.md). Deliberately a *sample of pool truth* rather
+/// than increment/decrement at alloc/free sites: a site-updated gauge
+/// under-counts under exactly the leak it exists to catch (a teardown
+/// path that forgets to free also forgets to decrement). A non-zero
+/// value with `siphon_ai_calls_active` at 0 IS a leak. Literal must
+/// match the sampler in `siphon-ai-media-glue::setup`.
+pub const RTP_PORT_PAIRS_ALLOCATED: &str = "siphon_ai_rtp_port_pairs_allocated";
+
+/// Total RTP port pairs in the pool (`[media].rtp_port_range` / 2),
+/// republished by the same sampler so allocated/capacity always come
+/// from the same source. Static for the process lifetime.
+pub const RTP_PORT_PAIRS_CAPACITY: &str = "siphon_ai_rtp_port_pairs_capacity";
+
 /// Caller-leg 20 ms frames dropped because the negotiated direction
 /// forbade our send — we answered a peer hold with `recvonly` /
 /// `inactive` (RFC 3264 §6.1, #417). Counts every suppressed push
@@ -1073,6 +1088,16 @@ pub fn register_descriptions() {
         Unit::Count,
         "Configured RTP port pairs held back from inbound for origination ([media].reserved_outbound_calls)."
     );
+    describe_gauge!(
+        RTP_PORT_PAIRS_ALLOCATED,
+        Unit::Count,
+        "RTP port pairs currently allocated, sampled from the pool. Non-zero with calls_active=0 is a leak."
+    );
+    describe_gauge!(
+        RTP_PORT_PAIRS_CAPACITY,
+        Unit::Count,
+        "Total RTP port pairs in the pool ([media].rtp_port_range / 2)."
+    );
 }
 
 /// Publish a zero for the counters whose *healthy* value is zero, so
@@ -1254,6 +1279,8 @@ pub const ALL_GAUGES: &[&str] = &[
     RECORDING_UPLOAD_SPOOL_DEPTH,
     INVITE_ADMISSION_SOURCES,
     RTP_RESERVED_OUTBOUND_CALLS,
+    RTP_PORT_PAIRS_ALLOCATED,
+    RTP_PORT_PAIRS_CAPACITY,
 ];
 
 /// Every histogram this module declares. See [`ALL_COUNTERS`]. Each of

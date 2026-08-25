@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **RTP port-pool gauges + a teardown-soak harness phase** (Phase 0 of
+  `docs/design/DEV_PLAN_WebRTC.md`). Two new gauges,
+  `siphon_ai_rtp_port_pairs_allocated` and `_capacity`, published every
+  2 s by a sampler that reads the pool itself — deliberately not
+  incremented at alloc/free sites, since a site-updated gauge
+  under-counts under exactly the leak it exists to catch. Allocated
+  diverging from `siphon_ai_calls_active` is a leaked media session;
+  alert on it. The SIPp suite gains a `teardown_soak` phase: twelve
+  calls across clean-BYE / CANCEL / abrupt-vanish (established dialog,
+  peer exits with no BYE — the browser-shaped teardown) over UDP and
+  TCP, then an assertion that live calls, the dialog store, and
+  allocated port pairs all return to zero. Lab result on this baseline:
+  eleven distinct teardown shapes (including delayed-offer and no-ACK
+  vanishes, and with the inactivity watchdog disabled) all settle to
+  zero — teardown is currently defense-in-depth (media watchdog,
+  forge's own session sweep, dialog reaper, BYE-failure-tolerant
+  teardown), and the phase exists to keep it that way once a WebRTC
+  leg multiplies the abrupt-teardown rate.
+
 ### Changed
 
 - **forge-media pinned by tag: `v2026.08.24`** (was `rev = "c277860cd123"`) —

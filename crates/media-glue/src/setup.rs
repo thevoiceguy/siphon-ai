@@ -53,7 +53,9 @@ use forge_engine::{
     ParticipantMediaUpdate, SessionManager,
 };
 use forge_sdp::sdes::{CryptoAttribute, CryptoSuite};
-use siphon_ai_telemetry::metrics::RTP_RESERVE_BLOCKS_TOTAL;
+use siphon_ai_telemetry::metrics::{
+    RTP_PORT_PAIRS_ALLOCATED, RTP_PORT_PAIRS_CAPACITY, RTP_RESERVE_BLOCKS_TOTAL,
+};
 use thiserror::Error;
 use tracing::{debug, info, instrument, warn};
 
@@ -568,6 +570,43 @@ impl MediaSetup {
 
     pub fn session_manager(&self) -> &Arc<SessionManager> {
         &self.session_manager
+    }
+
+    /// Spawn the RTP port-pool sampler: every `interval`, publish
+    /// `siphon_ai_rtp_port_pairs_allocated` / `_capacity` from
+    /// [`SessionManager::port_pool_stats`].
+    ///
+    /// A *sampler* on purpose, not increment/decrement at alloc/free
+    /// sites — a site-updated gauge under-counts under exactly the leak
+    /// it exists to catch (a teardown path that forgets to release a
+    /// session also forgets the decrement), and the sample reads pool
+    /// truth including paths this crate never sees. Runs off the audio
+    /// path (its own task, one async lock acquisition per tick); the
+    /// task ends when the `SessionManager` has no other owners left
+    /// (daemon shutdown).
+    ///
+    /// Phase 0 of `docs/design/DEV_PLAN_WebRTC.md`: the teardown-soak
+    /// harness asserts this gauge returns to zero after mixed
+    /// clean/abrupt teardowns.
+    pub fn spawn_port_pool_sampler(
+        &self,
+        interval: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let manager = Arc::downgrade(&self.session_manager);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                let Some(mgr) = manager.upgrade() else {
+                    debug!("port-pool sampler stopping; session manager gone");
+                    return;
+                };
+                let (allocated, available) = mgr.port_pool_stats().await;
+                metrics::gauge!(RTP_PORT_PAIRS_ALLOCATED).set(allocated as f64);
+                metrics::gauge!(RTP_PORT_PAIRS_CAPACITY).set((allocated + available) as f64);
+            }
+        })
     }
 
     pub fn bridge_manager(&self) -> &Arc<MediaBridgeManager> {

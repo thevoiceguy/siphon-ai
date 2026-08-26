@@ -68,6 +68,16 @@ pub struct WebRtcTap {
     /// plan exists to prevent. `None` disables it, matching
     /// `[media].inactivity_timeout_secs = 0`.
     inactivity_timeout: Option<Duration>,
+    /// The RTP port pair this leg occupies.
+    ///
+    /// A WebRTC leg binds one socket where a classic leg binds two, but
+    /// it fills one call slot either way, so it holds a whole pair —
+    /// see `siphon_ai_media_glue::PortReservation` for why the pool,
+    /// not just the socket, is the thing that matters. Held rather than
+    /// used: dropping the tap releases it, which is what makes the
+    /// capacity gauge return to zero after a browser call without any
+    /// teardown path having to remember.
+    _ports: Option<siphon_ai_media_glue::PortReservation>,
 }
 
 impl WebRtcTap {
@@ -83,7 +93,14 @@ impl WebRtcTap {
             tx_suppressed: None,
             recording: None,
             inactivity_timeout: None,
+            _ports: None,
         }
+    }
+
+    /// Hold an RTP port pair for the life of this leg (§4.4).
+    pub fn with_port_reservation(mut self, ports: siphon_ai_media_glue::PortReservation) -> Self {
+        self._ports = Some(ports);
+        self
     }
 
     /// Tear down after this long with no inbound RTP (see the field).

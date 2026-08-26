@@ -53,8 +53,15 @@ impl WebRtcLeg {
     ///
     /// Applies the remote description, waits (bounded) for local
     /// gathering, and produces the final answer SDP.
-    pub async fn answer(offer_sdp: &str, settings: &WebRtcSettings) -> Result<Answered> {
-        Self::answer_with_gather_budget(offer_sdp, settings, GATHER_BUDGET).await
+    /// `local_port` is where the media socket binds — the RTP port of
+    /// a `PortReservation` drawn from the same pool a SIP call uses, or
+    /// `0` to let the OS choose (tests, and only tests).
+    pub async fn answer(
+        offer_sdp: &str,
+        settings: &WebRtcSettings,
+        local_port: u16,
+    ) -> Result<Answered> {
+        Self::answer_with_gather_budget(offer_sdp, settings, local_port, GATHER_BUDGET).await
     }
 
     /// [`answer`](Self::answer) with an explicit gather budget — tests
@@ -62,9 +69,10 @@ impl WebRtcLeg {
     pub async fn answer_with_gather_budget(
         offer_sdp: &str,
         settings: &WebRtcSettings,
+        local_port: u16,
         gather_budget: Duration,
     ) -> Result<Answered> {
-        let mut peer = PeerConnection::with_config(settings.peer_config())
+        let mut peer = PeerConnection::with_config(settings.peer_config_on_port(local_port))
             .await
             .map_err(|e| WebRtcGlueError::Setup(e.to_string()))?;
 
@@ -203,7 +211,7 @@ mod tests {
     async fn answers_the_real_chrome_offer_with_gathered_candidates() {
         let Answered {
             leg, answer_sdp, ..
-        } = WebRtcLeg::answer(CHROME_OFFER, &WebRtcSettings::default())
+        } = WebRtcLeg::answer(CHROME_OFFER, &WebRtcSettings::default(), 0)
             .await
             .expect("answer");
 
@@ -225,7 +233,7 @@ mod tests {
             prefer_g711: true,
             ..Default::default()
         };
-        let Answered { leg, .. } = WebRtcLeg::answer(CHROME_OFFER, &settings)
+        let Answered { leg, .. } = WebRtcLeg::answer(CHROME_OFFER, &settings, 0)
             .await
             .expect("answer");
         assert_eq!(leg.codec(), (AudioCodec::PCMU, 0));
@@ -239,6 +247,7 @@ mod tests {
         let Answered { answer_sdp, .. } = WebRtcLeg::answer_with_gather_budget(
             CHROME_OFFER,
             &WebRtcSettings::default(),
+            0,
             Duration::from_millis(0),
         )
         .await
@@ -250,7 +259,7 @@ mod tests {
     async fn a_non_webrtc_offer_is_refused() {
         let plain = "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\n\
 t=0 0\r\nm=audio 9000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
-        let err = match WebRtcLeg::answer(plain, &WebRtcSettings::default()).await {
+        let err = match WebRtcLeg::answer(plain, &WebRtcSettings::default(), 0).await {
             Err(e) => e,
             Ok(_) => panic!("a plain RTP offer has no ICE/fingerprint to build a leg from"),
         };

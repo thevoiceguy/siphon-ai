@@ -44,10 +44,27 @@ enabled = true
 
 [media]
 codecs = ["pcmu"]
+# A narrow, distinctive range so the WebRTC leg's port can be checked
+# against it: §4.4 says a browser leg binds its one socket inside the
+# same range a SIP call draws from, and "inside" is only meaningful if
+# the range is small enough that landing there is not a coincidence.
+rtp_port_range = [41000, 41100]
 # The browser sends no media until Phase 2's WebRTC leg exists; keep
 # the watchdog generous so the signaling-only test call isn't reaped
 # mid-inspection.
 inactivity_timeout_secs = 60
+
+# Phase 2: the browser gets a real WebRTC media leg. Needs a daemon
+# built with the `webrtc` feature (`cargo build -p siphon-ai --features
+# webrtc`); without it the INVITE is refused 488 with a message saying
+# exactly that, rather than failing later as an SRTP mismatch.
+#
+# No STUN or TURN here on purpose: browser and daemon are both on
+# loopback, so host candidates are all that is needed and the lab has
+# no external dependency.
+[webrtc]
+enabled = true
+setup_timeout_secs = 15
 
 [bridge]
 # The echo WS server: examples/echo-ws-server-python/server.py

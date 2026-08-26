@@ -97,6 +97,19 @@ impl WebRtcSettings {
     /// (forge-media #130). Opus first by default (§1); `prefer_g711`
     /// flips it for a deployment whose SIP side is 8 kHz anyway.
     pub fn peer_config(&self) -> PeerConfig {
+        self.peer_config_on_port(0)
+    }
+
+    /// [`peer_config`](Self::peer_config) with the media socket pinned
+    /// to `local_port` (`0` = let the OS choose).
+    ///
+    /// A browser call must bind inside `[media].rtp_port_range` like
+    /// any other call: that range is the firewall rule an operator
+    /// opened and the capacity they sized, and a socket outside it is
+    /// unreachable and uncounted (`DEV_PLAN_WebRTC.md` §4.4). The port
+    /// comes from a `PortReservation` held by the leg, so the pool sees
+    /// a browser call exactly as it sees a SIP one.
+    pub fn peer_config_on_port(&self, local_port: u16) -> PeerConfig {
         let codecs = if self.prefer_g711 {
             vec![
                 (AudioCodec::PCMU, 0),
@@ -113,6 +126,10 @@ impl WebRtcSettings {
         PeerConfig {
             stun_servers: self.stun_servers.clone(),
             codecs,
+            transport: forge_webrtc::TransportConfig {
+                local_port,
+                ..forge_webrtc::TransportConfig::default()
+            },
             ..PeerConfig::default()
         }
     }

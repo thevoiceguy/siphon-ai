@@ -115,6 +115,16 @@ sed -e "s|127\.0\.0\.1:5070|127.0.0.1:$SIP_PORT|" \
     -e "s|examples/browser-sip/certs|$SCRIPT_DIR/certs|g" \
     "$SCRIPT_DIR/lab.toml" >"$CONFIG"
 
+# The page needs the same treatment, and for the same reason: it dials
+# the WSS port from a literal in the HTML, so serving the committed
+# file straight from $SCRIPT_DIR made a WSS_PORT override silently
+# half-apply — daemon moved, browser did not, and the failure looked
+# like a TLS problem rather than a port one.
+PAGE_DIR="$WORK/page"
+mkdir -p "$PAGE_DIR"
+sed -e "s|127\.0\.0\.1:8443|127.0.0.1:$WSS_PORT|g" \
+    "$SCRIPT_DIR/index.html" >"$PAGE_DIR/index.html"
+
 if ! ss -tln 2>/dev/null | grep -q ":$ECHO_PORT "; then
     ECHO_PY="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     [[ -x "$ECHO_PY" ]] || ECHO_PY=python3
@@ -127,7 +137,7 @@ fi
 RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$CONFIG" \
     >"$WORK/daemon.log" 2>&1 &
 PIDS+=($!)
-python3 -m http.server "$PAGE_PORT" --bind 127.0.0.1 --directory "$SCRIPT_DIR" \
+python3 -m http.server "$PAGE_PORT" --bind 127.0.0.1 --directory "$PAGE_DIR" \
     >"$WORK/http.log" 2>&1 &
 PIDS+=($!)
 sleep 2
@@ -171,6 +181,104 @@ grep -q "registration expired (connection lost)" "$WORK/daemon.log" \
     && echo "  OK — expired via connection-loss grace (daemon log confirms)" \
     || echo "  OK — gauge returned to 0 (expiry path in daemon log differs)"
 
+# ─── 3: a call draws a port pair from the pool (§4.4) ─────────────
+#
+# The three claims, checked against daemon truth rather than intent:
+# the browser leg is counted in the capacity gauge, its socket binds
+# inside `[media].rtp_port_range`, and the pair comes back when the
+# leg ends. The range in lab.toml is deliberately narrow, because
+# "landed in the range" only means something if the range is small.
+echo "─── call: port-pool accounting ───"
+pairs() { metrics | awk '/^siphon_ai_rtp_port_pairs_allocated /{print $2}'; }
+active() { metrics | awk '/^siphon_ai_calls_active /{print $2}'; }
+
+RANGE_LO=$(awk '/^rtp_port_range/{gsub(/[^0-9 ]/," ");print $1}' "$SCRIPT_DIR/lab.toml")
+RANGE_HI=$(awk '/^rtp_port_range/{gsub(/[^0-9 ]/," ");print $2}' "$SCRIPT_DIR/lab.toml")
+echo "  range from lab.toml: $RANGE_LO-$RANGE_HI"
+
+baseline_pairs="$(pairs)"
+if [[ -z "$baseline_pairs" ]]; then
+    echo "FAIL: siphon_ai_rtp_port_pairs_allocated is not published" >&2
+    exit 1
+fi
+if [[ "$baseline_pairs" != "0" ]]; then
+    echo "FAIL: pool not idle before the call (allocated=$baseline_pairs)" >&2
+    exit 1
+fi
+
+run_chrome --headless --disable-gpu \
+    --use-fake-ui-for-media-stream --use-fake-device-for-media-stream \
+    --ignore-certificate-errors --user-data-dir="$WORK/profile2" \
+    "http://127.0.0.1:$PAGE_PORT/?auto=1&call=1" >"$WORK/chrome2.log" 2>&1 &
+CHROME_PID=$!
+PIDS+=("$CHROME_PID")
+
+deadline=$((SECONDS + 45)); up=0
+while (( SECONDS < deadline )); do
+    [[ "$(active)" == "1" ]] && { up=1; break; }
+    sleep 1
+done
+if (( ! up )); then
+    echo "FAIL: browser call never became active (calls_active=$(active))" >&2
+    echo "  daemon: $WORK/daemon.log  chrome: $WORK/chrome2.log" >&2
+    exit 1
+fi
+
+# (a) counted in the gauge an operator watches for capacity.
+# The gauge is *sampled* from pool truth on a timer rather than
+# incremented at the allocation site (deliberately — a site-updated
+# gauge under-counts under exactly the leak it exists to catch), so it
+# lags the call by up to one sampler period. Poll rather than race it.
+deadline=$((SECONDS + 20)); counted=0
+while (( SECONDS < deadline )); do
+    [[ "$(pairs)" == "1" ]] && { counted=1; break; }
+    sleep 1
+done
+if (( ! counted )); then
+    echo "FAIL: browser call not counted in the port pool (allocated=$(pairs), want 1)" >&2
+    exit 1
+fi
+echo "  OK — siphon_ai_rtp_port_pairs_allocated 1 during the call"
+
+# (b) bound inside the operator's firewalled range
+RTP_PORT=$(grep -o 'rtp_port=[0-9]*' "$WORK/daemon.log" | tail -1 | cut -d= -f2)
+if [[ -z "$RTP_PORT" ]]; then
+    echo "FAIL: daemon never logged the leg's rtp_port" >&2
+    exit 1
+fi
+if (( RTP_PORT < RANGE_LO || RTP_PORT > RANGE_HI )); then
+    echo "FAIL: media bound to $RTP_PORT, outside [media].rtp_port_range $RANGE_LO-$RANGE_HI" >&2
+    exit 1
+fi
+if (( RTP_PORT % 2 != 0 )); then
+    echo "FAIL: rtp_port $RTP_PORT is odd" >&2
+    exit 1
+fi
+echo "  OK — media bound to $RTP_PORT, inside $RANGE_LO-$RANGE_HI"
+
+# The socket is not merely *claimed* to be there — it is listening.
+if command -v ss >/dev/null 2>&1; then
+    if ss -uln 2>/dev/null | grep -q ":$RTP_PORT\b"; then
+        echo "  OK — a UDP socket really is bound on $RTP_PORT"
+    else
+        echo "  note: ss shows no socket on $RTP_PORT (may lack permission to see it)"
+    fi
+fi
+
+# (c) the pair comes back when the leg ends — the leak Phase 0 is about
+echo "─── call teardown returns the pair ───"
+kill "$CHROME_PID" 2>/dev/null; wait "$CHROME_PID" 2>/dev/null
+deadline=$((SECONDS + 90)); returned=0
+while (( SECONDS < deadline )); do
+    [[ "$(pairs)" == "0" && "$(active)" == "0" ]] && { returned=1; break; }
+    sleep 2
+done
+if (( ! returned )); then
+    echo "FAIL: pair not returned after the call (allocated=$(pairs), active=$(active))" >&2
+    exit 1
+fi
+echo "  OK — pool back to 0 allocated, 0 calls active"
+
 echo
-echo "PASS — DEV_PLAN_WebRTC.md Phase 1 exit check (headless)."
+echo "PASS — DEV_PLAN_WebRTC.md Phase 1 exit check + §4.4 port accounting (headless)."
 echo "logs kept in $WORK"

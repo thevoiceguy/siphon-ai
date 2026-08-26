@@ -597,3 +597,91 @@ async fn reserve_refusal_is_recognised_from_the_real_forge_error() {
         "an exhausted pool must not be counted as a reservation refusal: {detail}"
     );
 }
+
+// ─── PortReservation (DEV_PLAN_WebRTC.md §4.4) ───────────────────────
+//
+// A WebRTC leg has no forge `MediaSession`, so it gets no ports as a
+// side effect of one. It still fills a call slot, so it draws a pair
+// explicitly — under the same floor, visible in the same gauge.
+
+/// The gauge an operator watches is sampled from pool truth, so a
+/// browser call is only visible in it if the pair is genuinely held.
+#[tokio::test]
+async fn reserved_pair_shows_in_the_pool_while_held() {
+    let (setup, mgr) = reserved_setup(43000, 43100, 0);
+    let (allocated_before, available_before) = mgr.port_pool_stats().await;
+    assert_eq!(allocated_before, 0);
+
+    let reservation = setup.reserve_port_pair().await.expect("pool has room");
+    assert_eq!(mgr.port_pool_stats().await.0, 1, "pair must be held");
+    assert!(
+        (43000..43100).contains(&reservation.rtp_port()),
+        "media must bind inside the configured range, got {}",
+        reservation.rtp_port()
+    );
+    assert_eq!(reservation.rtp_port() % 2, 0, "RTP port must be even");
+
+    drop(reservation);
+    // Release is spawned (forge's release is async, `Drop` is not), so
+    // let the runtime run it.
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    assert_eq!(
+        mgr.port_pool_stats().await,
+        (0, available_before),
+        "dropping the reservation must return the pair"
+    );
+}
+
+/// The whole point of holding a *pair*: a browser call and a SIP call
+/// cost the same, so the reserved band means one thing regardless of
+/// which kind of leg is consuming the pool.
+#[tokio::test]
+async fn browser_legs_respect_the_outbound_reservation() {
+    // 50 pairs, 49 reserved for origination — one inbound slot.
+    let (setup, mgr) = reserved_setup(43200, 43300, 49);
+
+    let first = setup.reserve_port_pair().await.expect("one slot is free");
+    let second = setup.reserve_port_pair().await;
+    assert!(
+        second.is_err(),
+        "a browser leg must not dip into the outbound reservation"
+    );
+
+    // And the refusal is the same shape a SIP call gets, so the caller
+    // rejects with the same 503 rather than needing a second path.
+    assert!(matches!(second, Err(SetupError::ResourceLimit(_))));
+
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(mgr.port_pool_stats().await.0, 0);
+}
+
+/// Browser and SIP legs draw from one pool, not two: a held browser
+/// pair really does reduce what a SIP call can get.
+#[tokio::test]
+async fn browser_and_sip_legs_share_one_pool() {
+    let (setup, mgr) = reserved_setup(43400, 43500, 0);
+    let (_, capacity) = mgr.port_pool_stats().await;
+
+    let held: Vec<_> = {
+        let mut v = Vec::new();
+        for _ in 0..capacity {
+            v.push(setup.reserve_port_pair().await.expect("within capacity"));
+        }
+        v
+    };
+    assert_eq!(mgr.port_pool_stats().await.0, capacity);
+
+    // Pool is now dry — an inbound SIP call must be refused, which is
+    // what proves the two leg types are competing for one resource.
+    assert!(
+        setup.reserve_port_pair().await.is_err(),
+        "an exhausted pool must refuse"
+    );
+
+    drop(held);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(mgr.port_pool_stats().await.0, 0, "all pairs returned");
+}

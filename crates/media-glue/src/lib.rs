@@ -9,6 +9,7 @@
 
 pub(crate) mod idle;
 pub mod moh;
+pub mod ports;
 pub mod room;
 pub mod rtp_stats;
 pub mod sdp;
@@ -16,6 +17,7 @@ pub mod setup;
 pub mod tap;
 
 pub use moh::{AnnounceSource, MohSource};
+pub use ports::PortReservation;
 pub use room::{
     spawn_room, RoomConfig, RoomEvent, RoomHandle, RoomJoinError, RoomLifecycle, RoomMembership,
     RoomObserver,

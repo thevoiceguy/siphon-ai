@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A browser can now place a call that carries audio** — the end of
+  Phase 2's core path in `docs/design/DEV_PLAN_WebRTC.md`. An INVITE
+  arriving over WS/WSS with a WebRTC-shaped offer is answered by
+  forge-webrtc, and the resulting peer connection is handed to the
+  controller as a `MediaLeg::WebRtc` alongside the classic RTP one.
+  Verified with a real headless-Chrome call end to end: Chrome → WSS →
+  the WebRTC leg → Opus decode at 16 kHz → the WS bridge → the echo
+  server → encode → Chrome, **1216 frames each direction, zero decode
+  or encode errors**.
+
+  Three things the classic path does are deliberately skipped for a
+  browser leg, because doing them would be wrong rather than merely
+  unnecessary: the **SRTP policy gate** (it would reject
+  `UDP/TLS/RTP/SAVPF` under the default `srtp_mode = off` and turn a
+  working call into a 488 — the exact misdiagnosis §4.1 exists to
+  end), the **profile tweaks** that rewrite an m-line for sip-sdp's
+  negotiator, and **forge's session start**, which has no session to
+  operate on. `[webrtc].setup_timeout` bounds ICE/DTLS.
+
+  The leg also gets its **own inactivity watchdog**, wired to the same
+  `[media].inactivity_timeout_secs` a SIP call uses. This was found by
+  testing rather than reasoning: when a browser tab closes there is no
+  BYE and no FIN we can see, and the first working call sat in
+  `calls_active` indefinitely after Chrome was killed. Now silence
+  reclaims the slot, and the leg logs the frames it moved in each
+  direction so a silent call can be told apart from no media at all.
+### Added
+
 - **The controller can run a browser call's media** (Phase 2 §4.3 of
   `docs/design/DEV_PLAN_WebRTC.md`). `CallController` now holds a
   `MediaLeg` — `Classic` (forge-engine RTP, every SIP call, unchanged)

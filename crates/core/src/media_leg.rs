@@ -118,6 +118,18 @@ impl MediaLeg {
         }
     }
 
+    /// Keep the leg alive across a WS drop (mid-call reconnect, or the
+    /// failure prompt). A browser leg has no equivalent today — a
+    /// browser whose WS died has lost its signalling channel too, so
+    /// there is nothing to reconnect *to* — and the flag is ignored.
+    pub fn with_survive_ws_drop(self, enabled: bool) -> Self {
+        match self {
+            MediaLeg::Classic(t) => MediaLeg::Classic(Box::new(t.with_survive_ws_drop(enabled))),
+            #[cfg(feature = "webrtc")]
+            other @ MediaLeg::WebRtc(_) => other,
+        }
+    }
+
     /// Run the leg to completion.
     ///
     /// The four channels are the seam: PCM16LE frames out to the WS

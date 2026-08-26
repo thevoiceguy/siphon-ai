@@ -462,6 +462,13 @@ pub enum AcceptError {
         enabled: bool,
     },
 
+    /// `[webrtc]` is enabled and the offer was a browser's, but the
+    /// media leg could not be built (no codec in common, malformed
+    /// ICE/DTLS material, no socket). 488, like every other
+    /// "your offer, our capabilities" failure.
+    #[error("WebRTC media leg could not be set up: {0}")]
+    WebRtcSetup(String),
+
     #[error("offer profile {offered} rejected under srtp_mode = {mode:?}")]
     SrtpModeMismatch {
         /// Wire token of the offered profile (`"RTP/AVP"` etc.).
@@ -534,7 +541,9 @@ impl AcceptError {
             | AcceptError::Setup(SetupError::Vad(_))
             | AcceptError::Controller(_) => (500, "Server Internal Error"),
             AcceptError::SrtpModeMismatch { .. } => (488, "Not Acceptable Here"),
-            AcceptError::WebRtcOffer { .. } => (488, "Not Acceptable Here"),
+            AcceptError::WebRtcOffer { .. } | AcceptError::WebRtcSetup(_) => {
+                (488, "Not Acceptable Here")
+            }
             AcceptError::IdentityRequired => (428, "Use Identity Header"),
             AcceptError::AttestationRejected { code, .. } => (*code, reason_phrase(*code)),
         }
@@ -556,7 +565,7 @@ impl AcceptError {
             // Separately alertable: a browser reached this daemon and
             // could not be served. That is a deployment gap, not a bad
             // call, and it should not hide in generic routing noise.
-            AcceptError::WebRtcOffer { .. } => "rejected_webrtc",
+            AcceptError::WebRtcOffer { .. } | AcceptError::WebRtcSetup(_) => "rejected_webrtc",
             _ => "rejected",
         }
     }
@@ -1813,6 +1822,52 @@ pub(crate) fn barge_in_to_tap_action(cfg: &BargeInConfig) -> siphon_ai_media_glu
 /// The wire-facing announcement of a call's resolved barge-in policy
 /// (`start.barge_in_mode`, 0.32.0). `enabled = false` reads as
 /// notify-only — that's exactly how the tap behaves.
+/// Build the `AnswerOutcome` the rest of the pipeline expects from a
+/// forge-webrtc answer.
+///
+/// The negotiated *codec* here is the browser leg's, and the sample
+/// rate is the PCM rate the bridge will see — the same number a classic
+/// call with that codec reports, which is what keeps the WS contract
+/// identical across leg types.
+#[cfg(feature = "webrtc")]
+fn webrtc_answer_outcome(
+    answer_sdp: &str,
+    codec: forge_core::AudioCodec,
+    payload_type: u8,
+    sample_rate: u32,
+) -> Result<AnswerOutcome, AcceptError> {
+    use siphon_ai_media_glue::Codec;
+    let parsed =
+        <forge_sdp::SessionDescription as forge_sdp::SessionDescriptionExt>::from_str(answer_sdp)
+            .map_err(|e| AcceptError::WebRtcSetup(format!("our own answer did not parse: {e}")))?;
+    let negotiated_codec = match codec {
+        forge_core::AudioCodec::Opus => Codec::Opus,
+        forge_core::AudioCodec::PCMU => Codec::Pcmu,
+        forge_core::AudioCodec::PCMA => Codec::Pcma,
+        other => {
+            return Err(AcceptError::WebRtcSetup(format!(
+                "{other:?} is not a browser-leg codec"
+            )))
+        }
+    };
+    Ok(AnswerOutcome {
+        answer: parsed,
+        answer_text: answer_sdp.to_string(),
+        negotiated_codec,
+        negotiated_payload_type: payload_type,
+        // The RTP clock, which for Opus is 48 kHz even though we decode
+        // at 16 (RFC 7587 §4.1) — distinct from the PCM rate below.
+        negotiated_clock_rate: match codec {
+            forge_core::AudioCodec::Opus => 48_000,
+            _ => 8_000,
+        },
+        negotiated_audio_sample_rate: sample_rate,
+        negotiated_direction: siphon_ai_media_glue::MediaDirection::SendRecv,
+        // SDES only; DTLS-SRTP carries no `a=crypto` key to report.
+        peer_srtp: None,
+    })
+}
+
 pub(crate) fn barge_in_mode_info(cfg: &BargeInConfig) -> siphon_ai_bridge::BargeInModeInfo {
     if !cfg.enabled {
         return siphon_ai_bridge::BargeInModeInfo::NotifyOnly;
@@ -2048,10 +2103,14 @@ pub struct BridgingAcceptor {
     /// floor, no preference, no force-refresher) until the daemon's
     /// `[sip]` config calls `with_session_timer_policy`.
     session_timer_policy: SessionTimerPolicy,
-    /// Whether `[webrtc]` is enabled on this daemon. Today it only
-    /// sharpens the rejection a browser INVITE receives (§4.1); when
-    /// the media leg is wired in, it is the switch that decides
-    /// whether to build one.
+    /// `[webrtc]`, when this daemon is configured for browser calls
+    /// (§4.1/§4.5). `None` ⇒ a browser INVITE is refused; `Some` ⇒ it
+    /// gets a forge-webrtc media leg.
+    #[cfg(feature = "webrtc")]
+    webrtc: Option<Arc<siphon_ai_webrtc_glue::WebRtcSettings>>,
+    /// Same switch, in a build without the leg compiled in — enough to
+    /// tell the operator which situation they are in.
+    #[cfg(not(feature = "webrtc"))]
     webrtc_enabled: bool,
     /// Authoritative timer for every dialog we accepted with session
     /// timers. The fan-out task subscribed in `new()` reads its event
@@ -2399,6 +2458,9 @@ impl BridgingAcceptor {
             webhook_sink: Arc::new(WebhookNullSink),
             call_id_factory: default_call_id_factory(),
             session_timer_policy: SessionTimerPolicy::default(),
+            #[cfg(feature = "webrtc")]
+            webrtc: None,
+            #[cfg(not(feature = "webrtc"))]
             webrtc_enabled: false,
             session_timer_manager,
             dialog_handles,
@@ -2537,9 +2599,18 @@ impl BridgingAcceptor {
         }
     }
 
-    /// Record that `[webrtc]` is enabled, so a browser INVITE that
-    /// cannot be served yet says which situation the operator is in
-    /// (DEV_PLAN_WebRTC.md §4.1).
+    /// Configure browser media legs (DEV_PLAN_WebRTC.md §4.1/§4.5).
+    /// `None` keeps browser INVITEs refused, with a message saying so.
+    #[cfg(feature = "webrtc")]
+    pub fn with_webrtc(mut self, settings: Option<siphon_ai_webrtc_glue::WebRtcSettings>) -> Self {
+        self.webrtc = settings.map(Arc::new);
+        self
+    }
+
+    /// Record that `[webrtc]` was requested on a build without the
+    /// leg, so the rejection can say which situation the operator is
+    /// in.
+    #[cfg(not(feature = "webrtc"))]
     pub fn with_webrtc_enabled(mut self, enabled: bool) -> Self {
         self.webrtc_enabled = enabled;
         self
@@ -3511,12 +3582,17 @@ impl CallAcceptor for BridgingAcceptor {
                 // and rolls back the forge session, no zombie call.
                 // forge's state machine requires Initializing →
                 // Active exactly once; we own that single call here.
-                if let Err(e) = self
-                    .media
-                    .session_manager()
-                    .start_session(&prepared.forge_call_id)
-                    .await
-                {
+                // A browser leg has no forge session: forge-webrtc
+                // owns its own socket and DTLS, and the port pool
+                // entry it would start does not exist.
+                if let Err(e) = if prepared.is_webrtc {
+                    Ok(())
+                } else {
+                    self.media
+                        .session_manager()
+                        .start_session(&prepared.forge_call_id)
+                        .await
+                } {
                     warn!(
                         call_id = %prepared.bridge_call_id,
                         error = %e,
@@ -4034,6 +4110,11 @@ pub struct PreparedCall {
     pub start: StartMsg,
     pub controller: CallController,
     pub handle: crate::call::CallHandle,
+    /// A browser leg (forge-webrtc) rather than a forge RTP session.
+    /// The steps that drive forge's own state machine — starting and
+    /// stopping the session, attaching its flow — have nothing to
+    /// operate on for one.
+    pub is_webrtc: bool,
 }
 
 impl std::fmt::Debug for PreparedCall {
@@ -4149,6 +4230,101 @@ impl BridgingAcceptor {
         result
     }
 
+    /// Finish preparing a **browser** call once forge-webrtc has
+    /// answered it (`DEV_PLAN_WebRTC.md` §4.1–4.3).
+    ///
+    /// Deliberately short. Everything a browser leg cannot have is
+    /// absent rather than stubbed: no `hold`/`park` contexts (both are
+    /// SIP re-INVITE dances — see `webrtc_leg`), no transfer, no
+    /// WS-reconnect (a browser whose WS died lost its signalling
+    /// channel too, so there is nothing to redial), and no SRTP block
+    /// on the start message — DTLS-SRTP is intrinsic to the leg, not a
+    /// negotiated add-on the server needs told about.
+    #[cfg(feature = "webrtc")]
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_webrtc_prepare(
+        &self,
+        _request: &Request,
+        route: &CompiledRoute,
+        facts: &InviteFacts,
+        answered: siphon_ai_webrtc_glue::Answered,
+        bridge_config: BridgeConfig,
+        bridge_call_id: BridgeCallId,
+        forge_call_id: forge_core::CallId,
+        sip_call_id: String,
+    ) -> Result<PreparedCall, AcceptError> {
+        let siphon_ai_webrtc_glue::Answered {
+            leg,
+            answer_sdp,
+            events,
+        } = answered;
+
+        let (codec, payload_type) = leg.codec();
+        let sample_rate = leg.bridge_sample_rate();
+        let answer = webrtc_answer_outcome(&answer_sdp, codec, payload_type, sample_rate)?;
+
+        let start = build_start_msg(
+            bridge_call_id.clone(),
+            facts,
+            &sip_call_id,
+            &answer,
+            &self.defaults.forward_headers,
+            // No `srtp` block: the media is DTLS-SRTP by construction,
+            // not a negotiated option the server chooses.
+            None,
+            None,
+            barge_in_mode_info(&resolve_barge_in(&self.defaults, route)),
+        );
+
+        let setup_timeout = self
+            .webrtc
+            .as_ref()
+            .map(|s| s.setup_timeout)
+            .unwrap_or_else(|| std::time::Duration::from_secs(15));
+        let media_tap = crate::webrtc_leg::WebRtcTap::new(leg, events, setup_timeout)
+            // Same knob a classic leg uses: a browser that vanishes
+            // (tab closed, laptop shut) sends no BYE, so silence is
+            // the only signal we get.
+            .with_inactivity_timeout(resolve_inactivity_timeout(&self.defaults, route))
+            .into_leg();
+
+        info!(
+            call_id = %bridge_call_id,
+            ?codec,
+            sample_rate,
+            "browser call prepared (WebRTC media leg)"
+        );
+
+        let cfg = CallControllerConfig {
+            call_id: bridge_call_id.clone(),
+            bridge: bridge_config.clone(),
+            start: start.clone(),
+            media_tap,
+            transfer: None,
+            recording: None,
+            conference: self.conference.clone(),
+            park: self.park.clone(),
+            hold: None,
+            ws_reconnect_enabled: false,
+            ws_reconnect_max: std::time::Duration::ZERO,
+            ws_reconnect_moh_file: None,
+            ws_failure_prompt: None,
+        };
+        let (controller, handle) = CallController::new(cfg);
+
+        Ok(PreparedCall {
+            bridge_call_id,
+            forge_call_id,
+            sip_call_id,
+            answer,
+            bridge_config,
+            start,
+            controller,
+            handle,
+            is_webrtc: true,
+        })
+    }
+
     async fn prepare_call_inner(
         &self,
         request: &Request,
@@ -4172,10 +4348,31 @@ impl BridgingAcceptor {
         // is exactly what the Phase 1 browser call ran into. Naming it
         // for what it is costs one check and saves the next person an
         // afternoon.
+        // A browser gets forge-webrtc's peer connection instead of a
+        // forge RTP session: it owns its own offer/answer, ICE and
+        // DTLS, so none of the SRTP tweaks below apply to it.
         #[cfg(feature = "webrtc")]
-        if matches!(transport, TransportKind::Ws | TransportKind::Wss)
+        let webrtc_answer = if matches!(transport, TransportKind::Ws | TransportKind::Wss)
             && siphon_ai_webrtc_glue::is_webrtc_offer(offer_sdp)
         {
+            let Some(settings) = self.webrtc.as_ref() else {
+                return Err(AcceptError::WebRtcOffer { enabled: false });
+            };
+            Some(
+                siphon_ai_webrtc_glue::WebRtcLeg::answer(offer_sdp, settings)
+                    .await
+                    .map_err(|e| AcceptError::WebRtcSetup(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+        #[cfg(not(feature = "webrtc"))]
+        if matches!(transport, TransportKind::Ws | TransportKind::Wss)
+            && offer_sdp.contains("a=fingerprint:")
+            && offer_sdp.contains("a=ice-ufrag:")
+        {
+            // No leg compiled in; say so rather than failing later as
+            // an SRTP policy mismatch.
             return Err(AcceptError::WebRtcOffer {
                 enabled: self.webrtc_enabled,
             });
@@ -4183,16 +4380,31 @@ impl BridgingAcceptor {
         #[cfg(not(feature = "webrtc"))]
         let _ = transport;
 
+        // A browser leg brings its own DTLS-SRTP: forge-webrtc has
+        // already answered, so the classic SRTP policy gate and the
+        // profile tweaks below are not just unnecessary but wrong —
+        // the gate would reject `UDP/TLS/RTP/SAVPF` under the default
+        // `srtp_mode = off` and turn a working browser call into a
+        // 488, which is exactly the misdiagnosis §4.1 exists to end.
+        #[cfg(feature = "webrtc")]
+        let is_webrtc_call = webrtc_answer.is_some();
+        #[cfg(not(feature = "webrtc"))]
+        let is_webrtc_call = false;
+
         // SRTP-mode policy gate (DEV_PLAN_0.3.0.md §4.1). Done before
         // any media bring-up so an incompatible offer fails fast with
         // 488. Re-parses the SDP here — `accept_inbound` parses again
         // internally; the duplication is cheap and avoids reshuffling
         // the media-setup API for this PR.
         let srtp_mode = resolve_srtp_mode(&self.defaults, route);
-        if let Ok(parsed_offer) =
-            <forge_sdp::SessionDescription as forge_sdp::SessionDescriptionExt>::from_str(offer_sdp)
-        {
-            enforce_srtp_mode(srtp_mode, &parsed_offer)?;
+        if !is_webrtc_call {
+            if let Ok(parsed_offer) =
+                <forge_sdp::SessionDescription as forge_sdp::SessionDescriptionExt>::from_str(
+                    offer_sdp,
+                )
+            {
+                enforce_srtp_mode(srtp_mode, &parsed_offer)?;
+            }
         }
         // If parsing fails here, fall through and let `accept_inbound`
         // surface the parse error via its normal SdpError path.
@@ -4207,8 +4419,12 @@ impl BridgingAcceptor {
         // The two tweaks share the same alternative selection, so at
         // most one engages per offer. Try DTLS first; if the policy
         // didn't select DTLS, try SDES.
-        let dtls_tweak = maybe_tweak_dtls_srtp_offer(offer_sdp, srtp_mode)?;
-        let sdes_tweak = if dtls_tweak.is_none() {
+        let dtls_tweak = if is_webrtc_call {
+            None
+        } else {
+            maybe_tweak_dtls_srtp_offer(offer_sdp, srtp_mode)?
+        };
+        let sdes_tweak = if dtls_tweak.is_none() && !is_webrtc_call {
             maybe_tweak_sdes_offer(offer_sdp, srtp_mode)?
         } else {
             None
@@ -4241,6 +4457,25 @@ impl BridgingAcceptor {
             sdes_srtp = sdes_tweak.is_some(),
             "media setup starting"
         );
+
+        // Media acquisition. One of two backends produces the answer
+        // and the leg; everything downstream — start message, contexts,
+        // recording, the controller — is identical either way.
+        #[cfg(feature = "webrtc")]
+        if let Some(answered) = webrtc_answer {
+            return self
+                .finish_webrtc_prepare(
+                    request,
+                    route,
+                    facts,
+                    answered,
+                    bridge_config,
+                    bridge_call_id,
+                    forge_call_id,
+                    sip_call_id,
+                )
+                .await;
+        }
 
         let InboundAccepted {
             mut answer,
@@ -4434,6 +4669,7 @@ impl BridgingAcceptor {
             start,
             controller,
             handle,
+            is_webrtc: false,
         })
     }
 }
@@ -5061,6 +5297,7 @@ impl BridgingAcceptor {
             start,
             controller,
             handle,
+            is_webrtc: false,
         };
         metrics::counter!(DELAYED_OFFER_TOTAL, "result" => "answered").increment(1);
         self.run_call(

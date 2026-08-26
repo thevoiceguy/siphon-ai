@@ -160,7 +160,7 @@ fn make_controller_reconnect(
             ..Default::default()
         },
         start: start_msg(call_id),
-        media_tap: tap,
+        media_tap: tap.into(),
         transfer: None,
         recording: None,
         conference: None,
@@ -239,7 +239,7 @@ fn make_controller_full(
             ..Default::default()
         },
         start: start_msg(call_id),
-        media_tap: tap,
+        media_tap: tap.into(),
         transfer: None,
         recording: None,
         conference,
@@ -281,7 +281,7 @@ fn make_controller_inactivity(
             ..Default::default()
         },
         start: start_msg(call_id),
-        media_tap: tap,
+        media_tap: tap.into(),
         transfer: None,
         recording: None,
         conference: None,
@@ -883,7 +883,7 @@ fn make_controller_prompt(
             ..Default::default()
         },
         start: start_msg(call_id),
-        media_tap: tap,
+        media_tap: tap.into(),
         transfer: None,
         recording: None,
         conference: None,

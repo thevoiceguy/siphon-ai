@@ -848,7 +848,8 @@ async fn run_call(
         // (0.7.3) — same as the acceptor does for inbound.
         media_tap: accepted
             .tap
-            .with_survive_ws_drop(ctx.ws_reconnect_enabled || ctx.ws_failure_prompt.is_some()),
+            .with_survive_ws_drop(ctx.ws_reconnect_enabled || ctx.ws_failure_prompt.is_some())
+            .into(),
         transfer: Some(transfer),
         recording: ctx.recording_setup.clone(),
         conference: ctx.conference.clone(),

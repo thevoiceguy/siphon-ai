@@ -11,6 +11,7 @@ pub mod conference;
 pub mod conference_admin;
 pub mod dialog_reaper;
 pub mod hold;
+pub mod media_leg;
 pub mod outbound;
 pub mod outbound_service;
 pub mod park;
@@ -18,6 +19,8 @@ pub mod park_admin;
 pub mod quality_live;
 pub mod registry;
 pub mod transfer;
+#[cfg(feature = "webrtc")]
+pub mod webrtc_leg;
 
 pub use acceptor::{
     build_bridge_config, build_outbound_start_msg, build_start_msg, default_call_id_factory,

@@ -4409,7 +4409,8 @@ impl BridgingAcceptor {
             // tear it down before the controller can redial (0.7.3) or
             // play the failure prompt (0.34.0).
             media_tap: tap
-                .with_survive_ws_drop(ws_reconnect_enabled || ws_failure_prompt.is_some()),
+                .with_survive_ws_drop(ws_reconnect_enabled || ws_failure_prompt.is_some())
+                .into(),
             transfer,
             recording,
             conference: self.conference.clone(),
@@ -5038,7 +5039,8 @@ impl BridgingAcceptor {
             start: start.clone(),
             media_tap: accepted
                 .tap
-                .with_survive_ws_drop(ws_reconnect_enabled || ws_failure_prompt.is_some()),
+                .with_survive_ws_drop(ws_reconnect_enabled || ws_failure_prompt.is_some())
+                .into(),
             transfer: None,
             recording,
             conference: self.conference.clone(),

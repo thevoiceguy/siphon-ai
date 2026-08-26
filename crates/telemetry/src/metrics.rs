@@ -507,6 +507,46 @@ pub const SIP_TLS_RELOAD_ATTEMPTS_TOTAL: &str = "siphon_ai_sip_tls_reload_attemp
 /// Only emitted when `[admin.tls]` is configured.
 pub const ADMIN_TLS_RELOAD_ATTEMPTS_TOTAL: &str = "siphon_ai_admin_tls_reload_attempts_total";
 
+/// Browser media legs that finished their ICE + DTLS setup phase
+/// (`DEV_PLAN_WebRTC.md` §4.6), labeled by `codec` (`opus`, `pcmu`,
+/// `pcma`, `other` — what the browser and this daemon agreed on) and
+/// `result`:
+///
+/// - `connected` — SRTP keys installed, media flowed;
+/// - `ice_timeout` — `[webrtc].setup_timeout` expired with **no**
+///   candidate pair nominated: no path exists (NAT on both ends with
+///   no STUN/TURN, or the media port blocked — see
+///   `[media].rtp_port_range` and §4.4);
+/// - `dtls_timeout` — a pair *was* nominated but the DTLS handshake
+///   never completed: the path works and the crypto does not;
+/// - `failed` — forge-webrtc gave up on the transport;
+/// - `closed` — the browser went away mid-setup (tab closed), which
+///   is a user action, not a fault.
+///
+/// The ice/dtls split is the whole point: those two failures have
+/// different fixes, and one "connect failed" counter would hide it.
+/// Bounded cardinality (4 × 5). Literal must match the call site in
+/// `siphon-ai-core::webrtc_leg`.
+pub const WEBRTC_LEGS_TOTAL: &str = "siphon_ai_webrtc_legs_total";
+
+/// Browser media legs that ended **after** connecting, by `reason`:
+/// `peer_closed` (the transport closed — the normal end of a browser
+/// call), `transport_failed` (forge-webrtc failed the transport
+/// mid-call), `inactivity` (`[media].inactivity_timeout_secs` fired:
+/// the page vanished without a BYE), `send_failed` (an outbound frame
+/// could not be sent), `controller` (the call ended from our side —
+/// BYE, shutdown, WS hangup).
+///
+/// **`inactivity` is this daemon's consent-freshness signal.** RFC
+/// 7675 consent failure is not surfaced as an event by forge-webrtc
+/// (it sends keepalives but does not fail the transport when replies
+/// stop), so silence is what tells us a browser is gone — the same
+/// detector a SIP leg uses, and the one that actually gives the call
+/// slot back. A rising rate means browsers are disappearing rather
+/// than hanging up: usually a page that closes its tab without
+/// sending a BYE. Literal must match `siphon-ai-core::webrtc_leg`.
+pub const WEBRTC_LEGS_ENDED_TOTAL: &str = "siphon_ai_webrtc_legs_ended_total";
+
 // ─── Gauges ─────────────────────────────────────────────────────────
 
 /// Currently-active bridged calls, inbound and outbound (#373 —
@@ -674,6 +714,39 @@ pub const RTP_PACKET_LOSS_RATIO: &str = "siphon_ai_rtp_packet_loss_ratio";
 /// every `rtp_stats` emission once RX data exists.
 pub const RTP_MOS_ESTIMATE: &str = "siphon_ai_rtp_mos_estimate";
 
+/// Time from the start of a browser leg's media phase to ICE
+/// nominating a candidate pair, in seconds (§4.6). Recorded once per
+/// leg that gets that far; a leg that never nominates is counted as
+/// `ice_timeout` on [`WEBRTC_LEGS_TOTAL`] instead, so the histogram's
+/// count is deliberately *not* the number of browser calls. Host
+/// candidates on a LAN land in the bottom bucket; anything above a
+/// second means STUN, a long candidate list, or a slow browser.
+/// Literal must match `siphon-ai-core::webrtc_leg`.
+pub const WEBRTC_ICE_SECONDS: &str = "siphon_ai_webrtc_ice_seconds";
+
+/// The DTLS handshake itself, in seconds: ICE nomination (when
+/// forge-webrtc starts the handshake) → SRTP keys installed. Separate
+/// from [`WEBRTC_ICE_SECONDS`] because the two phases fail and slow
+/// down for unrelated reasons — a handshake is round trips over a path
+/// ICE already proved works. Literal must match
+/// `siphon-ai-core::webrtc_leg`.
+pub const WEBRTC_DTLS_SECONDS: &str = "siphon_ai_webrtc_dtls_seconds";
+
+/// Wall time one browser leg spent **inside the codec**, in seconds,
+/// recorded once when the leg ends and labeled by `direction`:
+/// `decode` (browser → bridge) or `encode` (bridge → browser).
+///
+/// Codec work is pure computation with no I/O or awaits, so this is
+/// CPU time in all but name — the per-call transcode cost §4.6 asks
+/// for, and the number that answers "how many browser calls fit on
+/// this box". It excludes SRTP protect and the socket write, which
+/// are transport cost. Divide by `siphon_ai_call_duration_seconds`
+/// for the fraction of a core a leg burns; Opus costs an order of
+/// magnitude more than G.711, which is what the `codec` label on
+/// [`WEBRTC_LEGS_TOTAL`] is for. Literal must match
+/// `siphon-ai-core::webrtc_leg`.
+pub const WEBRTC_TRANSCODE_SECONDS: &str = "siphon_ai_webrtc_transcode_seconds";
+
 #[derive(Debug, Error)]
 pub enum InitError {
     #[error("metrics recorder install failed: {0}")]
@@ -753,6 +826,24 @@ pub fn prometheus_builder() -> Result<PrometheusBuilder, InitError> {
             b.set_buckets_for_metric(
                 Matcher::Full(RTP_MOS_ESTIMATE.to_string()),
                 &RTP_MOS_ESTIMATE_BUCKETS,
+            )
+        })
+        .and_then(|b| {
+            b.set_buckets_for_metric(
+                Matcher::Full(WEBRTC_ICE_SECONDS.to_string()),
+                &WEBRTC_SETUP_BUCKETS,
+            )
+        })
+        .and_then(|b| {
+            b.set_buckets_for_metric(
+                Matcher::Full(WEBRTC_DTLS_SECONDS.to_string()),
+                &WEBRTC_SETUP_BUCKETS,
+            )
+        })
+        .and_then(|b| {
+            b.set_buckets_for_metric(
+                Matcher::Full(WEBRTC_TRANSCODE_SECONDS.to_string()),
+                &WEBRTC_TRANSCODE_BUCKETS,
             )
         })
         // The embedded forge crates emit through this same recorder, and
@@ -1125,6 +1216,29 @@ pub fn register_descriptions() {
         Unit::Count,
         "Total RTP port pairs in the pool ([media].rtp_port_range / 2)."
     );
+    describe_counter!(
+        WEBRTC_LEGS_TOTAL,
+        "Browser media legs by negotiated codec and setup result (connected, ice_timeout, dtls_timeout, failed, closed)."
+    );
+    describe_counter!(
+        WEBRTC_LEGS_ENDED_TOTAL,
+        "Connected browser media legs by end reason (peer_closed, transport_failed, inactivity, send_failed, controller)."
+    );
+    describe_histogram!(
+        WEBRTC_ICE_SECONDS,
+        Unit::Seconds,
+        "Browser leg media start to ICE nominating a candidate pair."
+    );
+    describe_histogram!(
+        WEBRTC_DTLS_SECONDS,
+        Unit::Seconds,
+        "DTLS handshake on a browser leg (ICE nomination to SRTP keys installed)."
+    );
+    describe_histogram!(
+        WEBRTC_TRANSCODE_SECONDS,
+        Unit::Seconds,
+        "Wall time one browser leg spent inside the codec, by direction (decode, encode)."
+    );
 }
 
 /// Publish a zero for the counters whose *healthy* value is zero, so
@@ -1240,6 +1354,20 @@ pub const RTP_PACKET_LOSS_RATIO_BUCKETS: [f64; 9] =
 /// bucket boundary is a band boundary. The 5.0 top bounds the scale.
 pub const RTP_MOS_ESTIMATE_BUCKETS: [f64; 8] = [1.5, 2.0, 2.6, 3.1, 3.6, 4.0, 4.4, 5.0];
 
+/// Buckets for `webrtc_ice_seconds` and `webrtc_dtls_seconds`. Host
+/// candidates on a LAN nominate in milliseconds, a STUN round trip
+/// adds tens, and the top of the scale is the default
+/// `[webrtc].setup_timeout` neighbourhood — past which the leg is
+/// counted as a timeout rather than a slow success, so a bucket above
+/// 10 s would never fill.
+pub const WEBRTC_SETUP_BUCKETS: [f64; 9] = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 10.0];
+
+/// Buckets for `webrtc_transcode_seconds` — *per leg*, not per frame,
+/// so the scale is set by call length: a short G.711 call is
+/// milliseconds, a long Opus one is seconds. The 60 s top bounds a
+/// very long call rather than any expected value.
+pub const WEBRTC_TRANSCODE_BUCKETS: [f64; 9] = [0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 15.0, 60.0];
+
 /// Every counter this module declares. Exhaustive by test
 /// (`every_metric_const_is_listed`), which is what keeps the
 /// `# HELP` coverage test honest as metrics are added (#431).
@@ -1290,6 +1418,8 @@ pub const ALL_COUNTERS: &[&str] = &[
     SIP_TLS_RELOAD_ATTEMPTS_TOTAL,
     ADMIN_TLS_RELOAD_ATTEMPTS_TOTAL,
     RTP_RESERVE_BLOCKS_TOTAL,
+    WEBRTC_LEGS_TOTAL,
+    WEBRTC_LEGS_ENDED_TOTAL,
 ];
 
 /// Every gauge this module declares. See [`ALL_COUNTERS`].
@@ -1330,6 +1460,9 @@ pub const ALL_HISTOGRAMS: &[&str] = &[
     DRAIN_SECONDS,
     BARGE_IN_DECISION_SECONDS,
     WEBHOOK_DELIVERY_SECONDS,
+    WEBRTC_ICE_SECONDS,
+    WEBRTC_DTLS_SECONDS,
+    WEBRTC_TRANSCODE_SECONDS,
 ];
 
 #[cfg(test)]

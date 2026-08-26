@@ -48,6 +48,57 @@ pub struct Answered {
     pub events: mpsc::Receiver<PeerEvent>,
 }
 
+/// How the ICE + DTLS setup phase ended, with the timings that
+/// explain it (`DEV_PLAN_WebRTC.md` §4.6).
+///
+/// The split between the two timeout variants is the point: a browser
+/// call with no audio has failed either at ICE (no path — NAT, a
+/// firewall, a candidate we never reached) or at DTLS (a path exists
+/// but the handshake did not finish), and those are different
+/// problems with different fixes. `wait_connected`-style polling
+/// cannot tell them apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetupOutcome {
+    /// ICE nominated a pair and DTLS installed the SRTP keys: media
+    /// may flow. The durations are `None` only when the transport
+    /// connected before the wait began — see
+    /// [`WebRtcLeg::wait_for_setup`].
+    Connected {
+        /// Wait start → ICE nomination.
+        ice: Option<Duration>,
+        /// ICE nomination → SRTP keys installed, i.e. the DTLS
+        /// handshake itself.
+        dtls: Option<Duration>,
+    },
+    /// The budget expired with no candidate pair nominated.
+    IceTimeout,
+    /// A pair was nominated, but DTLS never completed inside the
+    /// budget.
+    DtlsTimeout {
+        /// How long ICE took, which succeeded.
+        ice: Duration,
+    },
+    /// forge-webrtc gave up on the transport (its own ICE timeout, a
+    /// DTLS error, a bad fingerprint).
+    Failed(String),
+    /// Closed — locally, or the event stream ended — before connecting.
+    Closed,
+}
+
+impl SetupOutcome {
+    /// Bounded label for the `result` dimension of
+    /// `siphon_ai_webrtc_legs_total`.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Connected { .. } => "connected",
+            Self::IceTimeout => "ice_timeout",
+            Self::DtlsTimeout { .. } => "dtls_timeout",
+            Self::Failed(_) => "failed",
+            Self::Closed => "closed",
+        }
+    }
+}
+
 impl WebRtcLeg {
     /// Answer a browser's offer.
     ///
@@ -123,14 +174,44 @@ impl WebRtcLeg {
         })
     }
 
-    /// Wait for ICE + DTLS. This is the `[webrtc].setup_timeout`
-    /// budget: a browser that signalled but never completes media must
-    /// not hold a call slot (§4.4).
-    pub async fn wait_connected(&self, timeout: Duration) -> Result<()> {
-        self.peer
-            .wait_connected(timeout)
-            .await
-            .map_err(|e| WebRtcGlueError::Connect(e.to_string()))
+    /// Wait for ICE + DTLS, watching the event stream. This is the
+    /// `[webrtc].setup_timeout` budget: a browser that signalled but
+    /// never completes media must not hold a call slot (§4.4).
+    ///
+    /// Driven by events rather than by polling the connection state
+    /// (forge-webrtc offers both) because the two questions an
+    /// operator asks of a browser call that never got audio —
+    /// *did ICE nominate a pair?* and *how long did DTLS take?* — are
+    /// only answerable if the transitions are observed as they happen.
+    /// Polling collapses `IceConnected` and `Connected` into one
+    /// "connected", which is the same reason §4.6's histograms exist.
+    ///
+    /// Takes the receiver the caller owns; everything after
+    /// [`SetupOutcome::Connected`] (RTP, RTCP, `Closed`) stays queued
+    /// for the caller's own loop.
+    pub async fn wait_for_setup(
+        &self,
+        events: &mut mpsc::Receiver<PeerEvent>,
+        budget: Duration,
+    ) -> SetupOutcome {
+        // The transport runs in its own task, so it can finish before
+        // this is first called. Its state is the authority; the events
+        // it already queued are then history we did not time, which is
+        // what the `None` timings mean.
+        match self.peer.get_state() {
+            ConnectionState::Connected => {
+                return SetupOutcome::Connected {
+                    ice: None,
+                    dtls: None,
+                }
+            }
+            ConnectionState::Failed => {
+                return SetupOutcome::Failed("transport failed before media started".into())
+            }
+            ConnectionState::Closed => return SetupOutcome::Closed,
+            _ => {}
+        }
+        await_setup(events, budget).await
     }
 
     /// The negotiated codec and the payload type the browser expects.
@@ -176,6 +257,52 @@ impl WebRtcLeg {
     /// Close the transport. Idempotent.
     pub fn close(&mut self) {
         self.peer.close();
+    }
+}
+
+/// Watch the event stream until the transport connects, fails, or the
+/// budget expires.
+///
+/// Free-standing (rather than a method) so the state machine can be
+/// tested against a synthetic event stream — building a real peer
+/// that fails DTLS on demand is not something a unit test can do.
+pub async fn await_setup(events: &mut mpsc::Receiver<PeerEvent>, budget: Duration) -> SetupOutcome {
+    let start = tokio::time::Instant::now();
+    let deadline = start + budget;
+    let mut ice_at: Option<tokio::time::Instant> = None;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return match ice_at {
+                Some(at) => SetupOutcome::DtlsTimeout {
+                    ice: at.duration_since(start),
+                },
+                None => SetupOutcome::IceTimeout,
+            };
+        }
+        match tokio::time::timeout(remaining, events.recv()).await {
+            Ok(Some(PeerEvent::IceConnected { local, remote })) => {
+                ice_at = Some(tokio::time::Instant::now());
+                debug!(%local, %remote, "ICE nominated a pair");
+            }
+            Ok(Some(PeerEvent::Connected)) => {
+                let now = tokio::time::Instant::now();
+                return SetupOutcome::Connected {
+                    ice: ice_at.map(|at| at.duration_since(start)),
+                    // Measured from nomination because that is when
+                    // forge-webrtc starts the handshake.
+                    dtls: ice_at.map(|at| now.duration_since(at)),
+                };
+            }
+            Ok(Some(PeerEvent::Failed(why))) => return SetupOutcome::Failed(why),
+            Ok(Some(PeerEvent::Closed)) | Ok(None) => return SetupOutcome::Closed,
+            // Late candidates and RTCP. Media cannot precede the SRTP
+            // keys, so nothing audible is being skipped here.
+            Ok(Some(_)) => {}
+            // Only the deadline can expire the inner timeout, and the
+            // top of the loop turns that into the right variant.
+            Err(_) => {}
+        }
     }
 }
 
@@ -253,6 +380,112 @@ mod tests {
         .await
         .expect("answer even when gathering did not finish");
         assert!(answer_sdp.contains("a=ice-ufrag:"), "{answer_sdp}");
+    }
+
+    /// The two phases are timed separately, which is the reason the
+    /// wait is event-driven at all. Paused clock: tokio advances time
+    /// when every task is idle, so the sleeps below *are* the timings.
+    #[tokio::test(start_paused = true)]
+    async fn connected_times_ice_and_dtls_apart() {
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let addr: std::net::SocketAddr = "127.0.0.1:41000".parse().unwrap();
+            tx.send(PeerEvent::IceConnected {
+                local: addr,
+                remote: addr,
+            })
+            .await
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            tx.send(PeerEvent::Connected).await.unwrap();
+        });
+
+        let outcome = await_setup(&mut rx, Duration::from_secs(5)).await;
+        assert_eq!(
+            outcome,
+            SetupOutcome::Connected {
+                ice: Some(Duration::from_millis(50)),
+                dtls: Some(Duration::from_millis(200)),
+            }
+        );
+    }
+
+    /// Nothing nominated inside the budget: no path exists.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_transport_is_an_ice_timeout() {
+        let (_tx, mut rx) = mpsc::channel::<PeerEvent>(8);
+        let outcome = await_setup(&mut rx, Duration::from_millis(500)).await;
+        assert_eq!(outcome, SetupOutcome::IceTimeout);
+        assert_eq!(outcome.label(), "ice_timeout");
+    }
+
+    /// A pair was nominated and then the handshake stalled — a
+    /// different fault from "no path", and the whole reason these are
+    /// two variants.
+    #[tokio::test(start_paused = true)]
+    async fn a_nominated_pair_that_never_handshakes_is_a_dtls_timeout() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let addr: std::net::SocketAddr = "127.0.0.1:41000".parse().unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            tx.send(PeerEvent::IceConnected {
+                local: addr,
+                remote: addr,
+            })
+            .await
+            .unwrap();
+            // Hold the sender so the stream does not close, which
+            // would be `Closed` rather than a timeout.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        let outcome = await_setup(&mut rx, Duration::from_millis(500)).await;
+        assert_eq!(
+            outcome,
+            SetupOutcome::DtlsTimeout {
+                ice: Duration::from_millis(100)
+            }
+        );
+        assert_eq!(outcome.label(), "dtls_timeout");
+    }
+
+    #[tokio::test]
+    async fn transport_failure_and_close_are_distinct_outcomes() {
+        let (tx, mut rx) = mpsc::channel(8);
+        tx.send(PeerEvent::Failed("dtls: bad fingerprint".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            await_setup(&mut rx, Duration::from_secs(1)).await,
+            SetupOutcome::Failed("dtls: bad fingerprint".into())
+        );
+
+        // A browser tab closing mid-setup drops the transport: a user
+        // action, not a fault, and labeled as such.
+        let (tx, mut rx) = mpsc::channel::<PeerEvent>(8);
+        drop(tx);
+        let outcome = await_setup(&mut rx, Duration::from_secs(1)).await;
+        assert_eq!(outcome, SetupOutcome::Closed);
+        assert_eq!(outcome.label(), "closed");
+    }
+
+    /// Candidates and RTCP keep arriving during setup; they must not
+    /// end the wait or restart the budget.
+    #[tokio::test(start_paused = true)]
+    async fn unrelated_events_do_not_end_the_wait() {
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            for _ in 0..3 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                tx.send(PeerEvent::GatheringComplete).await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        assert_eq!(
+            await_setup(&mut rx, Duration::from_millis(200)).await,
+            SetupOutcome::IceTimeout
+        );
     }
 
     #[tokio::test]

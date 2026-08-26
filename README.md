@@ -9,6 +9,12 @@ phone on a PBX), streams the call's audio over a WebSocket to a developer-
 supplied server, and plays audio received back over that WebSocket into the
 call. **It does not contain any AI code** — that is the WebSocket server's job.
 
+**What you'd build with it:** voice AI agents on the PSTN (bridge calls
+into an STT → LLM → TTS pipeline), smart IVR that replaces DTMF trees with
+natural language, real-time call observability (live transcription,
+translation, compliance, QA), and anything else that wants live call audio
+as a stream. See the reference bot below for a working example.
+
 ## How it fits together
 
 ```mermaid

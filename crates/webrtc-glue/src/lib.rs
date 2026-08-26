@@ -36,6 +36,9 @@ pub mod settings;
 
 pub use audio::{InboundAudio, OutboundAudio};
 pub use detect::{inspect, is_webrtc_offer, OfferShape};
+/// forge-webrtc's peer/transport event stream, re-exported so
+/// consumers need not depend on forge-webrtc directly.
+pub use forge_webrtc::PeerEvent;
 pub use leg::{Answered, WebRtcLeg};
 pub use settings::{SettingsError, WebRtcSettings};
 

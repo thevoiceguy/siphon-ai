@@ -108,7 +108,7 @@ async fn push_bridge_event_emits_hold_and_resume_on_ws() {
             trace_context: None,
             barge_in_mode: None,
         },
-        media_tap: tap,
+        media_tap: tap.into(),
         transfer: None,
         recording: None,
         conference: None,

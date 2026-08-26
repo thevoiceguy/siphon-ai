@@ -501,7 +501,7 @@ mod tests {
                 trace_context: None,
                 barge_in_mode: None,
             },
-            media_tap: tap,
+            media_tap: tap.into(),
             transfer: None,
             recording: None,
             conference: None,

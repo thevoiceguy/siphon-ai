@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The controller can run a browser call's media** (Phase 2 §4.3 of
+  `docs/design/DEV_PLAN_WebRTC.md`). `CallController` now holds a
+  `MediaLeg` — `Classic` (forge-engine RTP, every SIP call, unchanged)
+  or `WebRtc` (a forge-webrtc peer connection) — instead of a concrete
+  tap. The seam turned out to be far narrower than the acceptor's size
+  suggests: the controller already exchanged 20 ms PCM16LE frames over
+  plain channels and issued `TapCommand`s, and `MediaSession` never
+  appeared in it at all, so this is an enum over ~6 methods rather than
+  a refactor of the tap's internals.
+
+  `WebRtcTap` drives a browser leg the way `MediaTap` drives a SIP one:
+  wait for ICE/DTLS inside `[webrtc].setup_timeout`, then pump SRTP ⇄
+  the bridge's frames on a 20 ms tick. What a browser leg **cannot** do
+  is refused explicitly rather than half-done — bot-initiated hold and
+  park are SIP re-INVITE dances, outbound RFC 2833 DTMF is meaningless
+  to a browser, and conference rooms are fed by the classic frame loop.
+  Hold's refusal reuses the existing `accepted: false` path (the one
+  the conference-hold conflict already uses, #403), so the WS server
+  gets a normal `hold_failed` and no new protocol surface appears.
+  `Clear`, `Mute`/`Unmute`, `Mark` and the barge-in verdicts all work,
+  because those are about this leg's own playout.
+
+  Behaviour for existing calls is unchanged — every SIP call takes the
+  `Classic` variant, and the full SIPp suite passes untouched.
+
+### Added
+
 - **Leg selection for browser calls** (Phase 2 §4.1 of
   `docs/design/DEV_PLAN_WebRTC.md`). The acceptor now applies the
   plan's rule — **transport selects eligibility, SDP shape selects the

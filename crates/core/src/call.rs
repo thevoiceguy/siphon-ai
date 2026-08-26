@@ -66,7 +66,7 @@ use siphon_ai_bridge::{
     BridgeIn, CallId, Direction, DisconnectReason, ErrorCode, OutgoingEvent, StartMsg, StopReason,
 };
 use siphon_ai_media_glue::{
-    AnnounceEnd, AnnounceSource, MediaTap, MediaTapError, MohSource, QualityReport, QualitySummary,
+    AnnounceEnd, AnnounceSource, MediaTapError, MohSource, QualityReport, QualitySummary,
     RoomMembership, TapCommand, TapDisconnect,
 };
 
@@ -137,7 +137,7 @@ pub struct CallControllerConfig {
     pub start: StartMsg,
 
     /// Pre-attached forge tap. The controller drives it.
-    pub media_tap: MediaTap,
+    pub media_tap: crate::media_leg::MediaLeg,
 
     /// Optional REFER handle. `None` in unit tests that don't
     /// exercise transfer; the daemon's [`BridgingAcceptor`] populates

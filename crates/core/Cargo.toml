@@ -8,7 +8,17 @@ license.workspace      = true
 authors.workspace      = true
 repository.workspace   = true
 
+[features]
+default = []
+# Browser media legs (DEV_PLAN_WebRTC.md Phase 2). Off by default so a
+# plain build links neither forge-webrtc nor forge-ice; the daemon's
+# own `webrtc` feature turns this on, and the release artifacts ship
+# with it enabled.
+webrtc = ["dep:siphon-ai-webrtc-glue"]
+
 [dependencies]
+siphon-ai-webrtc-glue.workspace = true
+siphon-ai-webrtc-glue.optional  = true
 anyhow.workspace      = true
 tokio.workspace       = true
 async-trait.workspace = true

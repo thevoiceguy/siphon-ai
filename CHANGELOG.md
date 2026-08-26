@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Leg selection for browser calls** (Phase 2 §4.1 of
+  `docs/design/DEV_PLAN_WebRTC.md`). The acceptor now applies the
+  plan's rule — **transport selects eligibility, SDP shape selects the
+  leg** — before the SRTP policy gate: an INVITE over WS/WSS carrying a
+  WebRTC-shaped offer is recognised as a browser rather than
+  mis-diagnosed. Until the media leg is bridged it is still refused
+  `488`, but with a message naming the actual problem and telling the
+  operator which situation they are in (`[webrtc]` disabled vs enabled
+  but not yet terminating media), and under its own metric label
+  `siphon_ai_invites_total{result="rejected_webrtc"}` — separately
+  alertable, because a browser reaching a daemon that cannot serve it
+  is a deployment gap, not routing noise.
+
+  This is the seam the leg plugs into. It matters on its own because
+  the Phase 1 browser call hit `488 offer profile UDP/TLS/RTP/SAVPF
+  rejected under srtp_mode = Off` — true, and completely misleading.
+  Verified with a real headless-Chrome call against both configurations.
+  A non-browser RFC 7118 client sending plain RTP still gets the classic
+  leg, and a WebRTC-shaped offer arriving over UDP still does too:
+  neither half of the rule decides alone.
+
+### Added
+
 - **The WebRTC media leg's lifecycle and audio path** (`crates/webrtc-glue`,
   Phase 2 §4.2–4.3 of `docs/design/DEV_PLAN_WebRTC.md`). `WebRtcLeg`
   answers a browser offer with **complete gathering before the answer**

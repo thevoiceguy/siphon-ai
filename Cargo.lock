@@ -4329,6 +4329,7 @@ dependencies = [
  "siphon-ai-stir-shaken",
  "siphon-ai-telemetry",
  "siphon-ai-webhooks",
+ "siphon-ai-webrtc-glue",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.24.0",

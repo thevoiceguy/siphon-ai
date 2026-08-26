@@ -22,7 +22,7 @@ default = []
 # a plain `cargo build` links neither forge-webrtc nor forge-ice; the
 # release artifacts turn it on and gate at runtime with
 # `[webrtc].enabled`.
-webrtc = ["dep:siphon-ai-webrtc-glue"]
+webrtc = ["dep:siphon-ai-webrtc-glue", "siphon-ai-core/webrtc"]
 
 [dependencies]
 siphon-ai-webrtc-glue.workspace = true

@@ -58,6 +58,16 @@ pub struct WebRtcTap {
         mpsc::Sender<RecFrame>,
         std::sync::Arc<std::sync::atomic::AtomicU64>,
     )>,
+    /// Tear the call down after this long with no inbound RTP.
+    ///
+    /// A browser leg needs this at least as much as a SIP one: when a
+    /// tab closes the page is gone with no BYE and no FIN we can see —
+    /// ICE consent freshness is the only other signal, and nothing
+    /// guarantees it fires promptly. Without this a vanished browser
+    /// holds a call slot indefinitely, exactly the leak Phase 0 of the
+    /// plan exists to prevent. `None` disables it, matching
+    /// `[media].inactivity_timeout_secs = 0`.
+    inactivity_timeout: Option<Duration>,
 }
 
 impl WebRtcTap {
@@ -72,7 +82,14 @@ impl WebRtcTap {
             setup_timeout,
             tx_suppressed: None,
             recording: None,
+            inactivity_timeout: None,
         }
+    }
+
+    /// Tear down after this long with no inbound RTP (see the field).
+    pub fn with_inactivity_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.inactivity_timeout = timeout;
+        self
     }
 
     /// The PCM rate the bridge sees — 16 kHz for Opus, 8 kHz for
@@ -150,6 +167,11 @@ impl WebRtcTap {
             .map_err(|e| MediaTapError::AttachFailed(e.to_string()))?;
 
         let mut muted = false;
+        // Frames actually exchanged with the bridge. The error counters
+        // alone cannot distinguish "clean call" from "no media at all",
+        // which is the first question anyone asks of a silent call.
+        let (mut frames_to_bridge, mut frames_to_browser) = (0u64, 0u64);
+        let mut last_rtp = tokio::time::Instant::now();
         let mut ticker = tokio::time::interval(DRAIN_TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -158,7 +180,10 @@ impl WebRtcTap {
                 // Inbound SRTP → jitter buffer.
                 event = self.events.recv() => {
                     match event {
-                        Some(siphon_ai_webrtc_glue::PeerEvent::Rtp(pkt)) => inbound.push(&pkt),
+                        Some(siphon_ai_webrtc_glue::PeerEvent::Rtp(pkt)) => {
+                            last_rtp = tokio::time::Instant::now();
+                            inbound.push(&pkt);
+                        }
                         Some(siphon_ai_webrtc_glue::PeerEvent::Failed(why)) => {
                             warn!(connection_id = self.leg.connection_id(), %why,
                                   "browser media transport failed");
@@ -175,6 +200,18 @@ impl WebRtcTap {
 
                 // Steady cadence out to the WS bridge.
                 _ = ticker.tick() => {
+                    // Nothing from the browser for the whole window:
+                    // the tab is gone. Give the slot back.
+                    if let Some(limit) = self.inactivity_timeout {
+                        if last_rtp.elapsed() >= limit {
+                            warn!(
+                                connection_id = self.leg.connection_id(),
+                                timeout_secs = limit.as_secs(),
+                                "no inbound media from the browser; tearing down"
+                            );
+                            break TapDisconnect::InactivityTimeout;
+                        }
+                    }
                     for frame in inbound.drain() {
                         if let Some((rec, _)) = &self.recording {
                             let _ = rec.try_send(RecFrame::Caller(frame.clone()));
@@ -182,6 +219,7 @@ impl WebRtcTap {
                         if caller_audio_tx.send(frame).await.is_err() {
                             break;
                         }
+                        frames_to_bridge += 1;
                     }
                 }
 
@@ -200,6 +238,7 @@ impl WebRtcTap {
                     if let Some((rec, _)) = &self.recording {
                         let _ = rec.try_send(RecFrame::Bot(frame.clone()));
                     }
+                    frames_to_browser += 1;
                     if let Err(e) = outbound.send_frame(&frame).await {
                         warn!(connection_id = self.leg.connection_id(), error = %e,
                               "browser media send failed");
@@ -251,6 +290,8 @@ impl WebRtcTap {
         info!(
             connection_id = self.leg.connection_id(),
             ?disconnect,
+            frames_to_bridge,
+            frames_to_browser,
             decode_errors = inbound.decode_errors,
             other_payload_packets = inbound.other_payload_packets,
             encode_errors = outbound.encode_errors,

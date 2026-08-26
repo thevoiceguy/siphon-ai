@@ -560,14 +560,23 @@ impl Runtime {
             );
         }
 
-        let mut acceptor_builder = BridgingAcceptor::new(media_setup, bridge_defaults, registry.clone())
+        // `[webrtc]` (Phase 2). Resolved before any listener accepts:
+        // a config that asks for the browser media leg on a binary
+        // built without it must fail at startup, not answer a browser
+        // with a puzzling media error at 3 a.m.
+        let webrtc_settings = compile_webrtc_settings(webrtc.as_ref())?;
+        let _ = &webrtc_settings;
+
+        let acceptor_builder = BridgingAcceptor::new(media_setup, bridge_defaults, registry.clone())
             .with_cdr_sink(cdr_sink)
             .with_webhook_sink(Arc::clone(&webhook_sink))
             .with_session_timer_policy(session_timer_policy)
             .with_call_progress(sip.call_progress)
-            // Sharpens the rejection a browser INVITE gets while the
-            // media leg is being wired (DEV_PLAN_WebRTC.md §4.1).
-            .with_webrtc_enabled(webrtc.is_some())
+            // Browser media legs (DEV_PLAN_WebRTC.md §4.1). The
+            // settings resolved at boot decide whether a browser
+            // INVITE gets a leg or a clear refusal.
+            ;
+        let mut acceptor_builder = apply_webrtc(acceptor_builder, webrtc_settings)
             .with_allow_delayed_offer(sip.allow_delayed_offer)
             .with_verifier(verifier)
             .with_security_policy(security_policy)
@@ -731,13 +740,6 @@ impl Runtime {
         if let Some(adm) = admission {
             routing_handler_builder = routing_handler_builder.with_admission(adm);
         }
-        // `[webrtc]` (Phase 2). Resolved before any listener accepts:
-        // a config that asks for the browser media leg on a binary
-        // built without it must fail at startup, not answer a browser
-        // with a puzzling media error at 3 a.m.
-        let webrtc_settings = compile_webrtc_settings(webrtc.as_ref())?;
-        let _ = &webrtc_settings;
-
         // The daemon's registrar ([registrar], DEV_PLAN_WebRTC.md
         // Phase 1): serve REGISTER from browsers/softphones, bind
         // stream registrations to their connection, expire on
@@ -2109,9 +2111,6 @@ fn build_tls_client_config(extra_ca: Option<&std::path::Path>) -> Result<Arc<Tls
     ))
 }
 
-/// `[sip.tls]`. Failure here is fatal — operators who set
-/// `transports = ["tls"]` expect SIPS to actually work, not to
-/// silently degrade to cleartext.
 /// Resolve `[webrtc]` against what this binary was actually built
 /// with (DEV_PLAN_WebRTC.md Phase 2 §4.5).
 ///
@@ -2186,6 +2185,20 @@ fn check_build_features_inner(cfg: Option<&siphon_ai_config::WebRtcConfig>) -> R
     Ok(())
 }
 
+/// Hand the acceptor whatever this build can do with `[webrtc]`.
+#[cfg(feature = "webrtc")]
+fn apply_webrtc(
+    builder: BridgingAcceptor,
+    settings: Option<siphon_ai_webrtc_glue::WebRtcSettings>,
+) -> BridgingAcceptor {
+    builder.with_webrtc(settings)
+}
+
+#[cfg(not(feature = "webrtc"))]
+fn apply_webrtc(builder: BridgingAcceptor, enabled: Option<()>) -> BridgingAcceptor {
+    builder.with_webrtc_enabled(enabled.is_some())
+}
+
 /// Load the `[sip.wss]` cert/key into a rustls `ServerConfig` — the
 /// browser-facing WSS listener's identity, independent of `[sip.tls]`
 /// (see `RawSipWss::cert`).
@@ -2216,6 +2229,9 @@ pub(crate) fn load_wss_server_config(
     Ok(cfg)
 }
 
+/// Load the SIP TLS listener's cert/key from `[sip.tls]`. Failure here
+/// is fatal — operators who set `transports = ["tls"]` expect SIPS to
+/// actually work, not to silently degrade to cleartext.
 pub(crate) fn load_sip_tls_server_config(
     tls: &SipTlsConfig,
 ) -> Result<Arc<tokio_rustls::rustls::ServerConfig>> {

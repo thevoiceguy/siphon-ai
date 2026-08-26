@@ -135,7 +135,13 @@ Detection rule: **transport type selects eligibility, SDP shape selects the leg.
 
 ### 4.4 Ports, admission, and the pool
 
-- A WebRTC leg uses **one socket** (BUNDLE + rtcp-mux) versus the RTP/RTCP pair a classic leg allocates. Draw it from the same pool as one pair so `[media].reserved_outbound_calls` and the admission math stay coherent; a config note explains the accounting.
+- ~~A WebRTC leg uses **one socket** (BUNDLE + rtcp-mux) versus the RTP/RTCP pair a classic leg allocates. Draw it from the same pool as one pair so `[media].reserved_outbound_calls` and the admission math stay coherent; a config note explains the accounting.~~ **Done.** `MediaSetup::reserve_port_pair` hands the leg a `PortReservation` under the same floor an inbound SIP call uses, and forge-webrtc binds its socket to that pair's RTP port (forge-media [#134](https://github.com/thevoiceguy/forge-media/pull/134) added `TransportConfig::local_port` and `SessionManager::reserve_port_pair`).
+
+  Implementing it turned up a **fourth** reason beyond the three the plan anticipated, and it is the one an operator would hit first: a socket bound outside `rtp_port_range` is **unreachable through the firewall they configured for RTP**. Accounting can be reconciled after the fact; a blocked media path is a broken call in a deployment that did everything right.
+
+  Two decisions worth recording. The leg holds a whole *pair* despite using one port, because a pair is the unit the pool, the gauge, and the reserved band all count in — charging a browser call half a slot would make `reserved_outbound_calls` mean different things depending on who called. And the reservation releases on **`Drop`**, not on an explicit teardown call: forge's release is `async` so `Drop` spawns it, which is slightly awkward but makes forgetting impossible. An explicit `release().await` is what a leak looks like the first time someone adds an early `return` above it — and Phase 0 of this plan exists precisely because that bug class is easy to write and hard to see.
+
+  Because `siphon_ai_rtp_port_pairs_allocated` is *sampled from pool truth* rather than incremented at call sites, browser calls appear in the capacity gauge with no new metric — and the Phase 0 soak assertion that the gauge returns to zero now covers WebRTC legs for free.
 - ICE consent freshness and DTLS handshake timeouts feed the same watchdog that tears down `server_too_slow` calls, so a browser that connects signaling but never completes media doesn't hold a slot. New timeout: `[webrtc].setup_timeout` (default 15s from answer to DTLS-complete).
 
 ### 4.5 Config surface

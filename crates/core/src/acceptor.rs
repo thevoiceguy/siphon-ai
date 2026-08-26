@@ -4248,6 +4248,7 @@ impl BridgingAcceptor {
         route: &CompiledRoute,
         facts: &InviteFacts,
         answered: siphon_ai_webrtc_glue::Answered,
+        reservation: siphon_ai_media_glue::PortReservation,
         bridge_config: BridgeConfig,
         bridge_call_id: BridgeCallId,
         forge_call_id: forge_core::CallId,
@@ -4281,7 +4282,11 @@ impl BridgingAcceptor {
             .as_ref()
             .map(|s| s.setup_timeout)
             .unwrap_or_else(|| std::time::Duration::from_secs(15));
+        let rtp_port = reservation.rtp_port();
         let media_tap = crate::webrtc_leg::WebRtcTap::new(leg, events, setup_timeout)
+            // Held for exactly the life of the leg: dropping the tap
+            // returns the pair, so no teardown path can leak a slot.
+            .with_port_reservation(reservation)
             // Same knob a classic leg uses: a browser that vanishes
             // (tab closed, laptop shut) sends no BYE, so silence is
             // the only signal we get.
@@ -4292,6 +4297,7 @@ impl BridgingAcceptor {
             call_id = %bridge_call_id,
             ?codec,
             sample_rate,
+            rtp_port,
             "browser call prepared (WebRTC media leg)"
         );
 
@@ -4358,11 +4364,26 @@ impl BridgingAcceptor {
             let Some(settings) = self.webrtc.as_ref() else {
                 return Err(AcceptError::WebRtcOffer { enabled: false });
             };
-            Some(
-                siphon_ai_webrtc_glue::WebRtcLeg::answer(offer_sdp, settings)
-                    .await
-                    .map_err(|e| AcceptError::WebRtcSetup(e.to_string()))?,
+            // §4.4: a browser leg draws a port pair from the same pool
+            // a SIP call does, under the same
+            // `[media].reserved_outbound_calls` floor. It uses one
+            // socket (BUNDLE + rtcp-mux) where a classic leg uses two,
+            // but it occupies one *call slot* either way — and the
+            // pool is what the firewall range, the capacity gauge, and
+            // the reservation all count in. Drawing from outside it
+            // would make a browser call unreachable through the
+            // operator's firewall and invisible to their capacity
+            // alarm. Reserved before the answer so an exhausted pool
+            // costs no ICE gathering.
+            let reservation = self.media.reserve_port_pair().await?;
+            let answered = siphon_ai_webrtc_glue::WebRtcLeg::answer(
+                offer_sdp,
+                settings,
+                reservation.rtp_port(),
             )
+            .await
+            .map_err(|e| AcceptError::WebRtcSetup(e.to_string()))?;
+            Some((answered, reservation))
         } else {
             None
         };
@@ -4462,13 +4483,14 @@ impl BridgingAcceptor {
         // and the leg; everything downstream — start message, contexts,
         // recording, the controller — is identical either way.
         #[cfg(feature = "webrtc")]
-        if let Some(answered) = webrtc_answer {
+        if let Some((answered, reservation)) = webrtc_answer {
             return self
                 .finish_webrtc_prepare(
                     request,
                     route,
                     facts,
                     answered,
+                    reservation,
                     bridge_config,
                     bridge_call_id,
                     forge_call_id,

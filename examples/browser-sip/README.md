@@ -73,15 +73,35 @@ Playwright's download — **no root needed**: the two NSS libraries a
 server install lacks are fetched with `apt-get download` and injected
 via `LD_LIBRARY_PATH`), asserts `siphon_ai_registrar_bindings` goes to
 1, kills the browser, and asserts the connection-loss expiry brings it
-back to 0. Prints `PASS` on a full run. Needs `cargo build -p
-siphon-ai` first, plus `node`/`npx` and network for the Playwright
-fallback. This is also the seed of the plan's Phase 3 nightly
-browser-e2e harness.
+back to 0.
+
+It then places a **real call** and checks the §4.4 port accounting
+against daemon truth rather than intent:
+
+- `siphon_ai_rtp_port_pairs_allocated` goes to 1 — a browser call is
+  counted in the capacity gauge like any other
+- the media socket binds inside `[media].rtp_port_range` (the lab
+  narrows it to `41000-41100`, because "landed in the range" only
+  means something if the range is small), and `ss` confirms a UDP
+  socket really is listening there
+- the pair returns to the pool when the leg ends — the leak class
+  Phase 0 is about
+
+Prints `PASS` on a full run. Needs `cargo build -p siphon-ai --features
+webrtc` first (without the feature the call is refused 488 with a
+message saying exactly that), plus `node`/`npx` and network for the
+Playwright fallback. This is also the seed of the plan's Phase 3
+nightly browser-e2e harness.
 
 **Ports.** Running this on a box that already has a siphon-ai on it is
 the expected case, so every port is overridable — `SIP_PORT`,
 `WSS_PORT`, `PAGE_PORT`, `OBS_PORT`, `ECHO_PORT` — and the script
-copies `lab.toml` with them substituted rather than editing it. A
+copies `lab.toml` **and `index.html`** with them substituted rather
+than editing either. (The page needs it too: it dials the WSS port
+from a literal in the HTML, so serving the committed file directly
+made a `WSS_PORT` override silently half-apply — daemon moved, browser
+did not, and the failure read as a TLS problem rather than a port
+one.) A
 collision names the variable and prints the rerun for you:
 
 ```

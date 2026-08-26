@@ -460,6 +460,27 @@ impl MediaSetup {
         self.reserved_outbound_calls
     }
 
+    /// Reserve an RTP port pair for a media leg that is not a forge
+    /// session — today, a WebRTC leg (`DEV_PLAN_WebRTC.md` §4.4).
+    ///
+    /// Draws under the same `[media].reserved_outbound_calls` floor an
+    /// inbound SIP call uses, because that is what it is: an inbound
+    /// call occupying one slot. Anything else would let browser traffic
+    /// starve origination while the reserved band appeared untouched.
+    ///
+    /// The returned [`PortReservation`] releases on drop, so the pair
+    /// is held for exactly as long as the leg and no teardown path can
+    /// forget it. Failure is the same shape as an exhausted pool for a
+    /// SIP call, and the caller should reject with the same `503`.
+    pub async fn reserve_port_pair(&self) -> Result<crate::PortReservation, SetupError> {
+        crate::PortReservation::take(
+            Arc::clone(&self.session_manager),
+            self.reserved_outbound_calls,
+        )
+        .await
+        .map_err(|e| self.classify_inbound_alloc_error(e))
+    }
+
     /// Convert a failed inbound session allocation, splitting "the pool
     /// is empty" from "the rest is reserved for origination" for the
     /// operator (`RTP_RESERVE_BLOCKS_TOTAL`) — #556.

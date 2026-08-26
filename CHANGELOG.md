@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Browser calls now draw an RTP port pair from the same pool SIP calls
+  do** (`DEV_PLAN_WebRTC.md` §4.4). A WebRTC leg binds **one** socket
+  (BUNDLE + `a=rtcp-mux`) where a classic leg binds an RTP/RTCP pair,
+  and until now that socket came from wherever the OS put it —
+  outside `[media].rtp_port_range` entirely.
+
+  The accounting reason is the obvious one: `siphon_ai_rtp_port_pairs_allocated`
+  would under-report real load, and `[media].reserved_outbound_calls`
+  would be silently bypassed by browser traffic while still losing the
+  slot it protects — the exact starvation the setting exists to
+  prevent, made invisible. But the reason an operator hits **first** is
+  simpler and worse: a socket outside `rtp_port_range` is unreachable
+  through the firewall they opened for RTP. Media accounting can be
+  reconciled after the fact; a blocked media path is a broken call in a
+  deployment that did everything right.
+
+  A browser leg now holds a whole **pair** for its lifetime, under the
+  same floor an inbound SIP call uses, and forge-webrtc binds its
+  socket to that pair's RTP port. It holds a pair rather than a single
+  port because a pair is the unit the pool, the gauge and the reserved
+  band all count in — charging a browser call half a slot would make
+  `reserved_outbound_calls` mean two different things depending on who
+  called. A browser call refused by the floor gets the same `503` +
+  `Retry-After` and the same `siphon_ai_rtp_reserve_blocks_total`
+  increment a SIP call does.
+
+  The reservation releases on **`Drop`**, so no teardown path can leak
+  a slot — and because the capacity gauge is *sampled from pool truth*
+  rather than incremented at call sites, browser calls show up in it
+  with no new metric, and Phase 0's soak assertion that the gauge
+  returns to zero now covers WebRTC legs for free.
+
+  Needs forge-media [#134](https://github.com/thevoiceguy/forge-media/pull/134)
+  (`TransportConfig::local_port`, `SessionManager::reserve_port_pair`).
+
 - **A browser can now place a call that carries audio** — the end of
   Phase 2's core path in `docs/design/DEV_PLAN_WebRTC.md`. An INVITE
   arriving over WS/WSS with a WebRTC-shaped offer is answered by

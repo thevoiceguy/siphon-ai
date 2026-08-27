@@ -13,11 +13,17 @@
 
   What passes Phase 1 here is REGISTER: the WSS transport, Origin
   policy, subprotocol negotiation, digest auth, and the registration
-  binding are all end-to-end real. The test call exercises signaling
-  only — the browser offers WebRTC media (ICE/DTLS) that the daemon
-  cannot terminate until Phase 2's webrtc-glue, so expect the call to
-  connect at the SIP layer at best and carry no audio; its outcome
-  either way is diagnostic and shows in the log below.
+  binding are all end-to-end real. Since Phase 2 the test call carries
+  real audio too — the daemon answers the browser's offer with a
+  forge-webrtc media leg and bridges it to the WS server.
+
+  Query parameters (all optional):
+    ?auto=1    register on load, and shout the outcome to the console
+    ?call=1    with auto, place the test call as well
+    ?tone=1    send a 450 Hz oscillator instead of a microphone and
+               report what comes back on `window.__labAudio` — how
+               test-harness/browser asserts two-way audio
+    ?sipjs=U   load the SIP stack from U instead of the CDN
 -->
 <html lang="en">
 <head>
@@ -83,9 +89,16 @@ function status(text, ok) {
 // sip.js ships no prebuilt UMD bundle on npm; jsdelivr's auto-built
 // ESM of the package is the loadable form. Needs network on first
 // load (cached by the browser after).
+//
+// `?sipjs=<url>` overrides the source — the browser-interop harness
+// serves a vendored copy so a nightly run does not depend on a CDN
+// being up, and so a second SIP stack (JsSIP) can be swapped in for
+// the same page.
+const SIPJS_URL = new URLSearchParams(location.search).get("sipjs")
+  || "https://cdn.jsdelivr.net/npm/sip.js@0.21.2/+esm";
 let Web = null;
 try {
-  ({ Web } = await import("https://cdn.jsdelivr.net/npm/sip.js@0.21.2/+esm"));
+  ({ Web } = await import(SIPJS_URL));
 } catch (e) {
   status(`SIP.js failed to load: ${e.message || e}`, false);
   console.log(`BROWSER-SIP-RESULT: FAILED sipjs load: ${e}`);
@@ -93,14 +106,192 @@ try {
 
 let simpleUser = null;
 
+// ─── Audio-path instrumentation (?tone=1) ────────────────────────────
+//
+// The interop harness (test-harness/browser) needs the browser to
+// *send* something identifiable and *report* what it hears, without a
+// microphone: headless browsers differ in how fake devices are
+// enabled, and getUserMedia needs a permission grant that WebKit does
+// not hand out the same way Chromium does. WebAudio needs neither — an
+// oscillator is a real outbound track on every engine.
+//
+// 450 Hz out, 900 Hz expected back (the WS server plays the other
+// one). Both are multiples of 50 Hz so they land exactly on a
+// Goertzel bin for a 20 ms window at 8 kHz and 16 kHz alike.
+const TONE_TX_HZ = 450;
+const TONE_RX_HZ = 900;
+const toneMode = new URLSearchParams(location.search).has("tone");
+let audioCtx = null;
+
+/**
+ * The page's one AudioContext, if this browser will run one.
+ *
+ * Headless engines differ sharply here, and the difference is not a
+ * policy you can pref your way out of: **headless Firefox has no audio
+ * output device, so its AudioContext stays `suspended` forever and
+ * `resume()` never settles** — with or without a user gesture, with or
+ * without every `media.autoplay.*` pref. Awaiting it hangs the call
+ * before the INVITE is even built.
+ *
+ * So: bounded wait, and a caller that copes with `null`.
+ */
+async function audioContextOrNull(budgetMs = 1500) {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  } catch (e) {
+    log(`no AudioContext: ${e}`, "err");
+    return null;
+  }
+  if (audioCtx.state !== "running") {
+    // Never awaited on its own — see above.
+    await Promise.race([
+      audioCtx.resume().catch(() => {}),
+      new Promise((r) => setTimeout(r, budgetMs)),
+    ]);
+  }
+  return audioCtx.state === "running" ? audioCtx : null;
+}
+
+/**
+ * Our "microphone": a pure tone where WebAudio runs, the engine's own
+ * fake capture device where it does not.
+ *
+ * The fallback is not a lesser test — the far side *measures* what
+ * arrives rather than assuming a frequency, so an engine using its
+ * fake device is still proving the same thing: identifiable audio made
+ * it across. `window.__labAudio.tx_hz` records which case this was.
+ */
+async function toneStream(hz) {
+  const ctx = await audioContextOrNull();
+  if (ctx) {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const dest = ctx.createMediaStreamDestination();
+    osc.frequency.value = hz;
+    gain.gain.value = 0.35;
+    osc.connect(gain).connect(dest);
+    osc.start();
+    txSource = { source: "oscillator", tx_hz: hz };
+    log(`sending a ${hz} Hz tone (WebAudio)`, "sip");
+    return dest.stream;
+  }
+  txSource = { source: "capture-device", tx_hz: null };
+  log("no runnable AudioContext — falling back to the capture device; " +
+      "the far side measures what it hears either way", "sip");
+  return navigator.mediaDevices.getUserMedia({ audio: true });
+}
+let txSource = { source: "none", tx_hz: null };
+
+/**
+ * Watch the far end's audio and publish what it actually contains.
+ *
+ * Two measurements, because no single one works everywhere:
+ *
+ * - **`getStats()` `totalAudioEnergy`** on the inbound RTP track. Every
+ *   engine reports it, it needs no AudioContext, and it rises only if
+ *   decoded audio actually reached the browser. This is the assertion
+ *   the interop matrix relies on.
+ * - **The dominant frequency**, via an AnalyserNode, when WebAudio will
+ *   run. Stronger — it proves the audio is the WS server's 900 Hz tone
+ *   and not an echo of our own — but unavailable on an engine whose
+ *   AudioContext cannot start (headless Firefox).
+ *
+ * `window.__labAudio` carries both, plus which of them is meaningful.
+ */
+async function watchRemoteAudio(stream, peerConnection) {
+  const stats = window.__labAudio = {
+    ...txSource,
+    expect_rx_hz: TONE_RX_HZ,
+    rx_energy: 0,
+    rx_level: 0,
+    samples: 0,
+    analyser: false,
+    peak_db: -Infinity,
+    dominant_hz: 0,
+    matches: 0,
+  };
+
+  // Receiver stats: works on every engine.
+  if (peerConnection) {
+    setInterval(async () => {
+      try {
+        const report = await peerConnection.getStats();
+        report.forEach((s) => {
+          if (s.type === "inbound-rtp" && s.kind === "audio") {
+            if (typeof s.totalAudioEnergy === "number") {
+              stats.rx_energy = s.totalAudioEnergy;
+            }
+            if (typeof s.audioLevel === "number") {
+              stats.rx_level = Math.max(stats.rx_level, s.audioLevel);
+            }
+          }
+          // Firefox reports level on the track stats instead.
+          if (s.type === "track" && s.kind === "audio" && s.remoteSource) {
+            if (typeof s.totalAudioEnergy === "number") {
+              stats.rx_energy = Math.max(stats.rx_energy, s.totalAudioEnergy);
+            }
+          }
+        });
+        if (stats.rx_energy > 0 && !stats.energy_logged) {
+          stats.energy_logged = true;
+          log("inbound audio energy is rising — the far end is talking", "sip");
+          console.log(`BROWSER-SIP-AUDIO: ${JSON.stringify(stats)}`);
+        }
+      } catch (e) {
+        /* stats can throw while the PC is closing */
+      }
+    }, 250);
+  }
+
+  const ctx = await audioContextOrNull(0);
+  if (!ctx) {
+    log("no AudioContext: reporting inbound energy from getStats() only", "sip");
+    return;
+  }
+  stats.analyser = true;
+  const src = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 2048;
+  src.connect(analyser);
+  const bins = new Float32Array(analyser.frequencyBinCount);
+  const binHz = ctx.sampleRate / analyser.fftSize;
+  setInterval(() => {
+    analyser.getFloatFrequencyData(bins);
+    let best = 0;
+    let bestDb = -Infinity;
+    for (let i = 1; i < bins.length; i++) {
+      if (bins[i] > bestDb) { bestDb = bins[i]; best = i; }
+    }
+    stats.samples++;
+    stats.peak_db = Math.max(stats.peak_db, bestDb);
+    stats.dominant_hz = Math.round(best * binHz);
+    if (bestDb > -60 && Math.abs(stats.dominant_hz - TONE_RX_HZ) <= binHz) {
+      stats.matches++;
+      if (stats.matches === 5) {
+        log(`heard ${TONE_RX_HZ} Hz from the far end — two-way audio`, "sip");
+        console.log(`BROWSER-SIP-AUDIO: ${JSON.stringify(stats)}`);
+      }
+    }
+  }, 100);
+}
+
 async function register() {
   const server = $("server").value.trim();
   const user = $("user").value.trim();
   const aor = `sip:${user}@${$("domain").value.trim()}`;
+  // In tone mode the outbound track is an oscillator rather than a
+  // microphone, so no engine needs a fake device or a permission
+  // grant. `defaultSessionDescriptionHandlerFactory` takes the stream
+  // factory SIP.js will call when it needs local media.
+  const sdhFactory = toneMode && Web.defaultSessionDescriptionHandlerFactory
+    ? Web.defaultSessionDescriptionHandlerFactory(() => toneStream(TONE_TX_HZ))
+    : undefined;
+
   simpleUser = new Web.SimpleUser(server, {
     aor,
     media: { remote: { audio: $("remoteAudio") } },
     userAgentOptions: {
+      ...(sdhFactory ? { sessionDescriptionHandlerFactory: sdhFactory } : {}),
       authorizationUsername: user,
       authorizationPassword: $("pass").value,
       displayName: "browser-sip lab",
@@ -115,7 +306,28 @@ async function register() {
     },
     delegate: {
       onCallReceived: () => log("incoming call (unexpected in this lab)"),
-      onCallAnswered: () => { status(`in call (signaling up, media is Phase 2)`, true); $("btnHangup").disabled = false; },
+      onCallAnswered: () => {
+        status("in call", true);
+        $("btnHangup").disabled = false;
+        console.log("BROWSER-SIP-RESULT: ANSWERED");
+        if (toneMode) {
+          // The remote track lands on the <audio> element SIP.js was
+          // given; take the stream from there so this works whatever
+          // the stack did internally. The peer connection comes from
+          // the session's description handler — that is where the
+          // receiver stats live.
+          const el = $("remoteAudio");
+          const pc = simpleUser?.session?.sessionDescriptionHandler?.peerConnection ?? null;
+          const attach = () => {
+            if (el.srcObject) { watchRemoteAudio(el.srcObject, pc); return true; }
+            return false;
+          };
+          if (!attach()) {
+            const t = setInterval(() => { if (attach()) clearInterval(t); }, 100);
+            setTimeout(() => clearInterval(t), 10000);
+          }
+        }
+      },
       onCallHangup: () => { status("registered", true); $("btnHangup").disabled = true; $("btnCall").disabled = false; },
       onServerDisconnect: (err) => {
         status(`disconnected${err ? ": " + err : ""}`, false);
@@ -154,17 +366,18 @@ async function unregister() {
 
 async function call() {
   const target = `sip:${$("target").value.trim()}@${$("domain").value.trim()}`;
-  log(`calling ${target} — the browser offers WebRTC SDP; until Phase 2 the ` +
-      `daemon has no WebRTC media leg, so treat everything after the INVITE ` +
-      `as diagnostic`);
+  log(`calling ${target} — the browser offers WebRTC SDP and the daemon ` +
+      `answers it with a real media leg (Phase 2); ${toneMode
+        ? "tone mode: sending " + TONE_TX_HZ + " Hz, expecting " + TONE_RX_HZ + " Hz back"
+        : "audio flows if your WS server sends any"}`);
   $("btnCall").disabled = true;
   try {
     await simpleUser.call(target);
   } catch (e) {
     log(`call failed: ${e.message || e}`, "err");
-    log("expected until Phase 2 if the failure is SDP/media-shaped; the " +
-        "INVITE itself reaching the daemon (check its log / Homer) is what " +
-        "this exercise shows", "sip");
+    log("if the failure is SDP/media-shaped, check that the daemon was " +
+        "built with `--features webrtc` and has `[webrtc] enabled = true`; " +
+        "it answers with 488 and a message saying exactly which it was", "sip");
     $("btnCall").disabled = false;
   }
 }

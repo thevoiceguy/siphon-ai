@@ -55,3 +55,11 @@ docker/.data/
 examples/browser-sip/certs/
 examples/browser-sip/pw-browsers/
 examples/browser-sip/pw-libs/
+
+# Browser-interop harness (test-harness/browser): installed deps,
+# Playwright's own output, and the per-run stack description its global
+# setup hands to the tests.
+test-harness/browser/node_modules/
+test-harness/browser/test-results/
+test-harness/browser/playwright-report/
+test-harness/browser/.stack.json

@@ -1,0 +1,15 @@
+{
+  "name": "siphon-ai-browser-interop",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Real-browser interop harness for the WebRTC leg (DEV_PLAN_WebRTC.md §5)",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.47.0",
+    "sip.js": "0.21.2",
+    "ws": "^8.18.0"
+  }
+}

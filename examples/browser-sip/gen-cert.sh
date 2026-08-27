@@ -9,7 +9,13 @@
 # Output: certs/wss-cert.pem + certs/wss-key.pem, SANs for
 # localhost / 127.0.0.1 — matching lab.toml's [sip.wss] block.
 set -euo pipefail
-cd "$(dirname "$0")/certs"
+# `certs/` is gitignored (it holds a private key), so on a fresh clone
+# it does not exist yet — creating it is this script's job, not the
+# reader's. Found by the first CI run of the browser-interop workflow,
+# but it fails for anyone following the README on a new checkout too.
+CERTS="$(dirname "$0")/certs"
+mkdir -p "$CERTS"
+cd "$CERTS"
 
 if command -v mkcert >/dev/null 2>&1; then
     mkcert -install >/dev/null

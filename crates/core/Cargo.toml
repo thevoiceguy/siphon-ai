@@ -75,6 +75,12 @@ forge-sdp.workspace    = true
 forge-rtp.workspace    = true
 
 [dev-dependencies]
+# The loopback "browser" in `tests/webrtc_call.rs` is a real
+# forge-webrtc peer dialing the acceptor (DEV_PLAN_WebRTC.md §5). The
+# test binary only builds under `--features webrtc`; the dep is
+# dev-only either way, so a default build still links neither
+# forge-webrtc nor forge-ice.
+forge-webrtc.workspace                = true
 sip-parse.workspace                   = true
 tokio-tungstenite.workspace           = true
 futures.workspace                     = true

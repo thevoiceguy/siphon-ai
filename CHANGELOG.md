@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A browser call is now tested end to end on every commit, and CI
+  builds the `webrtc` feature at all** (`DEV_PLAN_WebRTC.md` §5, Phase
+  3 item 1). Two loopback layers, ~2 s each, no browser and no
+  container:
+
+  - `crates/webrtc-glue/tests/loopback.rs` — a browser-shaped peer
+    dialing a real `WebRtcLeg`: ICE nomination, DTLS, SRTP both
+    directions, the Opus transcode, teardown, and fifteen calls back to
+    back as a leak tripwire.
+  - `crates/core/tests/webrtc_call.rs` — the same peer dialing the
+    **acceptor**: an INVITE carrying a real forge-webrtc offer, the
+    controller against a real WS server, and audio making the full
+    round trip (browser → SRTP → decode → WS bridge → echo → encode →
+    SRTP → browser). Plus the plan's acceptance test on this
+    transport: drop the peer with no BYE and the inactivity watchdog
+    must tear the call down **and** hand the RTP port pair back.
+
+  **CI now runs `clippy` and `cargo test` with `--features
+  siphon-ai/webrtc`** alongside the default pass. Until now none of the
+  browser-leg code — the acceptor branch, the tap, the ICE/DTLS metrics
+  — was compiled or linted in CI, while the release artifacts ship it
+  enabled. That gap is closed.
+
+  The loopback immediately pinned something the design had only
+  reasoned about: **a vanished peer produces no event whatsoever** — no
+  `Closed`, no `Failed`, no RTP, for as long as you care to watch.
+  forge-webrtc sends RFC 7675 keepalives but never fails a transport
+  when the replies stop, so `[media].inactivity_timeout_secs` really is
+  the only thing that reclaims the slot. There is now a test asserting
+  that gap, which fails with instructions if forge-webrtc ever learns
+  to report it.
+
 - **A browser call now says where it is in ICE/DTLS, live — in the
   admin API and in sightglass** (`DEV_PLAN_WebRTC.md` §4.6, completing
   it). `GET /admin/v1/calls` rows and `GET /admin/v1/calls/{id}/stats`

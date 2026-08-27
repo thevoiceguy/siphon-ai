@@ -4303,6 +4303,7 @@ dependencies = [
  "forge-engine",
  "forge-rtp",
  "forge-sdp",
+ "forge-webrtc",
  "futures",
  "metrics",
  "metrics-exporter-prometheus",

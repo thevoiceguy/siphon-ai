@@ -95,9 +95,20 @@ the app — one layer at a time, the same way modals behave.
 - **calls** — fleet-unified call table (both id namespaces +
   direction; the Node column hides itself on single-node fleets), and
   a detail pane for the focused call: direction, from/to, SIP
-  Call-ID, sample rate, SRTP suite, STIR/SHAKEN attestation (0.49.0+
-  daemons), plus live MOS, jitter, packet counters, first-audio
-  latency, barge-ins, and a MOS trend sparkline. Stats are polled for
+  Call-ID, sample rate, SRTP suite, ICE/DTLS phase on a browser call,
+  STIR/SHAKEN attestation (0.49.0+ daemons), plus live MOS, jitter,
+  packet counters, first-audio latency, barge-ins, and a MOS trend
+  sparkline.
+
+  A **MEDIA** column appears when any visible call is a browser one
+  (`[webrtc]`): `ice` while ICE checks run, `dtls` once a candidate
+  pair is nominated and the handshake is in flight, `webrtc` once
+  media flows, then `failed` / `closed`. A classic SIP leg shows `—`
+  — it has no such phase. The column hides itself on a fleet with no
+  browser traffic, the same way the Node column does on one node, and
+  the distinction it preserves is the one that matters when a browser
+  call has no audio: a call parked on `ice` has no network path, one
+  parked on `dtls` has a path and failing crypto. Stats are polled for
   the focused call only. Below the active table, a **recent** pane
   tails the last completed calls (ended time, from → to, hangup
   cause, duration, MOS) from `GET /admin/v1/cdrs/recent`.

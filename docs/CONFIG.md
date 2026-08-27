@@ -52,6 +52,14 @@ anywhere `${VAR}` works.
 Unset env variables without a default fail the load; so do unreadable files and
 credentials. Resolved secret values are never logged.
 
+> **Comments are expanded too.** The pass runs over the raw file *before* TOML
+> parses it, so a `${...}` written inside a `#` comment is a real reference —
+> mentioning `${SOME_TOKEN}` in a note next to a setting makes the daemon
+> demand `SOME_TOKEN` at startup. Write such notes without the `${}` syntax
+> (or set the variable). The behaviour is deliberate — one scan, one pass, no
+> TOML-aware special cases — but it surprises people documenting their own
+> configs.
+
 ## Top-level layout
 
 ```toml

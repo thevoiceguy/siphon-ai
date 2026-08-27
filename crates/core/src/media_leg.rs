@@ -58,7 +58,30 @@ impl From<MediaTap> for MediaLeg {
     }
 }
 
+/// Reads a leg's live phase as a short stable string.
+///
+/// A closure rather than a concrete handle so the two admin registries
+/// (`CallControlRegistry`, `quality_live`) can report a browser leg's
+/// ICE/DTLS phase without core's non-WebRTC build depending on the
+/// type that produces it — the same indirection the admin state uses
+/// for every other cross-crate probe.
+pub type LegPhaseProbe = std::sync::Arc<dyn Fn() -> &'static str + Send + Sync>;
+
 impl MediaLeg {
+    /// A probe for this leg's live ICE/DTLS phase, or `None` for a
+    /// classic leg — which has no such phase, rather than an unknown
+    /// one (`DEV_PLAN_WebRTC.md` §4.6).
+    pub fn phase_probe(&self) -> Option<LegPhaseProbe> {
+        match self {
+            MediaLeg::Classic(_) => None,
+            #[cfg(feature = "webrtc")]
+            MediaLeg::WebRtc(t) => {
+                let state = t.state();
+                Some(std::sync::Arc::new(move || state.phase().as_str()))
+            }
+        }
+    }
+
     /// The PCM rate the WS bridge sees for this call — 8 kHz or
     /// 16 kHz, whichever the negotiated codec decodes to. Both
     /// backends land inside the bridge's fixed contract.

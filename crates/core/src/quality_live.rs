@@ -31,6 +31,11 @@ struct LiveEntry {
     meta: LiveCallMeta,
     quality: watch::Receiver<QualityReport>,
     epoch: watch::Receiver<Option<Instant>>,
+    /// Reads the media leg's live ICE/DTLS phase; `None` for a classic
+    /// leg, which has no such phase (§4.6). Unlike everything in
+    /// [`LiveCallMeta`], this one *changes* during the call, so it is
+    /// a probe rather than a captured value.
+    leg_phase: Option<crate::media_leg::LegPhaseProbe>,
 }
 
 /// Static call facts registered alongside the quality feed (0.49.0,
@@ -73,6 +78,7 @@ impl LiveQualityGuard {
         meta: LiveCallMeta,
         quality: watch::Receiver<QualityReport>,
         epoch: watch::Receiver<Option<Instant>>,
+        leg_phase: Option<crate::media_leg::LegPhaseProbe>,
     ) -> Self {
         live().write().insert(
             call_id.to_string(),
@@ -80,6 +86,7 @@ impl LiveQualityGuard {
                 meta,
                 quality,
                 epoch,
+                leg_phase,
             },
         );
         Self {
@@ -107,18 +114,28 @@ pub struct LiveQualityStats {
     pub meta: LiveCallMeta,
     #[serde(flatten)]
     pub quality: siphon_ai_cdr::QualityInfo,
+    /// A browser leg's ICE/DTLS phase at sample time — `connecting`,
+    /// `ice_connected`, `connected`, `failed`, `closed` (§4.6).
+    /// Omitted entirely for a classic leg: absent means "not a browser
+    /// call", not "unknown".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webrtc_state: Option<&'static str>,
 }
 
 /// Snapshot one active call's current quality state. `None` when no
 /// active call has that bridge `call_id` (ended calls answer through
 /// the CDR / history records instead).
 pub fn snapshot(call_id: &str) -> Option<LiveQualityStats> {
-    let (report, connected_at, meta) = {
+    let (report, connected_at, meta, webrtc_state) = {
         let map = live().read();
         let entry = map.get(call_id)?;
         let report = *entry.quality.borrow();
         let connected_at = *entry.epoch.borrow();
-        (report, connected_at, entry.meta.clone())
+        // Read under the same lock the entry is borrowed from, so the
+        // phase belongs to this snapshot rather than to whatever the
+        // call did while we were formatting the rest of it.
+        let webrtc_state = entry.leg_phase.as_ref().map(|probe| probe());
+        (report, connected_at, entry.meta.clone(), webrtc_state)
     };
     // Unlike the CDR (which omits an unmeasured block entirely), an
     // existing call always answers — with whatever is known so far.
@@ -132,6 +149,7 @@ pub fn snapshot(call_id: &str) -> Option<LiveQualityStats> {
         sampled_at: Utc::now(),
         meta,
         quality: crate::acceptor::quality_info(outcome),
+        webrtc_state,
     })
 }
 
@@ -161,6 +179,7 @@ mod tests {
             },
             qrx,
             erx,
+            None,
         );
 
         // Young call: exists, empty quality fields, static meta set.
@@ -175,6 +194,9 @@ mod tests {
         assert_eq!(wire["sample_rate"], 8000);
         assert_eq!(wire["verstat_attest"], "A");
         assert!(wire.get("srtp_profile").is_none());
+        // A classic leg has no ICE/DTLS phase, so the key is absent
+        // rather than null — absent means "not a browser call".
+        assert!(wire.get("webrtc_state").is_none());
 
         // A tap update shows up on the next probe.
         qtx.send_replace(QualityReport {
@@ -186,5 +208,49 @@ mod tests {
 
         drop(guard);
         assert!(snapshot("siphon-live-1").is_none(), "guard deregisters");
+    }
+
+    /// A browser leg's phase is a *probe*, not a captured value: the
+    /// snapshot must show where the call is now, not where it was when
+    /// it registered (§4.6).
+    #[tokio::test]
+    async fn a_browser_leg_reports_its_current_phase() {
+        let (_qtx, qrx) = watch::channel(QualityReport::default());
+        let (_etx, erx) = watch::channel(None);
+        let phase = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe_phase = std::sync::Arc::clone(&phase);
+        let guard = LiveQualityGuard::register(
+            "siphon-live-webrtc",
+            LiveCallMeta {
+                direction: "inbound".into(),
+                from: "browser".into(),
+                to: "1000".into(),
+                sip_call_id: "wss@host".into(),
+                sample_rate: 16_000,
+                srtp_profile: None,
+                verstat_attest: None,
+            },
+            qrx,
+            erx,
+            Some(std::sync::Arc::new(move || {
+                if probe_phase.load(std::sync::atomic::Ordering::Relaxed) {
+                    "connected"
+                } else {
+                    "ice_connected"
+                }
+            })),
+        );
+
+        let wire =
+            serde_json::to_value(snapshot("siphon-live-webrtc").expect("registered")).unwrap();
+        assert_eq!(wire["webrtc_state"], "ice_connected");
+
+        // DTLS finishes mid-call; the next read must move.
+        phase.store(true, std::sync::atomic::Ordering::Relaxed);
+        let wire =
+            serde_json::to_value(snapshot("siphon-live-webrtc").expect("registered")).unwrap();
+        assert_eq!(wire["webrtc_state"], "connected");
+
+        drop(guard);
     }
 }

@@ -265,18 +265,25 @@ impl ConsultRegistry {
 /// consumes). Before this the listing exposed only the SIP Call-ID, with
 /// no way to obtain the bridge id the conference API requires (issue
 /// #311).
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct CallControlRegistry {
     inner: Arc<RwLock<HashMap<String, ControlEntry>>>,
 }
 
 /// What [`CallControlRegistry`] stores per call: the command handle plus
 /// the identifiers/direction the admin listing reports.
-#[derive(Debug, Clone)]
+///
+/// No `Debug`: the leg-phase probe is a closure, and deriving it would
+/// force every holder to redact it.
+#[derive(Clone)]
 struct ControlEntry {
     handle: CallHandle,
     sip_call_id: String,
     direction: Direction,
+    /// Reads a browser leg's live ICE/DTLS phase for the admin listing
+    /// (`DEV_PLAN_WebRTC.md` §4.6). `None` for a classic leg — which
+    /// has no such phase, rather than an unknown one.
+    leg_phase: Option<crate::media_leg::LegPhaseProbe>,
 }
 
 /// One active call in the admin `GET /admin/v1/calls` snapshot. `call_id`
@@ -287,6 +294,20 @@ pub struct CallSnapshot {
     pub call_id: String,
     pub sip_call_id: String,
     pub direction: Direction,
+    /// A browser leg's ICE/DTLS phase right now — `connecting`,
+    /// `ice_connected`, `connected`, `failed`, `closed` (§4.6).
+    /// `None` for a classic call: it has no such phase.
+    pub webrtc_state: Option<&'static str>,
+}
+
+impl std::fmt::Debug for CallControlRegistry {
+    /// Hand-written because an entry holds a leg-phase closure. Prints
+    /// the population, which is what a `Debug` of a registry is for.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallControlRegistry")
+            .field("calls", &self.inner.read().len())
+            .finish()
+    }
 }
 
 impl CallControlRegistry {
@@ -307,12 +328,26 @@ impl CallControlRegistry {
     /// A collision means the id factory produced a duplicate (a bug);
     /// last insert wins with a warning, matching [`CallRegistry`].
     pub fn insert(&self, handle: CallHandle, sip_call_id: impl Into<String>, direction: Direction) {
+        self.insert_with_leg_phase(handle, sip_call_id, direction, None)
+    }
+
+    /// [`insert`](Self::insert) plus a probe for the call's live
+    /// ICE/DTLS phase — browser legs pass one, classic legs do not
+    /// (§4.6).
+    pub fn insert_with_leg_phase(
+        &self,
+        handle: CallHandle,
+        sip_call_id: impl Into<String>,
+        direction: Direction,
+        leg_phase: Option<crate::media_leg::LegPhaseProbe>,
+    ) {
         let key = handle.call_id().as_str().to_string();
         let sip_call_id = sip_call_id.into();
         let entry = ControlEntry {
             handle,
             sip_call_id: sip_call_id.clone(),
             direction,
+            leg_phase,
         };
         // Promote this dialog's SIP-ladder trace to the live
         // population (DESIGN_SIP_LADDER.md). This is the moment the
@@ -346,6 +381,7 @@ impl CallControlRegistry {
                 call_id: call_id.clone(),
                 sip_call_id: e.sip_call_id.clone(),
                 direction: e.direction,
+                webrtc_state: e.leg_phase.as_ref().map(|probe| probe()),
             })
             .collect()
     }

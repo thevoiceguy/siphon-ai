@@ -123,7 +123,17 @@ fn draw_table(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let multi_node = app.nodes.len() > 1;
     let visible = app.visible_calls();
 
+    // MEDIA is the browser column (`DEV_PLAN_WebRTC.md` §4.6): one
+    // glance answers "is that browser call actually up, and if not, is
+    // it stuck on ICE or on DTLS". It appears only when a visible call
+    // has a phase to report, so a fleet with no browser traffic keeps
+    // the exact table it had — the column costs width, and width is
+    // what this table is always short of.
+    let any_webrtc = visible.iter().any(|(_, c)| c.webrtc_state.is_some());
     let mut headers = vec!["CALL ID", "SIP CALL ID", "DIR"];
+    if any_webrtc {
+        headers.push("MEDIA");
+    }
     if multi_node {
         headers.insert(0, "NODE");
     }
@@ -139,6 +149,17 @@ fn draw_table(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             Cell::from(Span::styled(c.sip_call_id.as_str(), theme.dim_text())),
             Cell::from(Span::styled(c.direction.as_str(), theme.text())),
         ];
+        if any_webrtc {
+            cells.push(Cell::from(match c.webrtc_state.as_deref() {
+                Some(state) => Span::styled(
+                    media_label(state),
+                    ratatui::style::Style::default().fg(theme.webrtc_color(state)),
+                ),
+                // A classic leg has no phase — a dash, never a blank
+                // that could read as "unknown".
+                None => Span::styled("—", theme.dim_text()),
+            }));
+        }
         if multi_node {
             cells.insert(
                 0,
@@ -153,6 +174,9 @@ fn draw_table(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Constraint::Min(16),
         Constraint::Length(8),
     ];
+    if any_webrtc {
+        widths.push(Constraint::Length(6));
+    }
     if multi_node {
         widths.insert(0, Constraint::Length(10));
     }
@@ -220,6 +244,9 @@ fn draw_detail(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 ("to", "to"),
                 ("sip_call_id", "sip call-id"),
                 ("srtp_profile", "srtp"),
+                // Only a browser leg reports this, so the line simply
+                // does not appear for a classic call.
+                ("webrtc_state", "ice/dtls"),
                 ("verstat_attest", "attest"),
             ] {
                 if let Some(v) = stats.get(key).and_then(|v| v.as_str()) {
@@ -326,6 +353,27 @@ fn draw_detail(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     frame.render_widget(spark, spark_area);
 }
 
+/// The daemon's `webrtc_state` vocabulary, compressed to fit a column
+/// that shares a narrow table with two call ids. The mapping keeps the
+/// distinction that matters — *which* phase a stalled call is stuck in
+/// — and spends the saved width on the ids. The full string is in the
+/// detail pane (and in `GET /admin/v1/calls`).
+fn media_label(state: &str) -> &'static str {
+    match state {
+        // ICE checks are running: no path yet.
+        "connecting" => "ice",
+        // A pair is nominated and DTLS is handshaking.
+        "ice_connected" => "dtls",
+        // Up: this call's media is a browser's.
+        "connected" => "webrtc",
+        "failed" => "failed",
+        "closed" => "closed",
+        // A phase this build does not know: say so rather than
+        // silently rendering it as healthy.
+        _ => "?",
+    }
+}
+
 fn field_line_owned(theme: &Theme, label: &str, value: String) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{label:>12}  "), theme.dim_text()),
@@ -382,4 +430,23 @@ fn push_ratio(
         Span::styled(format!("{label:>12}  "), theme.dim_text()),
         Span::styled(format!("{:.2}%", v * 100.0), theme.text()),
     ]));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::media_label;
+
+    #[test]
+    fn every_daemon_phase_has_a_column_label() {
+        // The daemon's vocabulary (webrtc-glue's `LegPhase::as_str`).
+        assert_eq!(media_label("connecting"), "ice");
+        assert_eq!(media_label("ice_connected"), "dtls");
+        assert_eq!(media_label("connected"), "webrtc");
+        assert_eq!(media_label("failed"), "failed");
+        assert_eq!(media_label("closed"), "closed");
+        // A newer daemon than this sightglass must not render as
+        // healthy — sightglass is version-skewed against the fleet by
+        // design.
+        assert_eq!(media_label("teleported"), "?");
+    }
 }

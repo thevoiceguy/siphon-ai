@@ -66,6 +66,19 @@ impl Theme {
         }
     }
 
+    /// A browser leg's ICE/DTLS phase → color, keyed on the daemon's
+    /// `webrtc_state` vocabulary (`DEV_PLAN_WebRTC.md` §4.6).
+    /// `ice_connected` is amber rather than green on purpose: a path
+    /// exists but media cannot flow yet, and a call *parked* there is
+    /// a DTLS problem an operator wants to notice.
+    pub fn webrtc_color(&self, state: &str) -> Color {
+        match state {
+            "connected" => self.ok,
+            "failed" => self.err,
+            _ => self.warn,
+        }
+    }
+
     /// Registration status → color, keyed on the daemon's status
     /// strings ("registered" is healthy; anything failed-ish is red).
     pub fn registration_color(&self, status: &str) -> Color {

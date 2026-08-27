@@ -427,6 +427,7 @@ mod tests {
             call_id: id.to_string(),
             sip_call_id: format!("{id}@host"),
             direction: "inbound".to_string(),
+            webrtc_state: None,
         }
     }
 

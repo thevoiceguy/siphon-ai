@@ -1813,6 +1813,8 @@ impl CallRegistryHandle for RuntimeCallRegistry {
                     Direction::Outbound => "outbound",
                 }
                 .to_string(),
+                // Present only for a browser leg (§4.6).
+                webrtc_state: c.webrtc_state.map(str::to_string),
             })
             .collect()
     }

@@ -36,6 +36,7 @@ WSS_PORT="${WSS_PORT:-8443}"
 PAGE_PORT="${PAGE_PORT:-8088}"
 OBS_PORT="${OBS_PORT:-9091}"
 ECHO_PORT="${ECHO_PORT:-8765}"
+ADMIN_PORT="${ADMIN_PORT:-9092}"
 
 # ─── Chromium ─────────────────────────────────────────────────────
 # Resolve a binary; when it's the Playwright fallback, the two NSS
@@ -111,6 +112,7 @@ sed -e "s|127\.0\.0\.1:5070|127.0.0.1:$SIP_PORT|" \
     -e "s|127\.0\.0\.1:8088|127.0.0.1:$PAGE_PORT|g" \
     -e "s|localhost:8088|localhost:$PAGE_PORT|g" \
     -e "s|127\.0\.0\.1:9091|127.0.0.1:$OBS_PORT|" \
+    -e "s|127\.0\.0\.1:9092|127.0.0.1:$ADMIN_PORT|" \
     -e "s|127\.0\.0\.1:8765|127.0.0.1:$ECHO_PORT|" \
     -e "s|examples/browser-sip/certs|$SCRIPT_DIR/certs|g" \
     -e "s|examples/browser-sip/cdr.jsonl|$WORK/cdr.jsonl|" \
@@ -266,6 +268,24 @@ if command -v ss >/dev/null 2>&1; then
     fi
 fi
 
+# (d) while the call is up, the admin API says where its media is
+# (§4.6). This is the sightglass surface: a browser call that never
+# got audio is diagnosed by *which* phase it is stuck in, and that is
+# only answerable while the call still exists.
+admin() { curl -s -H "Authorization: Bearer lab-token-not-a-secret" \
+    "http://127.0.0.1:$ADMIN_PORT/admin/v1$1"; }
+state="$(admin /calls | python3 -c '
+import json, sys
+calls = json.load(sys.stdin)["calls"]
+print(next((c.get("webrtc_state", "") for c in calls), ""))
+')"
+if [[ "$state" != "connected" ]]; then
+    echo "FAIL: admin /calls reports webrtc_state=${state:-absent}, want connected" >&2
+    admin /calls >&2
+    exit 1
+fi
+echo "  OK — GET /admin/v1/calls: webrtc_state=connected"
+
 # (c) the pair comes back when the leg ends — the leak Phase 0 is about
 echo "─── call teardown returns the pair ───"
 kill "$CHROME_PID" 2>/dev/null; wait "$CHROME_PID" 2>/dev/null
@@ -363,5 +383,5 @@ fi
 echo "  OK — CDR v$cdr_version: leg_transport=$cdr_transport media_type=$cdr_media"
 
 echo
-echo "PASS — DEV_PLAN_WebRTC.md Phase 1 exit check + §4.4 port accounting + §4.6 observability and CDR v9 (headless)."
+echo "PASS — DEV_PLAN_WebRTC.md Phase 1 exit check + §4.4 port accounting + §4.6 metrics, live leg state, and CDR v9 (headless)."
 echo "logs kept in $WORK"

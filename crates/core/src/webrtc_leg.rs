@@ -36,7 +36,9 @@ use siphon_ai_telemetry::{
     WEBRTC_DTLS_SECONDS, WEBRTC_ICE_SECONDS, WEBRTC_LEGS_ENDED_TOTAL, WEBRTC_LEGS_TOTAL,
     WEBRTC_TRANSCODE_SECONDS,
 };
-use siphon_ai_webrtc_glue::{InboundAudio, OutboundAudio, SetupOutcome, WebRtcLeg};
+use siphon_ai_webrtc_glue::{
+    InboundAudio, LegPhase, OutboundAudio, SetupOutcome, WebRtcLeg, WebRtcLegState,
+};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -82,6 +84,10 @@ pub struct WebRtcTap {
     /// capacity gauge return to zero after a browser call without any
     /// teardown path having to remember.
     _ports: Option<siphon_ai_media_glue::PortReservation>,
+    /// Where this leg is in ICE/DTLS, published for the admin API and
+    /// sightglass (§4.6). Owned here, cloned out by the controller —
+    /// the peer connection itself cannot leave this task.
+    state: Arc<WebRtcLegState>,
 }
 
 impl WebRtcTap {
@@ -98,7 +104,13 @@ impl WebRtcTap {
             recording: None,
             inactivity_timeout: None,
             _ports: None,
+            state: Arc::new(WebRtcLegState::default()),
         }
+    }
+
+    /// The live ICE/DTLS phase cell, for whoever reports on this call.
+    pub fn state(&self) -> Arc<WebRtcLegState> {
+        Arc::clone(&self.state)
     }
 
     /// Hold an RTP port pair for the life of this leg (§4.4).
@@ -155,7 +167,7 @@ impl WebRtcTap {
         // there is nothing to send and nothing will arrive.
         let outcome = self
             .leg
-            .wait_for_setup(&mut self.events, self.setup_timeout)
+            .wait_for_setup(&mut self.events, self.setup_timeout, &self.state)
             .await;
         let (codec, payload_type) = self.leg.codec();
         let codec_label = codec_label(codec);
@@ -234,9 +246,11 @@ impl WebRtcTap {
                         Some(siphon_ai_webrtc_glue::PeerEvent::Failed(why)) => {
                             warn!(connection_id = self.leg.connection_id(), %why,
                                   "browser media transport failed");
+                            self.state.set(LegPhase::Failed);
                             break (TapDisconnect::CallEnded, "transport_failed");
                         }
                         Some(siphon_ai_webrtc_glue::PeerEvent::Closed) | None => {
+                            self.state.set(LegPhase::Closed);
                             break (TapDisconnect::CallEnded, "peer_closed");
                         }
                         // RTCP and late ICE/DTLS notices: nothing to do
@@ -334,6 +348,11 @@ impl WebRtcTap {
         };
 
         self.leg.close();
+        // Whatever ended the leg, it is closed now — the last phase an
+        // admin read can see before the call leaves the registry.
+        if self.state.phase() != LegPhase::Failed {
+            self.state.set(LegPhase::Closed);
+        }
         metrics::counter!(WEBRTC_LEGS_ENDED_TOTAL, "reason" => end_reason).increment(1);
         // Codec time for the whole leg, recorded once here rather than
         // per frame: 50 histogram observations a second per call would

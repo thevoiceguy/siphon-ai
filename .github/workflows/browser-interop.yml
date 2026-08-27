@@ -1,0 +1,93 @@
+name: browser interop
+
+# Real browsers against a real daemon (DEV_PLAN_WebRTC.md §5, item 2).
+#
+# Nightly rather than per-commit, deliberately: the per-commit media
+# coverage is the in-process loopback (crates/webrtc-glue/tests/
+# loopback.rs and crates/core/tests/webrtc_call.rs), which needs no
+# browser and takes two seconds. What only a real browser can tell us
+# is whether *its* WebRTC stack and *its* SIP stack agree with ours —
+# and that answer changes when browsers ship, not when we commit.
+#
+# Each engine registers over WSS, places a call, and has to prove audio
+# in both directions: the WS server measures what the browser sent, and
+# the page reports inbound audio energy from `getStats()`.
+
+on:
+  schedule:
+    # 04:30 UTC — after the browsers' own nightly channels have moved.
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+    inputs:
+      browsers:
+        description: "Comma-separated engines (chromium,firefox,webkit)"
+        required: false
+        default: "chromium,firefox,webkit"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-interop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  interop:
+    name: browsers × the WebRTC leg
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      # The browser leg is feature-gated; the release artifacts ship it
+      # on, and this job is about that build.
+      - name: Build the daemon with the webrtc feature
+        run: cargo build -p siphon-ai --features webrtc
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install harness dependencies
+        working-directory: test-harness/browser
+        run: npm ci
+
+      # `--with-deps` is the reason this runs on a GitHub runner rather
+      # than any box: WebKit needs a dozen system libraries (libwebp,
+      # libenchant, libsecret…) that a developer machine will not have.
+      - name: Install Playwright browsers
+        working-directory: test-harness/browser
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Generate the lab's WSS certificate
+        run: examples/browser-sip/gen-cert.sh
+
+      - name: Run the interop matrix
+        working-directory: test-harness/browser
+        env:
+          BROWSERS: ${{ inputs.browsers || 'chromium,firefox,webkit' }}
+          CI: "true"
+        run: npx playwright test
+
+      # The daemon log, the WS server's measurements and Playwright's
+      # traces are the whole diagnosis when an engine regresses — and
+      # the run that finds it is the one nobody was watching.
+      - name: Collect artifacts
+        if: always()
+        run: |
+          mkdir -p interop-artifacts
+          cp -r test-harness/browser/playwright-report interop-artifacts/ 2>/dev/null || true
+          cp -r test-harness/browser/test-results interop-artifacts/ 2>/dev/null || true
+          cp -r "${RUNNER_TEMP}"/browser-interop.* interop-artifacts/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-interop
+          path: interop-artifacts
+          retention-days: 14

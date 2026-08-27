@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Three real browsers now call the daemon every night and have to
+  prove audio in both directions** (`DEV_PLAN_WebRTC.md` §5, item 2).
+  `test-harness/browser/` is a Playwright harness — Chromium, Firefox
+  and WebKit each REGISTER over WSS, place a call the daemon answers
+  with a forge-webrtc leg, exchange audio, hang up, and give the RTP
+  port pair back. It runs nightly
+  (`.github/workflows/browser-interop.yml`), not per-commit: the
+  per-commit media coverage is the in-process loopback, and what a real
+  browser adds is whether *its* stacks agree with ours — which changes
+  when browsers ship.
+
+  Two-way audio is proved by **frequency, not level**, so neither
+  direction can be satisfied by an echo. The page sends an identifiable
+  tone; the harness's WS server *measures* the dominant frequency of
+  what arrives and plays 900 Hz back; the page asserts inbound audio
+  energy from `getStats()`.
+
+  The interesting part was that every engine difference was in the
+  browser's *audio plumbing*, not in DTLS or Opus — the media plane has
+  been identical across engines so far. Chief among them: **headless
+  Firefox has no audio output device**, so its `AudioContext` never
+  leaves `suspended` and `resume()` never settles — with or without a
+  user gesture, with or without every `media.autoplay.*` pref. Awaiting
+  it hung the call before the INVITE was built. The lab page now waits
+  with a budget and falls back to the engine's capture device, which is
+  why the server measures the frequency instead of assuming it.
+
+  `examples/browser-sip/index.html` gained the parameters that make
+  this possible — `?tone=1` (send a tone, report what comes back on
+  `window.__labAudio`) and `?sipjs=<url>` (load the SIP stack from
+  anywhere, so a nightly run never depends on a CDN) — and its copy no
+  longer says the test call carries no audio, which stopped being true
+  when the browser leg landed.
+
 - **A browser call is now tested end to end on every commit, and CI
   builds the `webrtc` feature at all** (`DEV_PLAN_WebRTC.md` §5, Phase
   3 item 1). Two loopback layers, ~2 s each, no browser and no

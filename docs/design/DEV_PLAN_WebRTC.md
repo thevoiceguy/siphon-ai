@@ -196,9 +196,21 @@ SIPp covers none of the media plane here, so the harness grows two new legs:
    - **A browser sends media only once its peer connection is up.** Frames pushed between the answer and DTLS completion have no SRTP context and are silently lost — obvious in hindsight, and the reason the first version of the e2e test saw zero audio.
 
    Still open on this item: wiring browser traffic into the **soak/load harness**. The blocker is not the media plane (the loopback is cheap enough) but signalling: a Rust load generator would need a *persistent* SIP-over-WebSocket **client** transport, and siphon-rs has only one-shot `send_ws`/`send_wss` outbound helpers today. Options are (a) add a WS client transport upstream, or (b) drive load through headless browsers, which is item 2's machinery.
-2. **Real-browser e2e:** Playwright driving headless Chromium + SIP.js against a containerized bridge, asserting two-way audio (inject a tone, assert level on the AI WebSocket, and vice versa). Runs nightly, not per-commit.
+2. ~~**Real-browser e2e:** Playwright driving headless Chromium + SIP.js against a containerized bridge, asserting two-way audio (inject a tone, assert level on the AI WebSocket, and vice versa). Runs nightly, not per-commit.~~ **Done** — `test-harness/browser/`, nightly via `.github/workflows/browser-interop.yml`, and **three engines rather than one**: Chromium, Firefox and WebKit each REGISTER over WSS, place a call, prove audio both ways, and hang up with the port pair returned.
+
+   Two-way audio is proved by *frequency*, not level, and neither direction can be satisfied by an echo: the page sends an identifiable tone and `tone-ws-server.mjs` measures the dominant frequency of what arrives (a Goertzel sweep over the 50 Hz grid a 20 ms window resolves exactly); the server plays 900 Hz back and the page asserts inbound audio energy from `getStats()`.
+
+   The engine differences turned out to be the whole story, and none of them were codec-shaped:
+
+   - **Headless Firefox has no audio output device**, so its `AudioContext` never leaves `suspended` and `resume()` *never settles* — not with a user gesture, not with any `media.autoplay.*` pref. Awaiting it hung the call before the INVITE was built. The page now waits with a budget and falls back to `getUserMedia()`; Firefox's fake capture device turns out to emit a clean 1 kHz tone, which is exactly why the server measures rather than assumes.
+   - **Inbound audio has to be asserted from `getStats()`** (`totalAudioEnergy`), the one measurement every engine reports without an AudioContext. Where WebAudio does run, the page additionally proves the audio *is* the server's 900 Hz rather than an echo.
+   - **WebKit needs a dozen system libraries** a developer box lacks, which is why this is a CI job with `--with-deps` rather than something to run locally.
+
+   Remaining on the matrix: **JsSIP** (a second page — the stacks' APIs differ; the `?sipjs=` hook and the measuring server are already shaped for it), and **real Safari**, which needs a macOS runner. WebKit is the closest Linux gets and shares the engine, so treat it as necessary rather than sufficient.
 
 Interop matrix, in priority order: Chrome, Firefox, Safari (its DTLS and Opus behaviors diverge most) × SIP.js and JsSIP. Safari is where the surprises will be — budget time for it.
+
+> **Where it stands:** Chromium, Firefox and WebKit × SIP.js run nightly. The surprises so far have come from the *harness* side of the engines (headless audio devices, autoplay policy) rather than from DTLS or Opus — the media plane has been boringly identical across engines, which is the outcome §4.2's "let forge-webrtc own offer/answer" was betting on.
 
 Abrupt-teardown scenarios from Phase 0 get a WebRTC variant: kill the browser page mid-call N hundred times, assert zero dialog/port leaks. This is the acceptance test that ties the whole plan together.
 

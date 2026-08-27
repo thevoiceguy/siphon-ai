@@ -100,6 +100,14 @@ pub struct InboundAudio {
     /// Payloads the codec refused. A decode failure is per-packet and
     /// recoverable; killing the call over one is worse than a click.
     pub decode_errors: u64,
+    /// Wall time spent inside `decode`, summed over the leg (§4.6).
+    ///
+    /// Decoding is pure computation on this thread — no I/O, no
+    /// awaits — so wall time here *is* CPU time, which is the number
+    /// capacity planning needs: how much of a core does a browser leg
+    /// cost, and how much of that is Opus rather than G.711. Two
+    /// clock reads per 20 ms packet, off any allocation path.
+    pub decode_nanos: u64,
 }
 
 impl InboundAudio {
@@ -112,6 +120,7 @@ impl InboundAudio {
             payload_type,
             other_payload_packets: 0,
             decode_errors: 0,
+            decode_nanos: 0,
         })
     }
 
@@ -145,7 +154,10 @@ impl InboundAudio {
     pub fn drain(&mut self) -> Vec<Vec<u8>> {
         let mut frames = Vec::new();
         while let Some(payload) = self.jitter.pop() {
-            match self.codec.decode(&payload) {
+            let began = std::time::Instant::now();
+            let decoded = self.codec.decode(&payload);
+            self.decode_nanos += began.elapsed().as_nanos() as u64;
+            match decoded {
                 Ok(samples) => self.reframer.push(&samples),
                 Err(e) => {
                     self.decode_errors += 1;
@@ -179,6 +191,11 @@ pub struct OutboundAudio {
     samples_per_frame: u32,
     /// Frames the codec refused to encode.
     pub encode_errors: u64,
+    /// Wall time spent inside `encode`, summed over the leg — the
+    /// transmit-side counterpart of [`InboundAudio::decode_nanos`],
+    /// and deliberately *not* including `send_audio` (SRTP protect
+    /// plus a socket write is transport cost, not transcode cost).
+    pub encode_nanos: u64,
 }
 
 impl OutboundAudio {
@@ -189,6 +206,7 @@ impl OutboundAudio {
             sender,
             samples_per_frame,
             encode_errors: 0,
+            encode_nanos: 0,
         })
     }
 
@@ -201,7 +219,10 @@ impl OutboundAudio {
     pub async fn send_frame(&mut self, pcm16le: &[u8]) -> Result<()> {
         let samples =
             unpack_pcm16_le(pcm16le).map_err(|e| WebRtcGlueError::Codec(e.to_string()))?;
-        let encoded = match self.codec.encode(&samples) {
+        let began = std::time::Instant::now();
+        let attempt = self.codec.encode(&samples);
+        self.encode_nanos += began.elapsed().as_nanos() as u64;
+        let encoded = match attempt {
             Ok(e) => e,
             Err(e) => {
                 self.encode_errors += 1;

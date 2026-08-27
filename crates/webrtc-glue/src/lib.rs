@@ -39,7 +39,7 @@ pub use detect::{inspect, is_webrtc_offer, OfferShape};
 /// forge-webrtc's peer/transport event stream, re-exported so
 /// consumers need not depend on forge-webrtc directly.
 pub use forge_webrtc::PeerEvent;
-pub use leg::{Answered, WebRtcLeg};
+pub use leg::{await_setup, Answered, SetupOutcome, WebRtcLeg};
 pub use settings::{SettingsError, WebRtcSettings};
 
 /// What can go wrong building or running a browser media leg.

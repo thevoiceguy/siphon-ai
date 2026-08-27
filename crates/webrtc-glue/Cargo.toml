@@ -35,4 +35,7 @@ default = ["opus"]
 opus = ["forge-codecs/opus"]
 
 [dev-dependencies]
-tokio = { workspace = true }
+# `test-util` is required for `#[tokio::test(start_paused = true)]`,
+# which is how the ICE/DTLS setup timings are asserted without real
+# sleeps (same reason media-glue pulls it in).
+tokio = { workspace = true, features = ["test-util"] }

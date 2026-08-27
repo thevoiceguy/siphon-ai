@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Browser calls are now observable: ICE and DTLS are timed and
+  counted apart, and a leg's codec cost is measured**
+  (`DEV_PLAN_WebRTC.md` §4.6). Until now a browser call that never got
+  audio produced one log line and no metric, and "connect failed"
+  covered two unrelated faults.
+
+  Five metrics, all emitted only by a WebRTC leg:
+  `siphon_ai_webrtc_legs_total{codec,result}`,
+  `siphon_ai_webrtc_legs_ended_total{reason}`,
+  `siphon_ai_webrtc_ice_seconds`, `siphon_ai_webrtc_dtls_seconds`, and
+  `siphon_ai_webrtc_transcode_seconds{direction}`. All five are
+  documented in `docs/DEPLOY.md`.
+
+  **The ice/dtls split is the point.** `result="ice_timeout"` means the
+  setup budget expired with *no* candidate pair nominated — there is no
+  path, so the answer is NAT, `[webrtc].stun_servers`, or a
+  `[media].rtp_port_range` the firewall never opened. `dtls_timeout`
+  means a pair *was* nominated and the handshake still did not finish:
+  the path works and the crypto does not. Those have different fixes,
+  and a single "connect failed" counter would have hidden which one you
+  had. Getting the split required making the setup wait **event-driven**
+  (`SetupOutcome`, `webrtc-glue::leg::await_setup`) rather than polling
+  the connection state the way it did before — polling collapses ICE
+  nomination and DTLS completion into one "connected" and throws away
+  the transition an operator needs.
+
+  `siphon_ai_webrtc_legs_ended_total{reason="inactivity"}` is this
+  daemon's **consent-freshness signal**. The plan asked for consent
+  failures; forge-webrtc sends RFC 7675 keepalives but does not fail a
+  transport when the replies stop, so there is no upstream event to
+  count. Silence is what actually tells us a browser is gone, and the
+  inactivity watchdog is what gives the call slot and its RTP port pair
+  back — so it is counted as the real detector rather than a metric
+  named after a mechanism we do not have.
+
+  `siphon_ai_webrtc_transcode_seconds` is the plan's per-call transcode
+  cost: wall time spent inside the codec, which for pure computation
+  with no I/O is CPU time in all but name. It excludes SRTP protect and
+  the socket write, and is recorded **once per leg** rather than per
+  frame — 50 histogram observations a second per call would cost more
+  than the work being measured (CLAUDE.md §4.3). Read next to the
+  `codec` label, it is the capacity number for browser traffic, and the
+  case for `[webrtc].prefer_g711` on a busy node.
+
 - **Browser calls now draw an RTP port pair from the same pool SIP calls
   do** (`DEV_PLAN_WebRTC.md` §4.4). A WebRTC leg binds **one** socket
   (BUNDLE + `a=rtcp-mux`) where a classic leg binds an RTP/RTCP pair,

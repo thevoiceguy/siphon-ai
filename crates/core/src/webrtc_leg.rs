@@ -32,7 +32,11 @@ use std::time::Duration;
 
 use siphon_ai_media_glue::{MediaTapError, TapCommand, TapDisconnect};
 use siphon_ai_recording::RecFrame;
-use siphon_ai_webrtc_glue::{InboundAudio, OutboundAudio, WebRtcLeg};
+use siphon_ai_telemetry::{
+    WEBRTC_DTLS_SECONDS, WEBRTC_ICE_SECONDS, WEBRTC_LEGS_ENDED_TOTAL, WEBRTC_LEGS_TOTAL,
+    WEBRTC_TRANSCODE_SECONDS,
+};
+use siphon_ai_webrtc_glue::{InboundAudio, OutboundAudio, SetupOutcome, WebRtcLeg};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -149,21 +153,43 @@ impl WebRtcTap {
 
         // ICE + DTLS. Until this completes there is no SRTP context, so
         // there is nothing to send and nothing will arrive.
-        if let Err(e) = self.leg.wait_connected(self.setup_timeout).await {
-            warn!(
-                connection_id = self.leg.connection_id(),
-                error = %e,
-                timeout_secs = self.setup_timeout.as_secs(),
-                "browser media never connected; giving the call slot back"
-            );
-            self.leg.close();
-            // The far end signalled but never completed media — the
-            // same shape as a stream that stalls, and the same cause
-            // the controller already knows how to report.
-            return Ok(TapDisconnect::InactivityTimeout);
+        let outcome = self
+            .leg
+            .wait_for_setup(&mut self.events, self.setup_timeout)
+            .await;
+        let (codec, payload_type) = self.leg.codec();
+        let codec_label = codec_label(codec);
+        metrics::counter!(
+            WEBRTC_LEGS_TOTAL,
+            "codec" => codec_label,
+            "result" => outcome.label(),
+        )
+        .increment(1);
+        match &outcome {
+            SetupOutcome::Connected { ice, dtls } => {
+                if let Some(ice) = ice {
+                    metrics::histogram!(WEBRTC_ICE_SECONDS).record(ice.as_secs_f64());
+                }
+                if let Some(dtls) = dtls {
+                    metrics::histogram!(WEBRTC_DTLS_SECONDS).record(dtls.as_secs_f64());
+                }
+            }
+            not_connected => {
+                warn!(
+                    connection_id = self.leg.connection_id(),
+                    outcome = not_connected.label(),
+                    detail = ?not_connected,
+                    timeout_secs = self.setup_timeout.as_secs(),
+                    "browser media never connected; giving the call slot back"
+                );
+                self.leg.close();
+                // The far end signalled but never completed media — the
+                // same shape as a stream that stalls, and the same cause
+                // the controller already knows how to report.
+                return Ok(TapDisconnect::InactivityTimeout);
+            }
         }
 
-        let (codec, payload_type) = self.leg.codec();
         let bridge_rate = self.leg.bridge_sample_rate();
         info!(
             connection_id = self.leg.connection_id(),
@@ -192,7 +218,11 @@ impl WebRtcTap {
         let mut ticker = tokio::time::interval(DRAIN_TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        let disconnect = loop {
+        // Both halves of the end: what the controller is told, and
+        // the bounded label the operator sees. They are not the same
+        // thing — `CallEnded` covers a browser that closed cleanly and
+        // a transport that failed, and only the second is a fault.
+        let (disconnect, end_reason) = loop {
             tokio::select! {
                 // Inbound SRTP → jitter buffer.
                 event = self.events.recv() => {
@@ -204,10 +234,10 @@ impl WebRtcTap {
                         Some(siphon_ai_webrtc_glue::PeerEvent::Failed(why)) => {
                             warn!(connection_id = self.leg.connection_id(), %why,
                                   "browser media transport failed");
-                            break TapDisconnect::CallEnded;
+                            break (TapDisconnect::CallEnded, "transport_failed");
                         }
                         Some(siphon_ai_webrtc_glue::PeerEvent::Closed) | None => {
-                            break TapDisconnect::CallEnded;
+                            break (TapDisconnect::CallEnded, "peer_closed");
                         }
                         // RTCP and late ICE/DTLS notices: nothing to do
                         // here, forge-webrtc has already acted on them.
@@ -226,7 +256,7 @@ impl WebRtcTap {
                                 timeout_secs = limit.as_secs(),
                                 "no inbound media from the browser; tearing down"
                             );
-                            break TapDisconnect::InactivityTimeout;
+                            break (TapDisconnect::InactivityTimeout, "inactivity");
                         }
                     }
                     for frame in inbound.drain() {
@@ -243,7 +273,7 @@ impl WebRtcTap {
                 // Bridge → browser.
                 playout = playout_audio_rx.recv() => {
                     let Some(frame) = playout else {
-                        break TapDisconnect::ControllerHungUp;
+                        break (TapDisconnect::ControllerHungUp, "controller");
                     };
                     let suppressed = self
                         .tx_suppressed
@@ -259,14 +289,14 @@ impl WebRtcTap {
                     if let Err(e) = outbound.send_frame(&frame).await {
                         warn!(connection_id = self.leg.connection_id(), error = %e,
                               "browser media send failed");
-                        break TapDisconnect::CallEnded;
+                        break (TapDisconnect::CallEnded, "send_failed");
                     }
                 }
 
                 // Controller commands.
                 cmd = cmd_rx.recv() => {
                     let Some(cmd) = cmd else {
-                        break TapDisconnect::ControllerHungUp;
+                        break (TapDisconnect::ControllerHungUp, "controller");
                     };
                     match cmd {
                         TapCommand::Mute => muted = true,
@@ -304,16 +334,57 @@ impl WebRtcTap {
         };
 
         self.leg.close();
+        metrics::counter!(WEBRTC_LEGS_ENDED_TOTAL, "reason" => end_reason).increment(1);
+        // Codec time for the whole leg, recorded once here rather than
+        // per frame: 50 histogram observations a second per call would
+        // cost more than the work being measured (CLAUDE.md §4.3).
+        let decode_secs = Duration::from_nanos(inbound.decode_nanos).as_secs_f64();
+        let encode_secs = Duration::from_nanos(outbound.encode_nanos).as_secs_f64();
+        metrics::histogram!(WEBRTC_TRANSCODE_SECONDS, "direction" => "decode").record(decode_secs);
+        metrics::histogram!(WEBRTC_TRANSCODE_SECONDS, "direction" => "encode").record(encode_secs);
         info!(
             connection_id = self.leg.connection_id(),
             ?disconnect,
+            end_reason,
             frames_to_bridge,
             frames_to_browser,
             decode_errors = inbound.decode_errors,
             other_payload_packets = inbound.other_payload_packets,
             encode_errors = outbound.encode_errors,
+            decode_secs,
+            encode_secs,
             "browser media leg ended"
         );
         Ok(disconnect)
+    }
+}
+
+/// Bounded `codec` label for the WebRTC leg metrics. `other` exists
+/// because the negotiated codec comes from forge-core's enum, which
+/// carries more variants than a browser leg can ever agree on — an
+/// unbounded label from an upstream enum is how metric cardinality
+/// escapes (CLAUDE.md §4.5).
+fn codec_label(codec: forge_core::AudioCodec) -> &'static str {
+    match codec {
+        forge_core::AudioCodec::Opus => "opus",
+        forge_core::AudioCodec::PCMU => "pcmu",
+        forge_core::AudioCodec::PCMA => "pcma",
+        _ => "other",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use forge_core::AudioCodec;
+
+    #[test]
+    fn codec_labels_are_bounded_and_lowercase() {
+        assert_eq!(codec_label(AudioCodec::Opus), "opus");
+        assert_eq!(codec_label(AudioCodec::PCMU), "pcmu");
+        assert_eq!(codec_label(AudioCodec::PCMA), "pcma");
+        // Anything a browser cannot negotiate collapses to one label
+        // rather than adding a series per upstream enum variant.
+        assert_eq!(codec_label(AudioCodec::G722), "other");
     }
 }

@@ -279,6 +279,57 @@ if (( ! returned )); then
 fi
 echo "  OK — pool back to 0 allocated, 0 calls active"
 
+# ─── 4: the leg is observable (§4.6) ──────────────────────────────
+#
+# A browser call that produced no metrics would look identical to one
+# that never happened. These are read *after* teardown so the end-of-leg
+# observations (end reason, transcode cost) are in as well.
+echo "─── leg observability ───"
+connected="$(metrics | grep '^siphon_ai_webrtc_legs_total{' | grep 'result="connected"' | head -1)"
+if [[ -z "$connected" ]]; then
+    echo "FAIL: no siphon_ai_webrtc_legs_total{result=\"connected\"} after a call that carried audio" >&2
+    metrics | grep '^siphon_ai_webrtc' >&2 || echo "  (no webrtc series at all)" >&2
+    exit 1
+fi
+echo "  OK — $connected"
+
+# The codec label has to be the one the leg actually negotiated, not a
+# default: lab.toml leaves [webrtc].prefer_g711 off, so Chrome and the
+# daemon land on Opus.
+if ! grep -q 'codec="opus"' <<<"$connected"; then
+    echo "FAIL: expected codec=\"opus\" on the connected leg, got: $connected" >&2
+    exit 1
+fi
+
+# ICE and DTLS are timed apart — the reason the setup wait is
+# event-driven. Both histograms must have observed this leg.
+for h in siphon_ai_webrtc_ice_seconds siphon_ai_webrtc_dtls_seconds; do
+    count="$(metrics | awk -v h="${h}_count" '$1==h{print $2}')"
+    if [[ -z "$count" || "$count" == "0" ]]; then
+        echo "FAIL: $h recorded nothing for a leg that connected (count=${count:-absent})" >&2
+        exit 1
+    fi
+    sum="$(metrics | awk -v h="${h}_sum" '$1==h{print $2}')"
+    echo "  OK — $h count=$count sum=${sum}s"
+done
+
+ended="$(metrics | grep '^siphon_ai_webrtc_legs_ended_total{' | head -1)"
+if [[ -z "$ended" ]]; then
+    echo "FAIL: the leg ended but siphon_ai_webrtc_legs_ended_total is absent" >&2
+    exit 1
+fi
+echo "  OK — $ended"
+
+# Transcode cost, recorded once per leg per direction.
+for d in decode encode; do
+    line="$(metrics | grep "^siphon_ai_webrtc_transcode_seconds_sum{" | grep "direction=\"$d\"" | head -1)"
+    if [[ -z "$line" ]]; then
+        echo "FAIL: no transcode cost recorded for direction=$d" >&2
+        exit 1
+    fi
+    echo "  OK — $line"
+done
+
 echo
-echo "PASS — DEV_PLAN_WebRTC.md Phase 1 exit check + §4.4 port accounting (headless)."
+echo "PASS — DEV_PLAN_WebRTC.md Phase 1 exit check + §4.4 port accounting + §4.6 leg observability (headless)."
 echo "logs kept in $WORK"

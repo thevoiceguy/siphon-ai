@@ -1,7 +1,9 @@
 name: test
 
 # Gates every PR and every push to main on:
-#   1. fmt + clippy + cargo test --workspace
+#   1. fmt + clippy + cargo test --workspace, then the same clippy +
+#      test pass with the `webrtc` feature (off by default, on in the
+#      release artifacts — so CI must build both shapes)
 #   2. the SIPp signaling regression suite
 #
 # Both jobs run on ubuntu-latest. The SIPp job only runs after
@@ -121,6 +123,21 @@ jobs:
 
       - name: cargo test --workspace --locked
         run: cargo test --workspace --locked
+
+      # The `webrtc` feature is off by default (a plain build links
+      # neither forge-webrtc nor forge-ice), which meant the browser
+      # leg — the acceptor branch, the tap, the ICE/DTLS metrics — was
+      # neither linted nor tested here at all. It ships enabled in the
+      # release artifacts, so CI builds it too.
+      #
+      # `crates/core/tests/webrtc_call.rs` runs under this: a real
+      # forge-webrtc peer dials the acceptor on loopback and audio makes
+      # the full round trip through the WS bridge (DEV_PLAN_WebRTC.md
+      # §5). No browser, no container, ~2 s.
+      - name: clippy + test with the webrtc feature
+        run: |
+          cargo clippy --workspace --all-targets --features siphon-ai/webrtc -- -D warnings
+          cargo test --workspace --locked --features siphon-ai/webrtc
 
       # Protocol-schema anti-drift (0.27.0): regenerate the JSON Schema
       # from the Rust types and diff against the committed

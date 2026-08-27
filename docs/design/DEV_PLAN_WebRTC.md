@@ -183,12 +183,26 @@ Everything appears in `--inspect-config`; changing any of it wants a restart (co
 
 SIPp covers none of the media plane here, so the harness grows two new legs:
 
-1. **forge-webrtc loopback in-process:** a test PeerConnection dialing the bridge — covers ICE, DTLS, SRTP, Opus transcode, teardown, and runs in plain CI. This is the workhorse; it's cheap enough for the soak/load harness, so wire it into the same mixed-traffic runs that produced `RESULTS-0.49.9-mixed-and-soak.md`.
+1. ~~**forge-webrtc loopback in-process:** a test PeerConnection dialing the bridge — covers ICE, DTLS, SRTP, Opus transcode, teardown, and runs in plain CI. This is the workhorse~~ **Done**, in two layers, both per-commit and ~2 s each:
+
+   - `crates/webrtc-glue/tests/loopback.rs` — a browser-shaped peer against a real `WebRtcLeg`: ICE nomination, DTLS, SRTP both ways, the Opus transcode, teardown, and 15 calls back to back as a leak tripwire.
+   - `crates/core/tests/webrtc_call.rs` — the same peer dialing the **acceptor**: an INVITE carrying a real forge-webrtc offer, the controller running against a real WS server, and audio making the full round trip (browser → SRTP → decode → WS bridge → echo → encode → SRTP → browser). This is the two-way-audio assertion the Playwright leg was going to provide, minus the browser.
+
+   **CI now builds the `webrtc` feature** (`cargo clippy`/`cargo test --features siphon-ai/webrtc`, alongside the default-feature pass). Until this, none of the browser-leg code — the acceptor branch, the tap, §4.6's metrics — was compiled or linted in CI at all, while the release artifacts ship it enabled.
+
+   Two things the loopback pinned that reasoning had not:
+
+   - **A vanished peer produces no event whatsoever.** `browser.close()` and 10 s of watching yields nothing — no `Closed`, no `Failed`, no RTP. forge-webrtc sends RFC 7675 keepalives but never fails a transport when the replies stop, so the inactivity watchdog really is the only detector, exactly as §4.6 recorded. There is now a test asserting that *gap*, which fails loudly (with instructions) if forge-webrtc ever learns to report it.
+   - **A browser sends media only once its peer connection is up.** Frames pushed between the answer and DTLS completion have no SRTP context and are silently lost — obvious in hindsight, and the reason the first version of the e2e test saw zero audio.
+
+   Still open on this item: wiring browser traffic into the **soak/load harness**. The blocker is not the media plane (the loopback is cheap enough) but signalling: a Rust load generator would need a *persistent* SIP-over-WebSocket **client** transport, and siphon-rs has only one-shot `send_ws`/`send_wss` outbound helpers today. Options are (a) add a WS client transport upstream, or (b) drive load through headless browsers, which is item 2's machinery.
 2. **Real-browser e2e:** Playwright driving headless Chromium + SIP.js against a containerized bridge, asserting two-way audio (inject a tone, assert level on the AI WebSocket, and vice versa). Runs nightly, not per-commit.
 
 Interop matrix, in priority order: Chrome, Firefox, Safari (its DTLS and Opus behaviors diverge most) × SIP.js and JsSIP. Safari is where the surprises will be — budget time for it.
 
 Abrupt-teardown scenarios from Phase 0 get a WebRTC variant: kill the browser page mid-call N hundred times, assert zero dialog/port leaks. This is the acceptance test that ties the whole plan together.
+
+> **The single-call form of that acceptance test now runs per-commit**: `a_browser_that_vanishes_gives_its_port_pair_back` (in `crates/core/tests/webrtc_call.rs`) connects a browser leg, lets it talk, drops the peer with no BYE, and asserts the inactivity watchdog tears the call down *and* returns the RTP port pair. The N-hundred-times form still wants the load harness, per item 1's note.
 
 ---
 

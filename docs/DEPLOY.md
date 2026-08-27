@@ -864,7 +864,7 @@ practice — restart is simpler).
 
 ```json
 {
-  "version": 8,
+  "version": 9,
   "call_id": "siphon-6ce27797cc0a4997b90cbae2f46ce7a4",
   "sip_call_id": "1-2651348@127.0.0.1",
   "started_at":  "2026-05-12T18:10:32.481Z",
@@ -874,6 +874,8 @@ practice — restart is simpler).
   "from": "sipp",
   "to":   "1000",
   "direction": "inbound",
+  "leg_transport": "udp",
+  "media_type": "rtp",
   "route": "default",
   "ws_url": "ws://echo-ws:8765/",
   "audio":   { "codec": "PCMU", "payload_type": 0, "sample_rate": 8000 },
@@ -935,8 +937,9 @@ Timer H), `"missing_sdp_answer"`, `"invalid_sdp_answer"`,
 an **empty `audio`** block (no codec was negotiated) and blank
 `bridge_disconnect` / `tap_disconnect`.
 
-The `version` integer is **8** as of 0.48.8 (the `recording_result`
-field and its CSV column; 7 in 0.45.0 for the `ws_disconnect` cause, 6 in
+The `version` integer is **9** as of 0.51.0 (the `leg_transport` and
+`media_type` fields and their two CSV columns; 8 in 0.48.8 for the
+`recording_result` field and its CSV column; 7 in 0.45.0 for the `ws_disconnect` cause, 6 in
 0.41.x for `transfer`, 5 in 0.40.0 for `answered_at` + `caller_hangup`, 4
 in 0.30.0 for the optional `quality` block, 3 in 0.17.0 for
 `drain_forced`, 2 in 0.9.5 for the delayed-offer causes). It bumps on
@@ -945,13 +948,45 @@ to the JSON shape is additive on its own — v4 and v8 bumped anyway, the
 first so consumers could gate on the version rather than probe for the
 `quality` block, the second because the field also widens the CSV row.
 
+### `leg_transport` and `media_type` (v9)
+
+Every record at `version >= 9` carries both:
+
+- **`leg_transport`** — `udp` | `tcp` | `tls` | `ws` | `wss`. For an
+  inbound call, the transport the INVITE arrived on; for an outbound
+  one, the gateway's configured transport.
+- **`media_type`** — `rtp` (cleartext), `srtp` (a classic leg keyed by
+  SDES or DTLS through SDP), or `webrtc` (a browser leg: ICE, BUNDLE,
+  `a=rtcp-mux`, DTLS-SRTP — encrypted by construction).
+
+They answer different questions and should not be conflated: `wss`
+signalling says nothing about whether the audio was encrypted, and
+`udp` signalling with SDES media is a real deployment. **`media_type`
+is the compliance field** — `rtp` is the only value for which the audio
+crossed the network in the clear.
+
+`media_type` reports what actually happened, not what was configured: a
+`[[gateway]].srtp = "preferred"` trunk whose peer answered plaintext
+records `rtp`, because that is what was on the wire. `webrtc` is its own
+value rather than `srtp` with a flag because the negotiation, the
+failure modes and the metrics all differ — see
+`siphon_ai_webrtc_legs_total` above.
+
+Both are omitted (rather than guessed) in the two cases where they are
+genuinely unknown: a record written by a pre-0.51.0 daemon, and a
+delayed-offer call that failed negotiation before any media existed —
+that record has `leg_transport` but no `media_type`, since claiming
+`rtp` would say cleartext audio flowed when none did. Gate on
+`version >= 9` rather than probing.
+
 ### CSV format (`[cdr.file].format = "csv"`, 0.36.0)
 
-The CSV layout is a flat view of the same record — 50 columns, one row
+The CSV layout is a flat view of the same record — 52 columns, one row
 per call, RFC 4180 quoting. (The count last read 45 before 0.38.0's three
-`quality_tx_*` columns, 0.40.0's `answered_at`, and 0.48.8's
-`recording_result`; it is asserted against the header by a unit test, so
-trust the code if this drifts again.) A header row is written when the file starts
+`quality_tx_*` columns, 0.40.0's `answered_at`, 0.48.8's
+`recording_result`, and 0.51.0's `leg_transport` + `media_type`; it is
+asserted against the header by a unit test, so trust the code if this
+drifts again.) A header row is written when the file starts
 empty (never repeated on restart). Semantics:
 
 - Nested blocks flatten to prefixed columns: `audio_codec`,

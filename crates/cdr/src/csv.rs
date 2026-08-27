@@ -38,12 +38,12 @@ quality_rx_packets_out_of_order,quality_rx_packets_duplicate,\
 quality_mos_estimate_min,quality_mos_estimate_avg,\
 quality_tx_packets_sent,quality_tx_octets_sent,\
 quality_tx_packets_lost_reported,\
-answered_at,recording_result";
+answered_at,recording_result,leg_transport,media_type";
 
 /// Number of columns in [`HEADER`] (and every row). Only asserted in
 /// tests — production code appends by name, not position.
 #[cfg(test)]
-pub(crate) const COLUMNS: usize = 50;
+pub(crate) const COLUMNS: usize = 52;
 
 /// RFC 4180 field escaping: quote when the value contains a comma,
 /// quote, or line break; double embedded quotes.
@@ -183,11 +183,22 @@ pub fn record_to_row(r: &CdrRecord) -> String {
         );
     }
     o.push(',');
-    // Last column: no trailing comma. Appended rather than slotted beside
-    // the other `recording_*` columns for the same append-only reason
-    // (#441).
+    // Appended rather than slotted beside the other `recording_*`
+    // columns for the same append-only reason (#441).
     if let Some(v) = &r.recording_result {
         push_field(&mut o, v.as_str());
+    }
+    o.push(',');
+
+    // v9: appended for the same reason. Empty only for a record that
+    // predates v9 — everything this daemon emits fills both.
+    if let Some(t) = r.leg_transport {
+        push_field(&mut o, t.as_str());
+    }
+    o.push(',');
+    // Last column: no trailing comma.
+    if let Some(m) = r.media_type {
+        push_field(&mut o, m.as_str());
     }
 
     o
@@ -216,6 +227,8 @@ mod tests {
             from: "+13125551234".into(),
             to: "5000".into(),
             direction: Direction::Inbound,
+            leg_transport: Some(crate::schema::LegTransport::Udp),
+            media_type: Some(crate::schema::MediaType::Rtp),
             route: "main_reception".into(),
             ws_url: "wss://reception.example.com/sip-bridge".into(),
             audio: AudioInfo {

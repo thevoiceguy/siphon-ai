@@ -76,7 +76,8 @@ use siphon_ai_bridge::{
     Direction, DisconnectReason, OutgoingEvent, SipMeta, StartMsg, PROTOCOL_VERSION,
 };
 use siphon_ai_cdr::{
-    AudioInfo as CdrAudioInfo, CdrRecord, CdrSinkHandle, Direction as CdrDirection, NullSink,
+    AudioInfo as CdrAudioInfo, CdrRecord, CdrSinkHandle, Direction as CdrDirection,
+    LegTransport as CdrLegTransport, MediaType as CdrMediaType, NullSink,
     TerminationCause as CdrTerminationCause, TerminationInfo as CdrTerminationInfo, CDR_VERSION,
 };
 use siphon_ai_media_glue::{
@@ -2727,6 +2728,12 @@ struct CallStart {
     route: String,
     ws_url: String,
     audio: CdrAudioInfo,
+    /// CDR v9 (`DEV_PLAN_WebRTC.md` §4.6): how the call arrived and how
+    /// its media was carried. Both are settled by the time the call is
+    /// prepared and neither can change mid-call, so they are snapshot
+    /// here with everything else rather than re-derived at teardown.
+    leg_transport: Option<CdrLegTransport>,
+    media_type: Option<CdrMediaType>,
     /// STIR/SHAKEN verdict captured at accept time, for the CDR. `None`
     /// until the accept-path verifier is wired (a later 0.4.0 chunk).
     verstat: Option<Box<siphon_ai_security::VerificationResult>>,
@@ -2751,6 +2758,8 @@ impl CallStart {
             from: self.from,
             to: self.to,
             direction: CdrDirection::Inbound,
+            leg_transport: self.leg_transport,
+            media_type: self.media_type,
             route: self.route,
             ws_url: self.ws_url,
             audio: self.audio,
@@ -2931,6 +2940,40 @@ fn record_prepare_outcome(elapsed: std::time::Duration, ok: bool) {
 /// Map core's recording outcome to the CDR schema's typed mirror (#447)
 /// — identical wire strings by construction; both sides pin
 /// `ok`/`degraded`/`failed`/`blocked` in tests.
+/// SIP transport → the CDR's closed vocabulary (v9).
+///
+/// `None` for siphon-rs's SCTP kinds, which no siphon-ai listener can
+/// produce: a record that says nothing is better than one that says
+/// `udp` about a call that was not. If SCTP ever becomes a real
+/// transport here, giving it a CDR name is a schema conversation.
+fn cdr_leg_transport(transport: TransportKind) -> Option<CdrLegTransport> {
+    match transport {
+        TransportKind::Udp => Some(CdrLegTransport::Udp),
+        TransportKind::Tcp => Some(CdrLegTransport::Tcp),
+        TransportKind::Tls => Some(CdrLegTransport::Tls),
+        TransportKind::Ws => Some(CdrLegTransport::Ws),
+        TransportKind::Wss => Some(CdrLegTransport::Wss),
+        _ => None,
+    }
+}
+
+/// How the media was carried, for the CDR (v9).
+///
+/// `start.srtp` is the same fact the WS server was told, so the record
+/// and the bridge cannot disagree about whether the audio was
+/// encrypted. A browser leg deliberately carries **no** `srtp` block —
+/// DTLS-SRTP is intrinsic to it rather than negotiated — which is why
+/// `webrtc` is checked first and is its own value rather than `srtp`.
+fn cdr_media_type(is_webrtc: bool, srtp_negotiated: bool) -> CdrMediaType {
+    if is_webrtc {
+        CdrMediaType::Webrtc
+    } else if srtp_negotiated {
+        CdrMediaType::Srtp
+    } else {
+        CdrMediaType::Rtp
+    }
+}
+
 pub(crate) fn map_recording_result(r: RecordingResult) -> siphon_ai_cdr::RecordingResult {
     match r {
         RecordingResult::Ok => siphon_ai_cdr::RecordingResult::Ok,
@@ -3017,6 +3060,7 @@ fn build_delayed_failure_cdr(
     route: &str,
     ws_url: &str,
     started_at: DateTime<Utc>,
+    leg_transport: Option<CdrLegTransport>,
 ) -> CdrRecord {
     let ended_at = Utc::now();
     let duration_ms = (ended_at - started_at).num_milliseconds().max(0) as u64;
@@ -3026,6 +3070,12 @@ fn build_delayed_failure_cdr(
         sip_call_id: sip_call_id.to_string(),
         started_at,
         ended_at,
+        leg_transport,
+        // The signalling transport is known; the media never existed.
+        // Negotiation failed before any stream came up, so `rtp` would
+        // claim this call carried cleartext audio — it carried none.
+        // Absent is the only true value here (CDR v9 §4.6).
+        media_type: None,
         duration_ms,
         // Pre-active failure: the call never connected, which is exactly
         // what `None` distinguishes from a very short answered call.
@@ -3849,6 +3899,17 @@ impl BridgingAcceptor {
                 payload_type: prepared.answer.negotiated_payload_type,
                 sample_rate: prepared.answer.negotiated_audio_sample_rate,
             },
+            leg_transport: prepared.leg_transport,
+            // `start.srtp` is the same fact the WS server was told, so
+            // the CDR and the bridge cannot disagree about whether the
+            // media was encrypted. A browser leg deliberately carries
+            // no `srtp` block — DTLS-SRTP is intrinsic to it rather
+            // than negotiated — which is exactly why `webrtc` is its
+            // own value and is checked first.
+            media_type: Some(cdr_media_type(
+                prepared.is_webrtc,
+                prepared.start.srtp.is_some(),
+            )),
             // Same verdict the WS `start` carried — single source of truth.
             verstat: prepared.start.verstat.clone(),
         };
@@ -4115,6 +4176,12 @@ pub struct PreparedCall {
     /// stopping the session, attaching its flow — have nothing to
     /// operate on for one.
     pub is_webrtc: bool,
+    /// Transport the INVITE arrived on, carried this far only so the
+    /// CDR can record it (v9, `DEV_PLAN_WebRTC.md` §4.6). Everything
+    /// else that cares about transport has already acted by now.
+    /// `None` only for a transport with no CDR name — see
+    /// [`cdr_leg_transport`].
+    pub leg_transport: Option<CdrLegTransport>,
 }
 
 impl std::fmt::Debug for PreparedCall {
@@ -4253,6 +4320,7 @@ impl BridgingAcceptor {
         bridge_call_id: BridgeCallId,
         forge_call_id: forge_core::CallId,
         sip_call_id: String,
+        leg_transport: Option<CdrLegTransport>,
     ) -> Result<PreparedCall, AcceptError> {
         let siphon_ai_webrtc_glue::Answered {
             leg,
@@ -4328,6 +4396,7 @@ impl BridgingAcceptor {
             controller,
             handle,
             is_webrtc: true,
+            leg_transport,
         })
     }
 
@@ -4495,6 +4564,7 @@ impl BridgingAcceptor {
                     bridge_call_id,
                     forge_call_id,
                     sip_call_id,
+                    cdr_leg_transport(transport),
                 )
                 .await;
         }
@@ -4692,6 +4762,7 @@ impl BridgingAcceptor {
             controller,
             handle,
             is_webrtc: false,
+            leg_transport: cdr_leg_transport(transport),
         })
     }
 }
@@ -4735,6 +4806,10 @@ struct PendingDelayedOffer {
     cdr_to: String,
     /// WS URL the call would have bridged to (CDR).
     cdr_ws_url: String,
+    /// Transport the offerless INVITE arrived on (CDR v9). Captured
+    /// with the other CDR facts because the transport context is long
+    /// gone by the time the ACK answer arrives.
+    cdr_leg_transport: Option<CdrLegTransport>,
     /// Resolved barge-in policy announcement for `start.barge_in_mode`
     /// (0.32.0) — captured here because the route isn't in scope when
     /// the ACK answer finally arrives.
@@ -5003,6 +5078,7 @@ impl BridgingAcceptor {
                 cdr_from,
                 cdr_to,
                 cdr_ws_url,
+                cdr_leg_transport: cdr_leg_transport(call.transport.transport()),
                 barge_in_mode: barge_in_mode_info(&resolve_barge_in(&self.defaults, route)),
                 ws_failure_prompt: resolve_ws_failure_prompt(&self.defaults, route),
             },
@@ -5034,6 +5110,7 @@ impl BridgingAcceptor {
                         &stale.route_name,
                         &stale.cdr_ws_url,
                         stale.started_at,
+                        stale.cdr_leg_transport,
                     ))
                     .await;
                 let _ = media
@@ -5081,6 +5158,7 @@ impl BridgingAcceptor {
             &stale.route_name,
             &stale.cdr_ws_url,
             stale.started_at,
+            stale.cdr_leg_transport,
         );
         let forge_call_id = stale.forge_call_id;
         let cdr_sink = Arc::clone(&self.cdr_sink);
@@ -5127,6 +5205,7 @@ impl BridgingAcceptor {
             cdr_from,
             cdr_to,
             cdr_ws_url,
+            cdr_leg_transport,
             barge_in_mode,
             ws_failure_prompt,
         } = pending;
@@ -5142,6 +5221,7 @@ impl BridgingAcceptor {
                 &route_name,
                 &cdr_ws_url,
                 started_at,
+                cdr_leg_transport,
             )
         };
 
@@ -5320,6 +5400,7 @@ impl BridgingAcceptor {
             controller,
             handle,
             is_webrtc: false,
+            leg_transport: cdr_leg_transport,
         };
         metrics::counter!(DELAYED_OFFER_TOTAL, "result" => "answered").increment(1);
         self.run_call(
@@ -5489,6 +5570,52 @@ mod tests {
             out.contains(&format!("{CALL_DURATION_SECONDS}_count 1")),
             "missing duration sample:\n{out}"
         );
+    }
+
+    /// CDR v9 (§4.6): the two fields that let a record say how a call
+    /// arrived and how its audio was carried.
+    mod cdr_leg_facts {
+        use super::super::TransportKind;
+        use super::super::{cdr_leg_transport, cdr_media_type, CdrLegTransport, CdrMediaType};
+
+        #[test]
+        fn every_transport_we_listen_on_has_a_cdr_name() {
+            for (kind, want) in [
+                (TransportKind::Udp, CdrLegTransport::Udp),
+                (TransportKind::Tcp, CdrLegTransport::Tcp),
+                (TransportKind::Tls, CdrLegTransport::Tls),
+                (TransportKind::Ws, CdrLegTransport::Ws),
+                (TransportKind::Wss, CdrLegTransport::Wss),
+            ] {
+                assert_eq!(cdr_leg_transport(kind), Some(want), "{kind:?}");
+            }
+        }
+
+        /// siphon-rs names SCTP transports this daemon cannot serve.
+        /// Recording nothing beats recording `udp` about a call that
+        /// was not — a compliance reader would believe it.
+        #[test]
+        fn a_transport_with_no_cdr_name_records_nothing() {
+            assert_eq!(cdr_leg_transport(TransportKind::Sctp), None);
+            assert_eq!(cdr_leg_transport(TransportKind::TlsSctp), None);
+        }
+
+        #[test]
+        fn a_browser_leg_is_webrtc_even_though_it_carries_no_srtp_block() {
+            // The browser leg's `start` message has no `srtp` block on
+            // purpose (DTLS-SRTP is intrinsic, not negotiated). Reading
+            // that absence as "cleartext" is exactly the bug this
+            // ordering prevents.
+            assert_eq!(cdr_media_type(true, false), CdrMediaType::Webrtc);
+            assert!(cdr_media_type(true, false).is_encrypted());
+        }
+
+        #[test]
+        fn a_classic_leg_follows_the_start_message() {
+            assert_eq!(cdr_media_type(false, true), CdrMediaType::Srtp);
+            assert_eq!(cdr_media_type(false, false), CdrMediaType::Rtp);
+            assert!(!cdr_media_type(false, false).is_encrypted());
+        }
     }
 
     /// Leg selection (DEV_PLAN_WebRTC.md §4.1): transport decides
@@ -7727,6 +7854,7 @@ a=sendrecv\r\n",
                 facts: facts_with_identity(None),
                 verstat: None,
                 bridge_config: BridgeConfig::default(),
+                cdr_leg_transport: Some(CdrLegTransport::Udp),
                 tap_options: TapOptions {
                     barge_in_action: siphon_ai_media_glue::BargeInAction::Notify,
                     barge_in_debounce: None,

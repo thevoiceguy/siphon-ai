@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CDR schema v8 → v9: every record now says how the call arrived
+  (`leg_transport`) and how its audio was carried (`media_type`)**
+  (`DEV_PLAN_WebRTC.md` §4.6). **Read this if you parse CDRs.**
+
+  `leg_transport` is `udp` | `tcp` | `tls` | `ws` | `wss` — the
+  transport an inbound INVITE arrived on, or an outbound gateway's
+  configured transport. `media_type` is `rtp` | `srtp` | `webrtc`.
+
+  The bump exists because with browser calls the record stopped being
+  able to answer an obvious question. A WebRTC leg and a plaintext UDP
+  leg produced *identical* CDRs apart from the codec, even though one is
+  DTLS-SRTP over WSS and the other is cleartext RTP over the open
+  internet — and `media_type` is the field a compliance report reads,
+  where `rtp` is the only value meaning the audio was in the clear.
+
+  Two things a consumer should know:
+
+  - **`media_type` reports what happened, not what was configured.** A
+    `[[gateway]].srtp = "preferred"` trunk whose peer answered plaintext
+    records `rtp`, because that is what crossed the network.
+  - **Both fields are omitted where they are genuinely unknown** rather
+    than defaulted: a record written by an older daemon, and a
+    delayed-offer call that failed negotiation before any media existed
+    (that one has `leg_transport` and no `media_type` — claiming `rtp`
+    would say cleartext audio flowed when none did). Gate on
+    `version >= 9` rather than probing for the keys.
+
+  **CSV sinks gain two columns (50 → 52)**, appended as always, so
+  position-keyed ingestors keep working and anything asserting an exact
+  column count does not. `webrtc` is a distinct value rather than `srtp`
+  with a flag because the negotiation, the failure modes and the metrics
+  all differ — see `siphon_ai_webrtc_legs_total`.
+
 ### Added
 
 - **Browser calls are now observable: ICE and DTLS are timed and

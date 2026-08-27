@@ -183,6 +183,11 @@ pub struct OutboundGateway {
     /// for UDP (config's `SipTransport::uri_param()` — kept as a
     /// plain string for the same no-config-dep reason as above).
     pub transport_uri_param: &'static str,
+    /// The same transport, named for the CDR (v9). Carried as the CDR
+    /// enum rather than re-derived from `transport_uri_param`: parsing
+    /// a URI parameter back into a transport is how the record and the
+    /// wire drift apart.
+    pub transport: siphon_ai_cdr::LegTransport,
     /// Default caller-ID `sip:` URI for calls through this gateway.
     pub from: String,
     /// SRTP policy for media on this trunk (0.7.x). The daemon maps the
@@ -515,6 +520,7 @@ impl OutboundOriginateHandle for OutboundService {
         // the INVITE) but we answer the peer's SDES offer per the same
         // policy — either way the negotiated suite rides `accepted.srtp_profile`.
         let srtp_requested = gw.srtp != OutboundSrtp::Off;
+        let leg_transport = gw.transport;
         let originator = Arc::clone(&gw.originator);
         let cdr_sink = Arc::clone(&self.cdr_sink);
         let webhook_sink = Arc::clone(&self.webhook_sink);
@@ -601,6 +607,7 @@ impl OutboundOriginateHandle for OutboundService {
                         call_registry,
                         park,
                         srtp_requested,
+                        leg_transport,
                         session_timers,
                         ws_reconnect_enabled,
                         ws_reconnect_max,
@@ -686,6 +693,8 @@ struct OutboundCallContext {
     /// Whether this gateway offered SRTP (`[[gateway]].srtp != off`), so the
     /// answered-call path can record `encrypted` vs `downgraded`.
     srtp_requested: bool,
+    /// This gateway's SIP transport, for the CDR's `leg_transport` (v9).
+    leg_transport: siphon_ai_cdr::LegTransport,
     /// Shared RFC 4028 expiry (#477). `None` when the daemon didn't wire
     /// one — the outbound path then behaves exactly as it did before,
     /// which is what every existing test expects.
@@ -770,6 +779,15 @@ async fn run_call(
                 exchange: accepted.srtp_exchange,
                 profile: profile.clone(),
             });
+    // What actually crossed the network, for the CDR (v9): the peer's
+    // answer, not our policy. A `preferred` gateway whose peer answered
+    // plaintext downgraded, and the record must say `rtp`. Outbound legs
+    // are never `webrtc` — this daemon does not originate to a browser.
+    let media_type = if accepted.srtp_profile.is_some() {
+        siphon_ai_cdr::MediaType::Srtp
+    } else {
+        siphon_ai_cdr::MediaType::Rtp
+    };
     if ctx.srtp_requested {
         // Encrypted when the peer accepted SRTP; downgraded when the gateway
         // is `preferred` and the peer answered plaintext. (`required`
@@ -1167,7 +1185,15 @@ async fn run_call(
         metrics::counter!(RECORDINGS_TOTAL, "result" => result.as_str()).increment(1);
     }
     let ended_at = Utc::now();
-    let mut record = build_outbound_record(&ctx, &sip_call_id, audio, &ws_url, ended_at, &view);
+    let mut record = build_outbound_record(
+        &ctx,
+        &sip_call_id,
+        audio,
+        &ws_url,
+        ended_at,
+        &view,
+        media_type,
+    );
     // Shared end-of-call instruments — the same block the inbound teardown
     // runs. `outbound_calls_total{result}` classified only call setup, so
     // an answered outbound leg's termination cause reached no metric and
@@ -1223,6 +1249,7 @@ async fn run_call(
 /// counterpart of the acceptor's `CallStart::into_record`. Failed calls
 /// don't get a CDR (the `outbound_failed` webhook + metric cover them),
 /// mirroring inbound where CDRs cover bridged calls only.
+#[allow(clippy::too_many_arguments)]
 fn build_outbound_record(
     ctx: &OutboundCallContext,
     sip_call_id: &str,
@@ -1230,6 +1257,7 @@ fn build_outbound_record(
     ws_url: &str,
     ended_at: DateTime<Utc>,
     view: &CallTerminationView,
+    media_type: siphon_ai_cdr::MediaType,
 ) -> CdrRecord {
     let duration_ms = (ended_at - ctx.started_at).num_milliseconds().max(0) as u64;
     CdrRecord {
@@ -1243,6 +1271,12 @@ fn build_outbound_record(
         from: ctx.from.clone(),
         to: ctx.to.clone(),
         direction: CdrDirection::Outbound,
+        // The gateway's configured transport, and whether the peer
+        // actually answered with SRTP — not whether we offered it
+        // (CDR v9). A `preferred` gateway that downgrades records
+        // `rtp`, because that is what crossed the network.
+        leg_transport: Some(ctx.leg_transport),
+        media_type: Some(media_type),
         route: ctx.gateway.clone(),
         ws_url: ws_url.to_string(),
         audio,
@@ -1465,6 +1499,7 @@ mod tests {
             call_registry: CallRegistry::new(),
             park: None,
             srtp_requested: false,
+            leg_transport: siphon_ai_cdr::LegTransport::Tls,
             session_timers: None,
             ws_reconnect_enabled: false,
             ws_reconnect_max: std::time::Duration::from_secs(30),
@@ -1500,9 +1535,15 @@ mod tests {
             "wss://agent.example.com/bridge",
             ended_at,
             &view,
+            siphon_ai_cdr::MediaType::Srtp,
         );
         assert_eq!(record.version, CDR_VERSION);
         assert_eq!(record.direction, CdrDirection::Outbound);
+        // v9: a TLS trunk that answered SRTP records both, and the
+        // gateway's transport comes from config rather than being
+        // re-parsed out of the Request-URI parameter.
+        assert_eq!(record.leg_transport, Some(siphon_ai_cdr::LegTransport::Tls));
+        assert_eq!(record.media_type, Some(siphon_ai_cdr::MediaType::Srtp));
         assert_eq!(record.call_id, "siphon-9b2c");
         assert_eq!(record.sip_call_id, "xyz-789@siphon");
         assert_eq!(record.route, "twilio_main");

@@ -113,6 +113,7 @@ sed -e "s|127\.0\.0\.1:5070|127.0.0.1:$SIP_PORT|" \
     -e "s|127\.0\.0\.1:9091|127.0.0.1:$OBS_PORT|" \
     -e "s|127\.0\.0\.1:8765|127.0.0.1:$ECHO_PORT|" \
     -e "s|examples/browser-sip/certs|$SCRIPT_DIR/certs|g" \
+    -e "s|examples/browser-sip/cdr.jsonl|$WORK/cdr.jsonl|" \
     "$SCRIPT_DIR/lab.toml" >"$CONFIG"
 
 # The page needs the same treatment, and for the same reason: it dials
@@ -330,6 +331,37 @@ for d in decode encode; do
     echo "  OK — $line"
 done
 
+# ─── 5: the browser call's CDR names the leg (§4.6, CDR v9) ───────
+#
+# The record is the only place an operator can later answer "was this
+# call a browser, and was its audio encrypted?" — metrics aggregate it
+# away. Read after teardown, because that is when the CDR is written.
+echo "─── CDR: leg_transport + media_type ───"
+CDR_FILE="$WORK/cdr.jsonl"
+deadline=$((SECONDS + 20)); wrote=0
+while (( SECONDS < deadline )); do
+    [[ -s "$CDR_FILE" ]] && { wrote=1; break; }
+    sleep 1
+done
+if (( ! wrote )); then
+    echo "FAIL: no CDR written to $CDR_FILE after a completed browser call" >&2
+    exit 1
+fi
+CDR_LINE="$(tail -1 "$CDR_FILE")"
+read -r cdr_version cdr_transport cdr_media <<<"$(python3 - "$CDR_FILE" <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    rec = json.loads(f.readlines()[-1])
+print(rec.get("version"), rec.get("leg_transport"), rec.get("media_type"))
+PYEOF
+)"
+if [[ "$cdr_transport" != "wss" || "$cdr_media" != "webrtc" ]]; then
+    echo "FAIL: browser call recorded as leg_transport=$cdr_transport media_type=$cdr_media" >&2
+    echo "  want wss / webrtc — record: $CDR_LINE" >&2
+    exit 1
+fi
+echo "  OK — CDR v$cdr_version: leg_transport=$cdr_transport media_type=$cdr_media"
+
 echo
-echo "PASS — DEV_PLAN_WebRTC.md Phase 1 exit check + §4.4 port accounting + §4.6 leg observability (headless)."
+echo "PASS — DEV_PLAN_WebRTC.md Phase 1 exit check + §4.4 port accounting + §4.6 observability and CDR v9 (headless)."
 echo "logs kept in $WORK"

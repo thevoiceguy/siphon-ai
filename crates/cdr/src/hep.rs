@@ -126,6 +126,8 @@ mod tests {
             from: "+13125551212".into(),
             to: "5000".into(),
             direction: Direction::Inbound,
+            leg_transport: Some(crate::schema::LegTransport::Udp),
+            media_type: Some(crate::schema::MediaType::Rtp),
             route: "default".into(),
             ws_url: "wss://example/call".into(),
             audio: AudioInfo {

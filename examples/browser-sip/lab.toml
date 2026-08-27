@@ -75,6 +75,18 @@ ws_url = "ws://127.0.0.1:8765/"
 enabled = true
 http_listen = "127.0.0.1:9091"
 
+# A CDR per ended call, so the lab can show what a browser call looks
+# like in the record: `leg_transport = "wss"`, `media_type = "webrtc"`
+# (CDR v9). headless-check.sh rewrites this path into its work dir the
+# same way it rewrites the cert paths. Both `enabled` flags are needed
+# — the master gates the sub-block.
+[cdr]
+enabled = true
+
+[cdr.file]
+enabled = true
+path = "examples/browser-sip/cdr.jsonl"
+
 # Optional: ship the browser signaling to Homer (the plan's "fully
 # visible in Homer" exit criterion). Bring the stack up first:
 #   docker compose -f examples/homer-stack/compose.yaml up -d

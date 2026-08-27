@@ -71,6 +71,19 @@
 //! field**, which is exactly what a compliance export reconciling
 //! recordings wants to do here.
 //!
+//! **v9 (0.51.0):** added the required `leg_transport`
+//! (`udp` / `tcp` / `tls` / `ws` / `wss`) and `media_type`
+//! (`rtp` / `srtp` / `webrtc`) fields — `DEV_PLAN_WebRTC.md` §4.6. With
+//! browser calls, "how did this call reach us and how was its media
+//! carried" stopped being derivable from the rest of the record: a
+//! WebRTC leg and a plaintext UDP leg produced identical CDRs apart
+//! from the codec, even though one is DTLS-SRTP over WSS and the other
+//! is cleartext RTP. Every v9 record carries both — they are typed
+//! `Option` only so a *pre*-v9 record still parses, where `None` means
+//! "not recorded" rather than a default that a compliance reader would
+//! take at face value. Two more CSV columns (50 → 52), which is the
+//! same "could break parsers" bar v8 crossed.
+//!
 //! ## What we record vs. what we don't
 //!
 //! - **From / To** users only — full SIP URIs are recorded as the
@@ -90,13 +103,13 @@ use serde::{Deserialize, Serialize};
 /// Schema version of the CDR record. Bump per CLAUDE.md §7.7
 /// whenever a change could break consumer parsers.
 ///
-/// v8 (0.48.8): adds the optional `recording_result` field (issues #440
-/// / #441) and, with it, a 50th CSV column. The JSON addition alone is
-/// additive-optional; the CSV width change is what could break a strict
-/// consumer, and gating on `version >= 8` is how a recording-reconciling
-/// consumer can tell whether a record is even capable of answering "did
-/// this recording land?" — the v4 (`quality`) rationale.
-pub const CDR_VERSION: u32 = 8;
+/// v9 (0.51.0): adds the `leg_transport` and `media_type` fields
+/// (`DEV_PLAN_WebRTC.md` §4.6) and, with them, a 51st and 52nd CSV
+/// column. `version >= 9` is how a consumer knows a record can answer
+/// "was this call encrypted, and did it come from a browser?" at all —
+/// before it, a WebRTC leg and a cleartext UDP leg were
+/// indistinguishable in the record.
+pub const CDR_VERSION: u32 = 9;
 
 /// One call's complete record. Always serialised as a single JSON
 /// object on a single line for JSONL file sinks.
@@ -146,6 +159,26 @@ pub struct CdrRecord {
     pub from: String,
     pub to: String,
     pub direction: Direction,
+    /// SIP transport this leg's **signalling** used (v9). For inbound
+    /// this is the transport the INVITE arrived on; for outbound it is
+    /// the gateway's configured transport. Distinct from
+    /// [`Self::media_type`] — `wss` signalling says nothing about
+    /// whether the media was encrypted, and `udp` signalling with SDES
+    /// media is a real (if unwise) deployment.
+    ///
+    /// **Every record this daemon emits at `version >= 9` has it.**
+    /// The `Option` exists so a *pre*-v9 record still parses into this
+    /// type, where `None` means "not recorded" — which is the truth
+    /// about an old record and better than defaulting it to `udp`, a
+    /// value a compliance reader would take at face value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg_transport: Option<LegTransport>,
+    /// How this leg's **media** was carried (v9): cleartext RTP,
+    /// SDES/DTLS-keyed SRTP on a classic leg, or a browser's WebRTC
+    /// leg (DTLS-SRTP, ICE, BUNDLE — encrypted by construction). Same
+    /// always-present-from-v9 rule as [`Self::leg_transport`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<MediaType>,
 
     /// Name of the matched `[[route]]` block (or `"unmatched"` if
     /// the route table didn't match — we don't currently emit CDRs
@@ -398,6 +431,78 @@ pub enum Direction {
     Outbound,
 }
 
+/// SIP transport for one leg's signalling (v9). Stable snake_case
+/// strings on the wire, the same closed-vocabulary mechanism as
+/// [`TerminationCause`] and [`RecordingResult`]: a new variant is a
+/// schema-version conversation, not a silently absorbed string.
+///
+/// The values match the `transport` label on
+/// `siphon_ai_sip_rate_limited_total`, so a CDR and a metric describing
+/// the same leg agree on what to call it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegTransport {
+    Udp,
+    Tcp,
+    Tls,
+    /// RFC 7118 SIP over WebSocket — a browser, or another WS client.
+    Ws,
+    /// RFC 7118 over TLS. What a real browser deployment uses: page
+    /// origins are https, and browsers refuse plaintext WS from one.
+    Wss,
+}
+
+impl LegTransport {
+    /// The wire string — identical to the serde serialization, for the
+    /// CSV sink and anywhere a `&'static str` is needed.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LegTransport::Udp => "udp",
+            LegTransport::Tcp => "tcp",
+            LegTransport::Tls => "tls",
+            LegTransport::Ws => "ws",
+            LegTransport::Wss => "wss",
+        }
+    }
+}
+
+/// How one leg's media was carried (v9). Same wire-string discipline as
+/// [`LegTransport`].
+///
+/// This is the field a compliance report reads: `rtp` means the audio
+/// crossed the network in the clear, and the other two mean it did not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaType {
+    /// Cleartext RTP (`RTP/AVP`).
+    Rtp,
+    /// SRTP on a classic leg — SDES (RFC 4568) or DTLS-SRTP, keyed
+    /// through SDP. `start.srtp` carried the same fact to the WS server.
+    Srtp,
+    /// A browser leg: ICE, BUNDLE, `a=rtcp-mux`, DTLS-SRTP. Encrypted by
+    /// construction — WebRTC has no cleartext mode — which is why it is
+    /// its own value rather than `srtp` with a flag: the negotiation,
+    /// the failure modes and the metrics all differ.
+    Webrtc,
+}
+
+impl MediaType {
+    /// The wire string — see [`LegTransport::as_str`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MediaType::Rtp => "rtp",
+            MediaType::Srtp => "srtp",
+            MediaType::Webrtc => "webrtc",
+        }
+    }
+
+    /// Whether the audio was encrypted on the wire. `rtp` is the only
+    /// value for which it was not.
+    pub fn is_encrypted(self) -> bool {
+        !matches!(self, MediaType::Rtp)
+    }
+}
+
 /// Audio metadata from the negotiated SDP answer. The wire-side
 /// codec lives in `codec` / `payload_type`; `sample_rate` is the
 /// post-decode rate the WS bridge saw (G.722 advertises 8000 in
@@ -557,6 +662,8 @@ mod tests {
             from: "+13125551234".into(),
             to: "5000".into(),
             direction: Direction::Inbound,
+            leg_transport: Some(LegTransport::Udp),
+            media_type: Some(MediaType::Rtp),
             route: "main_reception".into(),
             ws_url: "wss://reception.example.com/sip-bridge".into(),
             audio: AudioInfo {
@@ -639,10 +746,11 @@ mod tests {
     }
 
     #[test]
-    fn version_field_is_present_and_is_8() {
-        // Bumped to 8 in 0.48.8 (the optional `recording_result` field and
-        // the 50th CSV column that comes with it — issues #440 / #441).
-        // Was 7 in 0.45.0 (the `ws_disconnect` termination cause — issue
+    fn version_field_is_present_and_is_9() {
+        // Bumped to 9 in 0.51.0 (`leg_transport` + `media_type`, and the
+        // 51st/52nd CSV columns — DEV_PLAN_WebRTC.md §4.6). Was 8 in
+        // 0.48.8 (the optional `recording_result` field and the 50th CSV
+        // column — issues #440 / #441), 7 in 0.45.0 (the `ws_disconnect` termination cause — issue
         // #369), 6 in 0.41.x (`transfer` — issue #356), 5 in 0.40.0
         // (`answered_at` + `caller_hangup`), 4 in 0.30.0 (the `quality`
         // block), 3 in 0.17.0 (`drain_forced`) and 2 in 0.9.5
@@ -651,9 +759,9 @@ mod tests {
         // The literal is duplicated here on purpose: this test is the
         // tripwire that makes a version bump a deliberate, reviewed act
         // rather than something that rides along with a field addition.
-        assert_eq!(CDR_VERSION, 8);
+        assert_eq!(CDR_VERSION, 9);
         let v: serde_json::Value = serde_json::to_value(sample()).unwrap();
-        assert_eq!(v["version"], serde_json::json!(8));
+        assert_eq!(v["version"], serde_json::json!(9));
     }
 
     /// `answered_at` is what makes connected duration derivable; absent

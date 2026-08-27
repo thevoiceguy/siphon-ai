@@ -2849,6 +2849,17 @@ pub(crate) fn build_gateways(
                 proxy_host: gw.proxy_host.clone(),
                 proxy_port: gw.proxy_port,
                 transport_uri_param: gw.transport.uri_param(),
+                // The same transport, named for the CDR (v9). Gateways
+                // are configured `udp | tcp | tls` only, so the two WS
+                // arms are unreachable — mapped rather than defaulted so
+                // adding a WS gateway can never silently record `udp`.
+                transport: match gw.transport {
+                    SipTransport::Udp => siphon_ai_cdr::LegTransport::Udp,
+                    SipTransport::Tcp => siphon_ai_cdr::LegTransport::Tcp,
+                    SipTransport::Tls => siphon_ai_cdr::LegTransport::Tls,
+                    SipTransport::Ws => siphon_ai_cdr::LegTransport::Ws,
+                    SipTransport::Wss => siphon_ai_cdr::LegTransport::Wss,
+                },
                 from: gw.from.clone(),
                 // Map the config SRTP policy onto the media-glue offer
                 // mode (core's SrtpMode is the inbound enum; OutboundSrtp

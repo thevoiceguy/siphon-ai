@@ -113,6 +113,16 @@ async fn run_call_emits_cdr_when_controller_exits() {
     assert_eq!(r.audio.payload_type, 0);
     assert_eq!(r.audio.sample_rate, 8000);
     assert_eq!(r.termination.cause, TerminationCause::LocalShutdown);
+    // v9 (DEV_PLAN_WebRTC.md §4.6): a plain UDP INVITE with no SRTP.
+    // Both fields are present on every record this daemon emits — the
+    // `Option` is only so a pre-v9 record still parses.
+    assert_eq!(r.leg_transport, Some(siphon_ai_cdr::LegTransport::Udp));
+    assert_eq!(
+        r.media_type,
+        Some(siphon_ai_cdr::MediaType::Rtp),
+        "an unencrypted classic leg is `rtp`, and is_encrypted() says so"
+    );
+    assert!(!r.media_type.unwrap().is_encrypted());
     assert!(r.duration_ms < 5_000, "duration {} too long", r.duration_ms);
     assert!(r.ended_at >= r.started_at);
 

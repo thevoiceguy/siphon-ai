@@ -52,11 +52,13 @@ mod tests {
                         call_id: "siphon-aa11".into(),
                         sip_call_id: "aa11@pbx".into(),
                         direction: "inbound".into(),
+                        webrtc_state: None,
                     },
                     AdminCallRow {
                         call_id: "siphon-bb22".into(),
                         sip_call_id: "bb22@pbx".into(),
                         direction: "outbound".into(),
+                        webrtc_state: None,
                     },
                 ],
                 registrations: vec![RegistrationRow {
@@ -134,6 +136,33 @@ mod tests {
         assert!(screen.contains("outbound"), "{screen}");
         // Multi-node fleet → Node column present.
         assert!(screen.contains("NODE"), "{screen}");
+    }
+
+    /// §4.6: a browser call reports where it is in ICE/DTLS, and a
+    /// classic one shows a dash rather than a blank that could read as
+    /// "unknown".
+    #[test]
+    fn calls_tab_shows_a_browser_legs_ice_dtls_phase() {
+        let mut app = fixture_app();
+        app.tab = Tab::Calls;
+        app.nodes[0].calls[0].webrtc_state = Some("ice_connected".into());
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("MEDIA"), "{screen}");
+        // Compressed for the column; the full phase is in the detail
+        // pane and the admin API.
+        assert!(screen.contains("dtls"), "{screen}");
+        // The other fixture call is a classic leg: no phase invented
+        // for it.
+        assert!(app.nodes[0].calls[1].webrtc_state.is_none());
+
+        // And a fleet with no browser calls keeps the table it had:
+        // the column costs width that classic deployments should not
+        // pay.
+        let classic = fixture_app();
+        let mut classic_calls = classic;
+        classic_calls.tab = Tab::Calls;
+        let screen = render(&classic_calls, 120, 30);
+        assert!(!screen.contains("MEDIA"), "{screen}");
     }
 
     // Shipped in 0.49.3 with the `s` key bound but absent from the

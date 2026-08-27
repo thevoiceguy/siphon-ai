@@ -171,7 +171,11 @@ Everything appears in `--inspect-config`; changing any of it wants a restart (co
   Three decisions worth recording. **(1)** They are typed `Option` and **omitted where genuinely unknown** rather than defaulted: a pre-v9 record parses with both `None`, and a delayed-offer call that failed negotiation before any media existed gets `leg_transport` with no `media_type` — claiming `rtp` there would assert that cleartext audio flowed when none did. Same reasoning for siphon-rs's SCTP transport kinds, which no siphon-ai listener produces: no CDR name, so nothing recorded. **(2)** `media_type` is derived from `start.srtp` — the same fact the WS server was told — so the record and the bridge cannot disagree about whether a call was encrypted; and a browser leg is checked *first*, because it deliberately carries no `srtp` block (DTLS-SRTP is intrinsic to it) and reading that absence as "cleartext" is exactly the bug the ordering prevents. **(3)** Outbound records what the peer *answered*, not what the gateway offered: a `preferred` trunk that downgraded says `rtp`.
 
   Verified end to end: `examples/browser-sip/headless-check.sh` now enables a CDR file sink in `lab.toml` and asserts a real headless-Chrome call lands as `version 9, leg_transport=wss, media_type=webrtc`.
-- sightglass: surface ICE/DTLS state per call
+- ~~sightglass: surface ICE/DTLS state per call~~ **Done.** `webrtc_state` on `GET /admin/v1/calls` rows and on `GET /admin/v1/calls/{id}/stats`, rendered as a **MEDIA** column (`ice` → `dtls` → `webrtc`) and an `ice/dtls` detail line.
+
+  Two notes. **(1)** The phase is a *probe*, not a captured value: the peer connection cannot leave its tap task, so the tap publishes into one relaxed atomic and both admin registries read it at request time — a call watched live moves through the phases rather than reporting whatever was true when it registered. **(2)** The column hides itself when no visible call is a browser call, the way the Node column does on a single-node fleet. Adding it unconditionally squeezed the two call-id columns at 100 cols, and a fleet with no browser traffic should not pay width for a column of dashes.
+
+  §4.6 is complete: metrics, CDR v9, and this.
 
 ---
 

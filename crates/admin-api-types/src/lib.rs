@@ -36,6 +36,18 @@ pub struct AdminCallRow {
     pub sip_call_id: String,
     /// `"inbound"` | `"outbound"`.
     pub direction: String,
+    /// A **browser** call's live ICE/DTLS phase (`DEV_PLAN_WebRTC.md`
+    /// §4.6): `"connecting"` (ICE checks running), `"ice_connected"`
+    /// (a pair is nominated, DTLS handshaking — a call stuck here has
+    /// a working path and failing crypto), `"connected"` (SRTP keys
+    /// installed, media flowing), `"failed"`, `"closed"`.
+    ///
+    /// Absent for a classic SIP leg, which has no such phase — absent
+    /// means "not a browser call", never "unknown". Additive optional
+    /// field: an older client ignores it, and a newer client against
+    /// an older daemon sees `None` everywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webrtc_state: Option<String>,
 }
 
 /// `GET /admin/v1/calls` response envelope.
@@ -398,6 +410,7 @@ mod tests {
                 call_id: "siphon-abc".into(),
                 sip_call_id: "abc@host".into(),
                 direction: "inbound".into(),
+                webrtc_state: None,
             }],
         };
         assert_eq!(
@@ -411,6 +424,37 @@ mod tests {
                 }],
             })
         );
+    }
+
+    /// A classic call's row is byte-for-byte what it always was — the
+    /// test above proves that by omission. This one proves the browser
+    /// case carries the phase, and that an old client's payload (no
+    /// key at all) still parses.
+    #[test]
+    fn a_browser_call_row_carries_its_ice_dtls_phase() {
+        let row = AdminCallRow {
+            call_id: "siphon-web".into(),
+            sip_call_id: "web@host".into(),
+            direction: "inbound".into(),
+            webrtc_state: Some("ice_connected".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&row).unwrap(),
+            json!({
+                "call_id": "siphon-web",
+                "sip_call_id": "web@host",
+                "direction": "inbound",
+                "webrtc_state": "ice_connected",
+            })
+        );
+
+        let legacy: AdminCallRow = serde_json::from_value(json!({
+            "call_id": "siphon-abc",
+            "sip_call_id": "abc@host",
+            "direction": "inbound",
+        }))
+        .expect("a pre-0.51.0 daemon's row still parses");
+        assert_eq!(legacy.webrtc_state, None);
     }
 
     #[test]

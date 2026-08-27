@@ -97,6 +97,25 @@ path = "examples/browser-sip/cdr.jsonl"
 # collector = "127.0.0.1:9060"
 # capture_id = 2001
 
+# The authenticated admin API, so `headless-check.sh` can read a live
+# browser call's ICE/DTLS phase (`webrtc_state`, §4.6) — and so the lab
+# is one `sightglass --target` away from showing the same call in a TUI.
+#
+# The token is a **lab literal on loopback**. A real deployment keeps it
+# out of the file with an env-var or file reference (see docs/CONFIG.md
+# on `[[admin.token]]`) and puts the listener behind `[admin.tls]`.
+#
+# Note the reference syntax is deliberately *not* written out here: the
+# config loader resolves those placeholders over the raw file, comments
+# included, so naming one in a comment makes the daemon demand it.
+[admin]
+listen = "127.0.0.1:9092"
+
+[[admin.token]]
+name = "lab"
+token = "lab-token-not-a-secret"
+role = "readonly"
+
 [[route]]
 name = "default"
 [route.match]

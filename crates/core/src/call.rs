@@ -863,6 +863,13 @@ pub struct CallController {
 impl CallController {
     /// Construct a controller. Returns it together with a
     /// [`CallHandle`] the spawner can use to signal shutdown.
+    /// A probe for the media leg's live ICE/DTLS phase (`None` for a
+    /// classic leg). Read before the controller is spawned so the
+    /// admin registries can report on a browser call while it runs.
+    pub fn leg_phase_probe(&self) -> Option<crate::media_leg::LegPhaseProbe> {
+        self.cfg.media_tap.phase_probe()
+    }
+
     pub fn new(cfg: CallControllerConfig) -> (Self, CallHandle) {
         let (control_out_tx, control_out_rx) =
             mpsc::channel::<OutgoingEvent>(CONTROL_CHANNEL_CAPACITY);
@@ -1156,7 +1163,10 @@ impl CallController {
         // Live-stats registration (0.31.0): expose this call's quality
         // feed to `GET /admin/v1/calls/{id}/stats` for the call's
         // lifetime. RAII — dropping the guard on any exit path from
-        // `run` deregisters.
+        // `run` deregisters. The leg-phase probe rides along so a
+        // browser call's ICE/DTLS state is readable there too (§4.6);
+        // taken before the leg is moved into its task.
+        let leg_phase = media_tap.phase_probe();
         let _quality_live_guard = crate::quality_live::LiveQualityGuard::register(
             call_id.as_str(),
             crate::quality_live::LiveCallMeta {
@@ -1181,6 +1191,7 @@ impl CallController {
             },
             quality_rx.clone(),
             epoch_rx.clone(),
+            leg_phase,
         );
         // Quality history records (0.31.0): when `[quality]` is
         // configured, sample the tap's quality feed on the configured

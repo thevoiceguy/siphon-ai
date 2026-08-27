@@ -1281,6 +1281,7 @@ mod tests {
                     call_id: format!("siphon-{sip}"),
                     sip_call_id: sip.clone(),
                     direction: "inbound".into(),
+                    webrtc_state: None,
                 })
                 .collect()
         }

@@ -3966,10 +3966,13 @@ impl BridgingAcceptor {
         // accepted call is reachable by the id operators see. Carries the
         // SIP Call-ID + direction so `GET /admin/v1/calls` can report both
         // id namespaces (issue #311).
-        self.control_registry.insert(
+        self.control_registry.insert_with_leg_phase(
             cleanup_handle.clone(),
             prepared.sip_call_id.clone(),
             Direction::Inbound,
+            // A browser call reports where it is in ICE/DTLS for as
+            // long as it is listed; a classic one has no such phase.
+            prepared.controller.leg_phase_probe(),
         );
 
         // Per-route counter is owned-by-route — bounded cardinality

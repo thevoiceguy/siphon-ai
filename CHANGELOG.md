@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A browser call now says where it is in ICE/DTLS, live — in the
+  admin API and in sightglass** (`DEV_PLAN_WebRTC.md` §4.6, completing
+  it). `GET /admin/v1/calls` rows and `GET /admin/v1/calls/{id}/stats`
+  carry `webrtc_state`: `connecting` (ICE checks running — no path
+  yet), `ice_connected` (a pair is nominated and DTLS is handshaking),
+  `connected` (SRTP keys installed, media flowing), `failed`, `closed`.
+
+  **A call stuck on `ice_connected` has a working network path and
+  failing crypto**; one stuck on `connecting` has no path at all. That
+  is the same split `siphon_ai_webrtc_legs_total{result}` reports after
+  the fact — this is it while the call is still up, which is when an
+  operator can do something about it.
+
+  The key is **absent for a classic SIP leg** rather than empty: absent
+  means "not a browser call", never "unknown". Both are additive
+  optional fields, so an older client ignores them and a newer client
+  against an older daemon sees nothing.
+
+  Sightglass grows a **MEDIA** column on the calls tab (`ice` → `dtls`
+  → `webrtc`, `—` for a classic leg) and an `ice/dtls` line in the call
+  detail pane. The column **hides itself when no visible call is a
+  browser call**, the way the Node column does on a single-node fleet:
+  the table is always short of width, and a fleet with no browser
+  traffic should not pay for the column.
+
 ### Changed
 
 - **CDR schema v8 → v9: every record now says how the call arrived

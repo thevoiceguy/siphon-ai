@@ -17,6 +17,7 @@
 //! must not stall a call, and the host candidates already gathered are
 //! a perfectly good answer.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use forge_core::AudioCodec;
@@ -46,6 +47,74 @@ pub struct Answered {
     pub leg: WebRtcLeg,
     pub answer_sdp: String,
     pub events: mpsc::Receiver<PeerEvent>,
+}
+
+/// Where a browser leg is in ICE/DTLS, readable from **outside** the
+/// task that owns the leg (`DEV_PLAN_WebRTC.md` §4.6 — the sightglass
+/// item).
+///
+/// The peer connection lives inside its tap task and cannot be shared,
+/// so the tap publishes its phase into this cell as it observes each
+/// transition. An admin request reads it; nothing writes but the tap.
+/// One relaxed atomic, so a per-call reader costs nothing and the
+/// audio path is untouched (CLAUDE.md §4.3 — this is not a lock).
+#[derive(Debug, Default)]
+pub struct WebRtcLegState(AtomicU8);
+
+impl WebRtcLegState {
+    pub fn set(&self, phase: LegPhase) {
+        self.0.store(phase as u8, Ordering::Relaxed);
+    }
+
+    pub fn phase(&self) -> LegPhase {
+        LegPhase::from_u8(self.0.load(Ordering::Relaxed))
+    }
+}
+
+/// The phases [`WebRtcLegState`] reports. Ordered as a call moves
+/// through them; the strings are an admin-API vocabulary, so they are
+/// stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LegPhase {
+    /// Answered; ICE checks are running. Every leg starts here.
+    Connecting = 0,
+    /// ICE nominated a pair — there is a path — and DTLS is
+    /// handshaking. A leg **stuck** here is the interesting one: the
+    /// network works and the crypto does not.
+    IceConnected = 1,
+    /// DTLS finished, SRTP keys installed, media is flowing.
+    Connected = 2,
+    /// The transport failed, or setup ran out of budget.
+    Failed = 3,
+    /// Closed — normally, by the browser or by us.
+    Closed = 4,
+}
+
+impl LegPhase {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => LegPhase::IceConnected,
+            2 => LegPhase::Connected,
+            3 => LegPhase::Failed,
+            4 => LegPhase::Closed,
+            // Includes any value no `set` ever wrote, which cannot
+            // happen — `Connecting` is the honest answer either way.
+            _ => LegPhase::Connecting,
+        }
+    }
+
+    /// Wire/display string. Stable: the admin API and sightglass both
+    /// show it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LegPhase::Connecting => "connecting",
+            LegPhase::IceConnected => "ice_connected",
+            LegPhase::Connected => "connected",
+            LegPhase::Failed => "failed",
+            LegPhase::Closed => "closed",
+        }
+    }
 }
 
 /// How the ICE + DTLS setup phase ended, with the timings that
@@ -193,6 +262,7 @@ impl WebRtcLeg {
         &self,
         events: &mut mpsc::Receiver<PeerEvent>,
         budget: Duration,
+        state: &WebRtcLegState,
     ) -> SetupOutcome {
         // The transport runs in its own task, so it can finish before
         // this is first called. Its state is the authority; the events
@@ -200,18 +270,23 @@ impl WebRtcLeg {
         // what the `None` timings mean.
         match self.peer.get_state() {
             ConnectionState::Connected => {
+                state.set(LegPhase::Connected);
                 return SetupOutcome::Connected {
                     ice: None,
                     dtls: None,
-                }
+                };
             }
             ConnectionState::Failed => {
-                return SetupOutcome::Failed("transport failed before media started".into())
+                state.set(LegPhase::Failed);
+                return SetupOutcome::Failed("transport failed before media started".into());
             }
-            ConnectionState::Closed => return SetupOutcome::Closed,
+            ConnectionState::Closed => {
+                state.set(LegPhase::Closed);
+                return SetupOutcome::Closed;
+            }
             _ => {}
         }
-        await_setup(events, budget).await
+        await_setup(events, budget, state).await
     }
 
     /// The negotiated codec and the payload type the browser expects.
@@ -266,13 +341,18 @@ impl WebRtcLeg {
 /// Free-standing (rather than a method) so the state machine can be
 /// tested against a synthetic event stream — building a real peer
 /// that fails DTLS on demand is not something a unit test can do.
-pub async fn await_setup(events: &mut mpsc::Receiver<PeerEvent>, budget: Duration) -> SetupOutcome {
+pub async fn await_setup(
+    events: &mut mpsc::Receiver<PeerEvent>,
+    budget: Duration,
+    state: &WebRtcLegState,
+) -> SetupOutcome {
     let start = tokio::time::Instant::now();
     let deadline = start + budget;
     let mut ice_at: Option<tokio::time::Instant> = None;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
+            state.set(LegPhase::Failed);
             return match ice_at {
                 Some(at) => SetupOutcome::DtlsTimeout {
                     ice: at.duration_since(start),
@@ -283,10 +363,15 @@ pub async fn await_setup(events: &mut mpsc::Receiver<PeerEvent>, budget: Duratio
         match tokio::time::timeout(remaining, events.recv()).await {
             Ok(Some(PeerEvent::IceConnected { local, remote })) => {
                 ice_at = Some(tokio::time::Instant::now());
+                // Published before DTLS starts, so a leg watched live
+                // shows *which* phase it is stuck in rather than a
+                // single "connecting" that could mean either.
+                state.set(LegPhase::IceConnected);
                 debug!(%local, %remote, "ICE nominated a pair");
             }
             Ok(Some(PeerEvent::Connected)) => {
                 let now = tokio::time::Instant::now();
+                state.set(LegPhase::Connected);
                 return SetupOutcome::Connected {
                     ice: ice_at.map(|at| at.duration_since(start)),
                     // Measured from nomination because that is when
@@ -294,8 +379,14 @@ pub async fn await_setup(events: &mut mpsc::Receiver<PeerEvent>, budget: Duratio
                     dtls: ice_at.map(|at| now.duration_since(at)),
                 };
             }
-            Ok(Some(PeerEvent::Failed(why))) => return SetupOutcome::Failed(why),
-            Ok(Some(PeerEvent::Closed)) | Ok(None) => return SetupOutcome::Closed,
+            Ok(Some(PeerEvent::Failed(why))) => {
+                state.set(LegPhase::Failed);
+                return SetupOutcome::Failed(why);
+            }
+            Ok(Some(PeerEvent::Closed)) | Ok(None) => {
+                state.set(LegPhase::Closed);
+                return SetupOutcome::Closed;
+            }
             // Late candidates and RTCP. Media cannot precede the SRTP
             // keys, so nothing audible is being skipped here.
             Ok(Some(_)) => {}
@@ -401,7 +492,9 @@ mod tests {
             tx.send(PeerEvent::Connected).await.unwrap();
         });
 
-        let outcome = await_setup(&mut rx, Duration::from_secs(5)).await;
+        let state = WebRtcLegState::default();
+        assert_eq!(state.phase(), LegPhase::Connecting, "every leg starts here");
+        let outcome = await_setup(&mut rx, Duration::from_secs(5), &state).await;
         assert_eq!(
             outcome,
             SetupOutcome::Connected {
@@ -409,15 +502,18 @@ mod tests {
                 dtls: Some(Duration::from_millis(200)),
             }
         );
+        assert_eq!(state.phase(), LegPhase::Connected);
     }
 
     /// Nothing nominated inside the budget: no path exists.
     #[tokio::test(start_paused = true)]
     async fn a_silent_transport_is_an_ice_timeout() {
         let (_tx, mut rx) = mpsc::channel::<PeerEvent>(8);
-        let outcome = await_setup(&mut rx, Duration::from_millis(500)).await;
+        let state = WebRtcLegState::default();
+        let outcome = await_setup(&mut rx, Duration::from_millis(500), &state).await;
         assert_eq!(outcome, SetupOutcome::IceTimeout);
         assert_eq!(outcome.label(), "ice_timeout");
+        assert_eq!(state.phase(), LegPhase::Failed);
     }
 
     /// A pair was nominated and then the handshake stalled — a
@@ -440,7 +536,13 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(60)).await;
         });
 
-        let outcome = await_setup(&mut rx, Duration::from_millis(500)).await;
+        // The live phase is what an operator sees while it is stuck:
+        // ICE succeeded, so the leg reports `ice_connected` until the
+        // budget expires — which is the diagnosis, in one word.
+        let state = WebRtcLegState::default();
+        let peek = state.phase();
+        let outcome = await_setup(&mut rx, Duration::from_millis(500), &state).await;
+        assert_eq!(peek, LegPhase::Connecting);
         assert_eq!(
             outcome,
             SetupOutcome::DtlsTimeout {
@@ -448,6 +550,7 @@ mod tests {
             }
         );
         assert_eq!(outcome.label(), "dtls_timeout");
+        assert_eq!(state.phase(), LegPhase::Failed);
     }
 
     #[tokio::test]
@@ -456,18 +559,22 @@ mod tests {
         tx.send(PeerEvent::Failed("dtls: bad fingerprint".into()))
             .await
             .unwrap();
+        let state = WebRtcLegState::default();
         assert_eq!(
-            await_setup(&mut rx, Duration::from_secs(1)).await,
+            await_setup(&mut rx, Duration::from_secs(1), &state).await,
             SetupOutcome::Failed("dtls: bad fingerprint".into())
         );
+        assert_eq!(state.phase(), LegPhase::Failed);
 
         // A browser tab closing mid-setup drops the transport: a user
         // action, not a fault, and labeled as such.
         let (tx, mut rx) = mpsc::channel::<PeerEvent>(8);
         drop(tx);
-        let outcome = await_setup(&mut rx, Duration::from_secs(1)).await;
+        let state = WebRtcLegState::default();
+        let outcome = await_setup(&mut rx, Duration::from_secs(1), &state).await;
         assert_eq!(outcome, SetupOutcome::Closed);
         assert_eq!(outcome.label(), "closed");
+        assert_eq!(state.phase(), LegPhase::Closed);
     }
 
     /// Candidates and RTCP keep arriving during setup; they must not
@@ -483,7 +590,12 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(60)).await;
         });
         assert_eq!(
-            await_setup(&mut rx, Duration::from_millis(200)).await,
+            await_setup(
+                &mut rx,
+                Duration::from_millis(200),
+                &WebRtcLegState::default()
+            )
+            .await,
             SetupOutcome::IceTimeout
         );
     }

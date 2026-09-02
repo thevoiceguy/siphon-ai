@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  churn_200_60s — steady concurrency with continuous churn. Each instance
+  opens a call, pauses 60 s, then BYEs. With `sipp -l 200 -r 10` the daemon
+  holds 200 concurrent while calls turn over at ~3.3/s, so setup and
+  teardown run continuously instead of once at each end of a 10-minute
+  plateau. That churn is what produces a steady log-record rate, which is
+  why this variant exists: concurrent_burst_500.xml holds calls still, and
+  a still call logs almost nothing.
+
+  Derived from concurrent_burst_500.xml (pause 600 s -> 60 s). Same
+  constraints: no RTP is streamed, so the daemon needs
+  `[media].inactivity_timeout_secs = 0` or the watchdog reaps these calls.
+
+  Used by RESULTS-0.51.0-otlp-logs.md. Stop it with SIGUSR1, not SIGKILL —
+  killed scenarios never send their BYE, and with the watchdog off those
+  calls stay up until the daemon exits.
+-->
+<scenario name="churn_200_60s">
+  <send retrans="500">
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:sipp-churn@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:sipp-churn@[local_ip]:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=user1 53655765 2353687637 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [auto_media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+  <recv response="200" rtd="true"/>
+
+  <send>
+<![CDATA[
+ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-ack
+Max-Forwards: 70
+From: <sip:sipp-churn@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Content-Length: 0
+
+]]>
+  </send>
+
+  <!-- 600 s = 10 minutes. -->
+  <pause milliseconds="60000"/>
+
+  <send retrans="500">
+<![CDATA[
+BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]-bye
+Max-Forwards: 70
+From: <sip:sipp-churn@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>[peer_tag_param]
+Call-ID: [call_id]
+CSeq: 2 BYE
+Content-Length: 0
+
+]]>
+  </send>
+
+  <recv response="200"/>
+
+  <ResponseTimeRepartition value="200, 500, 1000, 2000"/>
+</scenario>

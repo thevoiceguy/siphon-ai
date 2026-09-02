@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The daemon can emit its logs as JSON** — `--log-format json`, or
+  `SIPHON_AI_LOG_FORMAT=json` for a systemd unit (#588). One object per
+  line, the event's own fields flattened to the top level and the current
+  span's fields under `span`, which is where `call_id` lives.
+
+  The point is what happens when logs leave the box. The daemon attaches a
+  lot of structure to its events — `call_id`, `route`, `from_user`,
+  `request_uri_user`, `register_source` — and in text form every one of
+  those is a substring that a shipper has to regex back apart, badly, and
+  that silently stops carrying a field the day a call site gains one. As
+  keys they land as queryable fields in Cloud Logging / Loki / Elastic and
+  survive new call sites without anyone touching a regex.
+
+  **`text` remains the default and its output is unchanged**, byte for
+  byte — it is the right thing for `journalctl` on one node, and the
+  shipped fail2ban filter's `<HOST>` extractor string-matches it.
+  Switching a node to `json` breaks that regex silently (bans stop, the
+  jail still looks healthy), which is called out in both
+  `docs/CONFIG.md` → *CLI flags & environment* (a new section covering
+  `--config` / `--log` / `--log-format` and their env twins) and the
+  `docs/OPERATIONS.md` quick-reference table.
+
+  Format and filter stay orthogonal: `--log-format` never changes which
+  events are emitted, and `PUT /admin/v1/log` never changes how they are
+  rendered. The `check` / `print-config` / `route-test` reports are
+  written straight to stdout, not through `tracing`, so they stay
+  human-readable in both modes.
+
 - **Three real browsers now call the daemon every night and have to
   prove audio in both directions** (`DEV_PLAN_WebRTC.md` §5, item 2).
   `test-harness/browser/` is a Playwright harness — Chromium, Firefox

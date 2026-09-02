@@ -5,6 +5,79 @@ on the daemon binary. TOML is the only supported format (CLAUDE.md §4.6); all
 validation runs at config load time, not first-use, so a bad config fails
 loudly at startup instead of mid-call.
 
+## CLI flags & environment
+
+Everything that shapes a *run* lives in the TOML file; the handful of things
+that shape the *process* — which file to read, and how the daemon logs — are
+flags. All three are `global`, so they parse on either side of a subcommand
+(`siphon-ai --config X check` and `siphon-ai check --config X` are the same
+command), and each has an environment twin for systemd units and containers.
+
+| Flag | Env | Default | What it does |
+|---|---|---|---|
+| `--config <PATH>` | `SIPHON_AI_CONFIG` | none (required) | The TOML file. Required by the daemon and by every subcommand except `decrypt-recording`. |
+| `--log <DIRECTIVE>` | `SIPHON_AI_LOG` | `RUST_LOG`, else the built-in default | The `tracing` filter — *which* events are emitted (`siphon_ai=debug,siphon=info`). Precedence is **replace, not merge**: the value you supply is the whole directive, so narrowing to one target (`siphon_ai_core=debug`) also drops the built-in `warn` floor and mutes everything else. Prefix it with `warn,` to keep the floor. Retunable at runtime without a restart via `PUT /admin/v1/log`. |
+| `--log-format <text\|json>` | `SIPHON_AI_LOG_FORMAT` | `text` | *How* those events are rendered. See below. |
+
+### `--log-format` (0.51.0)
+
+`text` — the default, and unchanged from every prior release — is one
+human-readable line per event, ANSI-coloured only when stdout is a terminal.
+It is the right output for reading `journalctl` on one node.
+
+`json` emits **one JSON object per line**, with the event's own fields
+flattened to the top level and the current span's fields under `span`:
+
+```console
+$ siphon-ai --config /etc/siphon-ai/config.toml --log-format json
+{"timestamp":"2026-09-02T17:09:39.164893Z","level":"INFO","message":"configuration compiled","node_id":"siphon-ai-local","sip_listen":"127.0.0.1:5070","routes":1,"target":"siphon_ai"}
+```
+
+Use it when the logs leave the box. The daemon attaches a lot of structure to
+its events — `call_id`, `route`, `from_user`, `request_uri_user`,
+`register_source` — and in `text` mode every one of those is a substring
+inside a line, which a shipper (OpenTelemetry Collector, Fluent Bit, Vector,
+Promtail) then has to regex back apart. In `json` mode they are keys, so they
+land as queryable fields in Cloud Logging / Loki / Elastic, and a field added
+at a new call site appears downstream without anyone updating a regex.
+
+`call_id` is a **span** field — every per-call function is instrumented with
+it — so it arrives as `span.call_id`, not at the top level:
+
+```console
+$ journalctl -o cat -u siphon-ai | jq -r 'select(.span.call_id) | "\(.span.call_id) \(.message)"'
+```
+
+Notes:
+
+- **Switching to `json` breaks anything that string-matches the journal.**
+  Most importantly the shipped `fail2ban` filter
+  (`docs/SECURITY_FAIL2BAN.md`), whose `<HOST>` extractor is written against
+  the text line and will silently stop matching — bans quietly stop happening
+  while the jail still looks healthy. If you run both, either keep `text` or
+  rewrite `contrib/fail2ban/filter.d/siphon-ai.conf` against the JSON shape
+  first.
+- **Format and filter are orthogonal.** `--log-format` never changes which
+  events are emitted, and `PUT /admin/v1/log` never changes how they are
+  rendered.
+- **The read-only subcommands' reports are unaffected.** `check`,
+  `print-config` and `route-test` write their summaries straight to stdout,
+  not through `tracing`, so those stay human-readable (and `print-config
+  --format json` stays the way to get *config* as JSON). What the flag does
+  change for a subcommand is how the load-time warnings it surfaces are
+  rendered.
+- **A fatal startup error still goes to stderr as plain text** — it is the
+  process's exit report, not a log record. Everything emitted during a call is
+  JSON.
+
+Under systemd, set it in the unit's environment file rather than the
+`ExecStart` line:
+
+```ini
+# /etc/siphon-ai/env
+SIPHON_AI_LOG_FORMAT=json
+```
+
 ## Secrets & variable expansion
 
 `${...}` references in any string value are expanded before TOML parsing, in a

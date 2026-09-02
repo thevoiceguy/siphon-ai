@@ -1349,6 +1349,32 @@ pub struct RawObservabilityOtlp {
     /// attached to every exported span.
     #[serde(default)]
     pub attributes: Option<std::collections::BTreeMap<String, String>>,
+    /// `[observability.otlp.logs]` — ship log records over the same
+    /// OTLP connection, carrying the enclosing span's trace context.
+    /// Off by default, like its parent.
+    #[serde(default)]
+    pub logs: RawObservabilityOtlpLogs,
+}
+
+/// `[observability.otlp.logs]` — export log records over OTLP alongside
+/// spans, so a record carries the `trace_id` / `span_id` of the span it
+/// was emitted inside and a backend can show it against that span.
+///
+/// A sub-table rather than a bare `logs = true` so the export level has
+/// somewhere to live — and so batch sizing can join it later without a
+/// breaking rename.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawObservabilityOtlpLogs {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Minimum severity to *export*, independent of the console filter:
+    /// `trace` | `debug` | `info` | `warn` | `error` | `off`.
+    /// Default `info`. Shipping a `debug` firehose over the network is a
+    /// foot-gun, and console and collector have genuinely different
+    /// appetites.
+    #[serde(default)]
+    pub level: Option<String>,
 }
 
 /// `[hep]` — HEP3 (Homer) shipping. Off by default; when

@@ -100,6 +100,14 @@ forge-engine.workspace = true
 forge-rtp.workspace    = true
 opentelemetry = "0.32.0"
 tracing-opentelemetry = "0.33.0"
+# OTLP log export (0.51.0): bridges `tracing` events into OTel log records
+# so they ship with the enclosing span's trace_id/span_id. Must be the
+# 0.32-compatible release, pairing with the opentelemetry stack above.
+opentelemetry-appender-tracing = "0.32.0"
+# Names SdkLoggerProvider / SdkLogger / SdkLogRecord for the lazily-resolving
+# provider in `otel.rs`. Same pin/features as siphon-ai-telemetry, which
+# builds the provider — no new compilation.
+opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
 
 [dev-dependencies]
 # `test-util` is required for `#[tokio::test(start_paused = true)]`

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
-use siphon_ai::{OtelActivation, Runtime};
+use siphon_ai::{OtelActivation, OtelLogControl, Runtime};
 use siphon_ai_config::Config;
 use siphon_ai_telemetry::LogFilterHandle;
 use tracing::info;
@@ -200,7 +200,8 @@ async fn main() -> Result<()> {
     // SRTP-key-in-cleartext footgun); without a subscriber those are
     // silently dropped and the preflight is less informative than a real
     // boot.
-    let (log_filter, otel_activation) = init_tracing(cli.log.as_deref(), cli.log_format);
+    let (log_filter, otel_activation, otel_log_control) =
+        init_tracing(cli.log.as_deref(), cli.log_format);
 
     // Read-only subcommands dispatch here and exit — no socket binding,
     // no runtime (but tracing is live, so config warnings show).
@@ -284,10 +285,15 @@ async fn main() -> Result<()> {
 
     // Pass the path so SIGHUP (`systemctl reload`) can re-read it for
     // hot reload of the reload-safe sections.
-    let runtime =
-        Runtime::build_with_reload(config, Some(config_path), log_filter, Some(otel_activation))
-            .await
-            .context("runtime build failed")?;
+    let runtime = Runtime::build_with_reload(
+        config,
+        Some(config_path),
+        log_filter,
+        Some(otel_activation),
+        Some(otel_log_control),
+    )
+    .await
+    .context("runtime build failed")?;
 
     runtime.run(shutdown_signal()).await
 }
@@ -652,7 +658,7 @@ const DEFAULT_LOG_FILTER: &str = "warn,\
 fn init_tracing(
     cli_filter: Option<&str>,
     log_format: LogFormat,
-) -> (LogFilterHandle, OtelActivation) {
+) -> (LogFilterHandle, OtelActivation, OtelLogControl) {
     const DEFAULT: &str = DEFAULT_LOG_FILTER;
 
     let env_filter = match cli_filter {
@@ -746,9 +752,39 @@ fn init_tracing(
     // ring sees — documented in CONFIG.md.
     let ring_layer = siphon_ai_telemetry::error_ring::ErrorRingLayer
         .with_filter(tracing_subscriber::filter::LevelFilter::WARN);
+
+    // OTLP **log** export (0.51.0), installed the same way as the trace
+    // layer above and for the same reason: the provider carries the
+    // endpoint, so it can't exist before config loads, and this runs first
+    // so config-load warnings still print. `LazyLoggerProvider` defers the
+    // lookup to the first record; the `OFF` per-layer filter means nothing
+    // reaches it until `OtelLogActivation::activate` opens it, which the
+    // runtime does only after installing the provider.
+    //
+    // That filter is also the *export level*
+    // (`[observability.otlp.logs].level`). Per-layer, so a `debug` console
+    // and an `info` collector are the same run — the console filter is
+    // still a floor over every layer on the registry, so this can narrow
+    // what ships but never widen it (documented in CONFIG.md, same caveat
+    // as the error ring).
+    //
+    // Trace correlation is not done here: `tracing-opentelemetry` 0.33
+    // attaches each span's OTel context on span entry, and the SDK's logger
+    // stamps `trace_id`/`span_id` from whatever context is current when a
+    // record is emitted. That is why enabling logs requires the parent
+    // `[observability.otlp]` — with the span layer's filter shut, no
+    // context is ever attached and every record would ship uncorrelated.
+    let (otlp_log_filter, otlp_log_filter_handle) =
+        tracing_subscriber::reload::Layer::new(EnvFilter::new("off"));
+    let otlp_log_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+        &siphon_ai::otel::LazyLoggerProvider,
+    )
+    .with_filter(otlp_log_filter);
+
     let _ = tracing_subscriber::registry()
         .with(filter_layer)
         .with(otel_layer)
+        .with(otlp_log_layer)
         .with(fmt_layer)
         .with(ring_layer)
         .try_init();
@@ -759,8 +795,14 @@ fn init_tracing(
     let activation = OtelActivation::new(Box::new(move || {
         otel_filter_handle.reload(tracing_subscriber::filter::LevelFilter::TRACE)
     }));
+    // Same deal for logs, except it isn't one-shot: the runtime opens the
+    // layer at the configured export level and closes it again before it
+    // flushes the pipeline at shutdown.
+    let log_control = OtelLogControl::new(Box::new(move |filter| {
+        otlp_log_filter_handle.reload(filter)
+    }));
 
-    (LogFilterHandle::new(reload_handle), activation)
+    (LogFilterHandle::new(reload_handle), activation, log_control)
 }
 
 /// Resolve when SIGINT (Ctrl-C) or SIGTERM is received. On Windows

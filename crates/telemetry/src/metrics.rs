@@ -154,6 +154,25 @@ pub const HEP_PACKETS_SENT_TOTAL: &str = "siphon_ai_hep_packets_sent_total";
 /// `hep-rs` first (siphon-ai #460).
 pub const HEP_PACKETS_DROPPED_TOTAL: &str = "siphon_ai_hep_packets_dropped_total";
 
+/// Log records discarded before reaching the OTLP exporter
+/// (`[observability.otlp.logs]`, 0.51.0), labeled by `reason` —
+/// currently only `queue_full`.
+///
+/// The daemon hands each record to a bounded queue and returns; a worker
+/// thread drains it into the SDK. A full queue means the collector (or the
+/// SDK's own batch worker behind it) is not keeping up with the log rate,
+/// and the record is dropped rather than allowed to hold up the emitting
+/// task — log export is observability, and observability never blocks a
+/// call (CLAUDE.md §4.7).
+///
+/// Movement here is the signal that the console still has lines the
+/// collector never received. Sustained movement means the log level being
+/// exported is too broad for the link, not that the daemon is unhealthy.
+/// `reason` is a label rather than a bare counter so a future
+/// `collector_down` value can join it without a rename — matching
+/// [`HEP_PACKETS_DROPPED_TOTAL`].
+pub const OTLP_LOG_RECORDS_DROPPED_TOTAL: &str = "siphon_ai_otlp_log_records_dropped_total";
+
 /// REGISTER attempts the daemon has driven. Labeled by `name`
 /// (the `[[register]].name`) and `outcome`:
 /// `registered` / `auth_failed` / `transport_error` / `timeout` /
@@ -942,6 +961,10 @@ pub fn register_descriptions() {
         "HEP3 packets dropped before the wire, by reason (queue_full)."
     );
     describe_counter!(
+        OTLP_LOG_RECORDS_DROPPED_TOTAL,
+        "Log records dropped before the OTLP exporter, by reason (queue_full)."
+    );
+    describe_counter!(
         REGISTER_ATTEMPTS_TOTAL,
         "REGISTER attempts by [[register]].name and outcome."
     );
@@ -1383,6 +1406,7 @@ pub const ALL_COUNTERS: &[&str] = &[
     SIP_RATE_LIMITED_TOTAL,
     HEP_PACKETS_SENT_TOTAL,
     HEP_PACKETS_DROPPED_TOTAL,
+    OTLP_LOG_RECORDS_DROPPED_TOTAL,
     REGISTER_ATTEMPTS_TOTAL,
     REGISTER_ADMIN_TRIGGERS_TOTAL,
     OUTBOUND_CALLS_TOTAL,

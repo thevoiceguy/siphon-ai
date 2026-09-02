@@ -1,9 +1,16 @@
-//! OpenTelemetry OTLP trace export (0.22.0).
+//! OpenTelemetry OTLP trace export (0.22.0) and log export (0.51.0).
 //!
 //! Builds an OTLP/gRPC span exporter + a batch-exporting `SdkTracerProvider`
 //! and installs it as the process-global tracer provider, so the
 //! `tracing-opentelemetry` layer wired in the daemon binary ships per-call
 //! spans to a collector (Tempo / Jaeger / an OTel Collector).
+//!
+//! Optionally builds a second, log-side pipeline over the same endpoint and
+//! the same resource ([`OtelConfig::logs`]), so a log record lands beside
+//! the span it was emitted inside. Unlike the tracer there is no
+//! process-global logger provider in `opentelemetry` 0.32, so the built
+//! `SdkLoggerProvider` is handed back to the caller, which wires it into
+//! its own subscriber.
 //!
 //! Off by default. **Best-effort**, mirroring the HEP worker (CLAUDE.md §4.7):
 //! spans batch on a background worker and drop on overflow; a slow or
@@ -14,7 +21,8 @@
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
-use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+use opentelemetry_otlp::{LogExporter, SpanExporter, WithExportConfig};
+use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 use thiserror::Error;
@@ -29,6 +37,9 @@ pub const OTEL_SCOPE: &str = "siphon-ai";
 pub enum OtelError {
     #[error("failed to build OTLP span exporter for {endpoint}: {detail}")]
     Exporter { endpoint: String, detail: String },
+
+    #[error("failed to build OTLP log exporter for {endpoint}: {detail}")]
+    LogExporter { endpoint: String, detail: String },
 }
 
 /// Resolved OTLP export plan. Primitives so `siphon-ai-config` isn't a dep here.
@@ -46,6 +57,11 @@ pub struct OtelConfig {
     pub node_id: String,
     /// Extra `key=value` resource attributes (e.g. `deployment.environment`).
     pub extra_attributes: Vec<(String, String)>,
+    /// Also build a log-export pipeline over the same endpoint, timeout and
+    /// resource (`[observability.otlp.logs]`). The *level* to export at is
+    /// deliberately not here: it is a `tracing` filter, and it belongs on the
+    /// appender layer in the daemon binary, not on the exporter.
+    pub logs: bool,
 }
 
 /// A live OTLP tracer provider. Held for the process lifetime; call
@@ -53,6 +69,11 @@ pub struct OtelConfig {
 #[derive(Clone)]
 pub struct OtelTelemetry {
     provider: SdkTracerProvider,
+    /// `Some` when `[observability.otlp.logs]` is on. Nothing installs it
+    /// process-globally — `opentelemetry` 0.32 has no global logger provider
+    /// the way it has a global tracer provider — so the caller takes it with
+    /// [`OtelTelemetry::logger_provider`] and wires it into its subscriber.
+    logger_provider: Option<SdkLoggerProvider>,
 }
 
 impl OtelTelemetry {
@@ -96,7 +117,7 @@ impl OtelTelemetry {
         let provider = SdkTracerProvider::builder()
             .with_batch_exporter(exporter)
             .with_sampler(sampler)
-            .with_resource(resource)
+            .with_resource(resource.clone())
             .build();
 
         // Install as the process global so `global::tracer()` (called by the
@@ -108,7 +129,45 @@ impl OtelTelemetry {
             sample_ratio = ratio,
             "OTLP trace export active"
         );
-        Ok(Self { provider })
+
+        // The log pipeline: its own exporter and batch worker over the same
+        // endpoint and timeout, sharing the resource so a record's
+        // `service.name` / `service.instance.id` match the spans it will be
+        // shown against. Built after the tracer so a bad endpoint is reported
+        // once, by the span exporter, rather than twice.
+        let logger_provider = if cfg.logs {
+            let exporter = LogExporter::builder()
+                .with_tonic()
+                .with_endpoint(cfg.endpoint.clone())
+                .with_timeout(cfg.timeout)
+                .build()
+                .map_err(|e| OtelError::LogExporter {
+                    endpoint: cfg.endpoint.clone(),
+                    detail: e.to_string(),
+                })?;
+            // No "active" line here on purpose: the caller logs it after
+            // it has opened the appender layer, so the line that announces
+            // the pipeline is itself the first record to travel it.
+            Some(
+                SdkLoggerProvider::builder()
+                    .with_batch_exporter(exporter)
+                    .with_resource(resource)
+                    .build(),
+            )
+        } else {
+            None
+        };
+
+        Ok(Self {
+            provider,
+            logger_provider,
+        })
+    }
+
+    /// The log-export provider, when `[observability.otlp.logs]` is on.
+    /// Cheap to clone — the SDK type is an `Arc` inside.
+    pub fn logger_provider(&self) -> Option<SdkLoggerProvider> {
+        self.logger_provider.clone()
     }
 
     /// Flush + shut down the provider, giving batched spans a bounded window to
@@ -118,6 +177,17 @@ impl OtelTelemetry {
             Ok(()) => info!("OTLP tracer flushed + shut down"),
             Err(e) => {
                 warn!(error = %e, "OTLP tracer shutdown/flush error; some spans may be lost")
+            }
+        }
+        // Same bounded window for the log pipeline. The records pending at a
+        // SIGTERM are the ones that say why the daemon is going away, so
+        // dropping them is exactly the wrong trade.
+        if let Some(logs) = &self.logger_provider {
+            match logs.shutdown_with_timeout(timeout) {
+                Ok(()) => info!("OTLP logger flushed + shut down"),
+                Err(e) => {
+                    warn!(error = %e, "OTLP logger shutdown/flush error; some log records may be lost")
+                }
             }
         }
     }

@@ -1088,6 +1088,63 @@ protocol stays v1 — see `docs/PROTOCOL.md` §3.1). A server that continues the
 trace shows up in the same waterfall as the daemon's spans. There is no
 separate knob: disabled OTLP ⇒ no headers, no field.
 
+#### `[observability.otlp.logs]` — correlated log export (0.51.0)
+
+Ship **log records** over the same OTLP connection as the spans, each one
+carrying the `trace_id` / `span_id` of the span it was emitted inside. In
+Tempo / Jaeger / Cloud Trace, opening a call's trace then shows that call's
+log lines attached to the spans that explain them — the "why did this call do
+that" loop without switching to a separate log search and matching by hand on
+Call-ID and timestamp.
+
+```toml
+[observability.otlp.logs]
+enabled = true      # default false, like its parent
+level   = "info"    # export severity: trace|debug|info|warn|error|off
+```
+
+| Field     | Type | Default | Notes |
+|-----------|------|---------|-------|
+| `enabled` | bool | `false` | Master switch. Off ⇒ the appender layer is a no-op behind a shut filter. **Requires `[observability.otlp].enabled = true`** — enabling it alone is a fatal config error, see below. |
+| `level`   | enum | `info`  | Minimum severity to export. A per-layer filter, so the console and the collector can be set separately. An unrecognised value fails at load. |
+
+**Why the parent is required.** A record carries trace context only because
+the span layer attached an OpenTelemetry context on span entry. With
+`[observability.otlp]` off there is no such context, so every record would
+ship uncorrelated — which is what scraping journald already gives you, and
+the reason this feature exists. The daemon refuses that combination at load
+rather than delivering a silently useless stream.
+
+**Level is independent one way only.** `level` is attached to the export
+layer itself, so a `debug` console with an `info` collector is one run — the
+export can be *narrower* than the console. It cannot be wider: the global
+filter (`--log` / `RUST_LOG` / `PUT /admin/v1/log`) gates every layer, so
+narrowing that below `level` also narrows what ships. Same caveat already
+documented for the error ring. If you want `debug` at the collector, the
+console filter has to pass `debug` too.
+
+**Best-effort, like HEP and like spans** (CLAUDE.md §4.7). The emitting task
+hands each record to a bounded queue and returns; a worker thread drains it
+into the SDK, which batches to the collector. A full queue drops the record
+and ticks
+`siphon_ai_otlp_log_records_dropped_total{reason="queue_full"}` — watch that
+counter, because movement there means the console has lines the collector
+never received. A collector that is merely *down* is not an error and costs
+the call path nothing; a bad *endpoint* fails loud at startup.
+
+**Startup and shutdown.** The daemon logs
+`OTLP log export active` with the endpoint and level once the pipeline is
+live — deliberately after the layer opens, so that line is itself the first
+record to travel it. On `SIGTERM` the layer is closed *before* the provider
+is flushed, and the queue is drained, so the records explaining why the
+daemon is going away are not the ones lost.
+
+**The SDK's own diagnostics do not ship.** `opentelemetry`, `tonic`, `h2`,
+`hyper`, `tower` and `reqwest` are muted on the export layer, because
+exporting makes them talk and shipping that would make export cause export.
+They still reach the console and `GET /admin/v1/errors` — which is where you
+will see `BatchLogProcessor.ExportError` when a collector is unreachable.
+
 ## `[admin]`
 
 Authenticated admin API listener (0.10.0). Serves `/admin/*` (hangup,

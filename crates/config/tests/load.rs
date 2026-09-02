@@ -369,6 +369,103 @@ sample_ratio = 1.5
 }
 
 #[test]
+fn otlp_logs_off_by_default_and_default_to_info_when_enabled() {
+    let base = r#"
+[sip]
+listen = "127.0.0.1:5060"
+[bridge]
+ws_url = "wss://x/y"
+[observability.otlp]
+enabled = true
+"#;
+    let cfg = load_from_str_with_env(base, &MapEnv::new([])).expect("compiles");
+    let otlp = cfg.observability.otlp.expect("otlp compiled");
+    assert!(
+        otlp.logs.is_none(),
+        "log export must stay off until asked for — it puts a second stream on the operator's network"
+    );
+
+    let toml = format!(
+        "{base}
+[observability.otlp.logs]
+enabled = true
+"
+    );
+    let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+    let logs = cfg
+        .observability
+        .otlp
+        .expect("otlp compiled")
+        .logs
+        .expect("logs compiled");
+    assert_eq!(
+        logs.level, "info",
+        "shipping debug by default is a foot-gun"
+    );
+}
+
+#[test]
+fn otlp_logs_level_is_validated_at_load_and_case_insensitive() {
+    let toml = |level: &str| {
+        format!(
+            r#"
+[sip]
+listen = "127.0.0.1:5060"
+[bridge]
+ws_url = "wss://x/y"
+[observability.otlp]
+enabled = true
+[observability.otlp.logs]
+enabled = true
+level = "{level}"
+"#
+        )
+    };
+
+    let cfg = load_from_str_with_env(&toml("WARN"), &MapEnv::new([])).expect("compiles");
+    assert_eq!(
+        cfg.observability
+            .otlp
+            .expect("otlp")
+            .logs
+            .expect("logs")
+            .level,
+        "warn"
+    );
+
+    // A typo'd level must fail startup, not silently pick a default and
+    // ship the wrong volume for a release (CLAUDE.md §4.6).
+    let err = load_from_str_with_env(&toml("infoo"), &MapEnv::new([])).unwrap_err();
+    assert!(
+        format!("{err}").contains("logs].level"),
+        "expected a level error naming the field, got: {err}"
+    );
+}
+
+#[test]
+fn otlp_logs_without_the_parent_block_fails_load() {
+    // Enabling logs while the span pipeline is off would ship records with
+    // no trace context — the exact thing scraping journald already gives
+    // you, and the reason this feature exists. Refuse rather than deliver
+    // a silently useless stream.
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+[bridge]
+ws_url = "wss://x/y"
+[observability.otlp]
+enabled = false
+[observability.otlp.logs]
+enabled = true
+"#;
+    let err = load_from_str_with_env(toml, &MapEnv::new([])).unwrap_err();
+    assert!(
+        format!("{err}").contains("[observability.otlp].enabled is false"),
+        "expected the parent-required error, got: {err}"
+    );
+}
+
+#[test]
 fn public_address_falls_back_to_listen_ip_when_unset() {
     let env = MapEnv::new([]);
     let toml = r#"

@@ -9,5 +9,5 @@ pub mod registration;
 pub mod reload;
 pub mod runtime;
 
-pub use otel::OtelActivation;
+pub use otel::{OtelActivation, OtelLogControl};
 pub use runtime::Runtime;

@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Log records now ship over OTLP carrying the trace context of the span
+  they were emitted inside** — `[observability.otlp.logs]`, off by default
+  (#589).
+
+  Since 0.22.0 the daemon exports one trace per call, and since 0.23.0 that
+  context reaches the WS server. Logs never came along: a line scraped from
+  journald carries no `trace_id`, because the context lives in the process
+  and is gone by the time the text is written. Only an in-process bridge can
+  attach it. Now opening a call's trace in Tempo / Jaeger / Cloud Trace shows
+  the lines that explain each span, rather than sending you to a separate log
+  search to match on Call-ID and timestamp by hand.
+
+  Same endpoint, timeout and resource attributes as the span pipeline, with
+  its own export `level` so the console and the collector can have different
+  appetites (narrower only — the global filter is still a floor over every
+  layer, which `docs/CONFIG.md` states rather than papers over). Enabling it
+  without `[observability.otlp]` is a fatal config error: with the span layer
+  off nothing attaches a context, so every record would ship uncorrelated —
+  which is exactly what journald already gives you.
+
+  **Two bugs found by running it against a real collector rather than
+  trusting the wiring:**
+
+  - The OTel batch processor raises `tracing` events of its own from inside
+    `emit` ("queue full", "emitted after Shutdown"). Dispatched from within a
+    layer's `on_event`, a nested event runs a second filter pass over the
+    same thread-local state the outer event is still using and leaves its
+    bits behind — a `debug_assert` panic in debug builds, and *silently wrong
+    per-layer filtering* in release, which is worse. So nothing calls into
+    the SDK from `on_event`: the layer stamps the trace context, which must
+    happen there while the span's context is still current, and hands the
+    record to a bounded queue; a worker thread does the rest. That is also
+    the shape §4.7 asks for — queue, return, never block — and it gives drops
+    a real counter, `siphon_ai_otlp_log_records_dropped_total`.
+  - Teardown flushed the provider while the layer was still feeding it. The
+    layer is now closed and its queue drained *before* the flush, so the
+    records that say why the daemon is going away are not the ones lost.
+
+  The SDK's own diagnostics and its gRPC stack (`opentelemetry`, `tonic`,
+  `h2`, `hyper`, `tower`, `reqwest`) are muted on the export layer only —
+  exporting makes them talk, and shipping that would make export cause
+  export. They still reach the console and `GET /admin/v1/errors`, which is
+  where `BatchLogProcessor.ExportError` shows up when a collector is
+  unreachable.
+
 - **The daemon can emit its logs as JSON** — `--log-format json`, or
   `SIPHON_AI_LOG_FORMAT=json` for a systemd unit (#588). One object per
   line, the event's own fields flattened to the top level and the current

@@ -483,6 +483,20 @@ pub struct OtlpConfig {
     pub service_name: String,
     /// Extra resource attributes (`key`, `value`).
     pub attributes: Vec<(String, String)>,
+    /// `Some` when `[observability.otlp.logs].enabled` — ship log
+    /// records over the same connection, correlated to the span they
+    /// were emitted inside.
+    pub logs: Option<OtlpLogsConfig>,
+}
+
+/// Resolved OTLP **log**-export plan (`[observability.otlp.logs]`).
+#[derive(Debug, Clone)]
+pub struct OtlpLogsConfig {
+    /// Minimum severity to export, already validated at load. One of
+    /// `trace` | `debug` | `info` | `warn` | `error` | `off`, lowercased.
+    /// Applied as a *per-layer* filter on the export layer, so it is
+    /// independent of the console filter in the narrowing direction.
+    pub level: String,
 }
 
 /// Resolved HEP3 (Homer) plan. The daemon binary builds a real
@@ -1274,6 +1288,12 @@ pub enum CompileError {
 
     #[error("[observability.otlp].sample_ratio {0} is out of range; must be between 0.0 and 1.0")]
     OtlpBadSampleRatio(f64),
+
+    #[error("[observability.otlp.logs].level {0:?} is not a level; use trace, debug, info, warn, error or off")]
+    OtlpBadLogLevel(String),
+
+    #[error("[observability.otlp.logs].enabled = true but [observability.otlp].enabled is false; OTLP log export ships over the trace pipeline's connection and carries the trace context its spans create")]
+    OtlpLogsWithoutParent,
 
     #[error("[admin].listen {0:?} is not a valid socket address: {1}")]
     BadAdminListen(String, std::net::AddrParseError),
@@ -3433,6 +3453,9 @@ fn compile_observability(raw: RawObservability) -> Result<ObservabilityConfig, C
 
 fn compile_otlp(raw: crate::raw::RawObservabilityOtlp) -> Result<Option<OtlpConfig>, CompileError> {
     if !raw.enabled {
+        if raw.logs.enabled {
+            return Err(CompileError::OtlpLogsWithoutParent);
+        }
         return Ok(None);
     }
     let endpoint = raw
@@ -3447,12 +3470,38 @@ fn compile_otlp(raw: crate::raw::RawObservabilityOtlp) -> Result<Option<OtlpConf
         .service_name
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "siphon-ai".to_string());
+    // The log pipeline rides the trace pipeline's endpoint and, more to
+    // the point, its *context*: a record only carries a trace id because
+    // the OTLP span layer attached one on span entry. Enabling logs with
+    // the parent off would silently ship uncorrelated records — exactly
+    // what the journald path already does — so refuse at load (§4.6)
+    // instead of pretending.
+    let logs = match raw.logs.enabled {
+        false => None,
+        true => {
+            let level = raw
+                .logs
+                .level
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "info".to_string())
+                .to_ascii_lowercase();
+            if !matches!(
+                level.as_str(),
+                "trace" | "debug" | "info" | "warn" | "error" | "off"
+            ) {
+                return Err(CompileError::OtlpBadLogLevel(level));
+            }
+            Some(OtlpLogsConfig { level })
+        }
+    };
+
     Ok(Some(OtlpConfig {
         endpoint,
         sample_ratio,
         timeout: Duration::from_millis(raw.timeout_ms.unwrap_or(5000)),
         service_name,
         attributes: raw.attributes.unwrap_or_default().into_iter().collect(),
+        logs,
     }))
 }
 

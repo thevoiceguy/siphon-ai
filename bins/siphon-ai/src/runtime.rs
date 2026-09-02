@@ -162,6 +162,10 @@ pub struct Runtime {
     /// OTLP trace exporter (0.22.0). `Some` when `[observability.otlp]` is
     /// enabled; held so teardown can flush pending spans before exit.
     otel: Option<siphon_ai_telemetry::OtelTelemetry>,
+    /// Handle on the OTLP log layer's filter (0.51.0). `Some` whenever the
+    /// daemon binary built one, enabled or not; teardown closes the layer
+    /// before flushing so the flush isn't racing its own input.
+    otel_log: Option<crate::OtelLogControl>,
     /// Per-`[[register]]` background tasks. v1's tasks are no-ops
     /// (UAC drive lands in a follow-up); we still own the handles
     /// so shutdown awaits them cleanly.
@@ -187,7 +191,7 @@ impl Runtime {
     /// Binds the UDP socket eagerly so a "port already in use" error
     /// surfaces during startup, not after we've logged "ready".
     pub async fn build(config: Config, log_filter: LogFilterHandle) -> Result<Self> {
-        Self::build_with_reload(config, None, log_filter, None).await
+        Self::build_with_reload(config, None, log_filter, None, None).await
     }
 
     /// Like [`build`](Self::build) but with the `--config` path so a
@@ -200,6 +204,7 @@ impl Runtime {
         config_path: Option<PathBuf>,
         log_filter: LogFilterHandle,
         otel_activation: Option<crate::OtelActivation>,
+        otel_log_control: Option<crate::OtelLogControl>,
     ) -> Result<Self> {
         // Fingerprint the restart-required sections before the config
         // is destructured, so a later SIGHUP reload can detect changes
@@ -287,11 +292,37 @@ impl Runtime {
                         service_name: otlp.service_name.clone(),
                         node_id: node.id.clone(),
                         extra_attributes: otlp.attributes.clone(),
+                        logs: otlp.logs.is_some(),
                     })
                     .map_err(|e| anyhow!("OTLP trace export build failed: {e}"))?;
                 // Provider is now the process global; make the layer live.
                 if let Some(activation) = otel_activation {
                     activation.activate();
+                }
+                // Log export (0.51.0), when `[observability.otlp.logs]` is
+                // on. Deliberately after the span layer is live: a record
+                // only carries a trace id because the span layer attached a
+                // context on entry, so opening the log layer first would
+                // ship a handful of uncorrelated records at startup.
+                //
+                // The export level is a per-layer filter here rather than a
+                // check at emit time, so a level of `warn` costs nothing for
+                // the info firehose instead of building a record and
+                // discarding it.
+                if let (Some(control), Some(logs), Some(provider)) = (
+                    otel_log_control.as_ref(),
+                    otlp.logs.as_ref(),
+                    telemetry.logger_provider(),
+                ) {
+                    control.activate(provider, &logs.level);
+                    // Logged after activation, so the line announcing the
+                    // pipeline is the first record to travel it — which
+                    // makes it a live end-to-end check, not a claim.
+                    info!(
+                        endpoint = %otlp.endpoint,
+                        level = %logs.level,
+                        "OTLP log export active"
+                    );
                 }
                 Some(telemetry)
             }
@@ -1384,6 +1415,7 @@ impl Runtime {
             hep_worker,
             upload_worker: upload_worker_handle,
             otel,
+            otel_log: otel_log_control,
             registration_mgr,
             registration_listeners,
             drain,
@@ -1522,6 +1554,13 @@ impl Runtime {
         // blocking thread — the SDK's shutdown is synchronous and must not be
         // called from within the async batch worker's runtime context.
         if let Some(otel) = self.otel {
+            // Stop feeding the log pipeline first. Records emitted while the
+            // provider is being flushed either race the flush or land in an
+            // already-shut-down processor; everything from here is
+            // console-only, by which point the collector has had its window.
+            if let Some(control) = &self.otel_log {
+                control.quiesce();
+            }
             let _ = tokio::task::spawn_blocking(move || {
                 otel.shutdown(Duration::from_secs(5));
             })

@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **forge-media pin `v2026.08.26` → `v2026.09.02`** — a routine roll-up.
+  Nothing in it was asked for by this project and nothing in it changes
+  this daemon's behaviour; the bump is to stop the pin drifting.
+
+  Three tags passed (`v2026.09.01` was superseded untagged by
+  `v2026.09.01.1`). Across the whole range only three files we build
+  changed. **forge-engine** gives `MediaSession` a dynamic payload-type
+  map — a B2BUA learns the far leg's negotiated payload types only when
+  its SDP answer arrives, and a re-INVITE can change them mid-call — held
+  in an `AtomicU32` so the per-packet forwarding path stays lock-free.
+  It is additive: every constructor seeds it from the frozen
+  `transcoding_config.payload_type_map` the forwarding path already read,
+  so a consumer that never calls the setter behaves identically, and we
+  have no leg whose payload types arrive late. **forge-sdp** moves its
+  `sip-sdp` dependency from a submodule-relative path to
+  `tag = "v2026.08.25"` — the same tag this workspace pins every other
+  `sip-*` crate to, so the lock still holds exactly one `sip-sdp`
+  (verified; differing tags would have linked two copies of the SDP
+  negotiator).
+
+  Everything else in the range is **forge-conference** — DTMF dial-out,
+  PIN auth, wait-for-moderator, an 80 ms RFC 2833 duplicate window. We
+  do not depend on that crate (our conferencing is forge-mixer), and the
+  dedup lives in `forge-conference`, not `forge-dtmf`, so this daemon's
+  DTMF path is untouched.
+
+  **siphon-rs is deliberately not bumped**: its newest tag is still
+  `v2026.08.25`, which we already pin — and which is the tag this forge
+  release records in `external/siphon-rs`, so the embedded pair matches.
+
+  Verified with the full workspace suite, a `--features webrtc` build,
+  and all 60 SIPp signaling scenarios.
+
 ### Added
 
 - **Log records now ship over OTLP carrying the trace context of the span

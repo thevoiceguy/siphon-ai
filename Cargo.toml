@@ -357,7 +357,44 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v20
 # upstream gate at https://github.com/thevoiceguy/forge-media/pull/39.
 #
 # forge-media is pinned to a **release tag** (RELEASING.md, adopted
-# 2026-08-24). Bumped 2026-08-26 **v2026.08.25 → v2026.08.26** for
+# 2026-08-24). Bumped 2026-09-02 **v2026.08.26 → v2026.09.02**, a
+# routine roll-up: nothing in it was asked for by this project, and
+# nothing in it changes our behaviour.
+#
+# Three tags passed (v2026.09.01 was superseded untagged by v2026.09.01.1).
+# Per-crate audit over the whole range — only three files we build changed:
+#
+#  * **forge-engine** `session.rs` + `forwarding.rs`: `MediaSession` gains a
+#    dynamic payload-type map (`payload_type_map()` /
+#    `set_payload_type_map()`), because a B2BUA learns the far leg's
+#    negotiated PTs only when its SDP answer arrives and a re-INVITE can
+#    change them mid-call. Held in an `AtomicU32` so the per-packet
+#    forwarding path stays lock-free. **Additive**: all three constructors
+#    seed it from `config.transcoding_config.payload_type_map`, the frozen
+#    value the forwarding path read before, so a consumer that never calls
+#    the setter — us — behaves identically. `to_transcoder_codec` also
+#    became `pub`. First consumer is FCP, not this daemon; we have no
+#    B2BUA leg whose PTs arrive late.
+#  * **forge-sdp** `Cargo.toml`: `sip-sdp` moves from a submodule-relative
+#    path to `git … tag = "v2026.08.25"`. That is the *same* tag this
+#    workspace pins every other `sip-*` crate to, so cargo unifies them and
+#    the lock still holds exactly one `sip-sdp`. Had the tags differed we
+#    would have linked two copies of the SDP negotiator — worth re-checking
+#    on any future forge bump that lands before ours.
+#
+# Everything else in the range is **forge-conference** (DTMF dial-out, PIN
+# auth, wait-for-moderator, and an 80 ms RFC 2833 duplicate window). We do
+# not depend on that crate — our conferencing is forge-mixer — and the
+# dedup lives in `forge-conference/dtmf_commands.rs`, not `forge-dtmf`, so
+# this daemon's DTMF path is untouched. No crate version was bumped in the
+# range; forge-engine's new public API arguably owed a minor bump, raised
+# upstream rather than worked around here.
+#
+# siphon-rs is deliberately NOT bumped alongside: its newest tag is still
+# **v2026.08.25**, which we already pin — and which is the tag this forge
+# release records in `external/siphon-rs`, so the embedded pair matches.
+#
+# (Prior: 2026-08-26 **v2026.08.25 → v2026.08.26** for
 # forge-media #134, which this project asked for: `TransportConfig::
 # local_port` lets a WebRTC leg bind its one socket (BUNDLE + rtcp-mux)
 # inside `[media].rtp_port_range` instead of an ephemeral port, and
@@ -370,7 +407,7 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v20
 # for exhaustive `TransportConfig` literals; we build ours with
 # `..Default::default()`, and `local_port: 0` preserves the old bind
 # behaviour for every other consumer. forge-engine 0.5.0 → 0.5.1 is
-# additive. Nothing else in the workspace changed between the two tags.
+# additive. Nothing else in the workspace changed between the two tags.)
 #
 # (Prior: 2026-08-23 rev pin 1fe94a502efa = nine commits, of which
 # **three were filed from this project** and two more reach our build.)
@@ -493,25 +530,25 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v20
 # comment for the current rev.) Prior forge pins: forge 1c996ae5fb4f = #86
 # neural VAD; forge 3c59b5f6e464 = #82-#85 dependency migrations; forge
 # 5fa76fb38675 = #81.
-forge-core    = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.26" }
-forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.26" }
-forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.26", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
-forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.26" }
-forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.26" }
-forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.26" }
-forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.26" }
-forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.26" }
+forge-core    = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
+forge-rtp     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
+forge-engine  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
+forge-codecs  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
+forge-sdp     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
+forge-dtmf    = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
+forge-vad     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
+forge-hep     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
 # WebRTC leg (DEV_PLAN_WebRTC.md Phase 2). Only reachable through
 # siphon-ai-webrtc-glue, which the daemon pulls in behind its
 # `webrtc` feature — a default build links neither.
-forge-webrtc  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.26" }
-forge-ice     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.26" }
+forge-webrtc  = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
+forge-ice     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
 # Conference rooms (0.7.0): forge-mixer is the per-room AudioMixer;
 # forge-injection provides ToneGenerator (join/leave tones now, MOH
 # for park later). Deliberately NOT forge-conference — its DTMF
 # IVR/PIN/host-control layer is unused per DEV_PLAN_0.7.0.md §9.4.
-forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.26" }
-forge-injection = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.26" }
+forge-mixer     = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
+forge-injection = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.09.02" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.

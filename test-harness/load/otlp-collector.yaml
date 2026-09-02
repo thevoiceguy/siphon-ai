@@ -1,0 +1,23 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+
+exporters:
+  debug:
+    verbosity: basic
+  file:
+    path: /otlp-out/logs.json
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [debug, file]
+    traces:
+      receivers: [otlp]
+      exporters: [debug]

@@ -14,7 +14,7 @@ evidence and flags any gaps.
 
 | Source                              | What's there                                                                           |
 |-------------------------------------|----------------------------------------------------------------------------------------|
-| Daemon log (stdout / journald)      | Lifecycle events, state transitions, errors, registration drive output                 |
+| Daemon log (stdout / journald)      | Lifecycle events, state transitions, errors, registration drive output. Human-readable text by default; `--log-format json` / `SIPHON_AI_LOG_FORMAT=json` (0.51.0) emits one JSON object per line instead, so `call_id` / `route` / `from_user` reach a shipper as queryable fields rather than substrings — see `docs/CONFIG.md` → *CLI flags & environment*. **Switching to `json` breaks the fail2ban journal regex** (`docs/SECURITY_FAIL2BAN.md`). |
 | `tracing` spans                     | Per-call latency between `on_invite` → `on_matched` → `accept_inbound` → `start_session`. With `[observability.otlp]` (0.22.0) these export as one OTLP trace per call (root carries the SIP `Call-ID`, direction, from/to) to Tempo / Jaeger — and the trace context propagates to the developer's WS server via `traceparent` on the WS upgrade + `start.trace_context` (0.23.0), so a server that continues it appears in the same waterfall. |
 | Homer UI (`http://.../`)            | SIP call flow + RTCP + CDR + log chunks correlated by SIP `Call-ID`                    |
 | Prometheus `/metrics`               | Counters / histograms; `siphon_ai_*` for app-level, `forge_*` for media, `heplify_*` for collector  |

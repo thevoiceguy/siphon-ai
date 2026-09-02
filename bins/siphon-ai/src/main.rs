@@ -37,6 +37,14 @@ struct Cli {
     #[arg(long, env = "SIPHON_AI_LOG", global = true)]
     log: Option<String>,
 
+    /// Log output format: `text` (human-readable, the default) or
+    /// `json` (one JSON object per line, for a log shipper). Orthogonal
+    /// to `--log`, which selects *what* is logged, not how it is
+    /// rendered.
+    #[arg(long = "log-format", env = "SIPHON_AI_LOG_FORMAT", value_enum,
+          default_value_t = LogFormat::Text, global = true)]
+    log_format: LogFormat,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -140,6 +148,27 @@ enum PrintFormat {
     Json,
 }
 
+/// How the daemon renders log events (`--log-format`).
+///
+/// This picks the *formatter*, never the filter — `--log` /
+/// `SIPHON_AI_LOG` still decide which events are emitted, and
+/// `PUT /admin/v1/log` still retunes that at runtime. It also does not
+/// touch the read-only subcommands' report output: `check`,
+/// `print-config` and `route-test` write their summaries straight to
+/// stdout, not through `tracing`, so those stay human-readable in both
+/// modes. What the flag *does* change for a subcommand is the
+/// rendering of the load-time `warn!`s it surfaces.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum LogFormat {
+    /// The default: one human-readable line per event, ANSI-coloured
+    /// when stdout is a terminal.
+    Text,
+    /// One JSON object per line, event fields flattened to the top
+    /// level. For OpenTelemetry Collector / Fluent Bit / Vector /
+    /// Promtail — anything that indexes fields rather than text.
+    Json,
+}
+
 /// The config path, from `--config` or `$SIPHON_AI_CONFIG`. A clap
 /// `global` arg can't be `required`, so enforce presence here.
 fn config_path(cli: &Cli) -> Result<PathBuf> {
@@ -171,7 +200,7 @@ async fn main() -> Result<()> {
     // SRTP-key-in-cleartext footgun); without a subscriber those are
     // silently dropped and the preflight is less informative than a real
     // boot.
-    let (log_filter, otel_activation) = init_tracing(cli.log.as_deref());
+    let (log_filter, otel_activation) = init_tracing(cli.log.as_deref(), cli.log_format);
 
     // Read-only subcommands dispatch here and exit — no socket binding,
     // no runtime (but tracing is live, so config warnings show).
@@ -620,7 +649,10 @@ const DEFAULT_LOG_FILTER: &str = "warn,\
 /// shorthand `tracing_subscriber::fmt()` builder, because the
 /// shorthand doesn't expose a reload handle. The layered form is
 /// the canonical way to make `EnvFilter` mutable at runtime.
-fn init_tracing(cli_filter: Option<&str>) -> (LogFilterHandle, OtelActivation) {
+fn init_tracing(
+    cli_filter: Option<&str>,
+    log_format: LogFormat,
+) -> (LogFilterHandle, OtelActivation) {
     const DEFAULT: &str = DEFAULT_LOG_FILTER;
 
     let env_filter = match cli_filter {
@@ -649,18 +681,55 @@ fn init_tracing(cli_filter: Option<&str>) -> (LogFilterHandle, OtelActivation) {
     let otel_layer = tracing_opentelemetry::layer()
         .with_tracer(siphon_ai::otel::LazyGlobalTracer::default())
         .with_filter(otel_filter);
-    // `fmt::layer()` defaults to ANSI on regardless of stdout type
-    // — unlike the higher-level `fmt::Subscriber::builder()` which
-    // does tty auto-detection. Without the explicit `with_ansi`
-    // call, every log line under systemd lands in journald with
-    // embedded `\x1b[..m` escape sequences. That's harmless to
-    // human readers (journalctl strips them on display) but breaks
-    // every downstream consumer that does string matching against
-    // the journal — most importantly the fail2ban `<HOST>` extractor
-    // for our trunk-rejection regex, which silently never matches.
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_target(true)
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()));
+    // The formatting layer, `text` (default) or `json`. The two arms
+    // have different types, so both are boxed into one
+    // `Box<dyn Layer<_>>` before joining the registry.
+    //
+    // `text` is deliberately the default and is byte-for-byte what the
+    // daemon has always emitted: it is the right output for
+    // `journalctl` on one node, and — see the `with_ansi` note below
+    // — for the fail2ban regex that reads the journal. `json` is for
+    // the case a text line cannot serve: a shipper that indexes
+    // *fields*, where `call_id` / `route` / `from_user` should arrive
+    // as queryable keys instead of substrings some regex has to pick
+    // back out (and silently stops picking out the day a call site
+    // gains a field).
+    let fmt_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> = match log_format {
+        // `fmt::layer()` defaults to ANSI on regardless of stdout type
+        // — unlike the higher-level `fmt::Subscriber::builder()` which
+        // does tty auto-detection. Without the explicit `with_ansi`
+        // call, every log line under systemd lands in journald with
+        // embedded `\x1b[..m` escape sequences. That's harmless to
+        // human readers (journalctl strips them on display) but breaks
+        // every downstream consumer that does string matching against
+        // the journal — most importantly the fail2ban `<HOST>` extractor
+        // for our trunk-rejection regex, which silently never matches.
+        LogFormat::Text => Box::new(
+            tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout())),
+        ),
+        // No `with_ansi` here on purpose rather than `with_ansi(false)`:
+        // the JSON writer never emits escape sequences, so passing the
+        // flag would only suggest it might.
+        //
+        // `flatten_event` puts the event's own fields at the top level
+        // instead of nesting them under `fields`, which is what a
+        // collector can index without a transform. `with_current_span`
+        // keeps the innermost span's fields — that is where `call_id`
+        // lives, since every per-call function is `#[instrument(fields(call_id))]`.
+        // `with_span_list(false)` drops the full ancestor chain, which
+        // would repeat those same fields on every line and put no bound
+        // on line size.
+        LogFormat::Json => Box::new(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .flatten_event(true)
+                .with_current_span(true)
+                .with_span_list(false)
+                .with_target(true),
+        ),
+    };
     // `try_init` so tests that initialise the subscriber separately
     // don't crash this process; the second init is a noop. The
     // reload handle works either way because the layer is part of
@@ -796,6 +865,112 @@ mod tests {
             out.contains("boom"),
             "an unlisted dependency must not be silently muted; got {out:?}"
         );
+    }
+
+    /// Render one event inside a `call_id`-bearing span through the
+    /// same JSON formatter `--log-format json` installs, and return the
+    /// line. Mirrors the real layer's configuration exactly — a copy
+    /// that drifted would prove nothing.
+    fn json_line(emit: impl FnOnce()) -> serde_json::Value {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let buf = Buffer::default();
+        let layer = tracing_subscriber::fmt::layer()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(false)
+            .with_target(true)
+            .with_writer(buf.clone());
+        let subscriber = tracing_subscriber::registry()
+            .with(EnvFilter::try_new("info").expect("directive parses"))
+            .with(layer);
+        tracing::subscriber::with_default(subscriber, emit);
+        let out = buf.contents();
+        serde_json::from_str(out.trim()).unwrap_or_else(|e| panic!("not JSON: {e}: {out:?}"))
+    }
+
+    /// The point of the whole flag (#588): under `json`, a field a
+    /// call site attached is a *key*, not a substring of the message
+    /// that a shipper has to regex back out.
+    #[test]
+    fn json_format_promotes_event_fields_to_top_level_keys() {
+        let line = json_line(|| {
+            tracing::info!(target: "siphon_ai::call", from = "sip:alice@pbx", "received invite");
+        });
+        assert_eq!(
+            line["fields"],
+            serde_json::Value::Null,
+            "flatten_event(true) should leave no `fields` nesting: {line}"
+        );
+        assert_eq!(
+            line["from"], "sip:alice@pbx",
+            "event field must be a top-level key: {line}"
+        );
+        assert_eq!(line["message"], "received invite", "{line}");
+        assert_eq!(line["target"], "siphon_ai::call", "{line}");
+        assert_eq!(line["level"], "INFO", "{line}");
+    }
+
+    /// `call_id` lives on the span, not the event — every per-call
+    /// function is `#[instrument(fields(call_id = ...))]`. It reaches
+    /// the line via `with_current_span(true)`, and the acceptance
+    /// criterion is that it is queryable rather than buried in text.
+    #[test]
+    fn json_format_carries_call_id_from_the_current_span() {
+        let line = json_line(|| {
+            let span = tracing::info_span!("handle_invite", call_id = "abc123@pbx");
+            let _g = span.enter();
+            tracing::info!("call answered");
+        });
+        assert_eq!(
+            line["span"]["call_id"], "abc123@pbx",
+            "the current span's call_id must ride along: {line}"
+        );
+        // `with_span_list(false)`: the ancestor chain is not repeated.
+        assert_eq!(
+            line["spans"],
+            serde_json::Value::Null,
+            "span list should stay off so line size is bounded: {line}"
+        );
+    }
+
+    /// The default must not move. Existing operators read this in
+    /// `journalctl`, and the fail2ban `<HOST>` extractor string-matches
+    /// it — a silent switch to JSON would break bans, not just eyes.
+    #[test]
+    fn text_is_the_default_log_format() {
+        use clap::Parser as _;
+        let cli = super::Cli::parse_from(["siphon-ai", "--config", "/dev/null"]);
+        assert_eq!(cli.log_format, super::LogFormat::Text);
+    }
+
+    /// `--log-format` is `global = true`, so it parses on either side
+    /// of a subcommand — same ergonomics as `--config` / `--log`.
+    #[test]
+    fn log_format_parses_before_and_after_a_subcommand() {
+        use clap::Parser as _;
+        for argv in [
+            vec![
+                "siphon-ai",
+                "--log-format",
+                "json",
+                "check",
+                "--config",
+                "x",
+            ],
+            vec![
+                "siphon-ai",
+                "check",
+                "--config",
+                "x",
+                "--log-format",
+                "json",
+            ],
+        ] {
+            let cli = super::Cli::parse_from(&argv);
+            assert_eq!(cli.log_format, super::LogFormat::Json, "argv: {argv:?}");
+        }
     }
 
     /// The floor is a floor, not a ceiling: first-party crates still

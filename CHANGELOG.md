@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-09-03
+
 ### Added
 
 - **A dead collector is now visible on `/metrics`, for both exporters**
@@ -654,6 +656,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which siphon-ai compiles today (forge-webrtc is not yet a dependency;
   the version bumps are manifest-only for the crates we use), so no
   behaviour change.
+
+### Fixed
+
+- **`examples/browser-sip/gen-cert.sh` works on a fresh clone** (#587) — it
+  assumed state a previous run left behind; the lab's first-time path now
+  generates the browser-trusted cert without it.
 
 ## [0.50.1] - 2026-08-24
 

@@ -50,7 +50,7 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
-**Current release: v0.50.1.** Production-deployed against real carriers
+**Current release: v0.51.0.** Production-deployed against real carriers
 (Twilio Elastic SIP Trunking, FreeSWITCH, CUCM). The WS protocol is still
 `version: "1"` — every release has been additive, so a WS server built
 against 0.1.0 keeps working unchanged. Daemon upgrades are near-drop-in

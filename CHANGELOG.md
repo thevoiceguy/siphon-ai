@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A dead collector is now visible on `/metrics`, for both exporters**
+  ([#596](https://github.com/thevoiceguy/siphon-ai/issues/596)). The 0.51.0 OTLP soak
+  killed the collector for 46 minutes under 200 concurrent calls and **no metric moved**:
+  `siphon_ai_otlp_log_records_dropped_total{reason="queue_full"}` guards the daemon's own
+  queue, which never fills against a dead collector because the SDK accepts records
+  instantly and discards the batch one hop later; the only evidence was an
+  `opentelemetry_sdk` ERROR line that a target-named log filter mutes. HEP had the same
+  blind spot since #460, and CLAUDE.md §4.7 has described a `siphon_ai_hep_collector_up`
+  gauge that did not exist.
+  - **OTLP**: the span and log exporters are wrapped so every batch's outcome is observed.
+    New gauge `siphon_ai_otlp_collector_up` (1/0, shared by spans and logs — same
+    endpoint), new `reason="collector_down"` on `siphon_ai_otlp_log_records_dropped_total`
+    counting every record in a failed batch, and new
+    `siphon_ai_otlp_spans_dropped_total{reason="collector_down"}` for spans. All present
+    from startup. `queue_full` keeps meaning what it meant.
+  - **HEP**: hep-rs grew `UdpHepSink::send_failures` (hep-rs #3), so a send the socket
+    refused — `ECONNREFUSED` after a dead collector's ICMP port-unreachable — is now
+    `siphon_ai_hep_packets_dropped_total{reason="collector_down"}`, and
+    `siphon_ai_hep_collector_up` is derived from it each 10 s sample: 0 when any send was
+    refused in the interval, 1 otherwise. Derived over the window because connected UDP
+    reports the refusal on the *following* send, so a point sample would flap. Every packet
+    handed to the sink now lands in exactly one of sent / queue_full / collector_down. UDP
+    caveat, documented: a black-holed collector (no ICMP back) still looks up.
+  - Reference alerts `SiphonAIOtlpCollectorDown` and `SiphonAIHepCollectorDown` in
+    `examples/observability/rules/alerting.yml`; CONFIG.md, DEPLOY.md, HEP.md, DEV_PLAN R12
+    and §4.7 now describe what exists.
+- **The `warn` log floor is enforced, not just default**
+  ([#597](https://github.com/thevoiceguy/siphon-ai/issues/597)). A `--log` / `RUST_LOG` /
+  `SIPHON_AI_LOG` directive that names only targets (`siphon_ai=debug,siphon=info` — the
+  shape of every example the repo used to ship) *replaced* the built-in filter, floor
+  included, and silently muted every crate it did not name: `hep_rs` reporting a dead
+  collector, `opentelemetry_sdk` reporting a failed export. The fail-safe held only while
+  nobody set a filter. Now such a directive gets `warn,` prepended — it can turn crates up
+  but cannot mute the ones it did not name — while a directive that states its own global
+  level (`info,siphon_ai=debug`, or a bare `off`) is left alone. The same rule applies to
+  `PUT /admin/v1/log`, whose response `filter` is what was actually installed. The daemon
+  logs `log filter active` with the effective directive and its source at startup.
+  **`--log-no-floor`** (`SIPHON_AI_LOG_NO_FLOOR`) restores the old replace-everything
+  behaviour for anyone who genuinely wants silence, and says so at startup with the one
+  `warn` that still gets out.
+
 - **Mutual TLS on the SIP trunk: verify who is calling, and route on it**
   (siphon-rs [#129](https://github.com/thevoiceguy/siphon-rs/issues/129) /
   [#130](https://github.com/thevoiceguy/siphon-rs/pull/130), pin `v2026.08.25` →

@@ -22,16 +22,20 @@
 //! into [`HEP_PACKETS_DROPPED_TOTAL`] and [`HEP_PACKETS_SENT_TOTAL`]
 //! so operators see degradation without the call path stalling.
 //!
-//! **What the metrics cannot tell you.** `sent` counts wire-level
-//! success, so a collector that is up but discarding still counts;
-//! and an *unreachable* collector is counted nowhere — the send
-//! failure is detected inside the upstream worker, which has no
-//! counter for it, so those packets are neither `sent` nor
-//! `dropped`. The signal for that case is the upstream throttled
-//! `hep_rs::udp` WARN, which is why `hep_rs` must stay in the
-//! daemon's default log filter (`bins/siphon-ai/src/main.rs`). A
-//! `collector_up` gauge would need a send-failure counter added to
-//! `hep-rs` — deliberately not faked here (siphon-ai #460).
+//! **An unreachable collector** (#596, closing the gap #460 left): the
+//! sink also counts sends the socket refused
+//! (`UdpHepSink::send_failures`), mirrored here as
+//! `siphon_ai_hep_packets_dropped_total{reason="collector_down"}`, and
+//! [`HEP_COLLECTOR_UP`] is derived from it each sample — `0` when any
+//! send failed during the last interval, `1` otherwise. So every packet
+//! handed to the sink is exactly one of sent / queue_full /
+//! collector_down. The UDP caveat stands: a connected UDP socket only
+//! learns a collector is dead from the ICMP port-unreachable it sends
+//! back, so a *black-holed* collector (a firewall dropping silently)
+//! still looks up — `sent` counts wire-level success, not delivery.
+//! The throttled `hep_rs::udp` WARN remains, and the daemon's log
+//! filter keeps a `warn` floor under every target so it is always
+//! reachable (#597).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -45,7 +49,7 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use crate::metrics::{HEP_PACKETS_DROPPED_TOTAL, HEP_PACKETS_SENT_TOTAL};
+use crate::metrics::{HEP_COLLECTOR_UP, HEP_PACKETS_DROPPED_TOTAL, HEP_PACKETS_SENT_TOTAL};
 
 /// Telemetry-owned HEP plumbing. Holds the shared `Arc<dyn HepSink>`
 /// for both the sip-hep / forge-hep emitters and SiphonAI's own
@@ -95,21 +99,41 @@ const HEP_METRICS_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::fr
 /// rather than `increment` because both upstream values are monotonic
 /// totals: mirroring them directly cannot drift, whereas a delta
 /// computed here would double-count on any missed tick.
-fn publish_counters(sink: &UdpHepSink) {
+fn publish_counters(sink: &UdpHepSink) -> u64 {
     counter!(HEP_PACKETS_SENT_TOTAL).absolute(sink.sent());
     counter!(HEP_PACKETS_DROPPED_TOTAL, "reason" => "queue_full").absolute(sink.drops());
+    let failures = sink.send_failures();
+    counter!(HEP_PACKETS_DROPPED_TOTAL, "reason" => "collector_down").absolute(failures);
+    failures
+}
+
+/// Publish the collector-up gauge from two consecutive send-failure
+/// readings: up unless a send failed in between (#596). Derived over a
+/// window rather than from the last send because a connected UDP socket
+/// reports a dead collector's ICMP refusal on the *next* send, so
+/// individual sends alternate success/failure and a point sample would
+/// flap.
+fn publish_collector_up(previous_failures: u64, failures: u64) {
+    let up = if failures > previous_failures {
+        0.0
+    } else {
+        1.0
+    };
+    metrics::gauge!(HEP_COLLECTOR_UP).set(up);
 }
 
 /// Republish [`publish_counters`] every
 /// [`HEP_METRICS_SAMPLE_INTERVAL`] until cancelled.
-async fn sample_counters(sink: UdpHepSink) {
+async fn sample_counters(sink: UdpHepSink, mut previous_failures: u64) {
     let mut ticker = tokio::time::interval(HEP_METRICS_SAMPLE_INTERVAL);
     // The first tick completes immediately; skip rather than burst if
     // the runtime ever stalls us past a whole interval.
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         ticker.tick().await;
-        publish_counters(&sink);
+        let failures = publish_counters(&sink);
+        publish_collector_up(previous_failures, failures);
+        previous_failures = failures;
     }
 }
 
@@ -239,8 +263,11 @@ impl HepTelemetry {
             // `siphon_ai_hep_packets_dropped_total` would have to
             // survive the series being *absent* until the first drop,
             // which is exactly when nobody is looking at it.
-            publish_counters(&shutdown_sink);
-            let sampler = tokio::spawn(sample_counters(shutdown_sink.clone()));
+            let failures = publish_counters(&shutdown_sink);
+            // Presumed reachable until a send says otherwise; the first
+            // sample interval settles it.
+            publish_collector_up(failures, failures);
+            let sampler = tokio::spawn(sample_counters(shutdown_sink.clone(), failures));
             worker_handle = Some(HepWorkerHandle {
                 sink: shutdown_sink,
                 worker: Some(worker),
@@ -517,6 +544,20 @@ mod tests {
     /// #460: both series must exist before the first packet, so an
     /// alert can be written against them directly instead of having to
     /// tolerate an absent series until something goes wrong.
+    /// #596: the gauge is derived over a sample window, so the
+    /// alternating success/failure a connected UDP socket produces
+    /// against a dead collector reads as a steady 0, and a quiet
+    /// interval after recovery reads as 1.
+    #[test]
+    fn collector_up_follows_send_failures_over_the_window() {
+        let out = rendered(|| publish_collector_up(0, 0));
+        assert!(out.contains("siphon_ai_hep_collector_up 1"), "{out}");
+        let out = rendered(|| publish_collector_up(3, 7));
+        assert!(out.contains("siphon_ai_hep_collector_up 0"), "{out}");
+        let out = rendered(|| publish_collector_up(7, 7));
+        assert!(out.contains("siphon_ai_hep_collector_up 1"), "{out}");
+    }
+
     #[tokio::test]
     async fn counters_are_published_from_startup() {
         // Collector address is never listened on — nothing here needs
@@ -524,7 +565,9 @@ mod tests {
         let cfg = UdpHepSinkConfig::new("127.0.0.1:1".parse().unwrap());
         let (sink, _worker) = UdpHepSink::start(cfg).await.expect("sink starts");
 
-        let out = rendered(|| publish_counters(&sink));
+        let out = rendered(|| {
+            publish_counters(&sink);
+        });
 
         assert!(
             out.contains("siphon_ai_hep_packets_sent_total 0"),
@@ -557,7 +600,9 @@ mod tests {
         }
 
         assert!(sink.drops() > 0, "expected the bounded queue to overflow");
-        let out = rendered(|| publish_counters(&sink));
+        let out = rendered(|| {
+            publish_counters(&sink);
+        });
         let expected = format!(
             r#"siphon_ai_hep_packets_dropped_total{{reason="queue_full"}} {}"#,
             sink.drops()

@@ -16,7 +16,8 @@ command), and each has an environment twin for systemd units and containers.
 | Flag | Env | Default | What it does |
 |---|---|---|---|
 | `--config <PATH>` | `SIPHON_AI_CONFIG` | none (required) | The TOML file. Required by the daemon and by every subcommand except `decrypt-recording`. |
-| `--log <DIRECTIVE>` | `SIPHON_AI_LOG` | `RUST_LOG`, else the built-in default | The `tracing` filter — *which* events are emitted (`siphon_ai=debug,siphon=info`). Precedence is **replace, not merge**: the value you supply is the whole directive, so narrowing to one target (`siphon_ai_core=debug`) also drops the built-in `warn` floor and mutes everything else. Prefix it with `warn,` to keep the floor. Retunable at runtime without a restart via `PUT /admin/v1/log`. |
+| `--log <DIRECTIVE>` | `SIPHON_AI_LOG` | `RUST_LOG`, else the built-in default | The `tracing` filter — *which* events are emitted (`siphon_ai=debug,siphon=info`). The value you supply replaces the default, **but the `warn` floor is enforced** (0.51.0, #597): a directive that names only targets gets `warn,` prepended, so it can turn crates *up* but cannot mute the ones it did not name — `hep_rs` reporting a dead collector, `opentelemetry_sdk` reporting a failed export. A directive that states a global level (`info,siphon_ai=debug`, or a bare `off`) is left alone. The effective directive is logged at startup (`log filter active`). Retunable at runtime without a restart via `PUT /admin/v1/log`, under the same rule; the response's `filter` is what was installed. |
+| `--log-no-floor` | `SIPHON_AI_LOG_NO_FLOOR` | off | Do not prepend the floor: the directive you supply is the whole filter and every unnamed crate is muted, the pre-0.51.0 behaviour. The daemon says so at startup with a `warn` (the one line that still gets out). For the rare case you genuinely want silence from everything you did not name. |
 | `--log-format <text\|json>` | `SIPHON_AI_LOG_FORMAT` | `text` | *How* those events are rendered. See below. |
 
 ### `--log-format` (0.51.0)
@@ -1133,10 +1134,23 @@ console filter has to pass `debug` too.
 hands each record to a bounded queue and returns; a worker thread drains it
 into the SDK, which batches to the collector. A full queue drops the record
 and ticks
-`siphon_ai_otlp_log_records_dropped_total{reason="queue_full"}` — watch that
-counter, because movement there means the console has lines the collector
-never received. A collector that is merely *down* is not an error and costs
-the call path nothing; a bad *endpoint* fails loud at startup.
+`siphon_ai_otlp_log_records_dropped_total{reason="queue_full"}`. A collector
+that is merely *down* is not an error and costs the call path nothing; a
+bad *endpoint* fails loud at startup.
+
+**What a dead collector looks like** (#596). Not a moving `queue_full`
+counter — the SDK accepts records instantly and discards the batch when
+its export fails one hop later, so that counter stays at 0 for the whole
+outage (the 0.51.0 soak ran 46 minutes that way). The signals are
+`siphon_ai_otlp_collector_up`, which flips to `0` on the first failed
+batch export (spans and log records share it), and
+`siphon_ai_otlp_log_records_dropped_total{reason="collector_down"}` /
+`siphon_ai_otlp_spans_dropped_total{reason="collector_down"}`, which count
+every record and span in a failed batch. **Alert on the gauge.** The SDK's
+own `BatchLogProcessor.ExportError` line still prints, and since 0.51.0 the
+log filter keeps a `warn` floor so it cannot be muted by naming targets
+(#597). Movement on either `reason` means the console has lines the
+collector never received.
 
 **Startup and shutdown.** The daemon logs
 `OTLP log export active` with the endpoint and level once the pipeline is
@@ -1353,12 +1367,15 @@ queue_capacity   = 256                        # default
 
 When `enabled = true`, `collector` and `capture_id` are required. HEP
 emission is best-effort: a full queue drops the packet and ticks
-`siphon_ai_hep_packets_dropped_total{reason="queue_full"}`, and delivery is
-counted by `siphon_ai_hep_packets_sent_total`. An **unreachable collector
-is reported by a throttled `hep_rs::udp` warning, not by a metric** — there
-is no `siphon_ai_hep_collector_up` gauge, because the sink has no
-send-failure counter to derive one from. `docs/HEP.md` has the diagnostic
-order to work through. The audio path never blocks on HEP (CLAUDE.md §4.7).
+`siphon_ai_hep_packets_dropped_total{reason="queue_full"}`, delivery to the
+wire is counted by `siphon_ai_hep_packets_sent_total`, and a send the
+socket refused — a dead collector answering with ICMP unreachable — ticks
+`siphon_ai_hep_packets_dropped_total{reason="collector_down"}` and drops
+`siphon_ai_hep_collector_up` to `0` for the sample interval (0.51.0, #596;
+the throttled `hep_rs::udp` warning remains alongside). A black-holed
+collector — no ICMP back — is the case UDP cannot report; `docs/HEP.md` has
+the diagnostic order for it. The audio path never blocks on HEP (CLAUDE.md
+§4.7).
 See `docs/HEP.md` for what each layer ships and how Homer correlates them.
 
 ## `[shutdown]`

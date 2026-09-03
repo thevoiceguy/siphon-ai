@@ -20,13 +20,108 @@
 
 use std::time::Duration;
 
+use metrics::{counter, gauge};
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{LogExporter, SpanExporter, WithExportConfig};
-use opentelemetry_sdk::logs::SdkLoggerProvider;
-use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::logs::{LogBatch, SdkLoggerProvider};
+use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider, SpanData};
 use opentelemetry_sdk::Resource;
 use thiserror::Error;
 use tracing::{info, warn};
+
+use crate::metrics::{OTLP_COLLECTOR_UP, OTLP_LOG_RECORDS_DROPPED_TOTAL, OTLP_SPANS_DROPPED_TOTAL};
+
+/// Record the outcome of one batch export against the shared collector
+/// gauge, and the batch's size against `dropped` when it failed (#596).
+///
+/// This is the one place a dead collector becomes visible on `/metrics`.
+/// The SDK's `BatchLogProcessor` / `BatchSpanProcessor` accept records
+/// instantly and discard a batch whose export fails, logging only through
+/// the `opentelemetry_sdk` target — which any target-named log filter
+/// mutes (#597). Wrapping the exporter is the only seam that sees both
+/// the failure and the batch size; runs on the SDK's own batch worker, so
+/// it is off every call path and outside any `on_event`.
+fn observe_export(dropped_metric: &'static str, batch_len: usize, result: &OTelSdkResult) {
+    match result {
+        Ok(()) => gauge!(OTLP_COLLECTOR_UP).set(1.0),
+        Err(_) => {
+            gauge!(OTLP_COLLECTOR_UP).set(0.0);
+            counter!(dropped_metric, "reason" => "collector_down").increment(batch_len as u64);
+        }
+    }
+}
+
+/// Publish the outage series at their resting values so an alert on
+/// them never has to reason about an absent series (same rationale as
+/// `hep::publish_counters` at startup).
+fn publish_export_baseline(logs: bool) {
+    gauge!(OTLP_COLLECTOR_UP).set(1.0);
+    counter!(OTLP_SPANS_DROPPED_TOTAL, "reason" => "collector_down").absolute(0);
+    if logs {
+        counter!(OTLP_LOG_RECORDS_DROPPED_TOTAL, "reason" => "collector_down").absolute(0);
+    }
+}
+
+/// [`SpanExporter`] that reports every batch's outcome to the metrics
+/// registry before returning it to the SDK unchanged.
+#[derive(Debug)]
+struct ObservedSpanExporter<E>(E);
+
+impl<E: opentelemetry_sdk::trace::SpanExporter> opentelemetry_sdk::trace::SpanExporter
+    for ObservedSpanExporter<E>
+{
+    async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+        let n = batch.len();
+        let result = self.0.export(batch).await;
+        observe_export(OTLP_SPANS_DROPPED_TOTAL, n, &result);
+        result
+    }
+
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        self.0.shutdown_with_timeout(timeout)
+    }
+
+    fn force_flush(&self) -> OTelSdkResult {
+        self.0.force_flush()
+    }
+
+    fn set_resource(&mut self, resource: &Resource) {
+        self.0.set_resource(resource)
+    }
+}
+
+/// [`LogExporter`] twin of [`ObservedSpanExporter`].
+#[derive(Debug)]
+struct ObservedLogExporter<E>(E);
+
+impl<E: opentelemetry_sdk::logs::LogExporter> opentelemetry_sdk::logs::LogExporter
+    for ObservedLogExporter<E>
+{
+    async fn export(&self, batch: LogBatch<'_>) -> OTelSdkResult {
+        let n = batch.iter().count();
+        let result = self.0.export(batch).await;
+        observe_export(OTLP_LOG_RECORDS_DROPPED_TOTAL, n, &result);
+        result
+    }
+
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        self.0.shutdown_with_timeout(timeout)
+    }
+
+    fn event_enabled(
+        &self,
+        level: opentelemetry::logs::Severity,
+        target: &str,
+        name: Option<&str>,
+    ) -> bool {
+        self.0.event_enabled(level, target, name)
+    }
+
+    fn set_resource(&mut self, resource: &Resource) {
+        self.0.set_resource(resource)
+    }
+}
 
 /// The instrumentation-scope name the daemon's `tracing-opentelemetry` layer
 /// uses (`opentelemetry::global::tracer(OTEL_SCOPE)`); kept here so the
@@ -114,8 +209,10 @@ impl OtelTelemetry {
             Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(ratio)))
         };
 
+        // Exporters are wrapped so a failed batch is counted and the
+        // collector gauge flips (#596); the SDK sees the same result.
         let provider = SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
+            .with_batch_exporter(ObservedSpanExporter(exporter))
             .with_sampler(sampler)
             .with_resource(resource.clone())
             .build();
@@ -150,13 +247,14 @@ impl OtelTelemetry {
             // the pipeline is itself the first record to travel it.
             Some(
                 SdkLoggerProvider::builder()
-                    .with_batch_exporter(exporter)
+                    .with_batch_exporter(ObservedLogExporter(exporter))
                     .with_resource(resource)
                     .build(),
             )
         } else {
             None
         };
+        publish_export_baseline(cfg.logs);
 
         Ok(Self {
             provider,

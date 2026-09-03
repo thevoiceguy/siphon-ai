@@ -860,7 +860,7 @@ For a typical call: caller speaks → server's AI responds → caller hears it.
 - CDR file accumulates entries; webhook delivery works; both can run simultaneously
 - `/health` and `/ready` respond correctly during startup, steady state, and shutdown
 - `POST /admin/log-level` flips a target to debug for 60s and back automatically
-- Killing Homer produces a `hep_rs::udp` "send failed ... Connection refused" WARN, and `siphon_ai_hep_packets_sent_total` stops climbing while calls continue (there is no `collector_up` gauge — #460)
+- Killing Homer produces a `hep_rs::udp` "send failed ... Connection refused" WARN, drops `siphon_ai_hep_collector_up` to 0 and moves `siphon_ai_hep_packets_dropped_total{reason="collector_down"}` while calls continue (0.51.0, #596; `sent` keeps climbing at half rate and is not the signal)
 - All §11.8 diagnostic questions answerable on a recorded test call
 
 ---
@@ -1009,18 +1009,20 @@ siphon_ai_bridge_added_latency_ms (histogram, labels: stage)
 **HEP:**
 ```
 siphon_ai_hep_packets_sent_total             # wire-level success; unlabeled
-siphon_ai_hep_packets_dropped_total{reason}  # reason ∈ {queue_full}
-# As-built, not as-planned. The `{type}` label, `collector_down` /
-# `encode_error` reasons, `collector_up` and `send_duration_seconds` were
-# all specified here but never implemented, and the docs promised them
-# for several releases (#460). Both series above are mirrored from
-# `hep_rs::UdpHepSink`'s own counters, which is why they carry no `type`:
-# SIP chunks are emitted by `sip-hep` and RTCP/QoS by `forge-hep`, so no
-# siphon-ai call site sees them. An unreachable collector is reported by
-# a throttled `hep_rs::udp` WARN, not a metric — the sink counts wire
-# successes and queue-full drops, and a refused send is neither.
-# Restoring `collector_up` means adding a send-failure counter to hep-rs
-# first.
+siphon_ai_hep_packets_dropped_total{reason}  # reason ∈ {queue_full, collector_down}
+siphon_ai_hep_collector_up                   # 0 when a send was refused in the last sample interval
+# As-built. The `{type}` label, `encode_error` reason and
+# `send_duration_seconds` were specified here and never implemented
+# (#460): all three series are mirrored from `hep_rs::UdpHepSink`'s own
+# counters, which is why they carry no `type` — SIP chunks are emitted by
+# `sip-hep` and RTCP/QoS by `forge-hep`, so no siphon-ai call site sees
+# them. `collector_down` and `collector_up` landed in 0.51.0 (#596) once
+# hep-rs grew the send-failure counter; a refused send is now counted,
+# and the gauge is derived from the counter moving over a window (a
+# point sample flaps — connected UDP alternates success/failure against
+# a dead peer). A black-holed collector (no ICMP) is still invisible to
+# UDP; the throttled `hep_rs::udp` WARN remains, under an enforced
+# `warn` log floor (#597).
 ```
 
 **System:**
@@ -1073,7 +1075,7 @@ See §3.5 for architecture. Operational notes:
 - **Correlation:** every emitted HEP packet carries chunk 0x0011 (correlation_id) = SiphonAI's internal `call_id`. This makes Homer's Call Flow view stitch SIP + RTCP + logs into one timeline.
 - **Compression:** HEP3 supports payload compression (zlib). Off by default for low latency; enable for high-volume nodes via `hep.compression = "zlib"`.
 - **Encryption:** payload encryption supported via `hep.password` (HEP3 chunk 0x000B). Required for any non-private-network deployment.
-- **Failure mode:** if the collector goes down the worker keeps draining the queue into a socket that returns `ECONNREFUSED`, warning once per throttle window; those packets are counted neither as sent nor as dropped. Queue-full drops — the case where the daemon is producing faster than the worker can ship, `[hep].queue_capacity` (default 256) — are counted via `siphon_ai_hep_packets_dropped_total{reason="queue_full"}`. Never blocks the call.
+- **Failure mode:** if the collector goes down the worker keeps draining the queue into a socket that returns `ECONNREFUSED`, warning once per throttle window; those packets are counted as `siphon_ai_hep_packets_dropped_total{reason="collector_down"}` and drop `siphon_ai_hep_collector_up` to 0 for the interval (0.51.0). Queue-full drops — the case where the daemon is producing faster than the worker can ship, `[hep].queue_capacity` (default 256) — are counted via `siphon_ai_hep_packets_dropped_total{reason="queue_full"}`. Never blocks the call.
 - **Local development:** `examples/homer-stack/docker-compose.yaml` brings up Homer + Postgres + the HEPlify-Server stack. `docker compose up` and you can see your own calls in the Homer UI within seconds.
 
 ### 11.5 CDRs (Call Detail Records)
@@ -1231,7 +1233,7 @@ If any of these can't be answered from observability data, that's a v1 bug, not 
 | R9 | Performance doesn't hit 500 cc on reference hardware | Low | Medium | Profile early (Week 5); kernel offload (forge-kernel) is escape hatch |
 | R10 | HEP upstream PRs (siphon-rs, forge-media) take longer than expected | Medium | Medium | Start in Week 1; you own all three repos so review/merge friction is zero; fallback is to do the emission inside SiphonAI by shadowing parsed messages from siphon-rs (uglier but works) |
 | R11 | Route matching gets gnarly with edge cases (header escaping, regex performance, registration source attribution) | Medium | Low | Comprehensive `routes` crate test suite from Week 2; document the matching grammar precisely |
-| R12 | Homer collector unreachable in production silently degrades observability without anyone noticing | Medium | Medium | Alert on the throttled `hep_rs::udp` "send failed" WARN — that is the only reliable signal. **The originally-planned mitigation was never built** — there is no `collector_up` gauge and `/ready` does not consider HEP (#460). Note `siphon_ai_hep_packets_sent_total` is *not* a substitute: connected-UDP surfaces the refusal on the following send, so against a dead collector it keeps climbing at ~half rate rather than flattening. The log line only reaches a sink because the default filter carries a `warn` floor |
+| R12 | Homer collector unreachable in production silently degrades observability without anyone noticing | Medium | Medium | Alert on `siphon_ai_hep_collector_up == 0` (built in 0.51.0, #596, once hep-rs counted refused sends; `/ready` still does not consider HEP — observability is not liveness). `siphon_ai_hep_packets_sent_total` is *not* a substitute: connected-UDP surfaces the refusal on the following send, so against a dead collector it keeps climbing at ~half rate rather than flattening. The throttled `hep_rs::udp` WARN remains a second channel, and since #597 the log filter keeps a `warn` floor under every target even when an operator supplies one, so the line cannot be muted by accident. Residual: a black-holed collector (no ICMP back) is invisible to UDP from the sender's side |
 | R13 | CDR webhook delivery to a slow endpoint creates back-pressure | Low | Medium | Bounded queue per webhook target; drop with metric increment; never block call teardown |
 
 ---

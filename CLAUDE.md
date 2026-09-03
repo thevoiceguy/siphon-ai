@@ -226,10 +226,11 @@ cargo fmt --all
 # Run the daemon locally with example config
 cargo run -p siphon-ai -- --config configs/local-dev.toml
 
-# Run with verbose tracing. Keep the leading `warn,` — RUST_LOG replaces the
-# built-in filter rather than merging with it, so a directive that only names
-# targets drops the default `warn` floor and mutes every crate it doesn't
-# name (an unreachable HEP or OTLP collector goes silent that way).
+# Run with verbose tracing. The daemon prepends a `warn` floor to any
+# RUST_LOG / --log that names only targets (#597), so a directive can turn
+# crates up but never mute the ones it doesn't name (an unreachable HEP or
+# OTLP collector used to go silent that way). Write the floor anyway — it
+# documents the intent and is what the daemon runs.
 RUST_LOG=warn,siphon_ai=debug,siphon=info,forge=info cargo run -p siphon-ai -- --config configs/local-dev.toml
 
 # Bring up the full local stack (siphond as fake PBX + SiphonAI + echo WS + Homer)

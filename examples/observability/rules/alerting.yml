@@ -145,6 +145,42 @@ groups:
 
   - name: siphon_ai.delivery
     rules:
+      - alert: SiphonAIOtlpCollectorDown
+        # The last OTLP batch export (spans or log records) failed. The
+        # drop counters cannot answer this — a dead collector never fills
+        # the producer-side queue (#596) — so the gauge is the signal.
+        expr: siphon_ai_otlp_collector_up == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SiphonAI cannot reach its OTLP collector from {{ $labels.instance }}"
+          description: >
+            Batch exports to [observability.otlp].endpoint have been failing
+            for 2m; every span and log record in those batches is discarded
+            (siphon_ai_otlp_spans_dropped_total /
+            siphon_ai_otlp_log_records_dropped_total{reason="collector_down"}).
+            Calls are unaffected. Check the collector, the endpoint, and the
+            daemon's `BatchLogProcessor.ExportError` lines.
+
+      - alert: SiphonAIHepCollectorDown
+        # A HEP send was refused during the last sample interval — the
+        # collector answered with ICMP port-unreachable. A black-holed
+        # collector (no ICMP) does not trip this; see docs/HEP.md.
+        expr: siphon_ai_hep_collector_up == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SiphonAI HEP collector is refusing packets from {{ $labels.instance }}"
+          description: >
+            [hep].collector is not listening: sends have been refused for 2m
+            and are counted under
+            siphon_ai_hep_packets_dropped_total{reason="collector_down"}.
+            Homer is missing signaling for every call in the window. Check
+            heplify-server is bound on the configured UDP port and the path
+            to it; docs/HEP.md has the diagnostic order.
+
       - alert: SiphonAIWebhookSpoolBacklog
         # Durable-spool depth rising = deliveries failing and backing up on disk.
         expr: max by (sink) (siphon_ai_webhook_spool_depth) > 100

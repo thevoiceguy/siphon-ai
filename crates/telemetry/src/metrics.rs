@@ -157,31 +157,67 @@ pub const HEP_PACKETS_SENT_TOTAL: &str = "siphon_ai_hep_packets_sent_total";
 /// bounded queue (`[hep].queue_capacity`, default 256) full and
 /// discarded the packet rather than block, per CLAUDE.md §4.7.
 ///
-/// Sustained movement here means the queue is too small for the call
-/// rate, not that the collector is down. `reason` is a label rather
-/// than a bare counter so a future `collector_down` value can join it
-/// without a rename — that one needs a send-failure counter added to
-/// `hep-rs` first (siphon-ai #460).
+/// Sustained movement of `queue_full` means the queue is too small for
+/// the call rate, not that the collector is down.
+///
+/// `collector_down` (#596, via `hep_rs::UdpHepSink::send_failures`):
+/// packets the worker dequeued but the socket refused to send —
+/// `ECONNREFUSED` after an ICMP port-unreachable from a dead collector.
+/// Every packet handed to the sink lands in exactly one of `sent`,
+/// `queue_full`, or `collector_down`. See [`HEP_COLLECTOR_UP`] for the
+/// UDP caveat (a black-holed collector produces no failures).
 pub const HEP_PACKETS_DROPPED_TOTAL: &str = "siphon_ai_hep_packets_dropped_total";
 
-/// Log records discarded before reaching the OTLP exporter
-/// (`[observability.otlp.logs]`, 0.51.0), labeled by `reason` —
-/// currently only `queue_full`.
+/// Log records discarded before reaching the collector
+/// (`[observability.otlp.logs]`, 0.51.0), labeled by `reason`:
 ///
-/// The daemon hands each record to a bounded queue and returns; a worker
-/// thread drains it into the SDK. A full queue means the collector (or the
-/// SDK's own batch worker behind it) is not keeping up with the log rate,
-/// and the record is dropped rather than allowed to hold up the emitting
-/// task — log export is observability, and observability never blocks a
-/// call (CLAUDE.md §4.7).
+/// - `queue_full` — the daemon hands each record to a bounded queue and
+///   returns; a worker thread drains it into the SDK. A full queue means
+///   the export path is not keeping up with the log rate, and the record
+///   is dropped rather than allowed to hold up the emitting task — log
+///   export is observability, and observability never blocks a call
+///   (CLAUDE.md §4.7). Sustained movement means the exported level is too
+///   broad for the link, not that the daemon is unhealthy.
+/// - `collector_down` (#596) — the SDK's batch export to the collector
+///   **failed** (connection refused, gRPC timeout, non-OK status) and the
+///   batch was discarded. Counted by the exporter wrapper in
+///   `crate::otel`, which is the only layer that sees the failure: the
+///   producer-side queue never fills against a dead collector because
+///   the SDK accepts records instantly and loses them one hop later, so
+///   `queue_full` stays at 0 for the whole outage (the 0.51.0 soak found
+///   exactly this). Pair with [`OTLP_COLLECTOR_UP`] for the current state.
 ///
-/// Movement here is the signal that the console still has lines the
-/// collector never received. Sustained movement means the log level being
-/// exported is too broad for the link, not that the daemon is unhealthy.
-/// `reason` is a label rather than a bare counter so a future
-/// `collector_down` value can join it without a rename — matching
-/// [`HEP_PACKETS_DROPPED_TOTAL`].
+/// Either way, movement here means the console has lines the collector
+/// never received.
 pub const OTLP_LOG_RECORDS_DROPPED_TOTAL: &str = "siphon_ai_otlp_log_records_dropped_total";
+
+/// Spans the OTLP batch exporter failed to deliver (`[observability.otlp]`),
+/// labeled by `reason` — `collector_down`, the same failure the log counter
+/// above records for records. One batch export failure counts every span
+/// in the batch. Present from startup at 0.
+pub const OTLP_SPANS_DROPPED_TOTAL: &str = "siphon_ai_otlp_spans_dropped_total";
+
+/// Whether the last OTLP batch export (spans or log records — they share
+/// the endpoint) succeeded: `1` up, `0` down. Set by the exporter wrapper
+/// in `crate::otel` on every export, so it reflects the collector as of
+/// the most recent batch (the SDK's batch delay, ~1 s under load, longer
+/// when idle). Published as `1` when the pipeline is built, on the
+/// grounds that a collector is presumed reachable until an export says
+/// otherwise; a dead collector flips it within one batch interval.
+/// **Alert on `== 0`** — this is the "is the collector gone?" question
+/// the drop counters cannot answer (#596).
+pub const OTLP_COLLECTOR_UP: &str = "siphon_ai_otlp_collector_up";
+
+/// Whether HEP packets are reaching the collector (`[hep]`): `1` up, `0`
+/// down (#596, the gauge CLAUDE.md §4.7 always described and #460 left
+/// unbuilt). Derived every sample interval (10 s) from `hep_rs`'s
+/// send-failure counter: `0` when a send failed during the last interval,
+/// `1` otherwise. UDP caveat: a connected UDP socket learns a collector
+/// is dead only from the ICMP port-unreachable it sends back, so a
+/// collector that is *black-holed* (a firewall dropping silently) looks
+/// up here — the send succeeds locally. Against a collector that answers
+/// with ICMP this is reliable and flips within one interval.
+pub const HEP_COLLECTOR_UP: &str = "siphon_ai_hep_collector_up";
 
 /// REGISTER attempts the daemon has driven. Labeled by `name`
 /// (the `[[register]].name`) and `outcome`:
@@ -972,11 +1008,23 @@ pub fn register_descriptions() {
     );
     describe_counter!(
         HEP_PACKETS_DROPPED_TOTAL,
-        "HEP3 packets dropped before the wire, by reason (queue_full)."
+        "HEP3 packets that never reached the collector, by reason (queue_full, collector_down)."
     );
     describe_counter!(
         OTLP_LOG_RECORDS_DROPPED_TOTAL,
-        "Log records dropped before the OTLP exporter, by reason (queue_full)."
+        "Log records that never reached the OTLP collector, by reason (queue_full, collector_down)."
+    );
+    describe_counter!(
+        OTLP_SPANS_DROPPED_TOTAL,
+        "Spans the OTLP batch exporter failed to deliver, by reason (collector_down)."
+    );
+    describe_gauge!(
+        OTLP_COLLECTOR_UP,
+        "1 if the last OTLP batch export (spans or logs) succeeded, 0 if it failed."
+    );
+    describe_gauge!(
+        HEP_COLLECTOR_UP,
+        "1 if no HEP UDP send failed in the last sample interval, 0 otherwise (ICMP-unreachable collector)."
     );
     describe_counter!(
         REGISTER_ATTEMPTS_TOTAL,
@@ -1422,6 +1470,7 @@ pub const ALL_COUNTERS: &[&str] = &[
     HEP_PACKETS_SENT_TOTAL,
     HEP_PACKETS_DROPPED_TOTAL,
     OTLP_LOG_RECORDS_DROPPED_TOTAL,
+    OTLP_SPANS_DROPPED_TOTAL,
     REGISTER_ATTEMPTS_TOTAL,
     REGISTER_ADMIN_TRIGGERS_TOTAL,
     OUTBOUND_CALLS_TOTAL,
@@ -1479,6 +1528,8 @@ pub const ALL_GAUGES: &[&str] = &[
     RTP_PORT_PAIRS_ALLOCATED,
     RTP_PORT_PAIRS_CAPACITY,
     REGISTRAR_BINDINGS,
+    OTLP_COLLECTOR_UP,
+    HEP_COLLECTOR_UP,
 ];
 
 /// Every histogram this module declares. See [`ALL_COUNTERS`]. Each of

@@ -37,7 +37,7 @@ cleanup() { kill "${SINK_PID:-0}" "${DAEMON_PID:-0}" "${SIPP_PID:-0}" 2>/dev/nul
 trap cleanup EXIT
 
 node "$HERE/../paced_sink.mjs" 8770 > "$SP/sink-$LABEL.log" 2>&1 & SINK_PID=$!
-RUST_LOG=siphon_ai=info "$BIN" --config "$CONFIG" > "$SP/daemon-$LABEL.log" 2>&1 & DAEMON_PID=$!
+RUST_LOG=warn,siphon_ai=info "$BIN" --config "$CONFIG" > "$SP/daemon-$LABEL.log" 2>&1 & DAEMON_PID=$!
 sleep 2
 kill -0 "$DAEMON_PID" 2>/dev/null || { echo "daemon died on startup:"; tail -20 "$SP/daemon-$LABEL.log"; exit 1; }
 echo "daemon $($BIN --version) pid=$DAEMON_PID"

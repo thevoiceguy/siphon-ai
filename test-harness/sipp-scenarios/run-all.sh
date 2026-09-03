@@ -238,7 +238,7 @@ awk -v obs="$AUX_OBS_PORT" -v admin="$ADMIN_API_PORT" '
 # to grep.
 DAEMON_LOG=$(mktemp -t siphon-ai-sipp.XXXXXX.log)
 echo "starting siphon-ai (log: $DAEMON_LOG)"
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$MAIN_CONFIG" >"$DAEMON_LOG" 2>&1 &
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$MAIN_CONFIG" >"$DAEMON_LOG" 2>&1 &
 DAEMON_PID=$!
 cleanup() {
     if kill -0 "$DAEMON_PID" 2>/dev/null; then
@@ -312,7 +312,7 @@ name = "default"
 any = true
 EOF
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$SP_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$SP_CONFIG" \
     >"$SP_DAEMON_LOG" 2>&1 &
 SP_DAEMON_PID=$!
 sp_cleanup() {
@@ -394,7 +394,7 @@ name = "default"
 any = true
 EOF
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$SS_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$SS_CONFIG" \
     >"$SS_DAEMON_LOG" 2>&1 &
 SS_DAEMON_PID=$!
 ss_cleanup() {
@@ -460,7 +460,7 @@ name = "default"
 any = true
 EOF
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$DA_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$DA_CONFIG" \
     >"$DA_DAEMON_LOG" 2>&1 &
 DA_DAEMON_PID=$!
 da_cleanup() {
@@ -505,7 +505,7 @@ name = "default"
 any = true
 EOF
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$AD_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$AD_CONFIG" \
     >"$AD_DAEMON_LOG" 2>&1 &
 AD_DAEMON_PID=$!
 ad_cleanup() {
@@ -554,7 +554,7 @@ name = "default"
 any = true
 EOF
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$TG_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$TG_CONFIG" \
     >"$TG_DAEMON_LOG" 2>&1 &
 TG_DAEMON_PID=$!
 tg_cleanup() {
@@ -610,7 +610,7 @@ name = "default"
 any = true
 EOF
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$REC_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$REC_CONFIG" \
     >"$REC_DAEMON_LOG" 2>&1 &
 REC_DAEMON_PID=$!
 rec_cleanup() {
@@ -707,7 +707,7 @@ OB_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$OB_WS_LOG" 2>&1 &
 OB_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$OB_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$OB_CONFIG" \
     >"$OB_DAEMON_LOG" 2>&1 &
 OB_DAEMON_PID=$!
 ob_cleanup() {
@@ -863,7 +863,7 @@ ORB_WS_PID=$!
 # `siphon_ai` and `siphon_ai::*` but not the sibling crates
 # `siphon_ai_sip_glue` (which logs the BYE→shutdown line) or
 # `siphon_ai_core` (which logs the teardown BYE failure).
-RUST_LOG=siphon_ai=info,siphon_ai_sip_glue=info,siphon_ai_core=info \
+RUST_LOG=warn,siphon_ai=info,siphon_ai_sip_glue=info,siphon_ai_core=info \
     "$DAEMON_BIN" --config "$ORB_CONFIG" \
     >"$ORB_DAEMON_LOG" 2>&1 &
 ORB_DAEMON_PID=$!
@@ -973,7 +973,7 @@ ODO_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$ODO_WS_LOG" 2>&1 &
 ODO_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$ODO_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$ODO_CONFIG" \
     >"$ODO_DAEMON_LOG" 2>&1 &
 ODO_DAEMON_PID=$!
 odo_cleanup() {
@@ -1069,7 +1069,7 @@ ODS_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$ODS_WS_LOG" 2>&1 &
 ODS_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$ODS_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$ODS_CONFIG" \
     >"$ODS_DAEMON_LOG" 2>&1 &
 ODS_DAEMON_PID=$!
 ods_cleanup() {
@@ -1158,7 +1158,7 @@ ODD_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$ODD_WS_LOG" 2>&1 &
 ODD_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$ODD_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$ODD_CONFIG" \
     >"$ODD_DAEMON_LOG" 2>&1 &
 ODD_DAEMON_PID=$!
 odd_cleanup() {
@@ -1258,7 +1258,7 @@ AT_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$AT_C_WS_LOG" 2>&1 &
 AT_C_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$AT_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$AT_CONFIG" \
     >"$AT_DAEMON_LOG" 2>&1 &
 AT_DAEMON_PID=$!
 AT_A_WS_PID=""
@@ -1378,7 +1378,7 @@ PK_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$PK_WS_LOG" 2>&1 &
 PK_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$PK_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$PK_CONFIG" \
     >"$PK_DAEMON_LOG" 2>&1 &
 PK_DAEMON_PID=$!
 pk_cleanup() {
@@ -1461,7 +1461,7 @@ PR_WS_A_PID=$!
     --bind "127.0.0.1:$PR_WS_B_PORT" --auto-hangup-after-ms 1500 >"$PR_WS_B_LOG" 2>&1 &
 PR_WS_B_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$PR_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$PR_CONFIG" \
     >"$PR_DAEMON_LOG" 2>&1 &
 PR_DAEMON_PID=$!
 PR_SIPP_PID=""
@@ -1559,7 +1559,7 @@ CF_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$CF_WS_LOG" 2>&1 &
 CF_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$CF_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$CF_CONFIG" \
     >"$CF_DAEMON_LOG" 2>&1 &
 CF_DAEMON_PID=$!
 CF_S1_PID=""
@@ -1665,7 +1665,7 @@ OBS_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$OBS_WS_LOG" 2>&1 &
 OBS_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$OBS_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$OBS_CONFIG" \
     >"$OBS_DAEMON_LOG" 2>&1 &
 OBS_DAEMON_PID=$!
 OBS_SIPP_PID=""
@@ -1748,7 +1748,7 @@ BH_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$BH_WS_LOG" 2>&1 &
 BH_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$BH_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$BH_CONFIG" \
     >"$BH_DAEMON_LOG" 2>&1 &
 BH_DAEMON_PID=$!
 bh_cleanup() {
@@ -1829,7 +1829,7 @@ RC_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$RC_WS_LOG" 2>&1 &
 RC_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$RC_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$RC_CONFIG" \
     >"$RC_DAEMON_LOG" 2>&1 &
 RC_DAEMON_PID=$!
 rc_cleanup() {
@@ -1914,7 +1914,7 @@ OR_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$OR_WS_LOG" 2>&1 &
 OR_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$OR_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$OR_CONFIG" \
     >"$OR_DAEMON_LOG" 2>&1 &
 OR_DAEMON_PID=$!
 OR_SIPP_PID=""
@@ -2004,7 +2004,7 @@ OH_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$OH_WS_LOG" 2>&1 &
 OH_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$OH_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$OH_CONFIG" \
     >"$OH_DAEMON_LOG" 2>&1 &
 OH_DAEMON_PID=$!
 OH_SIPP_PID=""
@@ -2077,7 +2077,7 @@ OP_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     --bind "127.0.0.1:$OP_WS_PORT" >"$OP_WS_LOG" 2>&1 &
 OP_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$OP_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$OP_CONFIG" \
     >"$OP_DAEMON_LOG" 2>&1 &
 OP_DAEMON_PID=$!
 op_cleanup() {
@@ -2140,7 +2140,7 @@ DO_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     --bind "127.0.0.1:$DO_WS_PORT" >"$DO_WS_LOG" 2>&1 &
 DO_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$DO_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$DO_CONFIG" \
     >"$DO_DAEMON_LOG" 2>&1 &
 DO_DAEMON_PID=$!
 do_cleanup() {
@@ -2226,7 +2226,7 @@ DONA_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     --bind "127.0.0.1:$DONA_WS_PORT" >"$DONA_WS_LOG" 2>&1 &
 DONA_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$DONA_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$DONA_CONFIG" \
     >"$DONA_DAEMON_LOG" 2>&1 &
 DONA_DAEMON_PID=$!
 dona_cleanup() {
@@ -2304,7 +2304,7 @@ name = "default"
 any = true
 EOF
 
-RUST_LOG=siphon_ai=info,sip_uas=warn "$DAEMON_BIN" --config "$RIA_CONFIG" \
+RUST_LOG=warn,siphon_ai=info,sip_uas=warn "$DAEMON_BIN" --config "$RIA_CONFIG" \
     >"$RIA_DAEMON_LOG" 2>&1 &
 RIA_DAEMON_PID=$!
 ria_cleanup() {
@@ -2369,7 +2369,7 @@ DOS_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     --bind "127.0.0.1:$DOS_WS_PORT" >"$DOS_WS_LOG" 2>&1 &
 DOS_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$DOS_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$DOS_CONFIG" \
     >"$DOS_DAEMON_LOG" 2>&1 &
 DOS_DAEMON_PID=$!
 dos_cleanup() {
@@ -2430,7 +2430,7 @@ DOD_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     --bind "127.0.0.1:$DOD_WS_PORT" >"$DOD_WS_LOG" 2>&1 &
 DOD_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$DOD_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$DOD_CONFIG" \
     >"$DOD_DAEMON_LOG" 2>&1 &
 DOD_DAEMON_PID=$!
 dod_cleanup() {
@@ -2500,7 +2500,7 @@ EOF
         >"$AUX_WS_LOG" 2>&1 &
     AUX_WS_PID=$!
 
-    RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$AUX_CONFIG" \
+    RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$AUX_CONFIG" \
         >"$AUX_DAEMON_LOG" 2>&1 &
     AUX_DAEMON_PID=$!
     aux_cleanup() {
@@ -2573,7 +2573,7 @@ BI_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$BI_WS_LOG" 2>&1 &
 BI_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$BI_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$BI_CONFIG" \
     >"$BI_DAEMON_LOG" 2>&1 &
 BI_DAEMON_PID=$!
 bi_cleanup() {
@@ -2661,7 +2661,7 @@ FP_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$FP_WS_LOG" 2>&1 &
 FP_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$FP_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$FP_CONFIG" \
     >"$FP_DAEMON_LOG" 2>&1 &
 FP_DAEMON_PID=$!
 fp_cleanup() {
@@ -2740,7 +2740,7 @@ name = "default"
 any = true
 EOF
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$RA_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$RA_CONFIG" \
     >"$RA_DAEMON_LOG" 2>&1 &
 RA_DAEMON_PID=$!
 # SIPp is the registrar; no remote target (it only answers).
@@ -2830,7 +2830,7 @@ name = "default"
 any = true
 EOF
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$TS_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$TS_CONFIG" \
     >"$TS_DAEMON_LOG" 2>&1 &
 TS_DAEMON_PID=$!
 ts_cleanup() {
@@ -2927,7 +2927,7 @@ name = "default"
 any = true
 EOF
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$WSP_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$WSP_CONFIG" \
     >"$WSP_DAEMON_LOG" 2>&1 &
 WSP_DAEMON_PID=$!
 wsp_cleanup() {
@@ -3029,7 +3029,7 @@ name = "default"
 any = true
 EOF
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$WSR_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$WSR_CONFIG" \
     >"$WSR_DAEMON_LOG" 2>&1 &
 WSR_DAEMON_PID=$!
 wsr_cleanup() {
@@ -3096,7 +3096,7 @@ DRAIN_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
     >"$DRAIN_WS_LOG" 2>&1 &
 DRAIN_WS_PID=$!
 
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$DRAIN_CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$DRAIN_CONFIG" \
     >"$DRAIN_DAEMON_LOG" 2>&1 &
 DRAIN_DAEMON_PID=$!
 drain_cleanup() {

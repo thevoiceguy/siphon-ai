@@ -74,6 +74,10 @@ pub(crate) struct CompiledMatch {
 
     pub(crate) register_source: Option<Matcher>,
 
+    /// Predicate over the peer certificate's names; see
+    /// `RawRouteMatch::peer_cert_san`.
+    pub(crate) peer_cert_san: Option<Matcher>,
+
     /// `(lowercased_header_name, predicate)` pairs.
     pub(crate) headers: Vec<(String, Matcher)>,
 }
@@ -97,6 +101,14 @@ pub struct CompiledRoute {
 }
 
 impl CompiledRoute {
+    /// `true` when this route's `[match]` block predicates on
+    /// `peer_cert_san`. The config crate uses it to refuse a dialplan
+    /// that names a client-certificate key on a daemon whose TLS
+    /// listener never asks for one — such a route could never match.
+    pub fn uses_peer_cert_san(&self) -> bool {
+        self.match_.peer_cert_san.is_some()
+    }
+
     /// True iff this route's `[match]` block predicates all hold
     /// against `info`. `any = true` short-circuits to `true`.
     pub fn matches(&self, info: &crate::CallInfo<'_>) -> bool {
@@ -136,6 +148,16 @@ impl CompiledRoute {
         }
         if let Some(p) = &m.register_source {
             if !p.matches(info.register_source) {
+                return false;
+            }
+        }
+        if let Some(p) = &m.peer_cert_san {
+            // Any one asserted name satisfies the key. An empty list
+            // (no verified certificate) can never match — the
+            // predicate is never even consulted, so `^$` under
+            // `regex = true` does not sneak an unauthenticated call
+            // through.
+            if !info.peer_cert_names.iter().any(|n| p.matches(n)) {
                 return false;
             }
         }

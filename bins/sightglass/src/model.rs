@@ -1010,6 +1010,7 @@ mod tests {
             sip_call_id: format!("{id}@host"),
             direction: "inbound".to_string(),
             webrtc_state: None,
+            peer_identity: None,
         }
     }
 

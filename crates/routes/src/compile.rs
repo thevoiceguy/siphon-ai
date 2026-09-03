@@ -169,6 +169,7 @@ fn compile_match(
         from_user,
         from_host,
         register_source,
+        peer_cert_san,
         header,
     } = raw;
 
@@ -179,6 +180,7 @@ fn compile_match(
         || from_user.is_some()
         || from_host.is_some()
         || register_source.is_some()
+        || peer_cert_san.is_some()
         || !header.is_empty();
 
     if any && has_other_keys {
@@ -234,6 +236,7 @@ fn compile_match(
         from_user: pred("from_user", from_user)?,
         from_host: pred("from_host", from_host)?,
         register_source: pred("register_source", register_source)?,
+        peer_cert_san: pred("peer_cert_san", peer_cert_san)?,
         headers,
     })
 }

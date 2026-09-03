@@ -2297,6 +2297,13 @@ pub struct DialogFlow {
     pub local: Option<std::net::SocketAddr>,
 }
 
+/// The verified TLS client certificate on the INVITE's connection,
+/// rendered for the admin listing (subject DN plus SANs), or `None`
+/// when the peer presented none (mutual TLS, siphon-rs #129).
+fn peer_identity_display(ctx: &TransportContext) -> Option<String> {
+    ctx.peer_identity().map(|id| id.to_string())
+}
+
 impl DialogFlow {
     /// Capture the flow from the transport context the INVITE
     /// arrived on. `None` for datagram transports or when the
@@ -3614,7 +3621,11 @@ impl CallAcceptor for BridgingAcceptor {
             )
             .await
         {
-            Ok(prepared) => {
+            Ok(mut prepared) => {
+                // Mutual TLS: carry the connection's verified identity to
+                // the admin listing. `prepare_call` only sees the transport
+                // kind, so it is stamped here where the context is.
+                prepared.peer_identity = peer_identity_display(call.transport);
                 let uas = self
                     .uas
                     .get()
@@ -3966,13 +3977,15 @@ impl BridgingAcceptor {
         // accepted call is reachable by the id operators see. Carries the
         // SIP Call-ID + direction so `GET /admin/v1/calls` can report both
         // id namespaces (issue #311).
-        self.control_registry.insert_with_leg_phase(
+        self.control_registry.insert_with_details(
             cleanup_handle.clone(),
             prepared.sip_call_id.clone(),
             Direction::Inbound,
             // A browser call reports where it is in ICE/DTLS for as
             // long as it is listed; a classic one has no such phase.
             prepared.controller.leg_phase_probe(),
+            // Who the connection proved itself to be (mutual TLS).
+            prepared.peer_identity.clone(),
         );
 
         // Per-route counter is owned-by-route — bounded cardinality
@@ -4185,6 +4198,12 @@ pub struct PreparedCall {
     /// `None` only for a transport with no CDR name — see
     /// [`cdr_leg_transport`].
     pub leg_transport: Option<CdrLegTransport>,
+    /// The verified TLS client certificate the INVITE's connection
+    /// presented (mutual TLS, siphon-rs #129), in `PeerIdentity`'s
+    /// display form, for the admin call listing. Set by the accept
+    /// paths from the `TransportContext` after `prepare_call`, which
+    /// only sees the transport *kind*. `None` when none was presented.
+    pub peer_identity: Option<String>,
 }
 
 impl std::fmt::Debug for PreparedCall {
@@ -4400,6 +4419,7 @@ impl BridgingAcceptor {
             handle,
             is_webrtc: true,
             leg_transport,
+            peer_identity: None,
         })
     }
 
@@ -4766,6 +4786,7 @@ impl BridgingAcceptor {
             handle,
             is_webrtc: false,
             leg_transport: cdr_leg_transport(transport),
+            peer_identity: None,
         })
     }
 }
@@ -4813,6 +4834,8 @@ struct PendingDelayedOffer {
     /// with the other CDR facts because the transport context is long
     /// gone by the time the ACK answer arrives.
     cdr_leg_transport: Option<CdrLegTransport>,
+    /// See [`PreparedCall::peer_identity`].
+    peer_identity: Option<String>,
     /// Resolved barge-in policy announcement for `start.barge_in_mode`
     /// (0.32.0) — captured here because the route isn't in scope when
     /// the ACK answer finally arrives.
@@ -5082,6 +5105,7 @@ impl BridgingAcceptor {
                 cdr_to,
                 cdr_ws_url,
                 cdr_leg_transport: cdr_leg_transport(call.transport.transport()),
+                peer_identity: peer_identity_display(call.transport),
                 barge_in_mode: barge_in_mode_info(&resolve_barge_in(&self.defaults, route)),
                 ws_failure_prompt: resolve_ws_failure_prompt(&self.defaults, route),
             },
@@ -5209,6 +5233,7 @@ impl BridgingAcceptor {
             cdr_to,
             cdr_ws_url,
             cdr_leg_transport,
+            peer_identity,
             barge_in_mode,
             ws_failure_prompt,
         } = pending;
@@ -5404,6 +5429,7 @@ impl BridgingAcceptor {
             handle,
             is_webrtc: false,
             leg_transport: cdr_leg_transport,
+            peer_identity,
         };
         metrics::counter!(DELAYED_OFFER_TOTAL, "result" => "answered").increment(1);
         self.run_call(
@@ -7248,6 +7274,7 @@ a=sendrecv\r\n";
             from_user: "caller",
             from_host: "example.net",
             register_source: "trunk",
+            peer_cert_names: &[],
             headers: leak_empty_headers(),
         }
     }
@@ -7858,6 +7885,7 @@ a=sendrecv\r\n",
                 verstat: None,
                 bridge_config: BridgeConfig::default(),
                 cdr_leg_transport: Some(CdrLegTransport::Udp),
+                peer_identity: None,
                 tap_options: TapOptions {
                     barge_in_action: siphon_ai_media_glue::BargeInAction::Notify,
                     barge_in_debounce: None,

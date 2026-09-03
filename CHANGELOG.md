@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Mutual TLS on the SIP trunk: verify who is calling, and route on it**
+  (siphon-rs [#129](https://github.com/thevoiceguy/siphon-rs/issues/129) /
+  [#130](https://github.com/thevoiceguy/siphon-rs/pull/130), pin `v2026.08.25` →
+  `v2026.09.03`). Until now a TLS trunk was encrypted but anonymous: the listener never
+  asked for a client certificate, so nothing distinguished a partner node from anyone who
+  found port 5061, and the only handles for a route were what the INVITE *claimed* about
+  itself. Now:
+  - **`[sip.tls].client_ca` + `client_auth = "optional" | "required"`** make the TLS
+    listener request a client certificate and verify it against a PEM CA bundle.
+    `required` fails the handshake for a peer with no certificate — it never sends a SIP
+    message; `optional` admits such a peer (no identity) while still refusing a
+    certificate that does not chain, so a fleet can roll certificates out before the
+    switch is thrown. Both halves must be set together; the bundle must exist at load;
+    the mode is validated at load; all three by `siphon-ai check`. Applies to the SIP TLS
+    listener only (browsers on `[sip.wss]` do not present client certificates).
+  - **`[sip.tls_client].client_cert` + `client_key`** present a certificate on every
+    outgoing TLS connection to a peer that asks — mutual TLS *toward* a trunk. Key must
+    be `0600`, as the listener key already is.
+  - **`peer_cert_san` route match key** (`docs/DIALPLAN.md` §4.6): matches when any name
+    the verified certificate asserts — URI SANs (where RFC 5922 puts a SIP identity), DNS,
+    IP, e-mail SANs, then the CN — satisfies the predicate. A call with no verified
+    certificate has no candidate names and can never match it, so a `.*` regex cannot
+    admit an unauthenticated caller the way it can for an absent header. A dialplan naming
+    the key on a daemon whose listener never asks for a certificate is **refused at load**,
+    naming the route — such a route could never fire. `siphon-ai route-test
+    --peer-cert-san <name>` (repeatable) models it offline.
+  - **Observability**: every INVITE on a verified connection logs `peer_identity` (subject
+    + SANs) and the SHA-256 fingerprint at `info` with the peer address, and the routed /
+    no-match lines carry `peer_cert_names`; new counter
+    `siphon_ai_tls_peer_identity_total{result="verified"|"none"}` per INVITE on TLS/WSS
+    (documented in DEPLOY.md, with the rollout recipe); `GET /admin/v1/calls` rows gain
+    an optional `peer_identity` field (additive — absent for every call that presented
+    none, so existing rows are byte-identical); `print-config` shows `tls_client_auth` and
+    `tls_client_identity` under `sip`.
+  - **Not in this release**: the identity is not yet on the CDR (would be v10) and
+    `[sip.admission]` / `[[trunk]]` do not consult it — routing is the authorization
+    point for now; the default route (or the absence of one → 404) is where an
+    unrecognized certificate ends up.
+
 ### Changed
 
 - **forge-media pin `v2026.08.26` → `v2026.09.02`** — a routine roll-up.

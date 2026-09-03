@@ -434,6 +434,16 @@ pub struct RawSipTls {
     /// PEM-encoded private key (path on disk). Required.
     #[serde(default)]
     pub key: Option<String>,
+    /// Mutual TLS: PEM bundle of CAs a connecting peer's client
+    /// certificate must chain to. Set together with `client_auth`.
+    #[serde(default)]
+    pub client_ca: Option<String>,
+    /// Mutual TLS mode: `"optional"` (a peer without a certificate may
+    /// still connect; one that presents a certificate that does not
+    /// chain is refused) or `"required"` (no certificate, no
+    /// connection). Set together with `client_ca`.
+    #[serde(default)]
+    pub client_auth: Option<String>,
 }
 
 /// `[webrtc]` — the browser media leg (DEV_PLAN_WebRTC.md Phase 2
@@ -559,6 +569,14 @@ pub struct RawSipTlsClient {
     /// self-signed certs.
     #[serde(default)]
     pub extra_ca: Option<String>,
+    /// Client certificate chain (PEM) presented on outgoing TLS
+    /// connections to peers that ask for one. Set together with
+    /// `client_key`.
+    #[serde(default)]
+    pub client_cert: Option<String>,
+    /// Private key (PEM, owner-only readable) for `client_cert`.
+    #[serde(default)]
+    pub client_key: Option<String>,
 }
 
 fn default_transports() -> Vec<String> {

@@ -29,3 +29,7 @@ siphon-ai-security.workspace   = true
 # `[admin]` compiles into telemetry's auth types (Role / AdminToken /
 # AdminAuth). telemetry sits below core, so this dep is acyclic.
 siphon-ai-telemetry.workspace  = true
+
+[dev-dependencies]
+# Real files on disk for the [sip.tls] / [sip.tls_client] path-existence tests.
+tempfile = "3"

@@ -53,12 +53,14 @@ mod tests {
                         sip_call_id: "aa11@pbx".into(),
                         direction: "inbound".into(),
                         webrtc_state: None,
+                        peer_identity: None,
                     },
                     AdminCallRow {
                         call_id: "siphon-bb22".into(),
                         sip_call_id: "bb22@pbx".into(),
                         direction: "outbound".into(),
                         webrtc_state: None,
+                        peer_identity: None,
                     },
                 ],
                 registrations: vec![RegistrationRow {

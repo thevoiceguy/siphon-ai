@@ -248,6 +248,41 @@ to UDP.
 > return a clear error rather than silently downgrading. Inbound
 > `INVITE sips:…` from the carrier works.
 
+#### Mutual TLS (0.51.0)
+
+To authenticate the *peer* rather than only encrypt to it — a
+cascade of conference nodes, a partner trunk that must not be
+reachable by anyone who found the port — have the listener ask for a
+client certificate and verify it against your CA:
+
+```toml
+[sip.tls]
+listen      = "0.0.0.0:5061"
+cert        = "/etc/siphon-ai/tls/fullchain.pem"
+key         = "/etc/siphon-ai/tls/privkey.pem"
+client_ca   = "/etc/siphon-ai/tls/trunk-ca.pem"   # what peers' certs must chain to
+client_auth = "required"                          # or "optional" while rolling out
+```
+
+`required` refuses the handshake — the peer never sends a SIP
+message. `optional` admits a peer with no certificate but still
+refuses one whose certificate does not chain; its INVITEs then carry
+no identity. Either way an INVITE that arrives on a verified
+connection carries the certificate's subject and SANs, which the
+`peer_cert_san` route key matches on (`docs/DIALPLAN.md` §4.6), the
+`INVITE arrived on a connection with a verified client certificate`
+log line prints with the SHA-256 fingerprint, and
+`GET /admin/v1/calls` shows as `peer_identity`. Roll out with
+`optional` and watch `siphon_ai_tls_peer_identity_total{result="none"}`
+drop to zero before switching to `required`.
+
+For the reverse direction — a trunk that demands a certificate from
+*us* — set `[sip.tls_client].client_cert` + `client_key`; every
+outgoing TLS connection presents it to a peer that asks. The key must
+be `0600` like the listener key. `siphon-ai check` validates both
+blocks (paths exist, halves come in pairs, mode is
+`optional|required`) before a restart.
+
 ### 3. WSS to the WebSocket server
 
 Just set `wss://` in `[bridge].ws_url` (or `[route.bridge].ws_url`):
@@ -1395,6 +1430,7 @@ applied (and test-enforced) in our `prometheus_builder()` (issue #437).
 | `siphon_ai_calls_total`                 | counter   | `cause=caller_hangup\|server_hangup\|local_shutdown\|drain_forced\|bridge_ended\|ws_disconnect\|tap_ended\|transfer` | Ended calls by termination cause. `caller_hangup` (0.40.0) = the far end sent BYE, split out of `local_shutdown`, which now means admin force-hangup / CANCEL / session expiry only. `drain_forced` (0.17.0) = force-ended at the graceful-shutdown drain deadline. `transfer` (0.41.x) = the call was handed off via REFER. `ws_disconnect` (0.45.0) = the WS dropped unexpectedly mid-call (or reconnect never recovered), split out of `bridge_ended` — alert on this one; it's the WS server crashing or the network failing, not a call ending. Counts inbound **and** outbound legs (#373 — outbound legs were previously invisible here, so `ws_disconnect` alerting missed outbound WS crashes). |
 | `siphon_ai_calls_active`                | gauge     | —                                     | Currently-running bridged calls, inbound and outbound (#373 — previously inbound-only). An outbound leg joins at answer; before that it counts only on `siphon_ai_outbound_calls_active`. |
 | `siphon_ai_route_match_total`           | counter   | `route`                               | Calls per matched route. |
+| `siphon_ai_tls_peer_identity_total`     | counter   | `result=verified\|none`               | Inbound INVITEs over TLS/WSS by whether the connection presented a client certificate the listener verified (mutual TLS, 0.51.0). `verified` = the INVITE carries a `PeerIdentity` and can match a `peer_cert_san` route; `none` = the peer presented nothing, which only `[sip.tls].client_auth = "optional"` (or no client auth) lets through. UDP/TCP INVITEs are not counted. Rolling mTLS out: run `optional`, drive `none` to zero, then switch to `required` — at which point `none` can only rise if the mode was reverted. Handshakes refused under `required` never reach this counter (the peer sends no INVITE); they are in sip-transport's handshake-error transport metrics. |
 | `siphon_ai_verstat_total`               | counter   | `result=passed\|failed\|unsigned`     | STIR/SHAKEN verification outcomes per inbound INVITE. Emitted only when `[security.stir_shaken].enabled = true`. `passed` = every check held; `failed` = `Identity` header present but verification didn't fully pass; `unsigned` = no `Identity` header. |
 | `siphon_ai_sip_auth_total`              | counter   | `result=ok\|challenged\|failed\|stale` | Inbound digest-auth outcomes per challenged INVITE (0.19.0). Emitted only for sources that require `[sip.auth]`. `ok` = a valid `Authorization` verified; `challenged` = no credentials presented → `401` issued; `failed` = credentials presented but wrong (bad password / unknown user) → `401`; `stale` = a nonce-freshness rejection → `401 stale=true` — the nonce was TTL-expired **or** past its reuse window (`[sip.auth].nonce_reuse_window_secs`, #430); the credential is not implicated either way. A rising `failed` is a brute-force / misconfiguration signal — pair with the fail2ban recipe. A rising `stale` usually just means peers re-authenticate less often than the reuse window — raise the window if the extra 401 round-trips bother you. |
 | `siphon_ai_invite_admission_total`      | counter   | `result=accepted\|rate_limited\|dropped` | Inbound INVITE admission decisions (0.19.0). Emitted only when `[sip.admission]` is on. `accepted` = admitted; `rate_limited` = per-source rate trip or global `max_concurrent` cap → `503`; `dropped` = source flooding past `drop_after` → silently dropped (no response). A rising `dropped` means a sustained flood; `rate_limited` spikes with bursty peers or an undersized cap. |

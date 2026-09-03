@@ -224,6 +224,8 @@ credentials. Resolved secret values are never logged.
 | `listen` | `host:port` | same IP + port `5061` | Where the TLS listener binds. |
 | `cert`   | path        | required when TLS on | PEM cert chain on disk. |
 | `key`    | path        | required when TLS on | PEM private key on disk. |
+| `client_ca` | path     | unset                | **Mutual TLS** (0.51.0, siphon-rs #129). PEM bundle of CAs a connecting peer's client certificate must chain to. Set together with `client_auth`; checked for existence at load, parsed at startup. |
+| `client_auth` | `"optional"` \| `"required"` | unset | With `client_ca`: `required` fails the handshake for a peer that presents no certificate — it never gets to send a SIP message; `optional` admits such a peer (its INVITEs carry no identity) while still refusing a certificate that does not chain. Use `optional` to roll certificates out across a fleet, then flip to `required`. Either way, every INVITE arriving on a connection whose certificate verified carries the certificate's identity — subject, CN, `sip:`/DNS/IP SANs — which the `peer_cert_san` route key matches on (see `docs/DIALPLAN.md` §4.6), the log line and the admin call listing show, and `siphon_ai_tls_peer_identity_total` counts. Applies to the SIP TLS listener only, not `[sip.wss]` (browsers do not present client certificates). Changing it takes a restart; the cert/key SIGHUP reload keeps the mode. |
 
 > **Server side only.** `[sip.tls]` is the inbound listener's
 > cert/key. *Outgoing* TLS connections — `[[gateway]]` and
@@ -254,6 +256,8 @@ browsers register to us, not the reverse.
 | Field      | Type | Default | Notes |
 |------------|------|---------|-------|
 | `extra_ca` | path | unset   | PEM bundle appended to the built-in webpki (Mozilla CA) roots when verifying outgoing TLS. For trunks fronted by a private CA and for test rigs with self-signed certs. Public trunks (e.g. Twilio) verify against the built-in roots without this. |
+| `client_cert` | path | unset | **Mutual TLS toward a trunk** (0.51.0). PEM certificate chain this daemon presents on every outgoing TLS connection — `[[gateway]]` / `[[register]]` with `transport = "tls"` — to a peer that requests a client certificate. Set together with `client_key`. A peer that never asks sees no difference. |
+| `client_key` | path | unset | Private key for `client_cert`. Must be owner-only readable (`0600`), the same rule as `[sip.tls].key`; a group- or world-readable key is refused at startup. |
 
 The path is checked at config load; an unreadable or empty bundle
 fails at startup, not at first dial-out.
@@ -417,7 +421,9 @@ min_attestation = "A"            # strict override of [security].min_attestation
 
 Match keys (any combination, all AND together): `request_uri_user`,
 `request_uri_host`, `to_user`, `to_host`, `from_user`, `from_host`,
-`register_source`, `header.<NAME> = "<value>"`, `any = true`.
+`register_source`, `peer_cert_san` (mutual TLS — needs
+`[sip.tls].client_auth`, refused at load otherwise),
+`header.<NAME> = "<value>"`, `any = true`.
 
 ## `[registrar]` — serve REGISTER (Phase 1 of the WebRTC plan)
 

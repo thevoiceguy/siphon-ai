@@ -149,6 +149,22 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # impossible type mismatches.
 
 # siphon-rs — RFC 3261 SIP stack.
+# Bumped 2026-09-03 **v2026.08.25** → **v2026.09.03** = siphon-rs #130 (issue
+# #129, filed for FCP's cascaded conferencing and consumed here as the SIP
+# mutual-TLS surface): the TLS listener can request and verify a client
+# certificate (`load_rustls_server_config_with_client_auth`), an outbound
+# `ClientConfig` can present one (`ClientIdentity` +
+# `build_rustls_client_config`), and every packet from a connection whose
+# certificate verified carries a `PeerIdentity` (subject, CN, DNS/URI/IP
+# SANs, SHA-256 fingerprint) that `TransportContext::peer_identity()`
+# exposes to the UAS layer. Additive — sip-transport 0.5.0 → 0.6.0,
+# sip-transaction 0.6.0 → 0.7.0, siphond 0.7.0; no signature changed, and a
+# listener that never asks for a certificate behaves exactly as before.
+# What this project does with it: `[sip.tls].client_ca` + `client_auth`,
+# `[sip.tls_client].client_cert` + `client_key`, and the `peer_cert_san`
+# route match key.
+# (Prior: 2026-08-25 **v2026.08.24.1** → **v2026.08.25** — sip-uas 0.5.0,
+# `on_register` receives the TransportContext.)
 # Bumped 2026-08-21 **v2026.08.20.1** → **v2026.08.21** = siphon-rs #121
 # (opened from this project against its own #549, found while verifying the
 # 0.49.8 deploy): a UAC dialog's local URI now comes from the dialog-forming
@@ -321,32 +337,32 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 #  `6fd432270bb8` = #67 dialog_manager share, siphon-ai #324;
 #  `fcaff011f9c6` = #65 invite_with_from, siphon-ai #316;
 #  `3a4fc312ade3` = #64 TLS-SNI-is-hostname, siphon-ai #312.)
-sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25" }
-sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25" }
-sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25", features = ["tls", "ws"] }
-sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25" }
-sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25" }
-sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25" }
-sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25" }
-sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25" }
-sip-registrar   = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25" }
-sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25" }
+sip-core        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
+sip-parse       = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
+sip-transport   = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03", features = ["tls", "ws"] }
+sip-transaction = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
+sip-dialog      = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
+sip-uas         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
+sip-uac         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
+sip-auth        = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
+sip-registrar   = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
+sip-dns         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
 # (distinct from forge-media's pinned sip-sdp). Used by the outbound
 # delayed-offer answer generator to hand the UAC a SessionDescription it
 # accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25" }
-sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25" }
+sip-sdp         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
+sip-hep         = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
 # sip-observe — the transport-layer observability seam. We implement its
 # `TransportMetrics` trait in siphon-ai-telemetry and install it with
 # `set_transport_metrics`, which is the only way to see ingress
 # rate-limit drops: the hook is defaulted to a no-op upstream, so an
 # embedder that installs nothing (as we did until 0.48.11) silently gets
 # the `NoopTransportMetrics` fallback (siphon-ai #459).
-sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25" }
+sip-observe     = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25" }
+sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #
@@ -376,7 +392,7 @@ sip-identity    = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v20
 #    became `pub`. First consumer is FCP, not this daemon; we have no
 #    B2BUA leg whose PTs arrive late.
 #  * **forge-sdp** `Cargo.toml`: `sip-sdp` moves from a submodule-relative
-#    path to `git … tag = "v2026.08.25"`. That is the *same* tag this
+#    path to `git … tag = "v2026.09.03"`. That is the *same* tag this
 #    workspace pins every other `sip-*` crate to, so cargo unifies them and
 #    the lock still holds exactly one `sip-sdp`. Had the tags differed we
 #    would have linked two copies of the SDP negotiator — worth re-checking

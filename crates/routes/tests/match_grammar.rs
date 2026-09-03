@@ -20,6 +20,7 @@ fn info<'a>(request_uri_user: &'a str, headers: &'a Headers) -> CallInfo<'a> {
         from_user: "+13125551234",
         from_host: "carrier.example.net",
         register_source: "trunk",
+        peer_cert_names: &[],
         headers,
     }
 }
@@ -232,4 +233,94 @@ fn any_combined_with_other_keys_fails_to_load() {
         request_uri_user = "5000"
     "#;
     assert!(load_from_toml(toml).is_err());
+}
+
+/// `peer_cert_san` (siphon-rs #129 / mutual TLS): matches when any
+/// name the verified client certificate asserts satisfies the
+/// predicate, and never for a call that presented no certificate.
+#[test]
+fn peer_cert_san_matches_any_asserted_name() {
+    let toml = r#"
+        [[route]]
+        name = "node-1"
+        [route.match]
+        peer_cert_san = "sip:node-1@example.com"
+
+        [[route]]
+        name = "fallback"
+        [route.match]
+        any = true
+    "#;
+    let set = load_from_toml(toml).unwrap();
+    let h = empty_headers();
+
+    // URI SAN first, DNS SAN second, CN last — order the transport uses.
+    let names = vec![
+        "sip:node-1@example.com".to_string(),
+        "node-1.example.com".to_string(),
+        "node-1".to_string(),
+    ];
+    let mut i = info("any", &h);
+    i.peer_cert_names = &names;
+    assert_eq!(matched_name(&set, &i), Some("node-1"));
+
+    // Literal matching is case-insensitive like every other key.
+    let upper = vec!["SIP:NODE-1@EXAMPLE.COM".to_string()];
+    let mut i = info("any", &h);
+    i.peer_cert_names = &upper;
+    assert_eq!(matched_name(&set, &i), Some("node-1"));
+
+    // A different node falls through to the default.
+    let other = vec!["sip:node-2@example.com".to_string()];
+    let mut i = info("any", &h);
+    i.peer_cert_names = &other;
+    assert_eq!(matched_name(&set, &i), Some("fallback"));
+}
+
+#[test]
+fn peer_cert_san_never_matches_a_call_without_a_verified_certificate() {
+    let toml = r#"
+        [[route]]
+        name = "authenticated-trunk"
+        [route.match]
+        regex = true
+        peer_cert_san = ".*"
+    "#;
+    let set = load_from_toml(toml).unwrap();
+    let h = empty_headers();
+    // Even a match-everything regex cannot admit a call with no
+    // names: there is no candidate string to run it against.
+    let i = info("any", &h);
+    assert_eq!(matched_name(&set, &i), None);
+    assert!(set.iter().next().unwrap().uses_peer_cert_san());
+}
+
+#[test]
+fn peer_cert_san_regex_and_ands_with_other_keys() {
+    let toml = r#"
+        [[route]]
+        name = "cascade"
+        [route.match]
+        regex = true
+        peer_cert_san = "^sip:node-[0-9]+@example\\.com$"
+        request_uri_user = "^conf-"
+    "#;
+    let set = load_from_toml(toml).unwrap();
+    let h = empty_headers();
+    let names = vec!["sip:node-7@example.com".to_string()];
+
+    let mut i = info("conf-1234", &h);
+    i.peer_cert_names = &names;
+    assert_eq!(matched_name(&set, &i), Some("cascade"));
+
+    // Right certificate, wrong target → no match.
+    let mut i = info("5000", &h);
+    i.peer_cert_names = &names;
+    assert_eq!(matched_name(&set, &i), None);
+
+    // Right target, certificate from outside the pattern → no match.
+    let rogue = vec!["sip:attacker@example.org".to_string()];
+    let mut i = info("conf-1234", &h);
+    i.peer_cert_names = &rogue;
+    assert_eq!(matched_name(&set, &i), None);
 }

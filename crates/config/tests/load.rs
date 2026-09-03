@@ -3700,3 +3700,245 @@ password = "${TURN_PASS}""#,
     let w = cfg.webrtc.expect("webrtc present");
     assert_eq!(w.turn_servers[0].password, "s3cret-relay");
 }
+
+/// Mutual TLS config surface (siphon-rs #129): `[sip.tls].client_ca` +
+/// `client_auth`, `[sip.tls_client].client_cert` + `client_key`, and the
+/// `peer_cert_san` route key's dependency on the former.
+mod mtls {
+    use super::*;
+    use std::io::Write as _;
+
+    /// Real files on disk: the compile step checks existence, and the
+    /// TLS listener's own cert/key are required whenever `tls` is on.
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        cert: String,
+        key: String,
+        ca: String,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::File::create(&path)
+                .unwrap()
+                .write_all(b"-----BEGIN CERTIFICATE-----\nMA==\n-----END CERTIFICATE-----\n")
+                .unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let cert = mk("cert.pem");
+        let key = mk("key.pem");
+        let ca = mk("ca.pem");
+        Fixture {
+            _dir: dir,
+            cert,
+            key,
+            ca,
+        }
+    }
+
+    fn tls_base(f: &Fixture, extra: &str) -> String {
+        format!(
+            r#"
+[sip]
+listen = "127.0.0.1:5060"
+transports = ["udp", "tls"]
+
+[sip.tls]
+cert = "{cert}"
+key = "{key}"
+{extra}
+
+[bridge]
+ws_url = "wss://x/y"
+"#,
+            cert = f.cert,
+            key = f.key,
+        )
+    }
+
+    #[test]
+    fn client_auth_unset_by_default() {
+        let f = fixture();
+        let cfg = load_from_str_with_env(&tls_base(&f, ""), &MapEnv::new([])).expect("compiles");
+        assert!(cfg.sip.tls.unwrap().client_auth.is_none());
+        assert!(cfg.sip.tls_client_identity.is_none());
+    }
+
+    #[test]
+    fn client_auth_required_and_optional_compile() {
+        let f = fixture();
+        for (mode, want) in [
+            ("required", siphon_ai_config::TlsClientAuthMode::Required),
+            ("optional", siphon_ai_config::TlsClientAuthMode::Optional),
+        ] {
+            let toml = tls_base(
+                &f,
+                &format!("client_ca = \"{}\"\nclient_auth = \"{mode}\"", f.ca),
+            );
+            let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+            let auth = cfg.sip.tls.unwrap().client_auth.expect("client auth set");
+            assert_eq!(auth.mode, want);
+            assert_eq!(auth.ca_path.to_string_lossy(), f.ca);
+        }
+    }
+
+    #[test]
+    fn client_auth_halves_must_come_together() {
+        let f = fixture();
+        for extra in [
+            format!("client_ca = \"{}\"", f.ca),
+            "client_auth = \"required\"".to_string(),
+        ] {
+            let err = load_from_str_with_env(&tls_base(&f, &extra), &MapEnv::new([]))
+                .expect_err("half a client-auth block must fail at load");
+            assert!(
+                err.to_string().contains("client_ca and client_auth"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn client_auth_rejects_unknown_mode_and_missing_bundle() {
+        let f = fixture();
+        let err = load_from_str_with_env(
+            &tls_base(
+                &f,
+                &format!("client_ca = \"{}\"\nclient_auth = \"on\"", f.ca),
+            ),
+            &MapEnv::new([]),
+        )
+        .expect_err("unknown mode");
+        assert!(err.to_string().contains("\"on\""), "{err}");
+
+        let err = load_from_str_with_env(
+            &tls_base(
+                &f,
+                "client_ca = \"/nonexistent/ca.pem\"\nclient_auth = \"required\"",
+            ),
+            &MapEnv::new([]),
+        )
+        .expect_err("missing bundle");
+        assert!(err.to_string().contains("client_ca"), "{err}");
+    }
+
+    #[test]
+    fn client_auth_without_tls_transport_is_the_usual_misconfig_error() {
+        let f = fixture();
+        let toml = format!(
+            r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[sip.tls]
+client_ca = "{}"
+client_auth = "required"
+
+[bridge]
+ws_url = "wss://x/y"
+"#,
+            f.ca
+        );
+        let err = load_from_str_with_env(&toml, &MapEnv::new([]))
+            .expect_err("[sip.tls] fields without \"tls\" in transports fail");
+        assert!(err.to_string().to_lowercase().contains("tls"), "{err}");
+    }
+
+    #[test]
+    fn outbound_client_identity_compiles_and_needs_both_halves() {
+        let f = fixture();
+        let toml = format!(
+            r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[sip.tls_client]
+client_cert = "{cert}"
+client_key = "{key}"
+
+[bridge]
+ws_url = "wss://x/y"
+"#,
+            cert = f.cert,
+            key = f.key,
+        );
+        let cfg = load_from_str_with_env(&toml, &MapEnv::new([])).expect("compiles");
+        let id = cfg.sip.tls_client_identity.expect("identity set");
+        assert_eq!(id.cert_path.to_string_lossy(), f.cert);
+        assert_eq!(id.key_path.to_string_lossy(), f.key);
+
+        let half = format!(
+            r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[sip.tls_client]
+client_cert = "{}"
+
+[bridge]
+ws_url = "wss://x/y"
+"#,
+            f.cert
+        );
+        let err = load_from_str_with_env(&half, &MapEnv::new([])).expect_err("half fails");
+        assert!(
+            err.to_string().contains("client_cert and client_key"),
+            "{err}"
+        );
+
+        let missing = format!(
+            r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[sip.tls_client]
+client_cert = "{}"
+client_key = "/nonexistent/key.pem"
+
+[bridge]
+ws_url = "wss://x/y"
+"#,
+            f.cert
+        );
+        let err = load_from_str_with_env(&missing, &MapEnv::new([])).expect_err("missing key");
+        assert!(err.to_string().contains("client_key"), "{err}");
+    }
+
+    #[test]
+    fn peer_cert_san_route_requires_client_auth_on_the_listener() {
+        let f = fixture();
+        let route = r#"
+[[route]]
+name = "cascade"
+[route.match]
+peer_cert_san = "sip:node-1@example.com"
+[route.bridge]
+ws_url = "wss://cascade/sip"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+        // Listener never asks for a certificate → the route could never
+        // match → refused at load.
+        let without = format!("{}\n{route}", tls_base(&f, ""));
+        let err = load_from_str_with_env(&without, &MapEnv::new([]))
+            .expect_err("peer_cert_san without client_auth must fail");
+        assert!(err.to_string().contains("cascade"), "{err}");
+        assert!(err.to_string().contains("client_auth"), "{err}");
+
+        // Same dialplan with mutual TLS on → fine.
+        let with = format!(
+            "{}\n{route}",
+            tls_base(
+                &f,
+                &format!("client_ca = \"{}\"\nclient_auth = \"optional\"", f.ca)
+            )
+        );
+        let cfg = load_from_str_with_env(&with, &MapEnv::new([])).expect("compiles");
+        assert!(cfg.routes.iter().any(|r| r.uses_peer_cert_san()));
+    }
+}

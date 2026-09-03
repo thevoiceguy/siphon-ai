@@ -98,6 +98,12 @@ enum Command {
         /// `[[register]]` block name.
         #[arg(long = "register-source", default_value = "trunk")]
         register_source: String,
+        /// Repeatable: a name the caller's verified TLS client
+        /// certificate asserts (a `sip:` URI / DNS SAN or the CN),
+        /// matched against `[route.match].peer_cert_san`. Omit to
+        /// model a call that presented no certificate.
+        #[arg(long = "peer-cert-san")]
+        peer_cert_san: Vec<String>,
         /// Repeatable SIP header, `Name: Value`, matched against
         /// `[route.match].header.*`.
         #[arg(long = "header", short = 'H')]
@@ -242,6 +248,7 @@ async fn main() -> Result<()> {
                 from,
                 from_host,
                 register_source,
+                peer_cert_san,
                 headers,
             } => run_route_test(
                 &path,
@@ -259,6 +266,7 @@ async fn main() -> Result<()> {
                     from_user: from.clone(),
                     from_host: from_host.clone(),
                     register_source: register_source.clone(),
+                    peer_cert_names: peer_cert_san.clone(),
                     headers: parse_headers(headers)?,
                 },
             ),

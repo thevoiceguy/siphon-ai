@@ -27,6 +27,10 @@ pub struct RouteTestInput {
     pub from_user: String,
     pub from_host: String,
     pub register_source: String,
+    /// Names asserted by a verified client certificate (mutual TLS),
+    /// matched against `[route.match].peer_cert_san`. Empty = the call
+    /// presented no certificate.
+    pub peer_cert_names: Vec<String>,
     /// `("X-Header", "value")` pairs.
     pub headers: Vec<(String, String)>,
 }
@@ -576,6 +580,14 @@ pub fn render_config_json(config: &Config, show_secrets: bool) -> String {
             "listen": config.sip.listen_addr.to_string(),
             "transports": config.sip.transports.iter().map(transport_str).collect::<Vec<_>>(),
             "tls": config.sip.tls.is_some(),
+            "tls_client_auth": config.sip.tls.as_ref().and_then(|t| t.client_auth.as_ref()).map(|a| json!({
+                "client_ca": a.ca_path.display().to_string(),
+                "mode": a.mode.as_str(),
+            })),
+            "tls_client_identity": config.sip.tls_client_identity.as_ref().map(|i| json!({
+                "client_cert": i.cert_path.display().to_string(),
+                "client_key": i.key_path.display().to_string(),
+            })),
             "allow_delayed_offer": config.sip.allow_delayed_offer,
         },
         "media": {
@@ -702,6 +714,7 @@ pub fn route_test(config: &Config, input: &RouteTestInput) -> String {
         from_user: &input.from_user,
         from_host: &input.from_host,
         register_source: &input.register_source,
+        peer_cert_names: &input.peer_cert_names,
         headers: &headers,
     };
 
@@ -712,6 +725,9 @@ pub fn route_test(config: &Config, input: &RouteTestInput) -> String {
     let _ = writeln!(s, "  to          = {}@{}", input.to_user, input.to_host);
     let _ = writeln!(s, "  from        = {}@{}", input.from_user, input.from_host);
     let _ = writeln!(s, "  register_source = {}", input.register_source);
+    if !input.peer_cert_names.is_empty() {
+        let _ = writeln!(s, "  peer_cert_san   = {:?}", input.peer_cert_names);
+    }
     if !input.headers.is_empty() {
         let _ = writeln!(s, "  headers     = {:?}", input.headers);
     }

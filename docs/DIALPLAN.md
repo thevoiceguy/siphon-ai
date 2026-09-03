@@ -106,6 +106,7 @@ All match keys are optional. Use as many as you need; they AND.
 | `from_user`          | User-part of the `From` header URI.                                                   |
 | `from_host`          | Host-part of the `From` header URI.                                                   |
 | `register_source`    | Name of the `[[register]]` block the call arrived on, or `"trunk"` for unregistered. |
+| `peer_cert_san`      | A name the peer's **verified TLS client certificate** asserts — any SAN or the CN. Mutual TLS only; see §4.6. |
 | `header.<NAME>`      | Value of header `<NAME>` (case-insensitive on the name).                              |
 | `any`                | Boolean. `true` matches everything; mutually exclusive with all the above.            |
 
@@ -192,6 +193,61 @@ Unconditional match. Place it at the end of the file as the
 catch-all. `any = true` together with any other match key is a
 config-load error — silent precedence between "match anything" and
 "match this specific thing" would be a footgun.
+
+### 4.6 `peer_cert_san` (mutual TLS, 0.51.0)
+
+`peer_cert_san` matches against the identity of the TLS **client
+certificate** the caller's connection presented — and only when the
+daemon's TLS listener verified it, which requires
+`[sip.tls].client_ca` + `client_auth` (siphon-rs #129). The candidate
+set is every name the certificate asserts, in this order: URI SANs
+(RFC 5922 §7.1 puts a SIP identity in a `sip:` URI SAN), DNS SANs,
+IP SANs, e-mail SANs, and finally the subject Common Name. The key
+matches when **any one** of them satisfies the predicate.
+
+```toml
+[sip.tls]
+cert        = "/etc/siphon-ai/tls/fullchain.pem"
+key         = "/etc/siphon-ai/tls/privkey.pem"
+client_ca   = "/etc/siphon-ai/tls/cascade-ca.pem"
+client_auth = "required"
+
+# Conference nodes dial each other with certificates our CA issued
+# (SAN sip:node-N@conf.example.com). Only they reach the cascade
+# bridge; everything else — including a caller who reached the TLS
+# listener with no certificate under `client_auth = "optional"` —
+# falls to the default route.
+[[route]]
+name = "cascade-trunk"
+[route.match]
+regex = true
+peer_cert_san = "^sip:node-[0-9]+@conf\\.example\\.com$"
+[route.bridge]
+ws_url = "wss://cascade.example.com/sip-bridge"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+```
+
+Two things distinguish this key from the others:
+
+- **A call with no verified certificate never matches it.** There is
+  no empty-string candidate, so `regex = true` with `peer_cert_san =
+  ".*"` (or `^$`) cannot admit an unauthenticated caller the way an
+  absent header can. The identity is what the *TLS layer* proved
+  before any SIP was read — no header in the INVITE can forge it.
+- **It is refused at config load unless the listener asks for
+  certificates.** Without `[sip.tls].client_auth` no INVITE could ever
+  carry an identity, so a route naming this key could never fire; the
+  daemon (and `siphon-ai check`) fails with a message naming the route
+  rather than shipping a dead entry.
+
+Literal values compare case-insensitively like every other key, which
+is right for DNS names and harmless for URIs; use `regex = true` with
+anchors when the exact URI matters. `siphon-ai route-test
+--peer-cert-san sip:node-3@conf.example.com` exercises it offline.
 
 ---
 

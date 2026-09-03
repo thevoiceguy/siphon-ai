@@ -44,13 +44,15 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use sip_core::{Request, Response};
 use sip_dialog::Dialog;
-use sip_transaction::{ServerTransactionHandle, TransportContext};
+use sip_transaction::{ServerTransactionHandle, TransportContext, TransportKind};
 use sip_uas::integrated::{IntegratedUAS, UasRequestHandler};
 use sip_uas::UserAgentServer;
 use siphon_ai_routes::{CompiledRoute, RouteSet};
 // Metric names from the crate that declares them — see the note in
 // media-glue's tap.rs (#474).
-use siphon_ai_telemetry::metrics::{INVITES_TOTAL, INVITE_ADMISSION_SOURCES, NOTIFY_TOTAL};
+use siphon_ai_telemetry::metrics::{
+    INVITES_TOTAL, INVITE_ADMISSION_SOURCES, NOTIFY_TOTAL, TLS_PEER_IDENTITY_TOTAL,
+};
 use tracing::{debug, info, instrument, warn};
 
 use crate::dialog::{
@@ -131,18 +133,24 @@ fn drain_reject_response(
 ///
 /// Pure / synchronous. The async trait wrapper [`RoutingHandler`]
 /// adapts this to the upstream [`UasRequestHandler`] surface.
+///
+/// `peer_cert_names` is every name the connection's verified TLS
+/// client certificate asserts (empty when none) — the candidate set
+/// for the `peer_cert_san` route key.
 pub fn dispatch_invite<'a>(
     routes: &'a RouteSet,
     register_source: &str,
+    peer_cert_names: &[String],
     request: &Request,
 ) -> RouteAction<'a> {
-    match route_invite(request, register_source, routes) {
+    match route_invite(request, register_source, peer_cert_names, routes) {
         RouteDecision::Matched { facts, route } => {
             info!(
                 route = route.name.as_str(),
                 from_user = facts.from_user.as_str(),
                 request_uri_user = facts.request_uri_user.as_str(),
                 register_source,
+                peer_cert_names = ?peer_cert_names,
                 "INVITE routed"
             );
             RouteAction::Accept { facts, route }
@@ -152,6 +160,7 @@ pub fn dispatch_invite<'a>(
                 from_user = facts.from_user.as_str(),
                 request_uri_user = facts.request_uri_user.as_str(),
                 register_source,
+                peer_cert_names = ?peer_cert_names,
                 "INVITE rejected: no route matched"
             );
             RouteAction::SendFinal(UserAgentServer::create_response(request, 404, "Not Found"))
@@ -773,8 +782,33 @@ impl<A: CallAcceptor + 'static> UasRequestHandler for RoutingHandler<A> {
             }
         }
 
+        // Mutual TLS (siphon-rs #129): the identity the connection
+        // proved before this INVITE was read, if the listener asked for
+        // a client certificate and the peer presented one that chained.
+        // Counted per INVITE on a TLS-family transport so an operator
+        // rolling `client_auth = "optional"` out can watch the share of
+        // peers that have certificates before flipping to `required`.
+        let peer_cert_names: Vec<String> = match ctx.peer_identity() {
+            Some(identity) => {
+                info!(
+                    peer = %ctx.peer(),
+                    peer_identity = %identity,
+                    fingerprint = %identity.fingerprint_hex(),
+                    "INVITE arrived on a connection with a verified client certificate"
+                );
+                metrics::counter!(TLS_PEER_IDENTITY_TOTAL, "result" => "verified").increment(1);
+                identity.names()
+            }
+            None => {
+                if matches!(ctx.transport(), TransportKind::Tls | TransportKind::Wss) {
+                    metrics::counter!(TLS_PEER_IDENTITY_TOTAL, "result" => "none").increment(1);
+                }
+                Vec::new()
+            }
+        };
+
         let routes = self.routes.load();
-        match dispatch_invite(&routes, &register_source, request) {
+        match dispatch_invite(&routes, &register_source, &peer_cert_names, request) {
             RouteAction::SendFinal(mut response) => {
                 self.fill_response(&mut response, ctx).await;
                 handle.send_final(response).await;

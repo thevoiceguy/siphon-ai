@@ -36,19 +36,24 @@ pub enum RouteDecision<'a> {
 /// `register_source` is the name of the `[[register]]` block the
 /// call arrived on, or `"trunk"` for unregistered inbound.
 ///
+/// `peer_cert_names` is what the connection's verified TLS client
+/// certificate asserts (see `InviteFacts::as_call_info`); pass an
+/// empty slice for a call that presented none.
+///
 /// The returned `&CompiledRoute` lifetime is tied to `routes`
-/// alone, *not* `register_source`. The matcher needs both at
-/// call-evaluation time but the result only references the route
-/// table — callers can pass a short-lived register_source string
-/// (e.g., synthesized per-request) and still hand the matched
-/// route off to a longer-lived consumer.
+/// alone, *not* `register_source` or `peer_cert_names`. The matcher
+/// needs all of them at call-evaluation time but the result only
+/// references the route table — callers can pass short-lived
+/// per-request strings and still hand the matched route off to a
+/// longer-lived consumer.
 pub fn route_invite<'r>(
     request: &Request,
     register_source: &str,
+    peer_cert_names: &[String],
     routes: &'r RouteSet,
 ) -> RouteDecision<'r> {
     let facts = InviteFacts::extract(request);
-    let info = facts.as_call_info(register_source);
+    let info = facts.as_call_info(register_source, peer_cert_names);
     match routes.find_match(&info) {
         Some(route) => RouteDecision::Matched { facts, route },
         None => RouteDecision::NoMatch { facts },

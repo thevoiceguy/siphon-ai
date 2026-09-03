@@ -72,6 +72,16 @@ pub const CALLS_TOTAL: &str = "siphon_ai_calls_total";
 /// `[[route]].name`). Useful for "which route is hot" dashboards.
 pub const ROUTE_MATCH_TOTAL: &str = "siphon_ai_route_match_total";
 
+/// Inbound INVITEs on a TLS-family transport (TLS, WSS) by whether the
+/// connection presented a client certificate the listener verified
+/// (mutual TLS, siphon-rs #129). Labeled by `result`: `verified` (the
+/// request carries a `PeerIdentity`; `peer_cert_san` routes can match
+/// it) or `none` (the peer presented nothing — only reachable with
+/// `[sip.tls].client_auth = "optional"` or no client auth at all).
+/// UDP/TCP INVITEs are not counted. Bounded cardinality (two values);
+/// the identity itself is in the log line and the admin call listing.
+pub const TLS_PEER_IDENTITY_TOTAL: &str = "siphon_ai_tls_peer_identity_total";
+
 /// STIR/SHAKEN verification outcomes on inbound INVITEs, counted only
 /// when `[security.stir_shaken].enabled = true`. Labeled by `result`:
 /// `passed` (every check held — attestation is trustworthy),
@@ -937,6 +947,10 @@ pub fn register_descriptions() {
     );
     describe_counter!(ROUTE_MATCH_TOTAL, "Calls accepted by matched route name.");
     describe_counter!(
+        TLS_PEER_IDENTITY_TOTAL,
+        "Inbound INVITEs over TLS/WSS by whether the connection presented a verified client certificate (mutual TLS)."
+    );
+    describe_counter!(
         VERSTAT_TOTAL,
         "STIR/SHAKEN verification outcomes by result (passed, failed, unsigned)."
     );
@@ -1400,6 +1414,7 @@ pub const ALL_COUNTERS: &[&str] = &[
     CALLS_TOTAL,
     CALLS_DRAIN_FORCED_TOTAL,
     ROUTE_MATCH_TOTAL,
+    TLS_PEER_IDENTITY_TOTAL,
     VERSTAT_TOTAL,
     RECORDINGS_TOTAL,
     RECORDING_UPLOADS_TOTAL,

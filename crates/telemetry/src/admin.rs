@@ -1282,6 +1282,7 @@ mod tests {
                     sip_call_id: sip.clone(),
                     direction: "inbound".into(),
                     webrtc_state: None,
+                    peer_identity: None,
                 })
                 .collect()
         }

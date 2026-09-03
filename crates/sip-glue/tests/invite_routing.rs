@@ -132,7 +132,7 @@ fn matches_route_by_request_uri_user() {
     )
     .build();
 
-    match route_invite(&req, "trunk", &routes) {
+    match route_invite(&req, "trunk", &[], &routes) {
         RouteDecision::Matched { route, .. } => assert_eq!(route.name, "reception"),
         RouteDecision::NoMatch { .. } => panic!("expected reception match"),
     }
@@ -162,7 +162,7 @@ fn falls_through_to_default() {
     )
     .build();
 
-    match route_invite(&req, "trunk", &routes) {
+    match route_invite(&req, "trunk", &[], &routes) {
         RouteDecision::Matched { route, .. } => assert_eq!(route.name, "default"),
         RouteDecision::NoMatch { .. } => panic!("expected default match"),
     }
@@ -188,7 +188,7 @@ fn no_match_returns_nomatch_when_no_default() {
     .build();
 
     assert!(matches!(
-        route_invite(&req, "trunk", &routes),
+        route_invite(&req, "trunk", &[], &routes),
         RouteDecision::NoMatch { .. }
     ));
 }
@@ -217,11 +217,11 @@ fn register_source_distinguishes_routes() {
     )
     .build();
 
-    match route_invite(&req, "cucm-main", &routes) {
+    match route_invite(&req, "cucm-main", &[], &routes) {
         RouteDecision::Matched { route, .. } => assert_eq!(route.name, "from-cucm"),
         _ => panic!("expected from-cucm match"),
     }
-    match route_invite(&req, "trunk", &routes) {
+    match route_invite(&req, "trunk", &[], &routes) {
         RouteDecision::Matched { route, .. } => assert_eq!(route.name, "from-trunk"),
         _ => panic!("expected from-trunk match"),
     }
@@ -254,7 +254,7 @@ fn header_match_with_regex() {
     .header("X-Tenant-Id", "acme")
     .build();
 
-    match route_invite(&req, "trunk", &routes) {
+    match route_invite(&req, "trunk", &[], &routes) {
         RouteDecision::Matched { route, .. } => assert_eq!(route.name, "tenant-acme"),
         _ => panic!("expected tenant-acme match"),
     }
@@ -267,7 +267,7 @@ fn header_match_with_regex() {
     .header("X-Tenant-Id", "globex")
     .build();
 
-    match route_invite(&req_other, "trunk", &routes) {
+    match route_invite(&req_other, "trunk", &[], &routes) {
         RouteDecision::Matched { route, .. } => assert_eq!(route.name, "default"),
         _ => panic!("expected default match"),
     }
@@ -297,7 +297,7 @@ fn from_user_match_with_regex_anchors() {
     )
     .build();
 
-    match route_invite(&req, "trunk", &routes) {
+    match route_invite(&req, "trunk", &[], &routes) {
         RouteDecision::Matched { route, .. } => assert_eq!(route.name, "vip"),
         _ => panic!("expected vip match"),
     }

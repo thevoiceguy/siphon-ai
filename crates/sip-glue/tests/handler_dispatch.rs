@@ -52,7 +52,7 @@ fn matched_invite_yields_accept_with_route_and_facts() {
         "<sip:5000@siphon.example.com>",
     );
 
-    match dispatch_invite(&routes, "trunk", &req) {
+    match dispatch_invite(&routes, "trunk", &[], &req) {
         RouteAction::Accept { facts, route } => {
             assert_eq!(route.name, "reception");
             assert_eq!(
@@ -86,7 +86,7 @@ fn unmatched_invite_yields_404_with_request_correlation_headers() {
         "<sip:9999@siphon.example.com>",
     );
 
-    match dispatch_invite(&routes, "trunk", &req) {
+    match dispatch_invite(&routes, "trunk", &[], &req) {
         RouteAction::SendFinal(response) => {
             assert_eq!(response.code(), 404);
             assert_eq!(response.reason(), "Not Found");
@@ -124,7 +124,7 @@ fn matched_route_with_default_fallback_picks_specific_first() {
         "<sip:caller@example.net>",
         "<sip:5000@siphon.example.com>",
     );
-    match dispatch_invite(&routes, "trunk", &req) {
+    match dispatch_invite(&routes, "trunk", &[], &req) {
         RouteAction::Accept { route, .. } => assert_eq!(route.name, "reception"),
         _ => panic!("expected Accept reception"),
     }
@@ -135,7 +135,7 @@ fn matched_route_with_default_fallback_picks_specific_first() {
         "<sip:caller@example.net>",
         "<sip:1234@siphon.example.com>",
     );
-    match dispatch_invite(&routes, "trunk", &req) {
+    match dispatch_invite(&routes, "trunk", &[], &req) {
         RouteAction::Accept { route, .. } => assert_eq!(route.name, "default"),
         _ => panic!("expected Accept default"),
     }
@@ -164,11 +164,11 @@ fn register_source_distinguishes_routes() {
         "<sip:5000@siphon.example.com>",
     );
 
-    match dispatch_invite(&routes, "cucm-main", &req) {
+    match dispatch_invite(&routes, "cucm-main", &[], &req) {
         RouteAction::Accept { route, .. } => assert_eq!(route.name, "from-cucm"),
         _ => panic!("expected Accept from-cucm"),
     }
-    match dispatch_invite(&routes, "trunk", &req) {
+    match dispatch_invite(&routes, "trunk", &[], &req) {
         RouteAction::Accept { route, .. } => assert_eq!(route.name, "from-trunk"),
         _ => panic!("expected Accept from-trunk"),
     }
@@ -198,12 +198,55 @@ fn dispatch_returned_route_outlives_register_source_string() {
 
     let action = {
         let rs = String::from("trunk");
-        dispatch_invite(&routes, &rs, &req)
+        dispatch_invite(&routes, &rs, &[], &req)
         // rs dropped here
     };
 
     match action {
         RouteAction::Accept { route, .. } => assert_eq!(route.name, "any-call"),
         _ => panic!("expected Accept"),
+    }
+}
+
+/// Mutual TLS (siphon-rs #129): the names off the connection's verified
+/// client certificate reach the matcher, and a call that presented none
+/// cannot take a `peer_cert_san` route.
+#[test]
+fn peer_cert_names_select_the_route() {
+    let routes = load_from_toml(
+        r#"
+        [[route]]
+        name = "cascade-trunk"
+        [route.match]
+        peer_cert_san = "sip:node-1@example.com"
+        [route.bridge]
+        ws_url = "wss://cascade.example.com/sip"
+
+        [[route]]
+        name = "default"
+        [route.match]
+        any = true
+        [route.bridge]
+        ws_url = "wss://bot.example.com/sip"
+        "#,
+    )
+    .unwrap();
+    let req = invite(
+        "sip:5000@siphon.example.com",
+        "sip:node-1@example.com",
+        "sip:5000@siphon.example.com",
+    );
+
+    let names = vec![
+        "sip:node-1@example.com".to_string(),
+        "node-1.example.com".to_string(),
+    ];
+    match dispatch_invite(&routes, "trunk", &names, &req) {
+        RouteAction::Accept { route, .. } => assert_eq!(route.name, "cascade-trunk"),
+        other => panic!("expected the certificate-scoped route, got {other:?}"),
+    }
+    match dispatch_invite(&routes, "trunk", &[], &req) {
+        RouteAction::Accept { route, .. } => assert_eq!(route.name, "default"),
+        other => panic!("expected the default route, got {other:?}"),
     }
 }

@@ -48,6 +48,15 @@ pub struct AdminCallRow {
     /// an older daemon sees `None` everywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webrtc_state: Option<String>,
+    /// The verified TLS client certificate the call's connection
+    /// presented (mutual TLS, siphon-rs #129): subject DN followed by
+    /// the SANs, e.g. `CN=node-1,O=Example san=[sip:node-1@example.com]`.
+    ///
+    /// Absent when the connection presented none — a UDP/TCP call, or a
+    /// TLS listener without `[sip.tls].client_auth`. Additive optional
+    /// field, same contract as `webrtc_state`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_identity: Option<String>,
 }
 
 /// `GET /admin/v1/calls` response envelope.
@@ -411,6 +420,7 @@ mod tests {
                 sip_call_id: "abc@host".into(),
                 direction: "inbound".into(),
                 webrtc_state: None,
+                peer_identity: None,
             }],
         };
         assert_eq!(
@@ -437,6 +447,7 @@ mod tests {
             sip_call_id: "web@host".into(),
             direction: "inbound".into(),
             webrtc_state: Some("ice_connected".into()),
+            peer_identity: None,
         };
         assert_eq!(
             serde_json::to_value(&row).unwrap(),
@@ -455,6 +466,29 @@ mod tests {
         }))
         .expect("a pre-0.51.0 daemon's row still parses");
         assert_eq!(legacy.webrtc_state, None);
+        assert_eq!(legacy.peer_identity, None);
+    }
+
+    /// A call whose connection presented a verified client certificate
+    /// (mutual TLS) carries the identity; every other row omits the key.
+    #[test]
+    fn an_mtls_call_row_carries_its_peer_identity() {
+        let row = AdminCallRow {
+            call_id: "siphon-mtls".into(),
+            sip_call_id: "mtls@host".into(),
+            direction: "inbound".into(),
+            webrtc_state: None,
+            peer_identity: Some("CN=node-1 san=[sip:node-1@example.com]".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&row).unwrap(),
+            json!({
+                "call_id": "siphon-mtls",
+                "sip_call_id": "mtls@host",
+                "direction": "inbound",
+                "peer_identity": "CN=node-1 san=[sip:node-1@example.com]",
+            })
+        );
     }
 
     #[test]

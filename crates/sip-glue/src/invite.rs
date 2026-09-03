@@ -85,7 +85,16 @@ impl InviteFacts {
     /// the call arrived through, or `"trunk"` for unregistered
     /// inbound. The caller (sip-glue's UAS handler, ultimately)
     /// knows which it was.
-    pub fn as_call_info<'a>(&'a self, register_source: &'a str) -> CallInfo<'a> {
+    ///
+    /// `peer_cert_names` is every name the connection's **verified**
+    /// TLS client certificate asserts (`PeerIdentity::names()`), or
+    /// empty when there was none — the candidate set for the
+    /// `peer_cert_san` route key.
+    pub fn as_call_info<'a>(
+        &'a self,
+        register_source: &'a str,
+        peer_cert_names: &'a [String],
+    ) -> CallInfo<'a> {
         CallInfo {
             request_uri_user: &self.request_uri_user,
             request_uri_host: &self.request_uri_host,
@@ -94,6 +103,7 @@ impl InviteFacts {
             from_user: &self.from_user,
             from_host: &self.from_host,
             register_source,
+            peer_cert_names,
             headers: &self.headers,
         }
     }

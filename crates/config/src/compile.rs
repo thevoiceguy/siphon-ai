@@ -655,6 +655,10 @@ pub struct SipConfig {
     /// transports list. `None` when TLS isn't enabled. Daemon
     /// loads cert/key from these paths at startup.
     pub tls: Option<SipTlsConfig>,
+    /// `[sip.tls_client].client_cert` / `client_key` — certificate this
+    /// daemon presents on outgoing TLS connections to a peer that asks
+    /// for one (mutual TLS toward a trunk). `None` = present nothing.
+    pub tls_client_identity: Option<TlsClientIdentity>,
     /// `[sip.tls_client].extra_ca` — optional PEM bundle appended to
     /// the webpki roots when verifying OUTGOING TLS connections
     /// (gateways / registrations with `transport = "tls"`).
@@ -776,6 +780,48 @@ impl std::fmt::Debug for SipAuthUser {
 #[derive(Debug, Clone)]
 pub struct SipTlsConfig {
     pub listen_addr: SocketAddr,
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    /// `[sip.tls].client_ca` + `client_auth` — mutual TLS on the SIP
+    /// TLS listener (siphon-rs #129). `None` = never ask for a client
+    /// certificate, the pre-0.51 behaviour.
+    pub client_auth: Option<SipTlsClientAuth>,
+}
+
+/// Mutual-TLS policy for the SIP TLS listener.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SipTlsClientAuth {
+    /// PEM bundle the peer's certificate chain must terminate in.
+    pub ca_path: PathBuf,
+    pub mode: TlsClientAuthMode,
+}
+
+/// Whether the TLS listener insists on a client certificate. Both
+/// modes verify a presented certificate against `ca_path`; they
+/// differ only when the peer presents none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsClientAuthMode {
+    /// Request a certificate; admit a peer with none (its INVITEs then
+    /// carry no identity and can never match a `peer_cert_san` route).
+    Optional,
+    /// Request a certificate; fail the handshake without one.
+    Required,
+}
+
+impl TlsClientAuthMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TlsClientAuthMode::Optional => "optional",
+            TlsClientAuthMode::Required => "required",
+        }
+    }
+}
+
+/// `[sip.tls_client].client_cert` + `client_key` — the identity this
+/// daemon presents on **outgoing** TLS connections to a peer that
+/// requests one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsClientIdentity {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
 }
@@ -1219,6 +1265,37 @@ pub enum CompileError {
     TlsClientExtraCaMissing(String),
 
     #[error(
+        "[sip.tls_client].client_cert and client_key must be set together \
+         (an outbound client certificate needs its private key, and vice versa)"
+    )]
+    TlsClientIdentityIncomplete,
+
+    #[error("[sip.tls_client].client_cert {0:?} does not exist or is not a file")]
+    TlsClientCertMissing(String),
+
+    #[error("[sip.tls_client].client_key {0:?} does not exist or is not a file")]
+    TlsClientKeyMissing(String),
+
+    #[error(
+        "[sip.tls].client_ca and client_auth must be set together \
+         (mutual TLS needs both the trust bundle and the optional|required mode)"
+    )]
+    SipTlsClientAuthIncomplete,
+
+    #[error("[sip.tls].client_auth {0:?} is not one of \"optional\", \"required\"")]
+    SipTlsUnknownClientAuth(String),
+
+    #[error("[sip.tls].client_ca {0:?} does not exist or is not a file")]
+    SipTlsClientCaMissing(String),
+
+    #[error(
+        "route {route:?} matches on peer_cert_san, but [sip.tls].client_auth is not set — \
+         the TLS listener never asks for a client certificate, so that route could never match. \
+         Set [sip.tls].client_ca + client_auth (and \"tls\" in [sip].transports), or drop the key."
+    )]
+    RoutePeerCertSanWithoutClientAuth { route: String },
+
+    #[error(
         "[[gateway]] {name:?} sets both `register` and `transport`; \
          the transport is inherited from the register block"
     )]
@@ -1444,6 +1521,22 @@ pub fn compile(raw: RawConfig) -> Result<Config, CompileError> {
     let media = compile_media(&raw.media)?;
     let bridge_defaults = compile_bridge(raw.bridge, &raw.media)?;
     let routes = compile_dialplan(raw.routes)?;
+    // A `peer_cert_san` route can only ever match an INVITE whose
+    // connection presented a verified client certificate, which only
+    // a listener with `[sip.tls].client_auth` asks for. Refuse the
+    // combination at load (CLAUDE.md §4.6) rather than ship a route
+    // that silently never fires.
+    let asks_for_client_cert = sip
+        .tls
+        .as_ref()
+        .is_some_and(|tls| tls.client_auth.is_some());
+    if !asks_for_client_cert {
+        if let Some(route) = routes.iter().find(|r| r.uses_peer_cert_san()) {
+            return Err(CompileError::RoutePeerCertSanWithoutClientAuth {
+                route: route.name.clone(),
+            });
+        }
+    }
     let registrations = compile_registrations(raw.registrations)?;
     let registrar = compile_registrar(raw.registrar, sip.auth.is_some())?;
     let webrtc = compile_webrtc(raw.webrtc)?;
@@ -1771,6 +1864,29 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
     // Client-side roots are independent of the TLS *listener* — a
     // UDP-only daemon can still dial a TLS trunk. Validate the path
     // at load per CLAUDE.md §4.6 (fail loud at startup).
+    // Outbound client identity: both halves or neither, and both must
+    // exist now — a trunk that demands a certificate would otherwise
+    // fail on the first dial-out with a rustls error instead of here.
+    let tls_client_identity = match (raw.tls_client.client_cert, raw.tls_client.client_key) {
+        (None, None) => None,
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(CompileError::TlsClientIdentityIncomplete);
+        }
+        (Some(cert), Some(key)) => {
+            let cert_path = PathBuf::from(&cert);
+            if !cert_path.is_file() {
+                return Err(CompileError::TlsClientCertMissing(cert));
+            }
+            let key_path = PathBuf::from(&key);
+            if !key_path.is_file() {
+                return Err(CompileError::TlsClientKeyMissing(key));
+            }
+            Some(TlsClientIdentity {
+                cert_path,
+                key_path,
+            })
+        }
+    };
     let tls_client_extra_ca = match raw.tls_client.extra_ca {
         None => None,
         Some(p) => {
@@ -1819,6 +1935,7 @@ fn compile_sip(raw: RawSip) -> Result<SipConfig, CompileError> {
         contact: raw.contact,
         tls,
         tls_client_extra_ca,
+        tls_client_identity,
         ws,
         wss,
         call_progress,
@@ -1989,7 +2106,11 @@ fn compile_sip_tls(
     tls_enabled: bool,
     sip_listen: &SocketAddr,
 ) -> Result<Option<SipTlsConfig>, CompileError> {
-    let has_any_tls_field = raw.cert.is_some() || raw.key.is_some() || raw.listen.is_some();
+    let has_any_tls_field = raw.cert.is_some()
+        || raw.key.is_some()
+        || raw.listen.is_some()
+        || raw.client_ca.is_some()
+        || raw.client_auth.is_some();
 
     if !tls_enabled {
         if has_any_tls_field {
@@ -2018,10 +2139,34 @@ fn compile_sip_tls(
         None => SocketAddr::new(sip_listen.ip(), 5061),
     };
 
+    // Mutual TLS: both halves or neither. The CA bundle is checked
+    // for existence here (CLAUDE.md §4.6 — fail at load, not on the
+    // first handshake); its contents are parsed when the listener's
+    // ServerConfig is built at startup, which is also fatal.
+    let client_auth = match (raw.client_ca, raw.client_auth) {
+        (None, None) => None,
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(CompileError::SipTlsClientAuthIncomplete);
+        }
+        (Some(ca), Some(mode)) => {
+            let mode = match mode.as_str() {
+                "optional" => TlsClientAuthMode::Optional,
+                "required" => TlsClientAuthMode::Required,
+                other => return Err(CompileError::SipTlsUnknownClientAuth(other.to_string())),
+            };
+            let ca_path = PathBuf::from(&ca);
+            if !ca_path.is_file() {
+                return Err(CompileError::SipTlsClientCaMissing(ca));
+            }
+            Some(SipTlsClientAuth { ca_path, mode })
+        }
+    };
+
     Ok(Some(SipTlsConfig {
         listen_addr,
         cert_path: PathBuf::from(cert_path),
         key_path: PathBuf::from(key_path),
+        client_auth,
     }))
 }
 

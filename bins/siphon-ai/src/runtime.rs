@@ -886,8 +886,11 @@ impl Runtime {
         // per-connection writer the listener attached.
         let tcp_client_pool = Arc::new(ConnectionPool::new());
         let tls_client_pool = Arc::new(TlsPool::new());
-        let tls_client_config = build_tls_client_config(sip.tls_client_extra_ca.as_deref())
-            .with_context(|| "build client TLS verification roots")?;
+        let tls_client_config = build_tls_client_config(
+            sip.tls_client_extra_ca.as_deref(),
+            sip.tls_client_identity.as_ref(),
+        )
+        .with_context(|| "build client TLS verification roots")?;
         let dispatcher: Arc<dyn TransportDispatcher> = Arc::new(MultiTransportDispatcher::new(
             Arc::clone(&udp_socket),
             Arc::clone(&tcp_client_pool),
@@ -1854,6 +1857,9 @@ impl CallRegistryHandle for RuntimeCallRegistry {
                 .to_string(),
                 // Present only for a browser leg (§4.6).
                 webrtc_state: c.webrtc_state.map(str::to_string),
+                // Present only when the connection proved itself with a
+                // client certificate (mutual TLS).
+                peer_identity: c.peer_identity,
             })
             .collect()
     }
@@ -2123,7 +2129,15 @@ impl siphon_ai_sip_glue::TrunkAllowlist for ConfigTrunkAllowlist {
 /// Twilio — plus the operator's `[sip.tls_client].extra_ca` PEM
 /// bundle for private-CA deployments and self-signed test rigs.
 /// Failure is fatal at startup, same contract as the server side.
-fn build_tls_client_config(extra_ca: Option<&std::path::Path>) -> Result<Arc<TlsClientConfig>> {
+///
+/// `identity` (`[sip.tls_client].client_cert` + `client_key`) is
+/// presented to a peer that requests a client certificate — mutual TLS
+/// toward a trunk (siphon-rs #129). Without it the config is the
+/// classic roots-only client.
+fn build_tls_client_config(
+    extra_ca: Option<&std::path::Path>,
+    identity: Option<&siphon_ai_config::TlsClientIdentity>,
+) -> Result<Arc<TlsClientConfig>> {
     let mut roots = tokio_rustls::rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     if let Some(path) = extra_ca {
@@ -2145,11 +2159,32 @@ fn build_tls_client_config(extra_ca: Option<&std::path::Path>) -> Result<Arc<Tls
         }
         info!(path = %path.display(), added, "client TLS extra CA roots loaded");
     }
-    Ok(Arc::new(
-        tokio_rustls::rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-    ))
+    let identity =
+        match identity {
+            None => None,
+            Some(id) => {
+                let cert = id.cert_path.to_str().ok_or_else(|| {
+                    anyhow!("[sip.tls_client].client_cert path is not valid UTF-8")
+                })?;
+                let key = id.key_path.to_str().ok_or_else(|| {
+                    anyhow!("[sip.tls_client].client_key path is not valid UTF-8")
+                })?;
+                let loaded = sip_transport::ClientIdentity::load(cert, key).with_context(|| {
+                    format!(
+                        "load [sip.tls_client] client_cert={} client_key={}",
+                        id.cert_path.display(),
+                        id.key_path.display()
+                    )
+                })?;
+                info!(
+                    cert = %id.cert_path.display(),
+                    "outbound TLS client certificate loaded (presented to peers that request one)"
+                );
+                Some(loaded)
+            }
+        };
+    sip_transport::build_rustls_client_config(roots, identity)
+        .with_context(|| "assemble outbound TLS client config")
 }
 
 /// Resolve `[webrtc]` against what this binary was actually built
@@ -2284,7 +2319,34 @@ pub(crate) fn load_sip_tls_server_config(
         .key_path
         .to_str()
         .ok_or_else(|| anyhow!("[sip.tls].key path is not valid UTF-8"))?;
-    let cfg = load_rustls_server_config(cert, key).with_context(|| {
+    let cfg = match tls.client_auth.as_ref() {
+        // Mutual TLS: request a client certificate and verify it against
+        // the CA bundle. A bad bundle is fatal here, at startup (or on
+        // SIGHUP, where the previous config is kept) — there is no
+        // cleartext fallback for "verify the peer".
+        Some(auth) => {
+            let ca = auth
+                .ca_path
+                .to_str()
+                .ok_or_else(|| anyhow!("[sip.tls].client_ca path is not valid UTF-8"))?;
+            let mode = match auth.mode {
+                siphon_ai_config::TlsClientAuthMode::Optional => {
+                    sip_transport::ClientAuthMode::Optional
+                }
+                siphon_ai_config::TlsClientAuthMode::Required => {
+                    sip_transport::ClientAuthMode::Required
+                }
+            };
+            info!(
+                client_ca = %auth.ca_path.display(),
+                mode = auth.mode.as_str(),
+                "SIP TLS listener requires client certificates (mutual TLS)"
+            );
+            sip_transport::load_rustls_server_config_with_client_auth(cert, key, ca, mode)
+        }
+        None => load_rustls_server_config(cert, key),
+    }
+    .with_context(|| {
         format!(
             "load TLS cert={} key={}",
             tls.cert_path.display(),
@@ -3295,6 +3357,10 @@ async fn handle_packet(
     // request on :5061 advertises `:5061;transport=tls`, not the
     // UDP listener's port).
     let local = packet.local();
+    // Mutual TLS (siphon-rs #129): the verified client certificate on
+    // this connection, if the listener asked for one. Copied onto the
+    // context so the routing handler can authorize by it.
+    let peer_identity = packet.peer_identity().cloned();
     let (transport, peer, payload, stream) = packet.into_parts();
 
     let Some(request) = parse_request(&payload) else {
@@ -3313,7 +3379,9 @@ async fn handle_packet(
     };
 
     let tx_kind = map_transport_kind(transport);
-    let ctx = TransportContext::new(tx_kind, peer, stream).with_local_addr(local);
+    let ctx = TransportContext::new(tx_kind, peer, stream)
+        .with_local_addr(local)
+        .with_peer_identity(peer_identity);
 
     if request.method().as_str() == "ACK" {
         // ACK opens no server transaction of its own; hand it to the
@@ -3810,6 +3878,7 @@ mod tls_reload_tests {
             listen_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
             cert_path: cert,
             key_path: key,
+            client_auth: None,
         }
     }
 

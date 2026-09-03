@@ -284,6 +284,11 @@ struct ControlEntry {
     /// (`DEV_PLAN_WebRTC.md` §4.6). `None` for a classic leg — which
     /// has no such phase, rather than an unknown one.
     leg_phase: Option<crate::media_leg::LegPhaseProbe>,
+    /// The verified TLS client certificate the call's connection
+    /// presented (mutual TLS, siphon-rs #129), rendered as
+    /// `PeerIdentity`'s display form: subject DN plus SANs. `None`
+    /// when the connection presented none.
+    peer_identity: Option<String>,
 }
 
 /// One active call in the admin `GET /admin/v1/calls` snapshot. `call_id`
@@ -298,6 +303,9 @@ pub struct CallSnapshot {
     /// `ice_connected`, `connected`, `failed`, `closed` (§4.6).
     /// `None` for a classic call: it has no such phase.
     pub webrtc_state: Option<&'static str>,
+    /// Subject + SANs of the verified client certificate on the call's
+    /// connection, when there was one (mutual TLS).
+    pub peer_identity: Option<String>,
 }
 
 impl std::fmt::Debug for CallControlRegistry {
@@ -341,6 +349,20 @@ impl CallControlRegistry {
         direction: Direction,
         leg_phase: Option<crate::media_leg::LegPhaseProbe>,
     ) {
+        self.insert_with_details(handle, sip_call_id, direction, leg_phase, None)
+    }
+
+    /// [`insert_with_leg_phase`](Self::insert_with_leg_phase) plus the
+    /// verified client-certificate identity the call's connection
+    /// presented, for the admin listing (mutual TLS, siphon-rs #129).
+    pub fn insert_with_details(
+        &self,
+        handle: CallHandle,
+        sip_call_id: impl Into<String>,
+        direction: Direction,
+        leg_phase: Option<crate::media_leg::LegPhaseProbe>,
+        peer_identity: Option<String>,
+    ) {
         let key = handle.call_id().as_str().to_string();
         let sip_call_id = sip_call_id.into();
         let entry = ControlEntry {
@@ -348,6 +370,7 @@ impl CallControlRegistry {
             sip_call_id: sip_call_id.clone(),
             direction,
             leg_phase,
+            peer_identity,
         };
         // Promote this dialog's SIP-ladder trace to the live
         // population (DESIGN_SIP_LADDER.md). This is the moment the
@@ -382,6 +405,7 @@ impl CallControlRegistry {
                 sip_call_id: e.sip_call_id.clone(),
                 direction: e.direction,
                 webrtc_state: e.leg_phase.as_ref().map(|probe| probe()),
+                peer_identity: e.peer_identity.clone(),
             })
             .collect()
     }

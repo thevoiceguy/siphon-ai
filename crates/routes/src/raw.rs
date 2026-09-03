@@ -88,6 +88,16 @@ pub struct RawRouteMatch {
     /// `"trunk"` for unregistered inbound (UAS-mode) calls.
     pub register_source: Option<String>,
 
+    /// A name the peer's **verified TLS client certificate** asserts —
+    /// any subjectAltName (`sip:` URI, DNS, IP, e-mail) or, as the RFC
+    /// 5922 §7.1 fallback, its Common Name. Matches when *any one* of
+    /// those names satisfies the predicate. A call whose connection
+    /// presented no verified certificate (UDP/TCP, or TLS without
+    /// `[sip.tls].client_auth`) has no names and never matches this
+    /// key — unlike an absent header, there is no empty-string
+    /// candidate for a regex to hit.
+    pub peer_cert_san: Option<String>,
+
     /// `header.<NAME> = "<value>"` — name is case-insensitive,
     /// matched against the inbound INVITE's headers.
     #[serde(default)]

@@ -89,6 +89,14 @@ pub struct CallInfo<'a> {
     /// `[[register]]` block's `name`.
     pub register_source: &'a str,
 
+    /// Every name the peer's **verified** TLS client certificate
+    /// asserts — URI / DNS / IP / e-mail SANs plus the Common Name
+    /// (`sip_transport::PeerIdentity::names()` order). Empty when the
+    /// call did not arrive on a connection that presented a
+    /// certificate the listener verified, which is what makes the
+    /// `peer_cert_san` key unmatchable for such a call.
+    pub peer_cert_names: &'a [String],
+
     pub headers: &'a Headers,
 }
 

@@ -242,8 +242,12 @@ INFO drive{name=cucm-main server=10.10.0.50:5060}: registration succeeded grante
 WARN drive{name=cucm-main server=10.10.0.50:5060}: registration failed; will retry after backoff outcome="auth_failed" error="401 Unauthorized" backoff_secs=5
 ```
 
-Filter with `RUST_LOG=siphon_ai::registration=debug` for the per-attempt
-detail (sleep deltas, transition events).
+Filter with `RUST_LOG=warn,siphon_ai::registration=debug` for the per-attempt
+detail (sleep deltas, transition events). Keep the leading `warn,`: the
+directive **replaces** the built-in filter rather than merging with it, so
+naming only this target would mute every other crate — including the
+upstream SIP-stack warnings that explain several rows of the
+troubleshooting table below. See `docs/CONFIG.md` §`--log`.
 
 ## Vendor notes
 
@@ -315,7 +319,7 @@ on every registered node and could not be alerted on (issue #486).
 |---|---|---|
 | `siphon_ai_register_state{state="pending"}` stays at 1 forever | First REGISTER never gets a response | Packet capture on the registrar's IP; firewall on `[sip].listen` |
 | `outcome="transport_error"` and the error is `Timer F expired` | Daemon sent REGISTER but no response arrived in 32s | Verify the registrar received it (PBX trace logs); confirm response source IP/port matches the daemon's `[sip].listen` |
-| `outcome="auth_failed"` after one attempt | Wrong `password` or `realm` | Compare the digest challenge details in tracing (`RUST_LOG=sip_auth=debug`) against the PBX config |
+| `outcome="auth_failed"` after one attempt | Wrong `password` or `realm` | Compare the digest challenge details in tracing (`RUST_LOG=warn,sip_auth=debug`) against the PBX config |
 | Refresh hits `transport_error` after a long-running success | Registrar restarted and lost our binding; or NAT mapping expired | The exponential backoff will retry; if it persists, shorten `expires_secs` so refresh runs more often |
 | Inbound INVITEs from the PBX get `register_source = "trunk"` instead of the registration name | Source IP/port doesn't match what `[[register]].server`/`port` resolved to | Confirm the PBX sends INVITEs from the same address it accepts REGISTERs on |
 | `siphon_ai_notify_total{result="ignored"}` climbs at the REGISTER rate | The registrar pushes MWI after each REGISTER — normal, absorbed | Nothing to do; see [MWI pushes](#mwi-pushes-from-the-registrar). Only `result="bad_event"` is actionable |

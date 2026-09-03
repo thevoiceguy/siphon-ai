@@ -857,11 +857,14 @@ fn set_log_filter(state: &AdminState, body: &Bytes) -> Response<Full<Bytes>> {
         }
     };
 
-    match handle.set(&directive) {
-        Ok(prev) => json_response(
+    match handle.set_effective(&directive) {
+        // `filter` is what was actually installed — with the `warn` floor
+        // prepended when the request named only targets (#597) — so the
+        // response never claims a directive the daemon is not running.
+        Ok((prev, effective)) => json_response(
             StatusCode::OK,
             &SetLogFilterResponse {
-                filter: directive,
+                filter: effective,
                 previous: prev,
             },
         ),

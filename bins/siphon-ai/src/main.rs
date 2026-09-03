@@ -33,9 +33,22 @@ struct Cli {
 
     /// Override the tracing filter (`siphon_ai=debug,siphon=info`).
     /// Defaults to `RUST_LOG` if set, or the built-in default
-    /// otherwise. Only affects running the daemon.
+    /// otherwise. A directive that names only targets gets a `warn`
+    /// floor prepended so unnamed crates keep reporting warnings — see
+    /// `--log-no-floor`. Only affects running the daemon.
     #[arg(long, env = "SIPHON_AI_LOG", global = true)]
     log: Option<String>,
+
+    /// Do NOT prepend the `warn` floor to a `--log` / `RUST_LOG`
+    /// directive that names only targets. The default floor keeps a
+    /// crate nobody listed (`hep_rs` reporting a dead collector,
+    /// `opentelemetry_sdk` reporting a failed export) able to warn;
+    /// with this flag the supplied directive is the whole filter and
+    /// every unnamed target is muted. Also disables the floor on
+    /// `PUT /admin/v1/log`.
+    #[arg(long = "log-no-floor", env = "SIPHON_AI_LOG_NO_FLOOR", global = true,
+          default_value_t = false, action = clap::ArgAction::SetTrue)]
+    log_no_floor: bool,
 
     /// Log output format: `text` (human-readable, the default) or
     /// `json` (one JSON object per line, for a log shipper). Orthogonal
@@ -206,8 +219,8 @@ async fn main() -> Result<()> {
     // SRTP-key-in-cleartext footgun); without a subscriber those are
     // silently dropped and the preflight is less informative than a real
     // boot.
-    let (log_filter, otel_activation, otel_log_control) =
-        init_tracing(cli.log.as_deref(), cli.log_format);
+    let (log_filter, otel_activation, otel_log_control, resolved_log) =
+        init_tracing(cli.log.as_deref(), cli.log_format, cli.log_no_floor);
 
     // Read-only subcommands dispatch here and exit — no socket binding,
     // no runtime (but tracing is live, so config warnings show).
@@ -279,6 +292,10 @@ async fn main() -> Result<()> {
     // installed above.)
     let config_path = config_path(&cli)?;
 
+    // Say what filter is running, once per start (#597). Daemon path
+    // only: the read-only subcommands own stdout (`print-config` emits
+    // JSON there) and a banner would corrupt it.
+    resolved_log.announce();
     info!(config = %config_path.display(), "loading configuration");
     let config = siphon_ai_config::load_from_path(&config_path)
         .with_context(|| format!("load config {}", config_path.display()))?;
@@ -652,11 +669,19 @@ const DEFAULT_LOG_FILTER: &str = "warn,\
 /// under everything — so no crate's warnings can be lost by omission
 /// — and lifts the siphon-ai crates to `info` on top of it.
 ///
-/// Note the precedence is *replace*, not merge: a `--log` or
-/// `RUST_LOG` value supplies the whole directive, floor included. An
-/// operator narrowing to one target (`RUST_LOG=siphon_ai_core=debug`)
-/// therefore also drops the floor and mutes everything else — add a
-/// leading `warn,` to keep it.
+/// A supplied directive replaces the default rather than merging with
+/// it — but the floor is **enforced**, not merely part of the default
+/// (#597): a directive that names only targets
+/// (`RUST_LOG=siphon_ai_core=debug`) gets `warn,` prepended, so it can
+/// turn crates *up* from warn but cannot mute the ones it did not name.
+/// Naming a global level (`info,siphon_ai=debug`, or a bare `off`) is
+/// the operator setting the floor themselves and is left alone;
+/// `--log-no-floor` restores the old replace-everything behaviour for
+/// anyone who genuinely wants silence. The effective directive is
+/// logged at startup either way, so a filter that mutes is at least
+/// announced. Before this, the fail-safe held only while nobody set a
+/// filter — the two collector outages that motivated it (#460, #596)
+/// were both invisible under target-named filters.
 ///
 /// Implementation note: we build the subscriber as
 /// `Registry → reload(EnvFilter) → fmt-layer` rather than the
@@ -666,13 +691,16 @@ const DEFAULT_LOG_FILTER: &str = "warn,\
 fn init_tracing(
     cli_filter: Option<&str>,
     log_format: LogFormat,
-) -> (LogFilterHandle, OtelActivation, OtelLogControl) {
-    const DEFAULT: &str = DEFAULT_LOG_FILTER;
-
-    let env_filter = match cli_filter {
-        Some(f) => EnvFilter::try_new(f).unwrap_or_else(|_| EnvFilter::new(DEFAULT)),
-        None => EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT)),
-    };
+    no_floor: bool,
+) -> (
+    LogFilterHandle,
+    OtelActivation,
+    OtelLogControl,
+    ResolvedLogDirective,
+) {
+    let resolved = resolve_log_directive(cli_filter, std::env::var("RUST_LOG").ok(), no_floor);
+    let env_filter = EnvFilter::try_new(&resolved.directive)
+        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
 
     let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(env_filter);
 
@@ -810,7 +838,99 @@ fn init_tracing(
         otlp_log_filter_handle.reload(filter)
     }));
 
-    (LogFilterHandle::new(reload_handle), activation, log_control)
+    (
+        LogFilterHandle::new(reload_handle).with_enforce_floor(!no_floor),
+        activation,
+        log_control,
+        resolved,
+    )
+}
+
+/// Where a log directive came from, for the startup line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogDirectiveSource {
+    /// `--log` / `SIPHON_AI_LOG`.
+    Flag,
+    /// `RUST_LOG`.
+    Env,
+    /// Nothing supplied — [`DEFAULT_LOG_FILTER`].
+    Default,
+}
+
+impl LogDirectiveSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            LogDirectiveSource::Flag => "--log",
+            LogDirectiveSource::Env => "RUST_LOG",
+            LogDirectiveSource::Default => "default",
+        }
+    }
+}
+
+/// The directive the subscriber will run, plus how it got that way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedLogDirective {
+    directive: String,
+    source: LogDirectiveSource,
+    /// The `warn` floor was prepended to a target-only directive.
+    floor_added: bool,
+    /// The directive carries no global level and `--log-no-floor` kept
+    /// it that way: every unnamed crate is muted.
+    floorless: bool,
+}
+
+impl ResolvedLogDirective {
+    /// Log the effective filter. `info` sits above the floor, so under a
+    /// floored directive this always prints; under `--log-no-floor` with
+    /// a muting directive the `warn` is what survives — which is the
+    /// point of it being a warn.
+    fn announce(&self) {
+        tracing::info!(
+            filter = %self.directive,
+            source = self.source.as_str(),
+            floor_added = self.floor_added,
+            "log filter active"
+        );
+        if self.floorless {
+            tracing::warn!(
+                filter = %self.directive,
+                "log filter names targets but no global level, and --log-no-floor is set: \
+                 warnings from every unnamed crate (hep_rs, opentelemetry_sdk, sip_*, forge*) \
+                 are muted"
+            );
+        }
+    }
+}
+
+/// Pick the directive (`--log` > `RUST_LOG` > default) and apply the
+/// floor rule (#597). Pure, so the precedence and the floor can be
+/// tested without a subscriber.
+fn resolve_log_directive(
+    cli_filter: Option<&str>,
+    rust_log: Option<String>,
+    no_floor: bool,
+) -> ResolvedLogDirective {
+    let (raw, source) = match (cli_filter, rust_log) {
+        (Some(f), _) => (f.to_string(), LogDirectiveSource::Flag),
+        (None, Some(e)) if !e.trim().is_empty() => (e, LogDirectiveSource::Env),
+        _ => (DEFAULT_LOG_FILTER.to_string(), LogDirectiveSource::Default),
+    };
+    if no_floor {
+        let floorless = !siphon_ai_telemetry::has_global_level(&raw);
+        return ResolvedLogDirective {
+            directive: raw.trim().to_string(),
+            source,
+            floor_added: false,
+            floorless,
+        };
+    }
+    let (directive, floor_added) = siphon_ai_telemetry::with_floor(&raw);
+    ResolvedLogDirective {
+        directive,
+        source,
+        floor_added,
+        floorless: false,
+    }
 }
 
 /// Resolve when SIGINT (Ctrl-C) or SIGTERM is received. On Windows
@@ -838,9 +958,66 @@ mod tests {
     use std::io;
     use std::sync::{Arc, Mutex};
 
-    use super::DEFAULT_LOG_FILTER;
+    use super::{resolve_log_directive, LogDirectiveSource, DEFAULT_LOG_FILTER};
     use tracing_subscriber::fmt::MakeWriter;
     use tracing_subscriber::EnvFilter;
+
+    /// #597: a target-only operator filter used to *replace* the floor;
+    /// now it is floored unless `--log-no-floor` says otherwise.
+    #[test]
+    fn operator_filters_are_floored_unless_told_not_to() {
+        let r = resolve_log_directive(Some("siphon_ai=debug,siphon=info"), None, false);
+        assert_eq!(r.directive, "warn,siphon_ai=debug,siphon=info");
+        assert_eq!(r.source, LogDirectiveSource::Flag);
+        assert!(r.floor_added && !r.floorless);
+
+        let r = resolve_log_directive(None, Some("siphon_ai::registration=debug".into()), false);
+        assert_eq!(r.directive, "warn,siphon_ai::registration=debug");
+        assert_eq!(r.source, LogDirectiveSource::Env);
+
+        // A directive that states its own global level is the
+        // operator's floor, not ours.
+        let r = resolve_log_directive(Some("info,siphon_ai=trace"), None, false);
+        assert_eq!(r.directive, "info,siphon_ai=trace");
+        assert!(!r.floor_added);
+        let r = resolve_log_directive(Some("off"), None, false);
+        assert_eq!(r.directive, "off");
+
+        // `--log` wins over RUST_LOG; nothing supplied is the default,
+        // which already carries the floor.
+        let r = resolve_log_directive(Some("warn"), Some("trace".into()), false);
+        assert_eq!(r.directive, "warn");
+        let r = resolve_log_directive(None, None, false);
+        assert_eq!(r.directive, DEFAULT_LOG_FILTER);
+        assert_eq!(r.source, LogDirectiveSource::Default);
+        assert!(!r.floor_added);
+
+        // --log-no-floor: the old replace semantics, and the resolver
+        // says the result mutes unnamed crates.
+        let r = resolve_log_directive(Some("siphon_ai=debug"), None, true);
+        assert_eq!(r.directive, "siphon_ai=debug");
+        assert!(!r.floor_added && r.floorless);
+        let r = resolve_log_directive(Some("warn,siphon_ai=debug"), None, true);
+        assert!(!r.floorless);
+    }
+
+    /// The floored form of the very filter the 0.51.0 OTLP soak ran
+    /// (#596) — under which a dead collector was silent for 46 minutes —
+    /// now lets the SDK's export error through.
+    #[test]
+    fn a_floored_soak_filter_passes_the_export_error() {
+        let r = resolve_log_directive(Some("siphon_ai=info,siphon=info,forge=info"), None, false);
+        let out = survives(&r.directive, || {
+            tracing::error!(target: "opentelemetry_sdk", name = "BatchLogProcessor.ExportError", "export failed");
+        });
+        assert!(out.contains("export failed"), "got {out:?}");
+        // And the unfloored one — what the soak actually ran — does not.
+        let r = resolve_log_directive(Some("siphon_ai=info,siphon=info,forge=info"), None, true);
+        let out = survives(&r.directive, || {
+            tracing::error!(target: "opentelemetry_sdk", "export failed");
+        });
+        assert!(!out.contains("export failed"), "got {out:?}");
+    }
 
     /// Collects formatted events so a test can assert on what a
     /// subscriber actually emitted.

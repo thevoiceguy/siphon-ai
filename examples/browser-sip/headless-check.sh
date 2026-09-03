@@ -137,7 +137,7 @@ if ! ss -tln 2>/dev/null | grep -q ":$ECHO_PORT "; then
 fi
 # Not a subshell, so $! is the daemon itself and the cleanup trap
 # really stops it (an orphaned daemon holds the ports for the rerun).
-RUST_LOG=siphon_ai=info "$DAEMON_BIN" --config "$CONFIG" \
+RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$CONFIG" \
     >"$WORK/daemon.log" 2>&1 &
 PIDS+=($!)
 python3 -m http.server "$PAGE_PORT" --bind 127.0.0.1 --directory "$PAGE_DIR" \

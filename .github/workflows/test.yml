@@ -309,9 +309,18 @@ jobs:
         if: always()
         run: kill "$(cat /tmp/echo-ws.pid)" || true
 
-      - name: Echo-ws log on failure
+      # The main phase's echo server logs to /tmp/echo-ws.log; every
+      # auxiliary phase in run-all.sh spawns its own on a different
+      # port and logs to /tmp/echo-ws-<phase>.XXXXXX.log (#612).
+      - name: Echo-ws logs on failure
         if: failure()
-        run: cat /tmp/echo-ws.log || true
+        run: |
+          shopt -s nullglob
+          for f in /tmp/echo-ws.log /tmp/echo-ws-*.log; do
+            echo "─── $f ───"
+            cat "$f"
+            echo
+          done
 
       # SIPp writes <scenario>_<pid>_errors.log to the runner's CWD
       # (`-trace_err` in run-all.sh; the runner pins CWD to its own
@@ -329,13 +338,31 @@ jobs:
           done
 
       # The daemon log tells us whether siphon-ai saw / answered the
-      # INVITE — critical when the SIPp side reports nothing.
-      - name: siphon-ai daemon log on failure
+      # INVITE — critical when the SIPp side reports nothing. The main
+      # phase logs to siphon-ai-sipp.*.log, but each auxiliary phase
+      # runs its own daemon under siphon-ai-<phase>.XXXXXX.log; until
+      # #612 only the main phase's log was dumped, so a failure in
+      # e.g. barge_in_pause printed a daemon log that never saw the
+      # call.
+      - name: siphon-ai daemon logs on failure
         if: failure()
         run: |
           shopt -s nullglob
-          for f in /tmp/siphon-ai-sipp.*.log; do
+          for f in /tmp/siphon-ai-*.log; do
             echo "─── $f ───"
             cat "$f"
             echo
           done
+
+      # Same files as an artifact, for when the inline dump is too
+      # long to read in the job log.
+      - name: Upload SIPp phase logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sipp-logs
+          path: |
+            /tmp/siphon-ai-*.log
+            /tmp/echo-ws*.log
+            test-harness/sipp-scenarios/*_errors.log
+          if-no-files-found: ignore

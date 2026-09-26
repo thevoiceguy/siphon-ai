@@ -568,6 +568,15 @@ pub const DEAD_AIR_EVENTS_TOTAL: &str = "siphon_ai_dead_air_events_total";
 /// call site in `siphon-ai-media-glue::tap`.
 pub const BARGE_IN_DECISIONS_TOTAL: &str = "siphon_ai_barge_in_decisions_total";
 
+/// Caller-leg 20 ms keepalive frames emitted by the tap while the WS
+/// server is silent and nothing else owns the caller's ear
+/// (`[bridge].idle_keepalive`, upstream issue #610). A sustained rate
+/// means the feature is engaged and the RTP flow toward the caller's
+/// media path stays bidirectional; zero with the feature off is the
+/// v1 behaviour. No labels. Literal must match the call site in
+/// `siphon-ai-media-glue::tap`.
+pub const IDLE_KEEPALIVE_FRAMES_TOTAL: &str = "siphon_ai_idle_keepalive_frames_total";
+
 /// `SIGHUP` cert-reload attempts for the SIP/TLS listener (0.3.0), one
 /// tick per attempt. Labeled by `outcome`: `ok` / `failed` (a broken
 /// cert/key on disk — the listener keeps serving the previous cert).
@@ -1086,6 +1095,10 @@ pub fn register_descriptions() {
         PEER_HOLD_TX_SUPPRESSED_FRAMES_TOTAL,
         "Caller-leg 20 ms frames dropped because the answered direction (recvonly/inactive, peer hold) forbade our send (#417)."
     );
+    describe_counter!(
+        IDLE_KEEPALIVE_FRAMES_TOTAL,
+        "Caller-leg 20 ms keepalive frames emitted while the WS server is silent ([bridge].idle_keepalive, #610)."
+    );
     describe_counter!(PARKS_TOTAL, "Calls parked, by result (ok, rejected).");
     describe_counter!(
         RETRIEVES_TOTAL,
@@ -1516,6 +1529,7 @@ pub const ALL_COUNTERS: &[&str] = &[
     SILENCE_EVENTS_TOTAL,
     DEAD_AIR_EVENTS_TOTAL,
     BARGE_IN_DECISIONS_TOTAL,
+    IDLE_KEEPALIVE_FRAMES_TOTAL,
     SIP_TLS_RELOAD_ATTEMPTS_TOTAL,
     ADMIN_TLS_RELOAD_ATTEMPTS_TOTAL,
     RTP_RESERVE_BLOCKS_TOTAL,

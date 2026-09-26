@@ -63,7 +63,7 @@ use crate::sdp::{
     generate_offer, negotiate_answer, negotiate_offer_answer, parse_offer, AnswerOutcome, Codec,
     LocalCapabilities, SdesOfferMode, SdpError,
 };
-use crate::tap::{BargeInAction, MediaTap, MediaTapError};
+use crate::tap::{BargeInAction, IdleKeepaliveMode, MediaTap, MediaTapError};
 
 /// Daemon-wide handles `MediaSetup` needs once at startup. Cheap to
 /// clone — every field is already `Arc`-ed.
@@ -164,6 +164,12 @@ pub struct InboundCall<'a> {
     /// Resolved by the acceptor from `[bridge].rtp_stats_interval_ms`
     /// plus any per-route override.
     pub rtp_stats_interval: Option<std::time::Duration>,
+    /// Caller-leg idle keepalive (`[bridge].idle_keepalive`, upstream
+    /// issue #610) — what the tap emits toward the caller while the WS
+    /// server is silent and nothing else owns the caller's ear.
+    /// Resolved by the acceptor from the global default plus any
+    /// per-route override.
+    pub idle_keepalive: IdleKeepaliveMode,
     /// Which VAD backend detects caller speech. Resolved by the
     /// acceptor from `[media].vad` plus the route's
     /// `[route.media].vad` override.
@@ -207,6 +213,8 @@ pub struct TapOptions {
     pub silence_threshold: Option<std::time::Duration>,
     pub dead_air_threshold: Option<std::time::Duration>,
     pub rtp_stats_interval: Option<std::time::Duration>,
+    /// Caller-leg idle keepalive (`[bridge].idle_keepalive`, #610).
+    pub idle_keepalive: IdleKeepaliveMode,
 }
 
 /// Inputs to [`MediaSetup::originate_offer`] — allocate a forge session and
@@ -752,7 +760,8 @@ impl MediaSetup {
         .with_barge_in_debounce(call.barge_in_debounce)
         .with_inactivity_timeout(call.inactivity_timeout)
         .with_idle_thresholds(call.silence_threshold, call.dead_air_threshold)
-        .with_rtp_stats_interval(call.rtp_stats_interval);
+        .with_rtp_stats_interval(call.rtp_stats_interval)
+        .with_idle_keepalive(call.idle_keepalive);
 
         guard.disarm();
 
@@ -952,7 +961,8 @@ impl MediaSetup {
         .with_barge_in_debounce(tap.barge_in_debounce)
         .with_inactivity_timeout(tap.inactivity_timeout)
         .with_idle_thresholds(tap.silence_threshold, tap.dead_air_threshold)
-        .with_rtp_stats_interval(tap.rtp_stats_interval);
+        .with_rtp_stats_interval(tap.rtp_stats_interval)
+        .with_idle_keepalive(tap.idle_keepalive);
 
         // (4) Activate the forge session: Initializing → Active, which spawns
         //     the RTP forwarding task (decode/forward inbound, send outbound).
@@ -1104,6 +1114,7 @@ mod tests {
                 silence_threshold: None,
                 dead_air_threshold: None,
                 rtp_stats_interval: None,
+                idle_keepalive: IdleKeepaliveMode::Off,
                 vad: VadBackend::default(),
             })
             .await;
@@ -1161,6 +1172,7 @@ a=sendrecv\r\n"
             silence_threshold: None,
             dead_air_threshold: None,
             rtp_stats_interval: None,
+            idle_keepalive: IdleKeepaliveMode::Off,
         }
     }
 

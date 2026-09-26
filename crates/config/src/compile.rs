@@ -1010,6 +1010,18 @@ pub enum CompileError {
     UnknownGlobalOnWsFailure(String),
 
     #[error(
+        "[bridge].idle_keepalive is {0:?}; expected \"off\", \"silence\", \
+         or \"comfort_noise\""
+    )]
+    UnknownIdleKeepalive(String),
+
+    #[error(
+        "route {route:?} sets [route.bridge].idle_keepalive = {value:?}; expected \
+         \"off\", \"silence\", or \"comfort_noise\""
+    )]
+    UnknownRouteIdleKeepalive { route: String, value: String },
+
+    #[error(
         "[observability].metrics_token is empty after expansion — unset it for an \
          open endpoint, or provide a real secret (${{file:…}} / ${{cred:…}})"
     )]
@@ -2987,6 +2999,16 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         .as_ref()
         .map(std::path::PathBuf::from);
 
+    // Idle keepalive (upstream #610). Off unless enabled; unknown
+    // tokens fail loud here rather than silently inheriting on the
+    // first call (CLAUDE.md §4.6).
+    let idle_keepalive = match raw.idle_keepalive.as_deref() {
+        None | Some("off") => siphon_ai_media_glue::IdleKeepaliveMode::Off,
+        Some("silence") => siphon_ai_media_glue::IdleKeepaliveMode::Silence,
+        Some("comfort_noise") => siphon_ai_media_glue::IdleKeepaliveMode::ComfortNoise,
+        Some(other) => return Err(CompileError::UnknownIdleKeepalive(other.to_string())),
+    };
+
     // `None` → 60 s default; `Some(0)` → watchdog off. The merge
     // step in `resolve_inactivity_timeout` handles per-route 0 →
     // disabled the same way.
@@ -3082,6 +3104,7 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         ws_reconnect_max,
         ws_failure_action,
         ws_failure_prompt_file,
+        idle_keepalive,
     })
 }
 
@@ -3238,6 +3261,18 @@ fn compile_dialplan(routes: Vec<siphon_ai_routes::RawRoute>) -> Result<RouteSet,
                 return Err(CompileError::UnknownOnWsFailure {
                     route: route.name.clone(),
                     value: mode.to_string(),
+                });
+            }
+        }
+        // Idle keepalive: same token set as the global key
+        // ([bridge].idle_keepalive, upstream #610). Without this a
+        // typo would load fine and silently inherit the global at
+        // resolve time instead of failing loud (§4.6).
+        if let Some(value) = route.bridge.idle_keepalive.as_deref() {
+            if !matches!(value, "off" | "silence" | "comfort_noise") {
+                return Err(CompileError::UnknownRouteIdleKeepalive {
+                    route: route.name.clone(),
+                    value: value.to_string(),
                 });
             }
         }

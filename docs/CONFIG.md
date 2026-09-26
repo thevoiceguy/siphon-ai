@@ -332,6 +332,19 @@ mode = "session_progress"
 | `ws_reconnect_max_secs`    | integer   | `30`     | Total window (seconds) a call may spend reconnecting before falling back to §5.7 teardown — how long the caller hears hold music before SiphonAI gives up. Must be `> 0` when `ws_reconnect_enabled = true` (fail-loud at load). Per-route override via `[route.bridge].ws_reconnect_max_secs`. |
 | `on_ws_failure`            | `"hangup" \| "play_prompt"` | `"hangup"` | What a call does when its WS becomes **unusable** (0.34.0): unexpected drop, connect failure at answer, keepalive timeout, `protocol_error`, `server_too_slow`, or an exhausted reconnect window. `hangup` = immediate teardown (the v1 behaviour). `play_prompt` = play `ws_failure_prompt_file` to the caller first (*"we're experiencing difficulties…"*), then the normal BYE teardown — CDR cause unchanged, `duration_ms` grows by the prompt. Never fires when the server *intended* the ending (`hangup`/clean `stop`), on caller actions, on `rtp_timeout`, or during drain. Previously a per-route-only key accepting `"hangup"` alone; now also the global default. Per-route override via `[route.bridge].on_ws_failure`. |
 | `ws_failure_prompt_file`   | path      | unset    | WAV played by `on_ws_failure = "play_prompt"` — **bridge rate** (8/16 kHz mono, like `[media].moh_file` and the consent announcement; no resampler). Required + existence-checked at load when any effective policy is `play_prompt`; files longer than the 30 s playback cap warn at load. Per-call unusability (e.g. rate mismatch on a 16 kHz call with an 8 kHz file) **fails open** to a plain hangup — the prompt is a courtesy, not compliance. Per-route override via `[route.bridge].ws_failure_prompt_file`. |
+| `idle_keepalive`           | `"off" \| "silence" \| "comfort_noise"` | `"off"` | Outbound RTP keepalive for the silent-server window (our fix for upstream issue [#610](https://github.com/thevoiceguy/siphon-ai/issues/610)). With the default `"off"` a call whose WS server streams nothing emits **no** outbound RTP at all — the playout pace tick is deliberately un-polled while nothing is queued — and some media paths respond to a peer gone silent by **stopping their own RTP toward us**: FreeSWITCH tears down its inbound flow when it stops receiving peer RTP (measured: `rx_packets_received` advancing exactly one packet per 5 s, RTCP-only), so the caller's inbound audio starves and the leg wedges. `"silence"` emits one zero (digital-silence) frame per 20 ms tick; `"comfort_noise"` emits one low-level comfort-noise frame per tick (the same forge generator MOH falls back to) — an audible "the line is alive" cue. Keepalive frames flow only while nothing else owns the caller's ear: forge has nothing in playout, the outbound queue is empty and no MOH/park/hold/announcement, pending barge-in arbitration, mute, conference room, peer-hold (tx gate), or WS drop is in effect. Unknown values fail at load. Per-route override via `[route.bridge].idle_keepalive`. |
+
+```toml
+[bridge]
+idle_keepalive = "comfort_noise"   # "off" (default) | "silence" | "comfort_noise"
+
+[[route]]
+name = "quiet_trunk"               # per-route override wins over the global
+[route.match]
+request_uri_user = "6000"
+[route.bridge]
+idle_keepalive = "silence"
+```
 
 > **Detection cadence.** Silence / dead-air events are polled every
 > 500 ms, so the `duration_ms` on the wire may overshoot the

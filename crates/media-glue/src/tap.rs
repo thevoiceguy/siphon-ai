@@ -67,16 +67,20 @@ use crate::rtp_stats::{QualityReport, RtpStatsTracker, RxStats, TxStats};
 // a rename cannot leave this crate emitting the old one (#474).
 use siphon_ai_telemetry::metrics::{
     BARGE_IN_DECISIONS_TOTAL, BARGE_IN_DECISION_SECONDS, DEAD_AIR_EVENTS_TOTAL,
-    OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL, RTP_JITTER_MS, RTP_MOS_ESTIMATE, RTP_PACKET_LOSS_RATIO,
-    RTP_RTT_MS, RTP_RX_JITTER_MS, SILENCE_EVENTS_TOTAL,
+    IDLE_KEEPALIVE_FRAMES_TOTAL, OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL, RTP_JITTER_MS,
+    RTP_MOS_ESTIMATE, RTP_PACKET_LOSS_RATIO, RTP_RTT_MS, RTP_RX_JITTER_MS, SILENCE_EVENTS_TOTAL,
 };
 
 use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, EventBus, ForgeError, ForgeEvent};
 use forge_dtmf::DtmfDigit;
+// `AudioSource` is the trait behind `ToneGenerator::read_frame` — the
+// idle-keepalive comfort-noise arm reads through it (#610), exactly
+// as `moh.rs` does.
 use forge_engine::{
     MediaBridgeHandle, MediaBridgeManager, MediaTarget, OutboundDtmfRequest, OutboundMediaFrame,
     PlayoutMode,
 };
+use forge_injection::AudioSource;
 use siphon_ai_bridge::{
     pack_pcm16_le, unpack_pcm16_le, AudioError, BargeInOutcome, ConferenceLeftReason, DtmfMethod,
     OutgoingEvent, Reframer,
@@ -581,6 +585,31 @@ pub enum TimeoutVerdict {
     Reject,
 }
 
+/// What the tap emits toward the caller while the WS server is silent
+/// and nothing else owns the caller's ear (`[bridge].idle_keepalive`,
+/// our answer to upstream issue #610).
+///
+/// #610: while the WS server streams nothing, the tap's pace tick is
+/// un-polled (its guard keeps an idle call from paying for it) and no
+/// outbound RTP leaves the daemon at all. Some media paths — FreeSWITCH
+/// in particular — stop sending *inbound* RTP toward a peer gone silent
+/// (measured: `rx_packets_received` advancing exactly one packet per
+/// 5 s, RTCP-only), starving the caller's inbound audio. An optional
+/// frame per idle 20 ms tick keeps the RTP flow bidirectional through
+/// such paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IdleKeepaliveMode {
+    /// Never emit idle frames — the v1 behaviour and the default.
+    #[default]
+    Off,
+    /// Emit a zero (digital silence) frame per idle 20 ms tick.
+    Silence,
+    /// Emit a comfort-noise frame per idle 20 ms tick — forge's
+    /// `ToneGenerator::comfort_noise`, the same primitive MOH falls
+    /// back to (`crate::moh`).
+    ComfortNoise,
+}
+
 /// Why the tap pump exited cleanly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TapDisconnect {
@@ -730,6 +759,16 @@ pub struct MediaTap {
     /// acceptor from `[bridge].ws_reconnect_enabled` via
     /// [`Self::with_survive_ws_drop`].
     survive_ws_drop: bool,
+    /// Caller-leg idle keepalive (`[bridge].idle_keepalive`, upstream
+    /// issue #610). When not [`IdleKeepaliveMode::Off`], the run loop
+    /// emits one frame toward the caller per 20 ms tick whenever forge
+    /// has nothing in playout (`!bot_is_playing(clock.until)` with an
+    /// empty outbound queue and no armed marks) and no other feature
+    /// owns the caller's ear (park/hold/announcement, pending barge-in
+    /// arbitration, mute, room membership, a dropped WS, the #417 tx
+    /// gate). Default `Off`; installed by the acceptor via
+    /// [`Self::with_idle_keepalive`].
+    idle_keepalive: IdleKeepaliveMode,
 }
 
 impl std::fmt::Debug for MediaTap {
@@ -804,6 +843,7 @@ impl MediaTap {
             first_audio_at: None,
             recording: None,
             survive_ws_drop: false,
+            idle_keepalive: IdleKeepaliveMode::Off,
         })
     }
 
@@ -853,6 +893,16 @@ impl MediaTap {
     /// override). `None` disables the event for this call.
     pub fn with_rtp_stats_interval(mut self, interval: Option<Duration>) -> Self {
         self.rtp_stats = RtpStatsTracker::new(interval);
+        self
+    }
+
+    /// Install the idle-keepalive mode resolved from
+    /// `[bridge].idle_keepalive` (and any per-route override).
+    /// [`IdleKeepaliveMode::Off`] (the default) keeps the v1 silence
+    /// semantics — an idle call never emits outbound frames. Acceptor
+    /// calls this after `attach_with_barge_in` before `run()`.
+    pub fn with_idle_keepalive(mut self, mode: IdleKeepaliveMode) -> Self {
+        self.idle_keepalive = mode;
         self
     }
 
@@ -1364,6 +1414,26 @@ impl MediaTap {
         let mut moh_tick = tokio::time::interval(Duration::from_millis(PLAYOUT_FRAME_MS));
         moh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         moh_tick.tick().await;
+
+        // Idle-keepalive cadence (#610) — same 20 ms monotonic pattern
+        // as the other optional ticks; the arm guard below suppresses
+        // it entirely when the feature is off or anything else owns
+        // the caller's ear, so an idle call with `idle_keepalive =
+        // "off"` (the default) never pays for this arm.
+        let mut keepalive_tick = tokio::time::interval(Duration::from_millis(PLAYOUT_FRAME_MS));
+        keepalive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        keepalive_tick.tick().await;
+        // Frame length: `sample_rate / 50` is the exact 20 ms sample
+        // count. The old `(sample_rate / 1000) * 20` form truncates at
+        // non-multiple-of-1000 rates (22050 Hz → 440 instead of 441),
+        // drifting the frame ~2.3 µs short every tick.
+        let keepalive_frame_samples = self.sample_rate as usize / 50;
+        // The comfort-noise generator is built only for the
+        // `comfort_noise` mode; `silence` synthesizes zero frames
+        // directly and allocates nothing up front.
+        let mut keepalive_tone = (self.idle_keepalive == IdleKeepaliveMode::ComfortNoise)
+            .then(|| forge_injection::ToneGenerator::comfort_noise(self.sample_rate));
+        let mut keepalive_engaged = false;
 
         // Barge-in debounce (echo/noise gate, §barge_in_debounce). Pinned
         // far-future placeholder; reset to `now + debounce` when a barge-in
@@ -2595,6 +2665,92 @@ impl MediaTap {
                     .await?;
                 }
 
+                // Idle keepalive (#610): when enabled and nothing else
+                // owns the caller's ear, emit one outbound frame per
+                // 20 ms tick so the caller's media path keeps seeing
+                // RTP from us while the WS server is silent — some
+                // paths (FreeSWITCH) stop their own inbound RTP when
+                // peer RTP dries up, starving the call. "Idle" is a
+                // playout-clock verdict, not a queue verdict: during
+                // active 50 fps streaming `drain_outbound` pops
+                // frame-by-frame (while unplayed < lead) and the queue
+                // reads empty between server arrivals, so a bare
+                // `outbound.is_empty()` guard lets a tick phase-race
+                // comfort-noise frames into the middle of a live turn.
+                // The arm therefore also requires
+                // `!bot_is_playing(clock.until, now)` — forge actually
+                // has nothing in playout — plus an empty armed-mark set
+                // (the pace tick's own guard: a mark must never fire
+                // ahead of the audio it rides). With the feature off
+                // (the default) the arm is never selectable and the
+                // idle call pays nothing. The remaining suppression set
+                // tracks the pace tick's `feed_ok` conditions — park,
+                // hold, announcement, pending arbitration, mute, a
+                // dropped WS, room membership.
+                _ = keepalive_tick.tick(),
+                    if self.idle_keepalive != IdleKeepaliveMode::Off
+                        && outbound.is_empty()
+                        && armed_marks.is_empty()
+                        && !bot_is_playing(clock.until, Instant::now())
+                        && parked.is_none()
+                        && held.is_none()
+                        && announcing.is_none()
+                        && pending_verdict.is_none()
+                        && !self.muted
+                        && !ws_dropped
+                        && room_send.is_none() =>
+                {
+                    // #417: a peer hold with our send negotiated away
+                    // suppresses every caller-leg push site — counted
+                    // and skipped like the others.
+                    if self.tx_gate_active() {
+                        self.note_tx_suppressed();
+                        continue;
+                    }
+                    if !keepalive_engaged {
+                        keepalive_engaged = true;
+                        debug!(
+                            call_id = %self.call_id,
+                            mode = ?self.idle_keepalive,
+                            "idle keepalive engaged; emitting frames while the server is silent"
+                        );
+                    }
+                    let samples = match self.idle_keepalive {
+                        // Never panics: a missing generator or a
+                        // failed read degrades to a silence frame —
+                        // the same stance `MohSource` takes.
+                        IdleKeepaliveMode::ComfortNoise => keepalive_tone
+                            .as_mut()
+                            .and_then(|t| t.read_frame(keepalive_frame_samples).ok())
+                            .unwrap_or_else(|| vec![0i16; keepalive_frame_samples]),
+                        // `silence` (and the impossible `Off` — the
+                        // arm guard excludes it) emit digital silence.
+                        _ => vec![0i16; keepalive_frame_samples],
+                    };
+                    // The recording's Bot channel is "what the caller
+                    // hears" — keepalive frames are caller-audible, so
+                    // they fork exactly like the MOH arm's frames do.
+                    if let Some((rec, drops)) = &self.recording {
+                        if let Err(mpsc::error::TrySendError::Full(_)) =
+                            rec.try_send(RecFrame::Bot(pack_pcm16_le(&samples)))
+                        {
+                            drops.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    let frame = OutboundMediaFrame {
+                        target: MediaTarget::A,
+                        sample_rate: self.sample_rate,
+                        samples,
+                        playback_id: None,
+                        mode: PlayoutMode::Append,
+                    };
+                    self.handle
+                        .send_audio(frame)
+                        .await
+                        .map_err(|e| MediaTapError::PlayoutFailed(e.to_string()))?;
+                    metrics::counter!(IDLE_KEEPALIVE_FRAMES_TOTAL).increment(1);
+                }
+
                 // Idle-detector poll. Fires every 500 ms when at
                 // least one threshold is configured; emits derived
                 // `SilenceDetected` / `DeadAirDetected` events as
@@ -3793,5 +3949,246 @@ mod tests {
 
         let outcome = join.await.expect("join").expect("ok");
         assert_eq!(outcome, TapDisconnect::ControllerHungUp);
+    }
+
+    /// #610 idle keepalive: with `comfort_noise` installed and nothing
+    /// else owning the caller's ear, the tap emits outbound frames on
+    /// its 20 ms cadence while the WS server is silent. The caller leg
+    /// in this fixture never drives RTP, which is exactly the #610
+    /// shape — forge must still receive audio (observable via the
+    /// manager's outbound-request channel), and it must be comfort
+    /// noise, not zeros.
+    #[tokio::test]
+    async fn idle_keepalive_comfort_noise_emits_frames_while_idle() {
+        let manager = Arc::new(MediaBridgeManager::new());
+        let call_id = CallId::new("c-keepalive-cn");
+        let tap = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            call_id.clone(),
+            8000,
+        )
+        .expect("attach")
+        .with_idle_keepalive(IdleKeepaliveMode::ComfortNoise);
+
+        let (caller_tx, _caller_rx) = mpsc::channel(4);
+        let (_playout_tx, playout_rx) = mpsc::channel(4);
+        let (events_tx, _events_rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+        let _join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+        let got = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(req) = manager.try_recv_outbound_request(&call_id).await {
+                    return req;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("keepalive frames reach forge while the server is silent");
+        match got {
+            forge_engine::OutboundMediaRequest::Audio(f) => {
+                assert_eq!(f.samples.len(), 160, "one 20 ms frame at 8 kHz");
+                assert!(
+                    f.samples.iter().any(|&s| s != 0),
+                    "comfort-noise keepalive must be non-silent"
+                );
+            }
+            other => panic!("expected an audio request, got {other:?}"),
+        }
+    }
+
+    /// #610 regression guard (adversarial-review CRITICAL fix): idle
+    /// keepalive must never interleave with ACTIVE server streaming.
+    /// During a live 50 fps turn the outbound queue drains
+    /// frame-by-frame (`drain_outbound` pops while unplayed < lead) and
+    /// reads empty between server arrivals, so a bare
+    /// `outbound.is_empty()` guard lets the keepalive tick phase-race
+    /// comfort-noise frames into the middle of the bot's audio. Every
+    /// frame forge receives while the server streams must be exactly
+    /// the server's frames — no insertion, no duplication. Content
+    /// fingerprint: each streamed frame is a fixed non-zero pattern;
+    /// keepalive frames are comfort noise or zeros, so any non-pattern
+    /// frame *between* the first and last pattern frame is a leak.
+    /// (Frames before the first pattern frame are legal idle keepalive
+    /// — the server had not started talking yet.)
+    #[tokio::test]
+    async fn idle_keepalive_comfort_noise_zero_frames_during_active_streaming() {
+        let manager = Arc::new(MediaBridgeManager::new());
+        let call_id = CallId::new("c-keepalive-stream");
+        let tap = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            call_id.clone(),
+            8000,
+        )
+        .expect("attach")
+        .with_idle_keepalive(IdleKeepaliveMode::ComfortNoise);
+
+        let (caller_tx, _caller_rx) = mpsc::channel(4);
+        let (playout_tx, playout_rx) = mpsc::channel(32);
+        let (events_tx, _events_rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+        let _join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+        const PATTERN: i16 = 0x55AA;
+        let server_frame = {
+            let mut b = Vec::with_capacity(320);
+            for _ in 0..160 {
+                b.extend_from_slice(&PATTERN.to_le_bytes());
+            }
+            b
+        };
+
+        // Stream at exactly 50 fps for one second — the live-turn shape.
+        let streamer = {
+            let server_frame = server_frame.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_millis(20));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                tick.tick().await; // the immediate first tick
+                for _ in 0..50 {
+                    playout_tx.send(server_frame.clone()).await.expect("stream");
+                    tick.tick().await;
+                }
+            })
+        };
+
+        // Collect forge-bound frames until all 50 streamed frames have
+        // come back through the manager's request channel.
+        let mut frames: Vec<bool> = Vec::new(); // true = pattern frame
+        let mut pattern_frames = 0usize;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match manager.try_recv_outbound_request(&call_id).await {
+                Some(forge_engine::OutboundMediaRequest::Audio(f)) => {
+                    let pattern = f.samples.len() == 160 && f.samples.iter().all(|&s| s == PATTERN);
+                    if pattern {
+                        pattern_frames += 1;
+                    }
+                    frames.push(pattern);
+                }
+                _ => tokio::time::sleep(Duration::from_millis(2)).await,
+            }
+            if pattern_frames >= 50 && streamer.is_finished() {
+                break;
+            }
+        }
+        streamer.await.expect("streamer join");
+
+        // No duplication: exactly the 50 streamed frames — and nothing
+        // else — may carry the pattern.
+        assert!(
+            (45..=50).contains(&pattern_frames),
+            "streamed frames must reach forge exactly once each (got {pattern_frames}/50 pattern frames)"
+        );
+        let first = frames
+            .iter()
+            .position(|p| *p)
+            .expect("at least one pattern frame");
+        let last = frames
+            .iter()
+            .rposition(|p| *p)
+            .expect("pattern frames exist");
+        let leaked = frames[first..=last].iter().filter(|p| !**p).count();
+        assert_eq!(
+            leaked, 0,
+            "keepalive frames leaked into active streaming: {leaked} non-pattern frame(s) between the first and last streamed frame"
+        );
+    }
+
+    /// #610 regression guard: keepalive off (the default) keeps the v1
+    /// behaviour — an idle call emits no outbound frames at all. The
+    /// pace tick's guard stays un-polled and nothing substitutes for
+    /// the missing server audio.
+    #[tokio::test]
+    async fn idle_keepalive_off_emits_no_frames_while_idle() {
+        let manager = Arc::new(MediaBridgeManager::new());
+        let call_id = CallId::new("c-keepalive-off");
+        let tap = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            call_id.clone(),
+            8000,
+        )
+        .expect("attach");
+        assert_eq!(tap.idle_keepalive, IdleKeepaliveMode::Off, "default is off");
+
+        let (caller_tx, _caller_rx) = mpsc::channel(4);
+        let (_playout_tx, playout_rx) = mpsc::channel(4);
+        let (events_tx, _events_rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+        let _join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+        // Ten idle 20 ms ticks' worth of wall clock: nothing may flow.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            manager.try_recv_outbound_request(&call_id).await.is_none(),
+            "an idle call with keepalive off must not emit outbound frames"
+        );
+    }
+
+    /// #610: hold owns the caller's ear — the hold's MOH plays, and the
+    /// idle-keepalive arm must stay silent for the hold's duration. The
+    /// keepalive here is `silence` (zero frames) so any zero frame that
+    /// slips through while MOH (comfort noise, non-zero) owns the leg
+    /// is an unambiguous keepalive leak.
+    #[tokio::test]
+    async fn idle_keepalive_suppressed_while_held() {
+        let manager = Arc::new(MediaBridgeManager::new());
+        let call_id = CallId::new("c-keepalive-hold");
+        let tap = MediaTap::attach(
+            &manager,
+            &::std::sync::Arc::new(forge_core::EventBus::new()),
+            call_id.clone(),
+            8000,
+        )
+        .expect("attach")
+        .with_idle_keepalive(IdleKeepaliveMode::Silence);
+
+        let (caller_tx, _caller_rx) = mpsc::channel(4);
+        let (_playout_tx, playout_rx) = mpsc::channel(4);
+        let (events_tx, _events_rx) = mpsc::channel(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel(4);
+        let _join = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+
+        let (hold_ack_tx, hold_ack_rx) = tokio::sync::oneshot::channel();
+        cmd_tx
+            .send(TapCommand::Hold {
+                moh: Box::new(crate::moh::MohSource::new(None, 8000)),
+                accepted: hold_ack_tx,
+            })
+            .await
+            .expect("send hold");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), hold_ack_rx)
+                .await
+                .expect("tap answers the hold")
+                .expect("ack channel open"),
+            "direct-pair hold must be accepted"
+        );
+
+        // The window between spawning the tap and the Hold landing is
+        // legal keepalive territory — frames emitted there sit in the
+        // manager's queue and would read as leaks below. The ack
+        // guarantees Hold now owns the caller's ear (no keepalive frame
+        // can be emitted after it), so drain the pre-hold residue once.
+        while manager.try_recv_outbound_request(&call_id).await.is_some() {}
+
+        // While held, every frame reaching forge is MOH comfort noise;
+        // a silent (all-zero) frame would be a keepalive leak.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        while tokio::time::Instant::now() < deadline {
+            if let Some(forge_engine::OutboundMediaRequest::Audio(f)) =
+                manager.try_recv_outbound_request(&call_id).await
+            {
+                assert!(
+                    f.samples.iter().any(|&s| s != 0),
+                    "zero frame while held = keepalive leaked past the MOH owner"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }

@@ -1524,6 +1524,17 @@ pub struct RawBridge {
     /// `[route.bridge].ws_failure_prompt_file`.
     #[serde(default)]
     pub ws_failure_prompt_file: Option<String>,
+    /// What the tap emits toward the caller while the WS server is
+    /// silent and nothing else owns the caller's ear (upstream issue
+    /// #610): `"off"` (default — the v1 behaviour: an idle call emits
+    /// no outbound RTP, which makes some media paths such as
+    /// FreeSWITCH stop their own inbound RTP), `"silence"` (one zero
+    /// frame per idle 20 ms tick), or `"comfort_noise"` (one
+    /// low-level comfort-noise frame per idle tick). Unknown values
+    /// fail at load. Per-route override via
+    /// `[route.bridge].idle_keepalive`.
+    #[serde(default)]
+    pub idle_keepalive: Option<String>,
 }
 
 /// `[bridge.tls]` — mTLS settings for the bridge WS leg.

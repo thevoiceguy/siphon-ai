@@ -218,6 +218,12 @@ pub struct BridgeDefaults {
     /// validated at config load; per-call usability (sample rate) is
     /// checked at play time and fails open to a plain hangup.
     pub ws_failure_prompt_file: Option<std::path::PathBuf>,
+    /// Caller-leg idle keepalive from `[bridge].idle_keepalive`
+    /// (upstream issue #610). Default `Off` — the v1 silence
+    /// semantics, where an idle call emits no outbound RTP at all.
+    /// Per-route override via `[route.bridge].idle_keepalive`
+    /// (see [`resolve_idle_keepalive`]).
+    pub idle_keepalive: siphon_ai_media_glue::IdleKeepaliveMode,
 }
 
 /// `[bridge].on_ws_failure` / `[route.bridge].on_ws_failure` policy
@@ -385,6 +391,7 @@ impl Default for BridgeDefaults {
             ws_reconnect_max: Duration::from_secs(30),
             ws_failure_action: WsFailureAction::Hangup,
             ws_failure_prompt_file: None,
+            idle_keepalive: siphon_ai_media_glue::IdleKeepaliveMode::Off,
         }
     }
 }
@@ -979,6 +986,33 @@ pub fn resolve_rtp_stats_interval(
         None => defaults.rtp_stats_interval,
         Some(0) => None,
         Some(ms) => Some(Duration::from_millis(ms)),
+    }
+}
+
+/// Resolve the per-call idle-keepalive mode by merging the daemon
+/// default (`[bridge].idle_keepalive`, upstream issue #610) with the
+/// per-route override. Route values are validated at config load
+/// (`UnknownRouteIdleKeepalive`), so the unknown-token arm here is a
+/// belt-and-braces fallback for callers that assemble `CompiledRoute`s
+/// outside the config loader — warn and fall back to the daemon
+/// default, matching [`resolve_vad`].
+pub fn resolve_idle_keepalive(
+    defaults: &BridgeDefaults,
+    route: &CompiledRoute,
+) -> siphon_ai_media_glue::IdleKeepaliveMode {
+    match route.bridge.idle_keepalive.as_deref() {
+        None => defaults.idle_keepalive,
+        Some("off") => siphon_ai_media_glue::IdleKeepaliveMode::Off,
+        Some("silence") => siphon_ai_media_glue::IdleKeepaliveMode::Silence,
+        Some("comfort_noise") => siphon_ai_media_glue::IdleKeepaliveMode::ComfortNoise,
+        Some(other) => {
+            tracing::warn!(
+                route = %route.name,
+                value = %other,
+                "[route.bridge].idle_keepalive has an invalid value; falling back to the daemon default"
+            );
+            defaults.idle_keepalive
+        }
     }
 }
 
@@ -4641,6 +4675,7 @@ impl BridgingAcceptor {
                 silence_threshold: resolve_silence_threshold(&self.defaults, route),
                 dead_air_threshold: resolve_dead_air_threshold(&self.defaults, route),
                 rtp_stats_interval: resolve_rtp_stats_interval(&self.defaults, route),
+                idle_keepalive: resolve_idle_keepalive(&self.defaults, route),
                 vad: resolve_vad(&self.defaults, route),
             })
             .await?;
@@ -4969,6 +5004,7 @@ impl BridgingAcceptor {
             silence_threshold: resolve_silence_threshold(&self.defaults, route),
             dead_air_threshold: resolve_dead_air_threshold(&self.defaults, route),
             rtp_stats_interval: resolve_rtp_stats_interval(&self.defaults, route),
+            idle_keepalive: resolve_idle_keepalive(&self.defaults, route),
         };
 
         // Build OUR offer + allocate the forge session. This mirrors
@@ -7927,6 +7963,7 @@ a=sendrecv\r\n",
                     silence_threshold: None,
                     dead_air_threshold: None,
                     rtp_stats_interval: None,
+                    idle_keepalive: siphon_ai_media_glue::IdleKeepaliveMode::Off,
                 },
                 route_name: "test-route".into(),
                 ws_reconnect_enabled: false,

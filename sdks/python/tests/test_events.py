@@ -261,6 +261,34 @@ class ToleranceTest(unittest.TestCase):
         raw["barge_in_mode"] = "pause"
         self.assertEqual(parse_event(json.dumps(raw)).barge_in_mode, "pause")
 
+    def test_timeline_fields_default_absent(self) -> None:
+        # 0.53.0 additive fields: absent on the wire → None / False.
+        ev = parse_event({"type": "mark", "call_id": "c", "seq": 1, "name": "m"})
+        self.assertIsNone(ev.offset_ms)
+        ev = parse_event(
+            {"type": "speech_started", "call_id": "c", "seq": 1, "ts_ms": 1}
+        )
+        self.assertFalse(ev.bot_playing)
+        ev = parse_event(
+            {"type": "speech_started", "call_id": "c", "seq": 1, "ts_ms": 1,
+             "bot_playing": True, "offset_ms": 12480}
+        )
+        self.assertTrue(ev.bot_playing)
+        self.assertEqual(ev.offset_ms, 12480)
+
+    def test_playout_events_parse_typed(self) -> None:
+        ev = parse_event(
+            {"type": "playout_started", "call_id": "c", "seq": 20, "offset_ms": 1180}
+        )
+        self.assertIsInstance(ev, events.PlayoutStarted)
+        self.assertEqual(ev.offset_ms, 1180)
+        ev = parse_event(
+            {"type": "playout_stopped", "call_id": "c", "seq": 31,
+             "offset_ms": 4360, "duration_ms": 3180, "reason": "barge_in"}
+        )
+        self.assertIsInstance(ev, events.PlayoutStopped)
+        self.assertEqual((ev.duration_ms, ev.reason), (3180, "barge_in"))
+
     def test_malformed_json_raises(self) -> None:
         with self.assertRaises(ValueError):
             parse_event("{nope")

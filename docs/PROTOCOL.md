@@ -255,6 +255,21 @@ exposed to. (It is stamped at detection, so on a debounce- or pause-held
 older daemons; fall back to diffing `ts_ms` against the wall-clock time
 you received `start`.
 
+`speech_started` also carries **`bot_playing: true`** (0.53.0) when the bot
+was in playout at the moment the caller started speaking — i.e. the
+caller talked *over* the bot rather than into silence:
+
+```json
+{ "type": "speech_started", "call_id": "...", "seq": 42, "ts_ms": 1785331555126, "offset_ms": 12480, "bot_playing": true }
+```
+
+It is the same test that decides whether `auto_clear` flushes, a
+debounce holds, or pause mode arms (below), and it is reported in every
+mode — with `notify_only` it tells you the caller interrupted and the
+reaction is yours. **Absent** (never `false`) otherwise, so older
+consumers see the shape they always saw. A timeline draws a
+`bot_playing` speech start as an interruption (§3.15).
+
 The barge-in **mode** doesn't change *whether* these are sent, only what
 SiphonAI does alongside a `speech_started`: `auto_clear` (the default) also
 flushes pending outbound playout; `notify_only` leaves that to the server;
@@ -301,9 +316,12 @@ outbound audio for the duration of the hold — the peer isn't
 listening — and resume on `resume`.
 
 ```json
-{ "type": "hold", "call_id": "...", "seq": 95, "direction": "sendonly" }
-{ "type": "resume", "call_id": "...", "seq": 142 }
+{ "type": "hold", "call_id": "...", "seq": 95, "direction": "sendonly", "offset_ms": 60000 }
+{ "type": "resume", "call_id": "...", "seq": 142, "offset_ms": 75000 }
 ```
+
+`offset_ms` (0.53.0) is when the direction change was applied, on
+the call timeline (§3.15).
 
 `direction` is one of `"sendonly"`, `"recvonly"`, or `"inactive"`.
 Transitions between non-`sendrecv` states (e.g. `sendonly` →
@@ -345,8 +363,12 @@ this when the audio queued *before* the server's `mark` request has
 been fully played out into the call.
 
 ```json
-{ "type": "mark", "call_id": "...", "seq": 91, "name": "greeting_done" }
+{ "type": "mark", "call_id": "...", "seq": 91, "name": "greeting_done", "offset_ms": 4360 }
 ```
+
+`offset_ms` (0.53.0) is the estimated playout completion the mark fired
+at — when the caller finished hearing the audio queued before it — on
+the call timeline (§3.15).
 
 ### 3.6 `silence_detected` — caller has been silent
 
@@ -463,8 +485,10 @@ approximate mid-call; at end of call both have settled and the CDR
 ### 3.9 `stop` — call ended
 
 ```json
-{ "type": "stop", "call_id": "...", "seq": 200, "reason": "caller_hangup" }
+{ "type": "stop", "call_id": "...", "seq": 200, "reason": "caller_hangup", "offset_ms": 91040 }
 ```
+
+`offset_ms` (0.53.0) marks the end of the call timeline (§3.15).
 
 `reason` is one of:
 
@@ -520,10 +544,15 @@ fires automatically on `always`, or in response to a `start_recording`
 control on `on_demand`; `recording_stopped` on call end or `stop_recording`.
 
 ```json
-{ "type": "recording_started", "call_id": "...", "seq": 12, "recording_id": "..." }
-{ "type": "recording_stopped", "call_id": "...", "seq": 40, "recording_id": "..." }
-{ "type": "recording_failed",  "call_id": "...", "seq": 13, "recording_id": "...", "reason": "disk full" }
+{ "type": "recording_started", "call_id": "...", "seq": 12, "recording_id": "...", "offset_ms": 38 }
+{ "type": "recording_stopped", "call_id": "...", "seq": 40, "recording_id": "...", "offset_ms": 91020 }
+{ "type": "recording_failed",  "call_id": "...", "seq": 13, "recording_id": "...", "reason": "disk full", "offset_ms": 40 }
 ```
+
+`offset_ms` (0.53.0): on `recording_started` it is the timeline position
+of the recording file's **first sample** — the anchor that places the
+WAV on the call timeline (§3.15); on `recording_stopped` / `recording_failed`
+it is when the file was finalized / the failure hit.
 
 `recording_id` identifies the recording (one per call in this release).
 Recording is best-effort — `recording_failed` never tears the call down.
@@ -570,9 +599,12 @@ the re-INVITE was acknowledged by the peer. Sent **after** the SIP
 round-trip, so the server knows the hold is real before relying on it.
 
 ```json
-{ "type": "held",    "call_id": "...", "seq": 61 }
-{ "type": "resumed", "call_id": "...", "seq": 80 }
+{ "type": "held",    "call_id": "...", "seq": 61, "offset_ms": 30000 }
+{ "type": "resumed", "call_id": "...", "seq": 80, "offset_ms": 42000 }
 ```
+
+`offset_ms` (0.53.0) is when the SIP round-trip completed, on
+the call timeline (§3.15).
 
 > **`held`/`resumed` (your request) vs. `hold`/`resume` (§3.3, the peer).**
 > These are **different messages**. `held`/`resumed` confirm *your* `hold`/
@@ -588,8 +620,11 @@ Emitted whenever a pause-mode barge-in arbitration (§3.2) resolves —
 **every** resolution, whatever caused it:
 
 ```json
-{ "type": "barge_in_resolved", "call_id": "...", "seq": 44, "outcome": "confirmed" }
+{ "type": "barge_in_resolved", "call_id": "...", "seq": 44, "outcome": "confirmed", "offset_ms": 12910 }
 ```
+
+`offset_ms` (0.53.0) is when the arbitration resolved, on
+the call timeline (§3.15).
 
 | `outcome` | Meaning |
 |---|---|
@@ -599,6 +634,67 @@ Emitted whenever a pause-mode barge-in arbitration (§3.2) resolves —
 
 Servers that don't run pause mode never see this event. Only sent on the
 session that armed the arbitration.
+
+### 3.15 `playout_started` / `playout_stopped` — bot turns, and the call timeline (0.53.0)
+
+**Opt-in** via `[bridge].playout_events = true` (per-route override
+`[route.bridge].playout_events`). Off by default.
+
+A **bot turn** is a run of server audio reaching the caller. These two
+events say when the caller actually *heard* the bot — which differs
+from when the server *sent* audio by the playout queue depth.
+
+```json
+{ "type": "playout_started", "call_id": "...", "seq": 20, "offset_ms": 1180 }
+{ "type": "playout_stopped", "call_id": "...", "seq": 31, "offset_ms": 4360, "duration_ms": 3180, "reason": "completed" }
+```
+
+A turn **starts** when the first frame of server audio is handed to the
+media engine after the previous turn ended. It **stops** with:
+
+| `reason` | When | `offset_ms` |
+|---|---|---|
+| `completed` | The queued audio finished and no new frame arrived for 250 ms. A server stall shorter than that does not split a turn. | The estimated end of the last frame (not when the 250 ms elapsed). |
+| `barge_in` | Caller speech cut the bot: an `auto_clear` flush, a debounce-confirmed flush, or a pause-mode arbitration arming. If the arbitration is then **rejected**, the retained tail plays as a **new** turn — the caller heard a gap. | The moment of the cut. |
+| `cleared` | You sent `clear` (§4.1) outside an arbitration. | The moment of the cut. |
+| `muted` | You sent `mute`, which drops queued audio. | The moment of the cut. |
+| `held` | Your `hold` (§4.10) started; hold music replaced the bot. | The moment of the cut. |
+| `parked` | The call was parked. | The moment of the cut. |
+
+A cut that lands after the turn's audio had already finished — inside
+the 250 ms window — was not an interruption, so the turn closes
+`completed` at the end of its audio instead.
+
+`duration_ms` is `playout_stopped.offset_ms` minus the matching
+`playout_started.offset_ms`. A turn still open when the call ends is
+closed by `stop` — no separate `playout_stopped` is sent. Hold music,
+announcements, `idle_keepalive` fill and conference mixing are not bot
+turns. WebRTC legs do not emit these events.
+
+#### Building a call timeline
+
+Every event that marks a moment carries `offset_ms`: monotonic
+milliseconds between SiphonAI sending `start` and that moment, from the
+daemon's monotonic clock. Put them on one axis and you have the call:
+`speech_started`/`speech_stopped` (the caller lane, with `bot_playing`
+marking interruptions), `playout_started`/`playout_stopped` (the bot
+lane), plus `dtmf`, `mark`, `barge_in_resolved`, `hold`/`resume`,
+`held`/`resumed`, `silence_detected`, `dead_air_detected` and `stop`.
+
+To draw the recording's waveform on the same axis, anchor it with
+`recording_started.offset_ms`. The WAV is stereo — left = caller,
+right = what the caller heard from SiphonAI — written as a continuous
+20 ms-per-frame stream, so for a recording at `rate` Hz:
+
+```text
+timeline_ms(sample s) = recording_started.offset_ms + s * 1000 / rate
+```
+
+That mapping holds up to the first `pause_recording` (§4.7): a paused
+span is omitted from the file, and your server, which issued the pause
+and resume, subtracts it. SiphonAI does not store the event stream;
+your server records the events it receives, keyed by `call_id` and
+ordered by `seq`, and joins the recording through `recording_id`.
 
 ---
 

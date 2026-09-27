@@ -21,10 +21,21 @@ pub enum RecControl {
 /// recording id.
 #[derive(Debug, Clone)]
 pub enum RecEvent {
-    /// Recording began (file open).
-    Started,
+    /// Recording began (file open). `at` is the monotonic instant the
+    /// file opened — the writer's first 20 ms frame is written on the
+    /// immediately-following tick, so this is the timeline position of
+    /// the file's first sample (`recording_started.offset_ms`,
+    /// PROTOCOL.md §3.11).
+    Started { at: std::time::Instant },
     /// Recording finalized cleanly (file written + header patched).
-    Stopped { data_bytes: u64, frames: u64 },
+    Stopped {
+        data_bytes: u64,
+        frames: u64,
+        at: std::time::Instant,
+    },
     /// Recording could not start or write.
-    Failed { reason: String },
+    Failed {
+        reason: String,
+        at: std::time::Instant,
+    },
 }

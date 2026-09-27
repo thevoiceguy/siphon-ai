@@ -134,6 +134,10 @@ class SpeechStarted:
     # transition (0.47.0) — media-timeline placement immune to clock
     # skew, WS transit jitter, and NTP steps. None from older daemons.
     offset_ms: int | None = None
+    # True when the bot was in playout as the caller started speaking —
+    # the caller talked over the bot (0.53.0, PROTOCOL.md §3.2). Omitted
+    # (False) otherwise.
+    bot_playing: bool = False
 
 
 @dataclass(frozen=True)
@@ -145,6 +149,9 @@ class BargeInResolved:
     call_id: str
     seq: int
     outcome: str
+    # Monotonic ms from `start` to this moment on the call timeline
+    # (0.53.0, PROTOCOL.md §3.15). None from older daemons.
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +177,9 @@ class FarEndHold:
     call_id: str
     seq: int
     direction: str
+    # Monotonic ms from `start` to this moment on the call timeline
+    # (0.53.0, PROTOCOL.md §3.15). None from older daemons.
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -179,6 +189,9 @@ class FarEndResume:
     type = "resume"
     call_id: str
     seq: int
+    # Monotonic ms from `start` to this moment on the call timeline
+    # (0.53.0, PROTOCOL.md §3.15). None from older daemons.
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -262,6 +275,9 @@ class Mark:
     call_id: str
     seq: int
     name: str
+    # Monotonic ms from `start` to this moment on the call timeline
+    # (0.53.0, PROTOCOL.md §3.15). None from older daemons.
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -270,6 +286,9 @@ class RecordingStarted:
     call_id: str
     seq: int
     recording_id: str
+    # Timeline position of the WAV's first sample — the anchor that maps
+    # recording samples onto every event's offset_ms (PROTOCOL.md §3.15).
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -278,6 +297,9 @@ class RecordingStopped:
     call_id: str
     seq: int
     recording_id: str
+    # Monotonic ms from `start` to this moment on the call timeline
+    # (0.53.0, PROTOCOL.md §3.15). None from older daemons.
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -287,6 +309,9 @@ class RecordingFailed:
     seq: int
     recording_id: str
     reason: str
+    # Monotonic ms from `start` to this moment on the call timeline
+    # (0.53.0, PROTOCOL.md §3.15). None from older daemons.
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -332,6 +357,9 @@ class Held:
     type = "held"
     call_id: str
     seq: int
+    # Monotonic ms from `start` to this moment on the call timeline
+    # (0.53.0, PROTOCOL.md §3.15). None from older daemons.
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -341,6 +369,34 @@ class Resumed:
     type = "resumed"
     call_id: str
     seq: int
+    # Monotonic ms from `start` to this moment on the call timeline
+    # (0.53.0, PROTOCOL.md §3.15). None from older daemons.
+    offset_ms: int | None = None
+
+
+@dataclass(frozen=True)
+class PlayoutStarted:
+    """A bot turn began: the caller started hearing server audio (0.53.0,
+    opt-in via ``[bridge].playout_events``, PROTOCOL.md §3.15)."""
+
+    type = "playout_started"
+    call_id: str
+    seq: int
+    offset_ms: int | None = None
+
+
+@dataclass(frozen=True)
+class PlayoutStopped:
+    """A bot turn ended (0.53.0, PROTOCOL.md §3.15). ``reason`` is one of
+    ``"completed"``, ``"barge_in"``, ``"cleared"``, ``"muted"``,
+    ``"held"``, ``"parked"``."""
+
+    type = "playout_stopped"
+    call_id: str
+    seq: int
+    duration_ms: int
+    reason: str
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -351,6 +407,9 @@ class Stop:
     call_id: str
     seq: int
     reason: str
+    # Monotonic ms from `start` to this moment on the call timeline
+    # (0.53.0, PROTOCOL.md §3.15). None from older daemons.
+    offset_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -376,6 +435,8 @@ Event = Union[
     SpeechStarted,
     SpeechStopped,
     BargeInResolved,
+    PlayoutStarted,
+    PlayoutStopped,
     FarEndHold,
     FarEndResume,
     SilenceDetected,
@@ -402,6 +463,8 @@ _EVENT_TYPES: dict[str, type] = {
     "speech_started": SpeechStarted,
     "speech_stopped": SpeechStopped,
     "barge_in_resolved": BargeInResolved,
+    "playout_started": PlayoutStarted,
+    "playout_stopped": PlayoutStopped,
     "hold": FarEndHold,
     "resume": FarEndResume,
     "silence_detected": SilenceDetected,

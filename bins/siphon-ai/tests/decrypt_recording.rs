@@ -31,7 +31,7 @@ async fn record_encrypted(dir: &Path) -> PathBuf {
             .with_encryption(Some(kek()))
             .run(arx, crx, etx),
     );
-    assert!(matches!(erx.recv().await, Some(RecEvent::Started)));
+    assert!(matches!(erx.recv().await, Some(RecEvent::Started { .. })));
     for _ in 0..5 {
         atx.send(RecFrame::Caller(vec![0x0F; 320])).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;

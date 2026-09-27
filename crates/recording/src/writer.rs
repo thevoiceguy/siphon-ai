@@ -140,6 +140,7 @@ impl RecordingWriter {
                 let _ = evt_tx
                     .send(RecEvent::Failed {
                         reason: err.to_string(),
+                        at: std::time::Instant::now(),
                     })
                     .await;
                 return Err(err);
@@ -158,7 +159,11 @@ impl RecordingWriter {
                 Ok(o) => {
                     open = Some(o);
                     status = Status::Recording;
-                    let _ = evt_tx.send(RecEvent::Started).await;
+                    let _ = evt_tx
+                        .send(RecEvent::Started {
+                            at: std::time::Instant::now(),
+                        })
+                        .await;
                 }
                 Err(e) => fail!(e),
             }
@@ -181,7 +186,11 @@ impl RecordingWriter {
                             Ok(o) => {
                                 open = Some(o);
                                 status = Status::Recording;
-                                let _ = evt_tx.send(RecEvent::Started).await;
+                                let _ = evt_tx
+                        .send(RecEvent::Started {
+                            at: std::time::Instant::now(),
+                        })
+                        .await;
                             }
                             Err(e) => fail!(e),
                         }
@@ -201,6 +210,7 @@ impl RecordingWriter {
                                     let _ = evt_tx.send(RecEvent::Stopped {
                                         data_bytes: stats.data_bytes,
                                         frames: stats.frames,
+                                        at: std::time::Instant::now(),
                                     }).await;
                                     last_stats = Some(stats);
                                 }
@@ -235,6 +245,7 @@ impl RecordingWriter {
                         .send(RecEvent::Stopped {
                             data_bytes: stats.data_bytes,
                             frames: stats.frames,
+                            at: std::time::Instant::now(),
                         })
                         .await;
                     last_stats = Some(stats);
@@ -508,7 +519,7 @@ mod tests {
         let (etx, mut erx) = mpsc::channel(8);
         let h = tokio::spawn(RecordingWriter::new(path.clone(), 8000, true).run(arx, crx, etx));
         // First event is Started (auto-start).
-        assert!(matches!(erx.recv().await, Some(RecEvent::Started)));
+        assert!(matches!(erx.recv().await, Some(RecEvent::Started { .. })));
         for _ in 0..5 {
             atx.send(RecFrame::Caller(vec![1u8; 320])).await.unwrap();
             atx.send(RecFrame::Bot(vec![2u8; 320])).await.unwrap();
@@ -534,7 +545,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(!path.exists(), "no file before Start");
         ctx.send(RecControl::Start).await.unwrap();
-        assert!(matches!(erx.recv().await, Some(RecEvent::Started)));
+        assert!(matches!(erx.recv().await, Some(RecEvent::Started { .. })));
         for _ in 0..4 {
             atx.send(RecFrame::Caller(vec![1u8; 320])).await.unwrap();
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -557,7 +568,7 @@ mod tests {
         let (_ctx, crx) = mpsc::channel(8);
         let (etx, mut erx) = mpsc::channel(8);
         let h = tokio::spawn(RecordingWriter::new(path.clone(), 8000, true).run(arx, crx, etx));
-        assert!(matches!(erx.recv().await, Some(RecEvent::Started)));
+        assert!(matches!(erx.recv().await, Some(RecEvent::Started { .. })));
         // Mid-recording: only the .part exists (0.24.0 finalize atomicity).
         atx.send(RecFrame::Caller(vec![1u8; 320])).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -582,7 +593,7 @@ mod tests {
                 .with_encryption(Some(kek.clone()))
                 .run(arx, crx, etx),
         );
-        assert!(matches!(erx.recv().await, Some(RecEvent::Started)));
+        assert!(matches!(erx.recv().await, Some(RecEvent::Started { .. })));
         for _ in 0..5 {
             atx.send(RecFrame::Caller(vec![0x11; 320])).await.unwrap();
             atx.send(RecFrame::Bot(vec![0x22; 320])).await.unwrap();
@@ -619,7 +630,7 @@ mod tests {
                 .with_format(crate::config::RecordingFormat::Opus)
                 .run(arx, crx, etx),
         );
-        assert!(matches!(erx.recv().await, Some(RecEvent::Started)));
+        assert!(matches!(erx.recv().await, Some(RecEvent::Started { .. })));
         for _ in 0..5 {
             atx.send(RecFrame::Caller(vec![0x33; 640])).await.unwrap();
             tokio::time::sleep(Duration::from_millis(25)).await;

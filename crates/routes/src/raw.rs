@@ -146,6 +146,10 @@ pub struct BridgeOverride {
     /// (`UnknownRouteIdleKeepalive`).
     pub idle_keepalive: Option<String>,
 
+    /// Per-route override of `[bridge].playout_events` (bot-turn
+    /// events, DESIGN_CALL_TIMELINE.md §3). `None` inherits the global.
+    pub playout_events: Option<bool>,
+
     /// Per-route override of `[bridge.tls]` — mTLS for this route's WS
     /// leg. `None` inherits the global `[bridge.tls]`. When present it
     /// **fully replaces** the global (it is a complete client-cert

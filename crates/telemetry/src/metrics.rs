@@ -577,6 +577,12 @@ pub const BARGE_IN_DECISIONS_TOTAL: &str = "siphon_ai_barge_in_decisions_total";
 /// `siphon-ai-media-glue::tap`.
 pub const IDLE_KEEPALIVE_FRAMES_TOTAL: &str = "siphon_ai_idle_keepalive_frames_total";
 
+/// Bot playout turns closed, by `reason` (`completed`, `barge_in`,
+/// `cleared`, `muted`, `held`, `parked`) — `[bridge].playout_events`,
+/// DESIGN_CALL_TIMELINE.md §3. Counted only on calls with the feature
+/// on; a turn still open at call end is not counted. Bounded label set.
+pub const PLAYOUT_TURNS_TOTAL: &str = "siphon_ai_playout_turns_total";
+
 /// `SIGHUP` cert-reload attempts for the SIP/TLS listener (0.3.0), one
 /// tick per attempt. Labeled by `outcome`: `ok` / `failed` (a broken
 /// cert/key on disk — the listener keeps serving the previous cert).
@@ -1194,6 +1200,10 @@ pub fn register_descriptions() {
         "Pause-mode barge-in arbitration latency: armed on speech_started, resolved by verdict/timeout/preemption."
     );
     describe_counter!(
+        PLAYOUT_TURNS_TOTAL,
+        "Bot playout turns closed by reason (completed, barge_in, cleared, muted, held, parked); [bridge].playout_events calls only."
+    );
+    describe_counter!(
         BARGE_IN_DECISIONS_TOTAL,
         "Pause-mode barge-in arbitration resolutions by outcome (confirmed, rejected, timeout)."
     );
@@ -1530,6 +1540,7 @@ pub const ALL_COUNTERS: &[&str] = &[
     DEAD_AIR_EVENTS_TOTAL,
     BARGE_IN_DECISIONS_TOTAL,
     IDLE_KEEPALIVE_FRAMES_TOTAL,
+    PLAYOUT_TURNS_TOTAL,
     SIP_TLS_RELOAD_ATTEMPTS_TOTAL,
     ADMIN_TLS_RELOAD_ATTEMPTS_TOTAL,
     RTP_RESERVE_BLOCKS_TOTAL,

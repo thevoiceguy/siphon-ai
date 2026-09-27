@@ -61,6 +61,7 @@ fn pcmu_call(call_id: &str, offer: &'static str) -> InboundCall<'static> {
         dead_air_threshold: None,
         rtp_stats_interval: None,
         idle_keepalive: ::siphon_ai_media_glue::IdleKeepaliveMode::Off,
+        playout_events: false,
         vad: ::siphon_ai_media_glue::VadBackend::default(),
     }
 }
@@ -233,6 +234,7 @@ async fn no_common_codec_rolls_back_session() {
             dead_air_threshold: None,
             rtp_stats_interval: None,
             idle_keepalive: ::siphon_ai_media_glue::IdleKeepaliveMode::Off,
+            playout_events: false,
             vad: ::siphon_ai_media_glue::VadBackend::default(),
         })
         .await;
@@ -275,6 +277,7 @@ async fn malformed_offer_does_not_allocate_ports() {
             dead_air_threshold: None,
             rtp_stats_interval: None,
             idle_keepalive: ::siphon_ai_media_glue::IdleKeepaliveMode::Off,
+            playout_events: false,
             vad: ::siphon_ai_media_glue::VadBackend::default(),
         })
         .await

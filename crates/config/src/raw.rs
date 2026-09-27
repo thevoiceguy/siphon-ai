@@ -1535,6 +1535,11 @@ pub struct RawBridge {
     /// `[route.bridge].idle_keepalive`.
     #[serde(default)]
     pub idle_keepalive: Option<String>,
+    /// Emit `playout_started` / `playout_stopped` bot-turn events on
+    /// the WS (PROTOCOL.md §3.15, DESIGN_CALL_TIMELINE.md §3). Default
+    /// `false`. Per-route override via `[route.bridge].playout_events`.
+    #[serde(default)]
+    pub playout_events: bool,
 }
 
 /// `[bridge.tls]` — mTLS settings for the bridge WS leg.

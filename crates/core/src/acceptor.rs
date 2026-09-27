@@ -224,6 +224,11 @@ pub struct BridgeDefaults {
     /// Per-route override via `[route.bridge].idle_keepalive`
     /// (see [`resolve_idle_keepalive`]).
     pub idle_keepalive: siphon_ai_media_glue::IdleKeepaliveMode,
+    /// Bot-turn `playout_started` / `playout_stopped` events from
+    /// `[bridge].playout_events` (DESIGN_CALL_TIMELINE.md §3). Default
+    /// `false`. Per-route override via `[route.bridge].playout_events`
+    /// (see [`resolve_playout_events`]).
+    pub playout_events: bool,
 }
 
 /// `[bridge].on_ws_failure` / `[route.bridge].on_ws_failure` policy
@@ -392,6 +397,7 @@ impl Default for BridgeDefaults {
             ws_failure_action: WsFailureAction::Hangup,
             ws_failure_prompt_file: None,
             idle_keepalive: siphon_ai_media_glue::IdleKeepaliveMode::Off,
+            playout_events: false,
         }
     }
 }
@@ -996,6 +1002,16 @@ pub fn resolve_rtp_stats_interval(
 /// belt-and-braces fallback for callers that assemble `CompiledRoute`s
 /// outside the config loader — warn and fall back to the daemon
 /// default, matching [`resolve_vad`].
+/// Resolve whether this call emits bot-turn playout events: the
+/// route's `[route.bridge].playout_events` when set, else the daemon
+/// default (DESIGN_CALL_TIMELINE.md §3).
+pub fn resolve_playout_events(defaults: &BridgeDefaults, route: &CompiledRoute) -> bool {
+    route
+        .bridge
+        .playout_events
+        .unwrap_or(defaults.playout_events)
+}
+
 pub fn resolve_idle_keepalive(
     defaults: &BridgeDefaults,
     route: &CompiledRoute,
@@ -3589,6 +3605,7 @@ impl CallAcceptor for BridgingAcceptor {
                     entry.handle.set_peer_held(true);
                     entry.handle.push_bridge_event(OutgoingEvent::Hold {
                         direction: new_direction.as_attr().to_string(),
+                        at: std::time::Instant::now(),
                     });
                 }
                 (true, false) => {
@@ -3597,7 +3614,9 @@ impl CallAcceptor for BridgingAcceptor {
                         "emitting Resume on WS bridge"
                     );
                     entry.handle.set_peer_held(false);
-                    entry.handle.push_bridge_event(OutgoingEvent::Resume);
+                    entry.handle.push_bridge_event(OutgoingEvent::Resume {
+                        at: std::time::Instant::now(),
+                    });
                 }
                 _ => {
                     // No transition (held→held with different flavor,
@@ -4673,6 +4692,7 @@ impl BridgingAcceptor {
                 dead_air_threshold: resolve_dead_air_threshold(&self.defaults, route),
                 rtp_stats_interval: resolve_rtp_stats_interval(&self.defaults, route),
                 idle_keepalive: resolve_idle_keepalive(&self.defaults, route),
+                playout_events: resolve_playout_events(&self.defaults, route),
                 vad: resolve_vad(&self.defaults, route),
             })
             .await?;
@@ -5002,6 +5022,7 @@ impl BridgingAcceptor {
             dead_air_threshold: resolve_dead_air_threshold(&self.defaults, route),
             rtp_stats_interval: resolve_rtp_stats_interval(&self.defaults, route),
             idle_keepalive: resolve_idle_keepalive(&self.defaults, route),
+            playout_events: resolve_playout_events(&self.defaults, route),
         };
 
         // Build OUR offer + allocate the forge session. This mirrors
@@ -7961,6 +7982,7 @@ a=sendrecv\r\n",
                     dead_air_threshold: None,
                     rtp_stats_interval: None,
                     idle_keepalive: siphon_ai_media_glue::IdleKeepaliveMode::Off,
+                    playout_events: false,
                 },
                 route_name: "test-route".into(),
                 ws_reconnect_enabled: false,

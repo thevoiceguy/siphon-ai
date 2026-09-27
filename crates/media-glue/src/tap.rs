@@ -67,8 +67,9 @@ use crate::rtp_stats::{QualityReport, RtpStatsTracker, RxStats, TxStats};
 // a rename cannot leave this crate emitting the old one (#474).
 use siphon_ai_telemetry::metrics::{
     BARGE_IN_DECISIONS_TOTAL, BARGE_IN_DECISION_SECONDS, DEAD_AIR_EVENTS_TOTAL,
-    IDLE_KEEPALIVE_FRAMES_TOTAL, OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL, RTP_JITTER_MS,
-    RTP_MOS_ESTIMATE, RTP_PACKET_LOSS_RATIO, RTP_RTT_MS, RTP_RX_JITTER_MS, SILENCE_EVENTS_TOTAL,
+    IDLE_KEEPALIVE_FRAMES_TOTAL, OUTBOUND_AUDIO_FRAMES_DROPPED_TOTAL, PLAYOUT_TURNS_TOTAL,
+    RTP_JITTER_MS, RTP_MOS_ESTIMATE, RTP_PACKET_LOSS_RATIO, RTP_RTT_MS, RTP_RX_JITTER_MS,
+    SILENCE_EVENTS_TOTAL,
 };
 
 use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, EventBus, ForgeError, ForgeEvent};
@@ -79,7 +80,7 @@ use forge_engine::{
 };
 use siphon_ai_bridge::{
     pack_pcm16_le, unpack_pcm16_le, AudioError, BargeInOutcome, ConferenceLeftReason, DtmfMethod,
-    OutgoingEvent, Reframer,
+    OutgoingEvent, PlayoutStopReason, Reframer,
 };
 use siphon_ai_recording::RecFrame;
 use thiserror::Error;
@@ -115,6 +116,18 @@ const BARGE_IN_PLAYOUT_GRACE: Duration = Duration::from_millis(60);
 /// which is the wanted behaviour there (the RTP gap already spans
 /// the window).
 const IDLE_KEEPALIVE_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// Playout-turn hangover (`[bridge].playout_events`,
+/// DESIGN_CALL_TIMELINE.md §3): a bot turn ends `completed` only once
+/// the queued audio has finished AND no new server frame arrived for
+/// this long. Deliberately the same figure as
+/// [`IDLE_KEEPALIVE_DEBOUNCE`] — both separate "the server went quiet"
+/// from routine real-time stalls (GC pause, TTS chunk boundary).
+const PLAYOUT_TURN_HANGOVER: Duration = Duration::from_millis(250);
+
+/// How often an open playout turn is checked for completion. Polled
+/// only while a turn is open, so an idle call pays nothing.
+const PLAYOUT_TURN_POLL: Duration = Duration::from_millis(50);
 
 /// PROTOCOL.md §5.5: outbound audio the tap holds ahead of the forge
 /// feed — 10 frames = 200 ms. Beyond this the **oldest** held frame is
@@ -799,6 +812,13 @@ pub struct MediaTap {
     /// flowing and still needs our outbound RTP. Default `Off`;
     /// installed by the acceptor via [`Self::with_idle_keepalive`].
     idle_keepalive: IdleKeepaliveMode,
+    /// Emit `playout_started` / `playout_stopped` bot-turn events
+    /// (`[bridge].playout_events`, DESIGN_CALL_TIMELINE.md §3). Default
+    /// `false`; installed via [`Self::with_playout_events`].
+    playout_events: bool,
+    /// When the open bot turn started; `None` = no turn open. Only
+    /// ever `Some` with [`Self::playout_events`] on.
+    turn_started: Option<Instant>,
 }
 
 impl std::fmt::Debug for MediaTap {
@@ -874,6 +894,8 @@ impl MediaTap {
             recording: None,
             survive_ws_drop: false,
             idle_keepalive: IdleKeepaliveMode::Off,
+            playout_events: false,
+            turn_started: None,
         })
     }
 
@@ -934,6 +956,83 @@ impl MediaTap {
     pub fn with_idle_keepalive(mut self, mode: IdleKeepaliveMode) -> Self {
         self.idle_keepalive = mode;
         self
+    }
+
+    /// Enable `playout_started` / `playout_stopped` bot-turn events
+    /// (`[bridge].playout_events`, DESIGN_CALL_TIMELINE.md §3). Off by
+    /// default; the acceptor installs the resolved global/per-route
+    /// value.
+    pub fn with_playout_events(mut self, enabled: bool) -> Self {
+        self.playout_events = enabled;
+        self
+    }
+
+    /// Open a bot turn at `now` if none is open (and the feature is
+    /// on): the first server frame handed to forge after the previous
+    /// turn closed. Best-effort `try_send` like every tap event.
+    fn open_turn(&mut self, events_tx: &mpsc::Sender<OutgoingEvent>, now: Instant) {
+        if !self.playout_events || self.turn_started.is_some() {
+            return;
+        }
+        self.turn_started = Some(now);
+        debug!(call_id = %self.call_id, "playout turn started");
+        if let Err(e) = events_tx.try_send(OutgoingEvent::PlayoutStarted { at: now }) {
+            debug!(call_id = %self.call_id, error = %e, "events_tx full or closed; dropping playout_started");
+        }
+    }
+
+    /// Close the open bot turn at a cut site (a flush, `clear`, mute,
+    /// hold, park). If the turn's audio had already finished — the cut
+    /// landed inside the hangover window — the bot was not actually
+    /// interrupted, so the turn closes `completed` at the end of its
+    /// audio instead of carrying the cut's reason.
+    fn cut_turn(
+        &mut self,
+        events_tx: &mpsc::Sender<OutgoingEvent>,
+        until: Option<Instant>,
+        reason: PlayoutStopReason,
+    ) {
+        let now = Instant::now();
+        match until {
+            Some(end) if end <= now => {
+                self.close_turn(events_tx, end, PlayoutStopReason::Completed)
+            }
+            _ => self.close_turn(events_tx, now, reason),
+        }
+    }
+
+    /// Close the open bot turn (no-op when none is open, so every cut
+    /// site can call it unconditionally). `at` is the turn's end on the
+    /// timeline: the clock's estimated end of the last frame for
+    /// `completed`, the moment of the cut otherwise.
+    fn close_turn(
+        &mut self,
+        events_tx: &mpsc::Sender<OutgoingEvent>,
+        at: Instant,
+        reason: PlayoutStopReason,
+    ) {
+        let Some(started) = self.turn_started.take() else {
+            return;
+        };
+        let at = at.max(started);
+        let duration_ms = at.duration_since(started).as_millis() as u64;
+        let label = match reason {
+            PlayoutStopReason::Completed => "completed",
+            PlayoutStopReason::BargeIn => "barge_in",
+            PlayoutStopReason::Cleared => "cleared",
+            PlayoutStopReason::Muted => "muted",
+            PlayoutStopReason::Held => "held",
+            PlayoutStopReason::Parked => "parked",
+        };
+        metrics::counter!(PLAYOUT_TURNS_TOTAL, "reason" => label).increment(1);
+        debug!(call_id = %self.call_id, reason = label, duration_ms, "playout turn stopped");
+        if let Err(e) = events_tx.try_send(OutgoingEvent::PlayoutStopped {
+            at,
+            duration_ms,
+            reason,
+        }) {
+            debug!(call_id = %self.call_id, error = %e, "events_tx full or closed; dropping playout_stopped");
+        }
     }
 
     /// Install the quality watch feed (0.30.0). The controller keeps
@@ -1111,6 +1210,7 @@ impl MediaTap {
     async fn forge_push_frame(
         &mut self,
         bytes: Vec<u8>,
+        events_tx: &mpsc::Sender<OutgoingEvent>,
         clock: &mut PlayoutClock,
         shadow: &mut VecDeque<Vec<u8>>,
         shadow_cap: usize,
@@ -1150,6 +1250,11 @@ impl MediaTap {
             self.publish_quality();
         }
         clock.note_push(push_now);
+        // A server frame reached the caller's ear: open a bot turn if
+        // none is open (DESIGN_CALL_TIMELINE.md §3). Below the #417
+        // gate on purpose — a dropped frame was never heard. The room
+        // mix push elsewhere deliberately does not open turns.
+        self.open_turn(events_tx, push_now);
         // Pause mode: shadow the pushed frame so a barge-in reject can
         // re-queue it, then drop frames the playout clock says have
         // already played — the ring only ever holds the unplayed tail
@@ -1200,8 +1305,8 @@ impl MediaTap {
     ) -> Result<(), MediaTapError> {
         let now = Instant::now();
         while armed_marks.front().is_some_and(|(_, due)| *due <= now) {
-            if let Some((name, _)) = armed_marks.pop_front() {
-                self.fire_mark(events_tx, name);
+            if let Some((name, due)) = armed_marks.pop_front() {
+                self.fire_mark(events_tx, name, due);
             }
         }
         loop {
@@ -1217,6 +1322,7 @@ impl MediaTap {
                     outbound.audio_len = outbound.audio_len.saturating_sub(1);
                     self.forge_push_frame(
                         bytes,
+                        events_tx,
                         clock,
                         shadow,
                         shadow_cap,
@@ -1231,7 +1337,7 @@ impl MediaTap {
                     let fire_now = Instant::now();
                     match clock.until.filter(|u| *u > fire_now) {
                         Some(due) => armed_marks.push_back((name, due)),
-                        None => self.fire_mark(events_tx, name),
+                        None => self.fire_mark(events_tx, name, fire_now),
                     }
                 }
                 Some(OutboundItem::Dtmf { digit, duration_ms }) => {
@@ -1258,8 +1364,11 @@ impl MediaTap {
     /// Best-effort `mark` emission, mirroring the other tap events:
     /// `try_send` so a backed-up bridge channel can't stall the audio
     /// arms.
-    fn fire_mark(&self, events_tx: &mpsc::Sender<OutgoingEvent>, name: String) {
-        if let Err(e) = events_tx.try_send(OutgoingEvent::Mark { name }) {
+    /// `at` is the estimated playout completion the mark fired for (its
+    /// armed due time, or now when nothing was playing) — the wire
+    /// `offset_ms` (DESIGN_CALL_TIMELINE.md §1).
+    fn fire_mark(&self, events_tx: &mpsc::Sender<OutgoingEvent>, name: String, at: Instant) {
+        if let Err(e) = events_tx.try_send(OutgoingEvent::Mark { name, at }) {
             warn!(
                 call_id = %self.call_id,
                 error = %e,
@@ -1464,6 +1573,8 @@ impl MediaTap {
         let mut keepalive_source = (self.idle_keepalive == IdleKeepaliveMode::ComfortNoise)
             .then(|| crate::moh::MohSource::new(None, self.sample_rate));
         let mut keepalive_engaged = false;
+        let mut turn_tick = tokio::time::interval(PLAYOUT_TURN_POLL);
+        turn_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // When the idle verdict (empty queue + marks, nothing in
         // playout, no other owner) first held; `None` until then. A
         // server frame reaching the outbound queue clears it back to
@@ -2006,6 +2117,13 @@ impl MediaTap {
                                 // bus is best-effort), and while the bot
                                 // is silent — nothing to pause.
                                 let speech_now = Instant::now();
+                                // DESIGN_CALL_TIMELINE.md §4: was the
+                                // bot talking when the caller started?
+                                // The same test every barge-in reaction
+                                // below uses.
+                                if let OutgoingEvent::SpeechStarted { bot_playing: bp, .. } = &mut out {
+                                    *bp = bot_is_playing(clock.until, speech_now);
+                                }
                                 let reaction = if matches!(out, OutgoingEvent::SpeechStarted { .. })
                                 {
                                     match self.barge_in_action {
@@ -2099,6 +2217,7 @@ impl MediaTap {
                                                 &self.call_id,
                                                 "auto_clear",
                                             );
+                                            self.cut_turn(&events_tx, clock.until, PlayoutStopReason::BargeIn);
                                             clock.reset();
                                         }
                                         BargeInAction::Pause { decision, .. } => {
@@ -2113,6 +2232,7 @@ impl MediaTap {
                                             // Armed marks anchored to the
                                             // flushed audio; §4.1 drops them.
                                             armed_marks.clear();
+                                            self.cut_turn(&events_tx, clock.until, PlayoutStopReason::BargeIn);
                                             clock.reset();
                                             arb_deadline
                                                 .as_mut()
@@ -2257,6 +2377,7 @@ impl MediaTap {
                                 &self.call_id,
                                 "mute",
                             );
+                            self.cut_turn(&events_tx, clock.until, PlayoutStopReason::Muted);
                             clock.reset();
                         }
                         TapCommand::Unmute => {
@@ -2377,6 +2498,7 @@ impl MediaTap {
                                 &self.call_id,
                                 "clear",
                             );
+                            self.cut_turn(&events_tx, clock.until, PlayoutStopReason::Cleared);
                             clock.reset();
                         }
                         TapCommand::SendDtmf { digit, duration_ms } => {
@@ -2519,6 +2641,8 @@ impl MediaTap {
                             // no replay (§5.7/park semantics) — held
                             // frames and unfired marks from the old
                             // session die here.
+                            // Close on the detaching session's channel.
+                            self.cut_turn(&events_tx, clock.until, PlayoutStopReason::Parked);
                             drop_outbound_queue(
                                 &mut outbound,
                                 &mut armed_marks,
@@ -2590,6 +2714,8 @@ impl MediaTap {
                                        "announcement cut short by hold");
                                 let _ = done.send(AnnounceEnd::CutShort { ms: frames * 20 });
                             }
+                            // MOH replaces the bot (DESIGN_CALL_TIMELINE.md §3).
+                            self.cut_turn(&events_tx, clock.until, PlayoutStopReason::Held);
                             held = Some(*moh);
                             // Align the MOH cadence to now (same as Park).
                             moh_tick.reset();
@@ -2741,6 +2867,21 @@ impl MediaTap {
                 // there for why not the guard) and books nothing into
                 // the suppressed-frames metric — that counter is
                 // reserved for audio the caller actually missed.
+                // DESIGN_CALL_TIMELINE.md §3: an open bot turn ends
+                // `completed` once the queue is empty and the last frame
+                // finished PLAYOUT_TURN_HANGOVER ago. Polled only while
+                // a turn is open (the feature off never opens one).
+                _ = turn_tick.tick(), if self.turn_started.is_some() => {
+                    let now = Instant::now();
+                    let finished = clock
+                        .until
+                        .is_none_or(|until| now >= until + PLAYOUT_TURN_HANGOVER);
+                    if outbound.is_empty() && finished {
+                        let end = clock.until.unwrap_or(now);
+                        self.close_turn(&events_tx, end, PlayoutStopReason::Completed);
+                    }
+                }
+
                 _ = keepalive_tick.tick(),
                     if self.idle_keepalive != IdleKeepaliveMode::Off
                         && outbound.is_empty()
@@ -3026,6 +3167,7 @@ impl MediaTap {
                             )
                             .await;
                             armed_marks.clear();
+                            self.cut_turn(&events_tx, clock.until, PlayoutStopReason::BargeIn);
                             clock.reset();
                             arb_deadline
                                 .as_mut()
@@ -3080,6 +3222,7 @@ impl MediaTap {
                                 &self.call_id,
                                 "auto_clear_debounce",
                             );
+                            self.cut_turn(&events_tx, clock.until, PlayoutStopReason::BargeIn);
                             clock.reset();
                         }
                     }
@@ -3348,7 +3491,10 @@ fn emit_resolved(
     call_id: &CallId,
     outcome: BargeInOutcome,
 ) {
-    if let Err(e) = events_tx.try_send(OutgoingEvent::BargeInResolved { outcome }) {
+    if let Err(e) = events_tx.try_send(OutgoingEvent::BargeInResolved {
+        outcome,
+        at: Instant::now(),
+    }) {
         debug!(
             call_id = %call_id,
             error = %e,
@@ -3396,6 +3542,9 @@ fn derive_outgoing_event(call_id: &CallId, event: ForgeEvent) -> Option<Outgoing
             // wire `offset_ms` keeps the transition's true timeline
             // position.
             at: Instant::now(),
+            // Stamped by the SpeechStarted handler against the playout
+            // clock (DESIGN_CALL_TIMELINE.md §4).
+            bot_playing: false,
             // Stamped by the pause-mode arm just before forwarding,
             // when this event arms an arbitration (0.32.0).
             decision_pending: false,

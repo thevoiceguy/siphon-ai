@@ -4118,3 +4118,73 @@ any = true
         assert!(cfg.routes.iter().any(|r| r.uses_peer_cert_san()));
     }
 }
+
+#[test]
+fn playout_events_default_global_and_route_override() {
+    // DESIGN_CALL_TIMELINE.md §3: opt-in, with a per-route override
+    // that wins in either direction.
+    use siphon_ai_core::acceptor::resolve_playout_events;
+    let env = MapEnv::new([]);
+    let base = |global: &str| {
+        format!(
+            r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+{global}
+
+[[route]]
+name = "on"
+[route.match]
+request_uri_user = "7000"
+[route.bridge]
+playout_events = true
+
+[[route]]
+name = "off"
+[route.match]
+request_uri_user = "7001"
+[route.bridge]
+playout_events = false
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#
+        )
+    };
+    for (global, want_default) in [("", false), ("playout_events = true", true)] {
+        let cfg = load_from_str_with_env(&base(global), &env).expect("compiles");
+        assert_eq!(
+            cfg.bridge_defaults.playout_events, want_default,
+            "{global:?}"
+        );
+        let got: Vec<(String, bool)> = cfg
+            .routes
+            .iter()
+            .map(|r| {
+                (
+                    r.name.clone(),
+                    resolve_playout_events(&cfg.bridge_defaults, r),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("on".to_string(), true),
+                ("off".to_string(), false),
+                ("default".to_string(), want_default),
+            ],
+            "{global:?}"
+        );
+    }
+    // A non-boolean fails at load.
+    let msg = load_from_str_with_env(&base(r#"playout_events = "yes""#), &env)
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("playout_events"), "got: {msg}");
+}

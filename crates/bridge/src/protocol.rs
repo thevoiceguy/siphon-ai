@@ -97,6 +97,12 @@ pub enum BridgeOut {
         /// when `decision_pending` is `true`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         decision_deadline_ms: Option<u64>,
+        /// `true` when the bot was in playout at the moment of
+        /// detection (DESIGN_CALL_TIMELINE.md §4) — the same test that
+        /// decides whether `auto_clear` flushes, a debounce holds, or
+        /// pause mode arms. Absent (never `false`) otherwise.
+        #[serde(default, skip_serializing_if = "is_false")]
+        bot_playing: bool,
     },
 
     /// VAD detected the caller stopping speaking.
@@ -129,11 +135,18 @@ pub enum BridgeOut {
         /// One of `"sendonly"`, `"recvonly"`, `"inactive"` —
         /// mirrors the peer's offered direction per RFC 3264 §6.1.
         direction: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
     },
 
     /// Direction returned to `sendrecv` after a [`BridgeOut::Hold`].
     /// The server may resume sending audio.
-    Resume { call_id: CallId, seq: Seq },
+    Resume {
+        call_id: CallId,
+        seq: Seq,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
+    },
 
     /// Caller has been silent (no VAD speech) for at least
     /// `duration_ms`. Configurable via `[bridge].silence_threshold_ms`;
@@ -293,6 +306,8 @@ pub enum BridgeOut {
         call_id: CallId,
         seq: Seq,
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
     },
 
     /// A recording has begun (auto on `mode = "always"`, or in response to
@@ -302,6 +317,8 @@ pub enum BridgeOut {
         call_id: CallId,
         seq: Seq,
         recording_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
     },
 
     /// A recording finalized (call ended, or [`BridgeIn::StopRecording`]).
@@ -309,6 +326,8 @@ pub enum BridgeOut {
         call_id: CallId,
         seq: Seq,
         recording_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
     },
 
     /// A recording could not start or write (e.g. disk error). The call is
@@ -319,6 +338,8 @@ pub enum BridgeOut {
         recording_id: String,
         /// Human-readable reason.
         reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
     },
 
     /// This call successfully joined a conference room, in response to
@@ -374,11 +395,21 @@ pub enum BridgeOut {
     /// [`BridgeOut::Hold`] event**, which reports that the *far end* held
     /// *us*. A server that sent `hold` waits for this before relying on
     /// the hold; on failure it gets `error { code: "hold_failed" }`.
-    Held { call_id: CallId, seq: Seq },
+    Held {
+        call_id: CallId,
+        seq: Seq,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
+    },
 
     /// Confirmation that a server-requested [`BridgeIn::Resume`] restored
     /// two-way audio (0.7.2). Mirror of [`BridgeOut::Held`].
-    Resumed { call_id: CallId, seq: Seq },
+    Resumed {
+        call_id: CallId,
+        seq: Seq,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
+    },
 
     /// A pause-mode barge-in arbitration resolved (0.32.0). Emitted for
     /// **every** resolution — a server verdict, the decision deadline
@@ -391,6 +422,32 @@ pub enum BridgeOut {
         call_id: CallId,
         seq: Seq,
         outcome: BargeInOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
+    },
+
+    /// A bot turn began: the first frame of server audio after the
+    /// playout clock was idle was handed to the media engine
+    /// (DESIGN_CALL_TIMELINE.md §3). Opt-in via
+    /// `[bridge].playout_events`.
+    PlayoutStarted {
+        call_id: CallId,
+        seq: Seq,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
+    },
+
+    /// A bot turn ended. For `completed`, `offset_ms` is the estimated
+    /// end of the last frame; for every other reason it is the moment
+    /// the turn was cut. `duration_ms` is measured from the matching
+    /// `playout_started`.
+    PlayoutStopped {
+        call_id: CallId,
+        seq: Seq,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
+        duration_ms: u64,
+        reason: PlayoutStopReason,
     },
 
     /// Last message SiphonAI sends. Followed by a clean WS close (1000).
@@ -398,6 +455,9 @@ pub enum BridgeOut {
         call_id: CallId,
         seq: Seq,
         reason: StopReason,
+        /// The end of the call timeline (DESIGN_CALL_TIMELINE.md §1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ms: Option<u64>,
     },
 
     /// Fatal error. Always followed by `stop { reason: "error" }` and a
@@ -648,6 +708,29 @@ pub enum BargeInOutcome {
     /// No verdict arrived within the decision window;
     /// `[bridge.barge_in].on_timeout` was applied.
     Timeout,
+}
+
+/// Why a bot turn ended ([`BridgeOut::PlayoutStopped`],
+/// DESIGN_CALL_TIMELINE.md §3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum PlayoutStopReason {
+    /// The queued audio finished and no new frame arrived within the
+    /// turn hangover.
+    Completed,
+    /// Caller speech cut it: an `auto_clear` flush, a debounce-confirmed
+    /// flush, or a pause-mode arbitration arming. A rejected
+    /// arbitration resumes the tail as a new `playout_started`.
+    BargeIn,
+    /// The server sent `clear` outside an arbitration.
+    Cleared,
+    /// The server sent `mute`, which drops the queue.
+    Muted,
+    /// A bot-initiated hold started; MOH replaced the bot.
+    Held,
+    /// The call was parked.
+    Parked,
 }
 
 /// The call's resolved barge-in mode, announced on
@@ -1100,6 +1183,96 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn bridge_out_timeline_offsets_round_trip() {
+        // DESIGN_CALL_TIMELINE.md §1: additive `offset_ms` on every
+        // moment-marking event; each shape round-trips byte-stable.
+        for raw in [
+            r#"{ "type": "mark", "call_id": "c", "seq": 91, "name": "greeting_done", "offset_ms": 4360 }"#,
+            r#"{ "type": "barge_in_resolved", "call_id": "c", "seq": 44, "outcome": "rejected", "offset_ms": 5120 }"#,
+            r#"{ "type": "hold", "call_id": "c", "seq": 95, "direction": "sendonly", "offset_ms": 60000 }"#,
+            r#"{ "type": "resume", "call_id": "c", "seq": 142, "offset_ms": 75000 }"#,
+            r#"{ "type": "held", "call_id": "c", "seq": 61, "offset_ms": 30000 }"#,
+            r#"{ "type": "resumed", "call_id": "c", "seq": 80, "offset_ms": 42000 }"#,
+            r#"{ "type": "recording_started", "call_id": "c", "seq": 12, "recording_id": "r", "offset_ms": 38 }"#,
+            r#"{ "type": "recording_stopped", "call_id": "c", "seq": 40, "recording_id": "r", "offset_ms": 91000 }"#,
+            r#"{ "type": "recording_failed", "call_id": "c", "seq": 13, "recording_id": "r", "reason": "disk full", "offset_ms": 40 }"#,
+            r#"{ "type": "stop", "call_id": "c", "seq": 300, "reason": "caller_hangup", "offset_ms": 91040 }"#,
+        ] {
+            let msg: BridgeOut = assert_round_trip(raw);
+            let v = serde_json::to_value(&msg).expect("serialize");
+            assert!(v["offset_ms"].is_u64(), "offset_ms survives: {raw}");
+        }
+        // Legacy shapes (no offset_ms) still parse and re-serialize
+        // without growing the field.
+        let legacy: BridgeOut =
+            assert_round_trip(r#"{ "type": "mark", "call_id": "c", "seq": 91, "name": "m" }"#);
+        assert!(matches!(
+            legacy,
+            BridgeOut::Mark {
+                offset_ms: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bridge_out_playout_events_round_trip() {
+        // DESIGN_CALL_TIMELINE.md §3: the opt-in bot-turn pair.
+        let msg: BridgeOut = assert_round_trip(
+            r#"{ "type": "playout_started", "call_id": "c", "seq": 20, "offset_ms": 1180 }"#,
+        );
+        assert!(matches!(
+            msg,
+            BridgeOut::PlayoutStarted {
+                offset_ms: Some(1180),
+                ..
+            }
+        ));
+        for (wire, reason) in [
+            ("completed", PlayoutStopReason::Completed),
+            ("barge_in", PlayoutStopReason::BargeIn),
+            ("cleared", PlayoutStopReason::Cleared),
+            ("muted", PlayoutStopReason::Muted),
+            ("held", PlayoutStopReason::Held),
+            ("parked", PlayoutStopReason::Parked),
+        ] {
+            let raw = format!(
+                r#"{{ "type": "playout_stopped", "call_id": "c", "seq": 31, "offset_ms": 4360, "duration_ms": 3180, "reason": "{wire}" }}"#
+            );
+            let msg: BridgeOut = assert_round_trip(&raw);
+            assert!(
+                matches!(msg, BridgeOut::PlayoutStopped { reason: r, duration_ms: 3180, .. } if r == reason),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_out_speech_started_bot_playing() {
+        // DESIGN_CALL_TIMELINE.md §4: present only when true.
+        let raw = r#"{ "type": "speech_started", "call_id": "c", "seq": 42, "ts_ms": 1785331555126, "offset_ms": 12480, "bot_playing": true }"#;
+        let msg: BridgeOut = assert_round_trip(raw);
+        assert!(matches!(
+            msg,
+            BridgeOut::SpeechStarted {
+                bot_playing: true,
+                ..
+            }
+        ));
+        let quiet = BridgeOut::SpeechStarted {
+            call_id: CallId::new("c"),
+            seq: 1,
+            ts_ms: 1,
+            offset_ms: None,
+            decision_pending: false,
+            decision_deadline_ms: None,
+            bot_playing: false,
+        };
+        let v = serde_json::to_value(&quiet).expect("serialize");
+        assert!(v.get("bot_playing").is_none(), "false is omitted: {v}");
     }
 
     #[test]

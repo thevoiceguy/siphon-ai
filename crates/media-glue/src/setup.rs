@@ -170,6 +170,10 @@ pub struct InboundCall<'a> {
     /// Resolved by the acceptor from the global default plus any
     /// per-route override.
     pub idle_keepalive: IdleKeepaliveMode,
+    /// Bot-turn playout events (`[bridge].playout_events`,
+    /// DESIGN_CALL_TIMELINE.md §3), resolved by the acceptor from the
+    /// global default plus any per-route override.
+    pub playout_events: bool,
     /// Which VAD backend detects caller speech. Resolved by the
     /// acceptor from `[media].vad` plus the route's
     /// `[route.media].vad` override.
@@ -215,6 +219,8 @@ pub struct TapOptions {
     pub rtp_stats_interval: Option<std::time::Duration>,
     /// Caller-leg idle keepalive (`[bridge].idle_keepalive`, #610).
     pub idle_keepalive: IdleKeepaliveMode,
+    /// Bot-turn playout events (`[bridge].playout_events`).
+    pub playout_events: bool,
 }
 
 /// Inputs to [`MediaSetup::originate_offer`] — allocate a forge session and
@@ -761,7 +767,8 @@ impl MediaSetup {
         .with_inactivity_timeout(call.inactivity_timeout)
         .with_idle_thresholds(call.silence_threshold, call.dead_air_threshold)
         .with_rtp_stats_interval(call.rtp_stats_interval)
-        .with_idle_keepalive(call.idle_keepalive);
+        .with_idle_keepalive(call.idle_keepalive)
+        .with_playout_events(call.playout_events);
 
         guard.disarm();
 
@@ -962,7 +969,8 @@ impl MediaSetup {
         .with_inactivity_timeout(tap.inactivity_timeout)
         .with_idle_thresholds(tap.silence_threshold, tap.dead_air_threshold)
         .with_rtp_stats_interval(tap.rtp_stats_interval)
-        .with_idle_keepalive(tap.idle_keepalive);
+        .with_idle_keepalive(tap.idle_keepalive)
+        .with_playout_events(tap.playout_events);
 
         // (4) Activate the forge session: Initializing → Active, which spawns
         //     the RTP forwarding task (decode/forward inbound, send outbound).
@@ -1115,6 +1123,7 @@ mod tests {
                 dead_air_threshold: None,
                 rtp_stats_interval: None,
                 idle_keepalive: IdleKeepaliveMode::Off,
+                playout_events: false,
                 vad: VadBackend::default(),
             })
             .await;
@@ -1173,6 +1182,7 @@ a=sendrecv\r\n"
             dead_air_threshold: None,
             rtp_stats_interval: None,
             idle_keepalive: IdleKeepaliveMode::Off,
+            playout_events: false,
         }
     }
 

@@ -164,6 +164,9 @@ pub enum OutgoingEvent {
         /// The arbitration's decision window in milliseconds; `Some`
         /// exactly when `decision_pending` is `true`.
         decision_deadline_ms: Option<u64>,
+        /// The bot was in playout at detection
+        /// (DESIGN_CALL_TIMELINE.md §4) → wire `bot_playing: true`.
+        bot_playing: bool,
     },
     SpeechStopped {
         ts_ms: u64,
@@ -183,6 +186,10 @@ pub enum OutgoingEvent {
     },
     Mark {
         name: String,
+        /// Monotonic stamp of the moment, converted to the wire
+        /// `offset_ms` against the instant `start` was written
+        /// (DESIGN_CALL_TIMELINE.md §1).
+        at: std::time::Instant,
     },
     /// Mid-dialog re-INVITE flipped peer audio direction to
     /// something other than `sendrecv`. The conn stamps `seq` and
@@ -190,22 +197,48 @@ pub enum OutgoingEvent {
     Hold {
         /// `"sendonly"`, `"recvonly"`, or `"inactive"` per RFC 3264.
         direction: String,
+        /// Monotonic stamp of the moment, converted to the wire
+        /// `offset_ms` against the instant `start` was written
+        /// (DESIGN_CALL_TIMELINE.md §1).
+        at: std::time::Instant,
     },
     /// Direction returned to `sendrecv` after a [`Self::Hold`].
-    Resume,
+    Resume {
+        at: std::time::Instant,
+    },
     /// A bot-initiated [`BridgeIn::Hold`] re-INVITE succeeded (0.7.2).
     /// The conn stamps `seq` and emits [`BridgeOut::Held`]. Distinct
     /// from [`Self::Hold`], which reports that the *far end* held us.
-    Held,
+    Held {
+        at: std::time::Instant,
+    },
     /// A bot-initiated [`BridgeIn::Resume`] re-INVITE restored two-way
     /// audio (0.7.2) → [`BridgeOut::Resumed`].
-    Resumed,
+    Resumed {
+        at: std::time::Instant,
+    },
     /// A pause-mode barge-in arbitration resolved (0.32.0) →
     /// [`BridgeOut::BargeInResolved`]. Emitted by the tap on every
     /// resolution: server verdict, deadline timeout, or a preempting
     /// command.
     BargeInResolved {
         outcome: crate::protocol::BargeInOutcome,
+        /// Monotonic stamp of the moment, converted to the wire
+        /// `offset_ms` against the instant `start` was written
+        /// (DESIGN_CALL_TIMELINE.md §1).
+        at: std::time::Instant,
+    },
+    /// A bot turn began (DESIGN_CALL_TIMELINE.md §3) →
+    /// [`BridgeOut::PlayoutStarted`]. Emitted by the tap only when
+    /// `[bridge].playout_events` is on.
+    PlayoutStarted {
+        at: std::time::Instant,
+    },
+    /// A bot turn ended → [`BridgeOut::PlayoutStopped`].
+    PlayoutStopped {
+        at: std::time::Instant,
+        duration_ms: u64,
+        reason: crate::protocol::PlayoutStopReason,
     },
     /// Caller has been silent (no VAD speech) for at least
     /// `duration_ms`. Configurable via `[bridge].silence_threshold_ms`;
@@ -265,6 +298,10 @@ pub enum OutgoingEvent {
     },
     Stop {
         reason: StopReason,
+        /// Monotonic stamp of the moment, converted to the wire
+        /// `offset_ms` against the instant `start` was written
+        /// (DESIGN_CALL_TIMELINE.md §1).
+        at: std::time::Instant,
     },
     Error {
         code: ErrorCode,
@@ -274,15 +311,20 @@ pub enum OutgoingEvent {
     /// [`BridgeOut::RecordingStarted`].
     RecordingStarted {
         recording_id: String,
+        /// The recorder's file-open instant — the timeline position of
+        /// the file's first sample (DESIGN_CALL_TIMELINE.md §2).
+        at: std::time::Instant,
     },
     /// A recording finalized → [`BridgeOut::RecordingStopped`].
     RecordingStopped {
         recording_id: String,
+        at: std::time::Instant,
     },
     /// A recording failed → [`BridgeOut::RecordingFailed`].
     RecordingFailed {
         recording_id: String,
         reason: String,
+        at: std::time::Instant,
     },
     /// This call joined a conference room → [`BridgeOut::ConferenceJoined`].
     /// The conn stamps `call_id` + `seq`.
@@ -639,6 +681,7 @@ async fn run_loop(
                         call_id: call_id.clone(),
                         seq,
                         reason: StopReason::Error,
+                        offset_ms: Some(offset_ms(std::time::Instant::now(), start_sent)),
                     };
                     let _ = sink
                         .send(Message::Text(serialize_or_drop(&stop)))
@@ -729,7 +772,7 @@ async fn run_loop(
                             Err(e) => {
                                 warn!(call_id = %call_id, error = %e,
                                     "malformed or unknown WS message from server");
-                                let _ = emit_fatal(&mut sink, &call_id, &mut seq,
+                                let _ = emit_fatal(&mut sink, &call_id, &mut seq, start_sent,
                                     ErrorCode::ProtocolError,
                                     "malformed or unknown message").await;
                                 let _ = close_clean(&mut sink).await;
@@ -740,7 +783,7 @@ async fn run_loop(
                         if got != call_id.as_str() {
                             warn!(call_id = %call_id, got,
                                 "WS message call_id does not match the connection");
-                            let _ = emit_fatal(&mut sink, &call_id, &mut seq,
+                            let _ = emit_fatal(&mut sink, &call_id, &mut seq, start_sent,
                                 ErrorCode::ProtocolError,
                                 "call_id does not match the connection").await;
                             let _ = close_clean(&mut sink).await;
@@ -804,7 +847,7 @@ async fn run_loop(
                 // timeout and ignore failures, then report the drop.
                 let _ = tokio::time::timeout(
                     Duration::from_secs(1),
-                    emit_fatal(&mut sink, &call_id, &mut seq,
+                    emit_fatal(&mut sink, &call_id, &mut seq, start_sent,
                         ErrorCode::Internal, "ws keepalive timeout"),
                 )
                 .await;
@@ -819,7 +862,7 @@ async fn run_loop(
                     "server sent no audio within start-deadline — server_too_slow");
                 // The connection is healthy here, so the `error` + `stop`
                 // will actually reach the server before we close.
-                let _ = emit_fatal(&mut sink, &call_id, &mut seq,
+                let _ = emit_fatal(&mut sink, &call_id, &mut seq, start_sent,
                     ErrorCode::ServerTooSlow, "no audio within start deadline").await;
                 let _ = close_clean(&mut sink).await;
                 return Ok(DisconnectReason::ServerTooSlow);
@@ -850,6 +893,7 @@ async fn emit_fatal<S>(
     sink: &mut S,
     call_id: &CallId,
     seq: &mut Seq,
+    start_sent: std::time::Instant,
     code: ErrorCode,
     message: &str,
 ) -> Result<(), BridgeError>
@@ -868,6 +912,7 @@ where
         call_id: call_id.clone(),
         seq: *seq,
         reason: StopReason::Error,
+        offset_ms: Some(offset_ms(std::time::Instant::now(), start_sent)),
     };
     *seq = seq.wrapping_add(1);
     sink.send(Message::Text(serialize_or_drop(&stop))).await?;
@@ -879,6 +924,14 @@ where
 /// best-effort path clean).
 fn serialize_or_drop(out: &BridgeOut) -> String {
     serde_json::to_string(out).unwrap_or_else(|_| String::from("{\"type\":\"stop\"}"))
+}
+
+/// Wire `offset_ms`: monotonic milliseconds from the instant `start`
+/// was written to the moment `at`. Saturates to 0 for a moment stamped
+/// before `start` hit the wire (an event queued while the WS was still
+/// connecting).
+fn offset_ms(at: std::time::Instant, start_sent: std::time::Instant) -> u64 {
+    at.saturating_duration_since(start_sent).as_millis() as u64
 }
 
 fn build_bridge_out(
@@ -893,6 +946,7 @@ fn build_bridge_out(
             at,
             decision_pending,
             decision_deadline_ms,
+            bot_playing,
         } => BridgeOut::SpeechStarted {
             call_id,
             seq,
@@ -903,6 +957,7 @@ fn build_bridge_out(
             offset_ms: Some(at.saturating_duration_since(start_sent).as_millis() as u64),
             decision_pending,
             decision_deadline_ms,
+            bot_playing,
         },
         OutgoingEvent::SpeechStopped {
             ts_ms,
@@ -928,19 +983,54 @@ fn build_bridge_out(
             method,
             offset_ms: Some(at.saturating_duration_since(start_sent).as_millis() as u64),
         },
-        OutgoingEvent::Mark { name } => BridgeOut::Mark { call_id, seq, name },
-        OutgoingEvent::Hold { direction } => BridgeOut::Hold {
+        OutgoingEvent::Mark { name, at } => BridgeOut::Mark {
+            call_id,
+            seq,
+            name,
+            offset_ms: Some(offset_ms(at, start_sent)),
+        },
+        OutgoingEvent::Hold { direction, at } => BridgeOut::Hold {
             call_id,
             seq,
             direction,
+            offset_ms: Some(offset_ms(at, start_sent)),
         },
-        OutgoingEvent::Resume => BridgeOut::Resume { call_id, seq },
-        OutgoingEvent::Held => BridgeOut::Held { call_id, seq },
-        OutgoingEvent::Resumed => BridgeOut::Resumed { call_id, seq },
-        OutgoingEvent::BargeInResolved { outcome } => BridgeOut::BargeInResolved {
+        OutgoingEvent::Resume { at } => BridgeOut::Resume {
+            call_id,
+            seq,
+            offset_ms: Some(offset_ms(at, start_sent)),
+        },
+        OutgoingEvent::Held { at } => BridgeOut::Held {
+            call_id,
+            seq,
+            offset_ms: Some(offset_ms(at, start_sent)),
+        },
+        OutgoingEvent::Resumed { at } => BridgeOut::Resumed {
+            call_id,
+            seq,
+            offset_ms: Some(offset_ms(at, start_sent)),
+        },
+        OutgoingEvent::BargeInResolved { outcome, at } => BridgeOut::BargeInResolved {
             call_id,
             seq,
             outcome,
+            offset_ms: Some(offset_ms(at, start_sent)),
+        },
+        OutgoingEvent::PlayoutStarted { at } => BridgeOut::PlayoutStarted {
+            call_id,
+            seq,
+            offset_ms: Some(offset_ms(at, start_sent)),
+        },
+        OutgoingEvent::PlayoutStopped {
+            at,
+            duration_ms,
+            reason,
+        } => BridgeOut::PlayoutStopped {
+            call_id,
+            seq,
+            offset_ms: Some(offset_ms(at, start_sent)),
+            duration_ms,
+            reason,
         },
         OutgoingEvent::SilenceDetected { duration_ms, at } => BridgeOut::SilenceDetected {
             call_id,
@@ -983,10 +1073,11 @@ fn build_bridge_out(
             tx_packets_lost_reported,
             mos_estimate,
         },
-        OutgoingEvent::Stop { reason } => BridgeOut::Stop {
+        OutgoingEvent::Stop { reason, at } => BridgeOut::Stop {
             call_id,
             seq,
             reason,
+            offset_ms: Some(offset_ms(at, start_sent)),
         },
         OutgoingEvent::Error { code, message } => BridgeOut::Error {
             call_id,
@@ -994,24 +1085,28 @@ fn build_bridge_out(
             code,
             message,
         },
-        OutgoingEvent::RecordingStarted { recording_id } => BridgeOut::RecordingStarted {
+        OutgoingEvent::RecordingStarted { recording_id, at } => BridgeOut::RecordingStarted {
             call_id,
             seq,
             recording_id,
+            offset_ms: Some(offset_ms(at, start_sent)),
         },
-        OutgoingEvent::RecordingStopped { recording_id } => BridgeOut::RecordingStopped {
+        OutgoingEvent::RecordingStopped { recording_id, at } => BridgeOut::RecordingStopped {
             call_id,
             seq,
             recording_id,
+            offset_ms: Some(offset_ms(at, start_sent)),
         },
         OutgoingEvent::RecordingFailed {
             recording_id,
             reason,
+            at,
         } => BridgeOut::RecordingFailed {
             call_id,
             seq,
             recording_id,
             reason,
+            offset_ms: Some(offset_ms(at, start_sent)),
         },
         OutgoingEvent::ConferenceJoined {
             room_id,
@@ -1110,10 +1205,83 @@ mod tests {
         // The bot-initiated hold acks (0.7.2) — distinct from the
         // peer-hold Hold/Resume events — stamp call_id + seq.
         let now = std::time::Instant::now();
-        let held = build_bridge_out(OutgoingEvent::Held, CallId::new("c"), 3, now);
+        let held = build_bridge_out(OutgoingEvent::Held { at: now }, CallId::new("c"), 3, now);
         assert!(matches!(held, BridgeOut::Held { seq: 3, .. }));
-        let resumed = build_bridge_out(OutgoingEvent::Resumed, CallId::new("c"), 4, now);
+        let resumed =
+            build_bridge_out(OutgoingEvent::Resumed { at: now }, CallId::new("c"), 4, now);
         assert!(matches!(resumed, BridgeOut::Resumed { seq: 4, .. }));
+    }
+
+    #[test]
+    fn build_bridge_out_stamps_timeline_offsets_from_source_instant() {
+        // DESIGN_CALL_TIMELINE.md §1: `offset_ms` comes from the
+        // instant stamped at the source, not from when the conn sends.
+        let start_sent = std::time::Instant::now();
+        let at = start_sent + Duration::from_millis(1500);
+        let mark = build_bridge_out(
+            OutgoingEvent::Mark {
+                name: "m".into(),
+                at,
+            },
+            CallId::new("c"),
+            1,
+            start_sent,
+        );
+        assert!(matches!(
+            mark,
+            BridgeOut::Mark {
+                offset_ms: Some(1500),
+                ..
+            }
+        ));
+        let rec = build_bridge_out(
+            OutgoingEvent::RecordingStarted {
+                recording_id: "r".into(),
+                at: start_sent + Duration::from_millis(38),
+            },
+            CallId::new("c"),
+            2,
+            start_sent,
+        );
+        assert!(matches!(
+            rec,
+            BridgeOut::RecordingStarted {
+                offset_ms: Some(38),
+                ..
+            }
+        ));
+        let stopped = build_bridge_out(
+            OutgoingEvent::PlayoutStopped {
+                at,
+                duration_ms: 900,
+                reason: crate::protocol::PlayoutStopReason::Completed,
+            },
+            CallId::new("c"),
+            3,
+            start_sent,
+        );
+        assert!(matches!(
+            stopped,
+            BridgeOut::PlayoutStopped {
+                offset_ms: Some(1500),
+                duration_ms: 900,
+                ..
+            }
+        ));
+        // A moment stamped before `start` went out saturates to 0.
+        let early = build_bridge_out(
+            OutgoingEvent::Held { at: start_sent },
+            CallId::new("c"),
+            4,
+            start_sent + Duration::from_millis(10),
+        );
+        assert!(matches!(
+            early,
+            BridgeOut::Held {
+                offset_ms: Some(0),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1125,6 +1293,7 @@ mod tests {
                 at: start_sent + Duration::from_millis(250),
                 decision_pending: false,
                 decision_deadline_ms: None,
+                bot_playing: false,
             },
             CallId::new("c"),
             7,

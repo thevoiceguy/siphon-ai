@@ -27,6 +27,8 @@ export {
   parseEvent,
   type AudioFormat,
   type BargeInResolved,
+  type PlayoutStarted,
+  type PlayoutStopped,
   type BridgeEvent,
   type ConferenceJoined,
   type ConferenceLeft,

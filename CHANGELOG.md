@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Call timeline events** (PROTOCOL.md §3.15, `docs/design/DESIGN_CALL_TIMELINE.md`).
+  Everything a server needs to draw a LiveKit-style call timeline — a waveform with caller
+  speech, bot turns and barge-ins mapped along it — now arrives on one `offset_ms` axis.
+  All additive within protocol v1.
+  - **`offset_ms` on every moment-marking event** that lacked it: `mark` (the estimated
+    playout completion it fired at), `barge_in_resolved`, `hold`/`resume`,
+    `held`/`resumed`, `recording_started`/`recording_stopped`/`recording_failed`, and
+    `stop`. Each is stamped where the moment happens, not when the event is sent.
+  - **`recording_started.offset_ms` anchors the WAV**: it is the timeline position of the
+    file's first sample, so `timeline_ms = recording_started.offset_ms + sample * 1000 / rate`
+    places the recording under every other event.
+  - **`speech_started.bot_playing: true`** when the caller started speaking over the bot,
+    in every barge-in mode. Absent otherwise.
+  - **`playout_started` / `playout_stopped`** bot-turn events, opt-in via
+    `[bridge].playout_events` (per-route override). A stop carries `duration_ms` and a
+    `reason`: `completed`, `barge_in`, `cleared`, `muted`, `held` or `parked`. New counter
+    `siphon_ai_playout_turns_total{reason}`.
+  - Schema regenerated; both server SDKs gain the fields and the `PlayoutStarted` /
+    `PlayoutStopped` types; the example echo servers log the bot turns.
+
 ## [0.53.0] - 2026-09-27
 
 ### Added

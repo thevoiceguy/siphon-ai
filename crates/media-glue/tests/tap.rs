@@ -2613,6 +2613,10 @@ async fn clear_cuts_turn_as_cleared() {
     let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
     let _pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
     let _drain = spawn_forge_drain(Arc::clone(&manager), call.clone());
+    // Keep a sender alive past `stream.abort()`: a closed playout
+    // channel reads as the controller hanging up and the tap exits,
+    // racing the Clear below (CI saw the exit win).
+    let _playout_keep = playout_tx.clone();
     let stream = spawn_streamer(playout_tx, 50);
 
     let first = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())

@@ -54,6 +54,11 @@ Content-Length: 0
 ]]>
   </send>
 
+  <!-- Let the echo server's greeting (its greeting-ms option) get into
+       playout before the caller speaks, so the VAD trips while the bot
+       is provably talking and pause arbitration arms (#612). -->
+  <pause milliseconds="500"/>
+
   <!-- Caller "speech": replay the generated tone capture. pcapplay
        paces packets by the capture's own 20 ms timestamps. -->
   <nop>

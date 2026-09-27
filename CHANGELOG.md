@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.53.0] - 2026-09-27
+
 ### Added
 
 - **`[bridge].idle_keepalive`** ([#610](https://github.com/thevoiceguy/siphon-ai/issues/610)).
@@ -22,6 +24,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep arriving. Per-route override via `[route.bridge].idle_keepalive`; unknown values
   (global or route) fail at load. New counter
   `siphon_ai_idle_keepalive_frames_total`.
+
+### Security
+
+- **siphon-rs v2026.09.05 → v2026.09.22** fixes two remote panics
+  ([siphon-rs v2026.09.22](https://github.com/thevoiceguy/siphon-rs/releases/tag/v2026.09.22)):
+  `extract_tag` and `validate_event_package` sliced a `From` tag / `Event` header at a fixed
+  byte offset to test for a prefix, which panics when that offset falls inside a multi-byte
+  character. Every in-dialog request is matched through `extract_tag`, so a single crafted
+  header from any peer could stop the process. Both sites now return `None` where they
+  panicked, with regression tests, and siphon-rs's fuzz crate — described as running, but
+  never built — now builds and runs nightly with four new targets. **All deployments should
+  update.**
+- **rustls 0.23.40 → 0.23.45** ([RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285)):
+  TLS 1.3 handshake messages were accepted across encryption-level boundaries. rustls sits
+  under every TLS surface here — SIP over TLS, the WS bridge, the admin listener and the
+  webhook/CDR HTTP clients — so this closes the daily `cargo audit` failure that had been
+  open on `main` since the advisory landed. Lockfile-only; the fixed rustls requires
+  aws-lc-rs 1.18.1 / aws-lc-sys 0.45.0, which came along with it.
+
+### Changed
+
+- **forge-media v2026.09.10.1 → v2026.09.22, siphon-rs v2026.09.05 → v2026.09.22.** The
+  siphon-rs roll carries the panic fixes above plus v2026.09.15 (sip-core 0.7.8 multipart
+  bodies and RFC 6442 geolocation serialisation, sip-parse 0.4.0, sip-uac 0.7.2
+  `invite_with_options`) — none of which siphon-ai calls. forge-media moves with it because
+  v2026.09.22 embeds siphon-rs v2026.09.22 (its `sip-sdp` pin and submodule), and staying
+  behind would link two copies of the SDP negotiator. Of the forge crates siphon-ai builds,
+  only forge-rtp 0.7.0 (RFC 8285 extension walking), forge-sdp 0.2.2 (RFC 4796
+  `a=content`) and forge-webrtc 0.7.0 (a second video content stream) changed, all
+  additive; forge-engine, core, codecs, dtmf, vad, hep, ice, mixer and injection are
+  unchanged, so the audio path is untouched. The rest of the range is video, GPU, MP4 and
+  BFCP crates this project does not depend on. No wire behaviour changes.
+
+### Documentation
+
+- **Getting started on Debian 13** (`getting_started_with_siphon-ai.md`): a first-run
+  guide from a fresh install to a bridged call.
 
 ## [0.52.0] - 2026-09-11
 

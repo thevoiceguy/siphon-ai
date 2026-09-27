@@ -103,7 +103,7 @@ sudo siphon-ai check --config /etc/siphon-ai/config.toml
 
 `check` parses and validates the configuration without opening SIP, RTP, or HTTP listeners. Run it before startup and after edits. It catches configuration errors, but it cannot prove firewall reachability, API-key validity, or working audio.
 
-One thing worth knowing if you read the source-install guide in `docs/INSTALL_DEBIAN13.md` alongside this: that path puts the binary at `/usr/local/bin` and the config at `/etc/siphon-ai/siphon-ai.toml`. The `.deb` uses `/usr/bin` and `config.toml`. Same daemon, different paths. It matters in section 4.
+One thing worth knowing if you read the source-install guide in [`INSTALL_DEBIAN13.md`](INSTALL_DEBIAN13.md) alongside this: that path puts the binary at `/usr/local/bin` and the config at `/etc/siphon-ai/siphon-ai.toml`. The `.deb` uses `/usr/bin` and `config.toml`. Same daemon, different paths. It matters in section 4.
 
 ---
 

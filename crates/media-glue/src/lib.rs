@@ -33,5 +33,6 @@ pub use setup::{
     OutboundOffer, OutboundOfferRequest, OutboundSrtp, SetupError, TapOptions, VadBackend,
 };
 pub use tap::{
-    AnnounceEnd, BargeInAction, MediaTap, MediaTapError, TapCommand, TapDisconnect, TimeoutVerdict,
+    AnnounceEnd, BargeInAction, IdleKeepaliveMode, MediaTap, MediaTapError, TapCommand,
+    TapDisconnect, TimeoutVerdict,
 };

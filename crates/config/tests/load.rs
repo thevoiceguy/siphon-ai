@@ -1307,6 +1307,139 @@ on_ws_failure = "hangup"
 }
 
 #[test]
+fn idle_keepalive_defaults_to_off() {
+    // Upstream #610: the idle-keepalive knob is opt-in — an operator
+    // who never wrote the key keeps the v1 silence semantics.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let cfg = load_from_str_with_env(toml, &env).expect("absent key compiles");
+    assert_eq!(
+        cfg.bridge_defaults.idle_keepalive,
+        siphon_ai_media_glue::IdleKeepaliveMode::Off
+    );
+}
+
+#[test]
+fn idle_keepalive_unknown_value_fails_loud() {
+    // Fail loud at startup, not silently-inherit on the first call
+    // (CLAUDE.md §4.6) — same grammar for the global key and the
+    // per-route override.
+    let env = MapEnv::new([]);
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+idle_keepalive = "quiet"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let msg = load_from_str_with_env(toml, &env).unwrap_err().to_string();
+    assert!(
+        msg.contains("idle_keepalive"),
+        "expected unknown-value rejection, got: {msg}"
+    );
+}
+
+#[test]
+fn idle_keepalive_valid_values_compile() {
+    let env = MapEnv::new([]);
+    for (value, expected) in [
+        ("off", siphon_ai_media_glue::IdleKeepaliveMode::Off),
+        ("silence", siphon_ai_media_glue::IdleKeepaliveMode::Silence),
+        (
+            "comfort_noise",
+            siphon_ai_media_glue::IdleKeepaliveMode::ComfortNoise,
+        ),
+    ] {
+        let toml = format!(
+            r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+idle_keepalive = "{value}"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#
+        );
+        let cfg = load_from_str_with_env(&toml, &env)
+            .unwrap_or_else(|e| panic!("{value} must compile: {e}"));
+        assert_eq!(cfg.bridge_defaults.idle_keepalive, expected);
+    }
+}
+
+#[test]
+fn route_idle_keepalive_override_compiles_and_unknown_fails() {
+    let env = MapEnv::new([]);
+    // A valid per-route override compiles.
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "loud"
+[route.match]
+request_uri_user = "7000"
+[route.bridge]
+idle_keepalive = "comfort_noise"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    load_from_str_with_env(toml, &env).expect("route-level override compiles");
+    // An unknown per-route value fails with the route named.
+    let toml = r#"
+[sip]
+listen = "127.0.0.1:5060"
+
+[bridge]
+ws_url = "wss://x/y"
+
+[[route]]
+name = "typo"
+[route.match]
+request_uri_user = "7000"
+[route.bridge]
+idle_keepalive = "comfort-noise"
+
+[[route]]
+name = "default"
+[route.match]
+any = true
+"#;
+    let msg = load_from_str_with_env(toml, &env).unwrap_err().to_string();
+    assert!(
+        msg.contains("idle_keepalive") && msg.contains("typo"),
+        "expected route-scoped unknown-value rejection, got: {msg}"
+    );
+}
+
+#[test]
 fn inactivity_timeout_defaults_to_60s_when_absent() {
     // The watchdog default in `BridgeDefaults::default()` is 60s so
     // an operator who never wrote the field still gets a sensible

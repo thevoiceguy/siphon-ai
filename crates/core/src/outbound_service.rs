@@ -511,6 +511,7 @@ impl OutboundOriginateHandle for OutboundService {
             silence_threshold: self.defaults.silence_threshold,
             dead_air_threshold: self.defaults.dead_air_threshold,
             rtp_stats_interval: self.defaults.rtp_stats_interval,
+            idle_keepalive: self.defaults.idle_keepalive,
         };
         let bridge = BridgeConfig {
             ws_url,

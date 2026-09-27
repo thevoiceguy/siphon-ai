@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`[bridge].idle_keepalive`** ([#610](https://github.com/thevoiceguy/siphon-ai/issues/610)).
+  Optional outbound RTP during the silent-server window: with the default `"off"` a call
+  whose WS server streams nothing emits no outbound RTP at all, and some media paths
+  respond to a peer gone silent by stopping their own RTP toward us — FreeSWITCH measured
+  at one packet per 5 s, RTCP-only, starving the caller's inbound audio. `"silence"` emits
+  a digital-silence frame per idle 20 ms tick, `"comfort_noise"` a low-level
+  comfort-noise frame (the same forge generator MOH falls back to). Engagement requires
+  the idle verdict to hold continuously for 250 ms (any server frame restarting the
+  clock) so ordinary mid-utterance server jitter doesn't insert a fill frame, and frames
+  keep flowing through mute and barge-in arbitration, where caller→server audio must
+  keep arriving. Per-route override via `[route.bridge].idle_keepalive`; unknown values
+  (global or route) fail at load. New counter
+  `siphon_ai_idle_keepalive_frames_total`.
+
 ## [0.52.0] - 2026-09-11
 
 ### Added

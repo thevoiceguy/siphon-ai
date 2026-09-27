@@ -194,3 +194,23 @@ test("unknown type wraps, unknown fields pass through, malformed throws", () => 
   assert.throws(() => parseEvent("{nope"));
   assert.throws(() => parseEvent('{"no_type": 1}'));
 });
+
+test("timeline fields (0.53.0) parse and playout events are typed", () => {
+  const started = parseEvent(
+    JSON.stringify({ type: "playout_started", call_id: "c", seq: 20, offset_ms: 1180 }),
+  );
+  assert.equal(started.type, "playout_started");
+  const stopped = parseEvent(
+    JSON.stringify({
+      type: "playout_stopped", call_id: "c", seq: 31,
+      offset_ms: 4360, duration_ms: 3180, reason: "barge_in",
+    }),
+  );
+  assert.ok(stopped.type === "playout_stopped" && stopped.reason === "barge_in");
+  const speech = parseEvent(
+    JSON.stringify({ type: "speech_started", call_id: "c", seq: 1, ts_ms: 1, bot_playing: true }),
+  );
+  assert.ok(speech.type === "speech_started" && speech.bot_playing === true);
+  const mark = parseEvent(JSON.stringify({ type: "mark", call_id: "c", seq: 1, name: "m" }));
+  assert.ok(mark.type === "mark" && mark.offset_ms === undefined);
+});

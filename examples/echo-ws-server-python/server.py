@@ -40,6 +40,8 @@ from siphon_ai_server import (  # noqa: E402
     AudioFrame,
     BargeInResolved,
     Call,
+    PlayoutStarted,
+    PlayoutStopped,
     SiphonServer,
     SpeechStarted,
     Start,
@@ -202,6 +204,18 @@ async def handle(call: Call, opts: Options) -> None:
                 start.call_id,
                 item.outcome,
             )
+        elif isinstance(item, (PlayoutStarted, PlayoutStopped)):
+            # Bot turns on the call timeline (0.53.0, opt-in via
+            # [bridge].playout_events): when the caller actually heard
+            # the echo, on the same offset_ms axis as speech_started.
+            if isinstance(item, PlayoutStarted):
+                LOG.info("playout_started call_id=%s offset_ms=%s",
+                         start.call_id, item.offset_ms)
+            else:
+                LOG.info(
+                    "playout_stopped call_id=%s offset_ms=%s duration_ms=%s reason=%s",
+                    start.call_id, item.offset_ms, item.duration_ms, item.reason,
+                )
         elif isinstance(item, Stop):
             LOG.info("stop call_id=%s reason=%s", start.call_id, item.reason)
             break

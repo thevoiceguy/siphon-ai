@@ -846,7 +846,7 @@ async fn mark_with_no_audio_fires_immediately() {
         .expect("events channel still open");
 
     match event {
-        OutgoingEvent::Mark { name } => assert_eq!(name, "no-audio"),
+        OutgoingEvent::Mark { name, .. } => assert_eq!(name, "no-audio"),
         other => panic!("expected Mark, got {other:?}"),
     }
 
@@ -922,7 +922,7 @@ async fn mark_fires_after_estimated_playout_of_queued_frames() {
     let elapsed = mark_sent_at.elapsed();
 
     match event {
-        OutgoingEvent::Mark { name } => assert_eq!(name, "after-5"),
+        OutgoingEvent::Mark { name, .. } => assert_eq!(name, "after-5"),
         other => panic!("expected Mark, got {other:?}"),
     }
 
@@ -1155,9 +1155,18 @@ async fn auto_clear_drops_playout_and_flushes_on_speech_started() {
         .await
         .expect("speech_started arrives")
         .expect("events_tx open");
+    // DESIGN_CALL_TIMELINE.md §4: nothing was queued, so the caller
+    // did not talk over the bot — `bot_playing` stays false (absent on
+    // the wire).
     assert!(
-        matches!(event, OutgoingEvent::SpeechStarted { .. }),
-        "expected SpeechStarted, got {event:?}",
+        matches!(
+            event,
+            OutgoingEvent::SpeechStarted {
+                bot_playing: false,
+                ..
+            }
+        ),
+        "expected SpeechStarted with bot_playing=false, got {event:?}",
     );
 
     drop(_cmd_tx);
@@ -1374,6 +1383,7 @@ async fn pause_reject_resumes_retained_tail() {
             resolved,
             OutgoingEvent::BargeInResolved {
                 outcome: siphon_ai_bridge::BargeInOutcome::Rejected,
+                ..
             }
         ),
         "expected rejected resolution, got {resolved:?}",
@@ -2331,7 +2341,7 @@ async fn clear_drops_pending_marks_and_post_clear_marks_fire_promptly() {
             .await
             .expect("a mark fires within 1 s of the clear")
             .expect("events channel open");
-        if let OutgoingEvent::Mark { name } = ev {
+        if let OutgoingEvent::Mark { name, .. } = ev {
             break name;
         }
     };
@@ -2350,7 +2360,7 @@ async fn clear_drops_pending_marks_and_post_clear_marks_fire_promptly() {
     let extra = tokio::time::timeout(Duration::from_millis(1300), async {
         loop {
             match events_rx.recv().await {
-                Some(OutgoingEvent::Mark { name }) => break name,
+                Some(OutgoingEvent::Mark { name, .. }) => break name,
                 Some(_) => continue,
                 None => break String::new(),
             }
@@ -2366,4 +2376,311 @@ async fn clear_drops_pending_marks_and_post_clear_marks_fire_promptly() {
     drop(playout_tx);
     drop(cmd_tx);
     let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+}
+
+// ─── Call timeline: bot playout turns (DESIGN_CALL_TIMELINE.md §3) ──
+
+/// Keep forge's bounded request channel drained for the life of a test
+/// so the tap's pushes never back up.
+fn spawn_forge_drain(
+    manager: Arc<MediaBridgeManager>,
+    call: CallId,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            if manager.try_recv_outbound_request(&call).await.is_none() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+    })
+}
+
+/// Stream `n` server frames at the real-time 20 ms cadence.
+fn spawn_streamer(playout_tx: mpsc::Sender<Vec<u8>>, n: usize) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let frame = pack_pcm16_le(&vec![1000i16; SAMPLES_PER_FRAME_8K]);
+        let mut tick = tokio::time::interval(Duration::from_millis(20));
+        for _ in 0..n {
+            tick.tick().await;
+            if playout_tx.send(frame.clone()).await.is_err() {
+                return;
+            }
+        }
+        // Keep the sender alive so the tap doesn't see the WS go away.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    })
+}
+
+/// Collect every playout / speech event for `window`.
+async fn collect_timeline_events(
+    events_rx: &mut mpsc::Receiver<siphon_ai_bridge::OutgoingEvent>,
+    window: Duration,
+) -> Vec<siphon_ai_bridge::OutgoingEvent> {
+    use siphon_ai_bridge::OutgoingEvent;
+    let deadline = tokio::time::Instant::now() + window;
+    let mut out = Vec::new();
+    while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, events_rx.recv()).await {
+        if matches!(
+            ev,
+            OutgoingEvent::PlayoutStarted { .. }
+                | OutgoingEvent::PlayoutStopped { .. }
+                | OutgoingEvent::SpeechStarted { .. }
+        ) {
+            out.push(ev);
+        }
+    }
+    out
+}
+
+/// A run of server audio is one turn: `playout_started` at the first
+/// forge push, `playout_stopped { completed }` once the audio finished
+/// and the hangover passed, with the turn's length as `duration_ms`
+/// and the stop's `at` at the clock's estimated end of audio.
+#[tokio::test]
+async fn playout_turn_started_then_completed() {
+    use siphon_ai_bridge::{OutgoingEvent, PlayoutStopReason};
+    use siphon_ai_media_glue::TapCommand;
+
+    let manager = Arc::new(MediaBridgeManager::new());
+    let bus = Arc::new(forge_core::EventBus::new());
+    let call = CallId::new("turn-completed");
+    let tap = MediaTap::attach(&manager, &bus, call.clone(), 8000)
+        .expect("attach")
+        .with_playout_events(true);
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(32);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(32);
+    let (_cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let _pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+    let _drain = spawn_forge_drain(Arc::clone(&manager), call.clone());
+    let _stream = spawn_streamer(playout_tx, 15); // 300 ms of bot audio
+
+    let evs = collect_timeline_events(&mut events_rx, Duration::from_millis(1200)).await;
+    let started: Vec<_> = evs
+        .iter()
+        .filter_map(|e| match e {
+            OutgoingEvent::PlayoutStarted { at } => Some(*at),
+            _ => None,
+        })
+        .collect();
+    let stopped: Vec<_> = evs
+        .iter()
+        .filter_map(|e| match e {
+            OutgoingEvent::PlayoutStopped {
+                at,
+                duration_ms,
+                reason,
+            } => Some((*at, *duration_ms, *reason)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        started.len(),
+        1,
+        "one continuous stream is one turn: {evs:?}"
+    );
+    assert_eq!(stopped.len(), 1, "the turn closes exactly once: {evs:?}");
+    let (stop_at, duration_ms, reason) = stopped[0];
+    assert_eq!(reason, PlayoutStopReason::Completed);
+    // 15 frames = 300 ms of audio; the stop is the clock's estimated
+    // end of audio, not the hangover timer's firing time.
+    assert!(
+        (260..=380).contains(&duration_ms),
+        "turn length tracks the audio, got {duration_ms} ms"
+    );
+    assert_eq!(
+        stop_at.duration_since(started[0]).as_millis() as u64,
+        duration_ms
+    );
+}
+
+/// The feature is opt-in: without `with_playout_events(true)` no
+/// playout event is ever emitted.
+#[tokio::test]
+async fn playout_events_off_by_default() {
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::TapCommand;
+
+    let manager = Arc::new(MediaBridgeManager::new());
+    let bus = Arc::new(forge_core::EventBus::new());
+    let call = CallId::new("turn-off");
+    let tap = MediaTap::attach(&manager, &bus, call.clone(), 8000).expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(32);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(32);
+    let (_cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let _pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+    let _drain = spawn_forge_drain(Arc::clone(&manager), call.clone());
+    let _stream = spawn_streamer(playout_tx, 10);
+
+    let evs = collect_timeline_events(&mut events_rx, Duration::from_millis(800)).await;
+    assert!(
+        evs.is_empty(),
+        "no playout events with the feature off: {evs:?}"
+    );
+}
+
+/// Caller speech over the bot: `speech_started` carries
+/// `bot_playing = true` and the open turn closes as `barge_in`.
+#[tokio::test]
+async fn barge_in_cuts_turn_and_marks_bot_playing() {
+    use chrono::Utc;
+    use forge_core::ForgeEvent;
+    use siphon_ai_bridge::{OutgoingEvent, PlayoutStopReason};
+    use siphon_ai_media_glue::{BargeInAction, TapCommand};
+
+    let manager = Arc::new(MediaBridgeManager::new());
+    let bus = Arc::new(forge_core::EventBus::new());
+    let call = CallId::new("turn-barge");
+    let tap = MediaTap::attach_with_barge_in(
+        &manager,
+        &bus,
+        call.clone(),
+        8000,
+        BargeInAction::AutoClear,
+    )
+    .expect("attach")
+    .with_playout_events(true);
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(32);
+    let (_cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let _pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+    let _drain = spawn_forge_drain(Arc::clone(&manager), call.clone());
+    let _stream = spawn_streamer(playout_tx, 50); // 1 s of bot audio
+
+    // Wait for the turn to open, then talk over it.
+    let first = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+        .await
+        .expect("playout_started arrives")
+        .expect("events_tx open");
+    assert!(
+        matches!(first, OutgoingEvent::PlayoutStarted { .. }),
+        "got {first:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    bus.publish(ForgeEvent::SpeechStarted {
+        call_id: call.clone(),
+        timestamp: Utc::now(),
+    })
+    .expect("publish");
+
+    let evs = collect_timeline_events(&mut events_rx, Duration::from_millis(400)).await;
+    assert!(
+        evs.iter().any(|e| matches!(
+            e,
+            OutgoingEvent::SpeechStarted {
+                bot_playing: true,
+                ..
+            }
+        )),
+        "speech over playout is flagged bot_playing: {evs:?}"
+    );
+    let stop = evs
+        .iter()
+        .find_map(|e| match e {
+            OutgoingEvent::PlayoutStopped {
+                duration_ms,
+                reason,
+                ..
+            } => Some((*duration_ms, *reason)),
+            _ => None,
+        })
+        .expect("the barge-in closes the turn");
+    assert_eq!(stop.1, PlayoutStopReason::BargeIn);
+    assert!(stop.0 >= 150, "cut ~200 ms in, got {} ms", stop.0);
+}
+
+/// A server `clear` mid-turn closes it as `cleared`.
+#[tokio::test]
+async fn clear_cuts_turn_as_cleared() {
+    use siphon_ai_bridge::{OutgoingEvent, PlayoutStopReason};
+    use siphon_ai_media_glue::TapCommand;
+
+    let manager = Arc::new(MediaBridgeManager::new());
+    let bus = Arc::new(forge_core::EventBus::new());
+    let call = CallId::new("turn-clear");
+    let tap = MediaTap::attach(&manager, &bus, call.clone(), 8000)
+        .expect("attach")
+        .with_playout_events(true);
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(32);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let _pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+    let _drain = spawn_forge_drain(Arc::clone(&manager), call.clone());
+    let stream = spawn_streamer(playout_tx, 50);
+
+    let first = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+        .await
+        .expect("playout_started arrives")
+        .expect("events_tx open");
+    assert!(
+        matches!(first, OutgoingEvent::PlayoutStarted { .. }),
+        "got {first:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    stream.abort(); // the server stops streaming as it clears
+    cmd_tx.send(TapCommand::Clear).await.expect("send clear");
+
+    let evs = collect_timeline_events(&mut events_rx, Duration::from_millis(600)).await;
+    let reasons: Vec<_> = evs
+        .iter()
+        .filter_map(|e| match e {
+            OutgoingEvent::PlayoutStopped { reason, .. } => Some(*reason),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasons, vec![PlayoutStopReason::Cleared], "{evs:?}");
+}
+
+/// A cut that lands after the turn's audio already finished (inside the
+/// 250 ms hangover) was not an interruption: the turn closes
+/// `completed`, not `cleared`.
+#[tokio::test]
+async fn clear_after_audio_finished_closes_turn_completed() {
+    use siphon_ai_bridge::{OutgoingEvent, PlayoutStopReason};
+    use siphon_ai_media_glue::TapCommand;
+
+    let manager = Arc::new(MediaBridgeManager::new());
+    let bus = Arc::new(forge_core::EventBus::new());
+    let call = CallId::new("turn-late-clear");
+    let tap = MediaTap::attach(&manager, &bus, call.clone(), 8000)
+        .expect("attach")
+        .with_playout_events(true);
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(32);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(32);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let _pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+    let _drain = spawn_forge_drain(Arc::clone(&manager), call.clone());
+    let _stream = spawn_streamer(playout_tx, 10); // 200 ms of audio
+
+    let first = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+        .await
+        .expect("playout_started arrives")
+        .expect("events_tx open");
+    assert!(
+        matches!(first, OutgoingEvent::PlayoutStarted { .. }),
+        "got {first:?}"
+    );
+    // Audio ends ~200-300 ms after the start; the hangover closes the
+    // turn ~250 ms after that. Clear in between.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    cmd_tx.send(TapCommand::Clear).await.expect("send clear");
+
+    let evs = collect_timeline_events(&mut events_rx, Duration::from_millis(600)).await;
+    let reasons: Vec<_> = evs
+        .iter()
+        .filter_map(|e| match e {
+            OutgoingEvent::PlayoutStopped { reason, .. } => Some(*reason),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasons, vec![PlayoutStopReason::Completed], "{evs:?}");
 }

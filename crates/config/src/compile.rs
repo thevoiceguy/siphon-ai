@@ -3103,6 +3103,7 @@ fn compile_bridge(raw: RawBridge, media: &RawMedia) -> Result<BridgeDefaults, Co
         ws_failure_action,
         ws_failure_prompt_file,
         idle_keepalive,
+        playout_events: raw.playout_events,
     })
 }
 

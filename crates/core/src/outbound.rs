@@ -235,6 +235,7 @@ impl SdpAnswerGenerator for DelayedOfferAnswerer {
                 dead_air_threshold: tap.dead_air_threshold,
                 rtp_stats_interval: tap.rtp_stats_interval,
                 idle_keepalive: tap.idle_keepalive,
+                playout_events: tap.playout_events,
                 vad,
             })
             .await;
@@ -1104,6 +1105,7 @@ mod tests {
                     dead_air_threshold: None,
                     rtp_stats_interval: None,
                     idle_keepalive: siphon_ai_media_glue::IdleKeepaliveMode::Off,
+                    playout_events: false,
                 },
                 vad: siphon_ai_media_glue::VadBackend::default(),
                 srtp_mode: SrtpMode::Off,

@@ -512,6 +512,7 @@ impl OutboundOriginateHandle for OutboundService {
             dead_air_threshold: self.defaults.dead_air_threshold,
             rtp_stats_interval: self.defaults.rtp_stats_interval,
             idle_keepalive: self.defaults.idle_keepalive,
+            playout_events: self.defaults.playout_events,
         };
         let bridge = BridgeConfig {
             ws_url,

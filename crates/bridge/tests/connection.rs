@@ -351,6 +351,7 @@ async fn upgrade_carries_subprotocol_user_agent_and_call_id() {
     control_out
         .send(OutgoingEvent::Stop {
             reason: StopReason::CallerHangup,
+            at: std::time::Instant::now(),
         })
         .await
         .unwrap();
@@ -400,6 +401,7 @@ async fn trace_context_propagates_as_upgrade_headers_and_start_field() {
     control_out
         .send(OutgoingEvent::Stop {
             reason: StopReason::CallerHangup,
+            at: std::time::Instant::now(),
         })
         .await
         .unwrap();
@@ -431,6 +433,7 @@ async fn auth_header_forwarded_verbatim_bearer() {
     control_out
         .send(OutgoingEvent::Stop {
             reason: StopReason::ServerHangup,
+            at: std::time::Instant::now(),
         })
         .await
         .unwrap();
@@ -461,6 +464,7 @@ async fn auth_header_forwarded_verbatim_basic() {
     control_out
         .send(OutgoingEvent::Stop {
             reason: StopReason::ServerHangup,
+            at: std::time::Instant::now(),
         })
         .await
         .unwrap();
@@ -490,6 +494,7 @@ async fn start_is_first_message_with_seq_zero() {
     control_out
         .send(OutgoingEvent::Stop {
             reason: StopReason::CallerHangup,
+            at: std::time::Instant::now(),
         })
         .await
         .unwrap();
@@ -523,6 +528,7 @@ async fn audio_frames_round_trip_to_server_and_back() {
     control_out
         .send(OutgoingEvent::Stop {
             reason: StopReason::CallerHangup,
+            at: std::time::Instant::now(),
         })
         .await
         .unwrap();
@@ -554,6 +560,7 @@ async fn outgoing_control_events_get_seq_stamped_in_order() {
     control_out
         .send(OutgoingEvent::Mark {
             name: "ack-1".into(),
+            at: std::time::Instant::now(),
         })
         .await
         .unwrap();
@@ -576,6 +583,7 @@ async fn outgoing_control_events_get_seq_stamped_in_order() {
     control_out
         .send(OutgoingEvent::Stop {
             reason: StopReason::CallerHangup,
+            at: std::time::Instant::now(),
         })
         .await
         .unwrap();
@@ -619,6 +627,7 @@ async fn server_sent_bridge_in_messages_are_parsed_and_dispatched() {
     control_out
         .send(OutgoingEvent::Stop {
             reason: StopReason::ServerHangup,
+            at: std::time::Instant::now(),
         })
         .await
         .unwrap();
@@ -756,6 +765,7 @@ async fn stop_event_returns_stop_sent() {
     control_out
         .send(OutgoingEvent::Stop {
             reason: StopReason::CallerHangup,
+            at: std::time::Instant::now(),
         })
         .await
         .unwrap();

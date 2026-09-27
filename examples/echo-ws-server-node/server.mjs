@@ -88,6 +88,18 @@ const server = new SiphonServer(
         console.log(
           `barge_in_resolved call_id=${start.call_id} outcome=${item.outcome}`,
         );
+      } else if (item.type === "playout_started") {
+        // Bot turns on the call timeline (0.53.0, opt-in via
+        // [bridge].playout_events): when the caller actually heard the
+        // echo, on the same offset_ms axis as speech_started.
+        console.log(
+          `playout_started call_id=${start.call_id} offset_ms=${item.offset_ms}`,
+        );
+      } else if (item.type === "playout_stopped") {
+        console.log(
+          `playout_stopped call_id=${start.call_id} offset_ms=${item.offset_ms}` +
+            ` duration_ms=${item.duration_ms} reason=${item.reason}`,
+        );
       } else if (item.type === "stop") {
         console.log(`stop call_id=${start.call_id} reason=${item.reason}`);
         break;

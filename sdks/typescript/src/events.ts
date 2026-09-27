@@ -76,6 +76,12 @@ export interface SpeechStarted extends Base {
    * `on_timeout` applies. Present exactly when `decision_pending`.
    */
   decision_deadline_ms?: number;
+  /**
+   * `true` when the bot was in playout as the caller started speaking —
+   * the caller talked over the bot (0.53.0, PROTOCOL.md §3.2). Omitted
+   * (`false`) otherwise.
+   */
+  bot_playing?: boolean;
 }
 
 /**
@@ -86,6 +92,24 @@ export interface SpeechStarted extends Base {
 export interface BargeInResolved extends Base {
   type: "barge_in_resolved";
   outcome: "confirmed" | "rejected" | "timeout";
+  /** Monotonic ms from `start` to this moment on the call timeline (0.53.0, PROTOCOL.md §3.15). Absent from older daemons. */
+  offset_ms?: number;
+}
+
+/** A bot turn began (0.53.0, opt-in via `[bridge].playout_events`, PROTOCOL.md §3.15). */
+export interface PlayoutStarted extends Base {
+  type: "playout_started";
+  /** Monotonic ms from `start` to this moment on the call timeline (0.53.0, PROTOCOL.md §3.15). Absent from older daemons. */
+  offset_ms?: number;
+}
+
+/** A bot turn ended (0.53.0, PROTOCOL.md §3.15). */
+export interface PlayoutStopped extends Base {
+  type: "playout_stopped";
+  duration_ms: number;
+  reason: "completed" | "barge_in" | "cleared" | "muted" | "held" | "parked";
+  /** Monotonic ms from `start` to this moment on the call timeline (0.53.0, PROTOCOL.md §3.15). Absent from older daemons. */
+  offset_ms?: number;
 }
 
 export interface SpeechStopped extends Base {
@@ -105,11 +129,15 @@ export interface SpeechStopped extends Base {
 export interface FarEndHold extends Base {
   type: "hold";
   direction: string;
+  /** Monotonic ms from `start` to this moment on the call timeline (0.53.0, PROTOCOL.md §3.15). Absent from older daemons. */
+  offset_ms?: number;
 }
 
 /** Wire `type: resume` (daemon→server). */
 export interface FarEndResume extends Base {
   type: "resume";
+  /** Monotonic ms from `start` to this moment on the call timeline (0.53.0, PROTOCOL.md §3.15). Absent from older daemons. */
+  offset_ms?: number;
 }
 
 export interface SilenceDetected extends Base {
@@ -190,22 +218,30 @@ export interface Dtmf extends Base {
 export interface MarkEvent extends Base {
   type: "mark";
   name: string;
+  /** Monotonic ms from `start` to this moment on the call timeline (0.53.0, PROTOCOL.md §3.15). Absent from older daemons. */
+  offset_ms?: number;
 }
 
 export interface RecordingStarted extends Base {
   type: "recording_started";
   recording_id: string;
+  /** Timeline position of the WAV's first sample — the anchor mapping recording samples onto every event's `offset_ms` (0.53.0, PROTOCOL.md §3.15). */
+  offset_ms?: number;
 }
 
 export interface RecordingStopped extends Base {
   type: "recording_stopped";
   recording_id: string;
+  /** Monotonic ms from `start` to this moment on the call timeline (0.53.0, PROTOCOL.md §3.15). Absent from older daemons. */
+  offset_ms?: number;
 }
 
 export interface RecordingFailed extends Base {
   type: "recording_failed";
   recording_id: string;
   reason: string;
+  /** Monotonic ms from `start` to this moment on the call timeline (0.53.0, PROTOCOL.md §3.15). Absent from older daemons. */
+  offset_ms?: number;
 }
 
 export interface ConferenceJoined extends Base {
@@ -235,17 +271,23 @@ export interface ParticipantLeft extends Base {
 /** Ack: the bot-requested hold is active. */
 export interface Held extends Base {
   type: "held";
+  /** Monotonic ms from `start` to this moment on the call timeline (0.53.0, PROTOCOL.md §3.15). Absent from older daemons. */
+  offset_ms?: number;
 }
 
 /** Ack: the bot-requested hold ended. */
 export interface Resumed extends Base {
   type: "resumed";
+  /** Monotonic ms from `start` to this moment on the call timeline (0.53.0, PROTOCOL.md §3.15). Absent from older daemons. */
+  offset_ms?: number;
 }
 
 /** Last message of a session; the daemon closes after sending it. */
 export interface StopEvent extends Base {
   type: "stop";
   reason: string;
+  /** Monotonic ms from `start` to this moment on the call timeline (0.53.0, PROTOCOL.md §3.15). Absent from older daemons. */
+  offset_ms?: number;
 }
 
 export interface ErrorEvent extends Base {
@@ -266,6 +308,8 @@ export type BridgeEvent =
   | SpeechStarted
   | SpeechStopped
   | BargeInResolved
+  | PlayoutStarted
+  | PlayoutStopped
   | FarEndHold
   | FarEndResume
   | SilenceDetected
@@ -291,6 +335,8 @@ export const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set([
   "speech_started",
   "speech_stopped",
   "barge_in_resolved",
+  "playout_started",
+  "playout_stopped",
   "hold",
   "resume",
   "silence_detected",

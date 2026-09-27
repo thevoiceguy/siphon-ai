@@ -1394,7 +1394,7 @@ impl CallController {
                         CallTermination::LocalShutdown
                     };
                     let _ = control_out_tx
-                        .send(OutgoingEvent::Stop { reason })
+                        .send(OutgoingEvent::Stop { reason, at: std::time::Instant::now() })
                         .await;
                     break;
                 }
@@ -1406,7 +1406,7 @@ impl CallController {
                             debug!(?cause, ws_call_id = %cid, "server requested hangup");
                             termination = CallTermination::ServerHangup;
                             let _ = control_out_tx
-                                .send(OutgoingEvent::Stop { reason: StopReason::ServerHangup })
+                                .send(OutgoingEvent::Stop { reason: StopReason::ServerHangup, at: std::time::Instant::now() })
                                 .await;
                             break;
                         }
@@ -1567,7 +1567,7 @@ impl CallController {
                                 _ if held => {
                                     // Idempotent: already held → re-ack.
                                     debug!(call_id = %call_id, "hold requested but already held; re-acking");
-                                    let _ = control_out_tx.send(OutgoingEvent::Held).await;
+                                    let _ = control_out_tx.send(OutgoingEvent::Held { at: std::time::Instant::now() }).await;
                                 }
                                 _ if handle.peer_held() => {
                                     // No stacking (0.7.2 first cut): the far
@@ -1640,7 +1640,7 @@ impl CallController {
                                                 held_since = Some(Instant::now());
                                                 metrics::counter!(HOLDS_TOTAL, "result" => "ok").increment(1);
                                                 info!(call_id = %call_id, "call held (bot-initiated)");
-                                                let _ = control_out_tx.send(OutgoingEvent::Held).await;
+                                                let _ = control_out_tx.send(OutgoingEvent::Held { at: std::time::Instant::now() }).await;
                                             }
                                             Err(e) => {
                                                 // Revert the optimistic MOH switch.
@@ -1670,7 +1670,7 @@ impl CallController {
                             if !held {
                                 // Not held → no-op success (PROTOCOL.md §4.10).
                                 debug!(call_id = %call_id, "resume on a call that isn't held; acking no-op");
-                                let _ = control_out_tx.send(OutgoingEvent::Resumed).await;
+                                let _ = control_out_tx.send(OutgoingEvent::Resumed { at: std::time::Instant::now() }).await;
                             } else if let Some(hctx) = hold.as_ref() {
                                 match drive_hold_reinvite(
                                     hctx,
@@ -1693,7 +1693,7 @@ impl CallController {
                                         }
                                         metrics::counter!(HOLDS_TOTAL, "result" => "ok").increment(1);
                                         info!(call_id = %call_id, "call resumed (bot-initiated)");
-                                        let _ = control_out_tx.send(OutgoingEvent::Resumed).await;
+                                        let _ = control_out_tx.send(OutgoingEvent::Resumed { at: std::time::Instant::now() }).await;
                                     }
                                     Err(e) => {
                                         // Stay held; the WS server can retry.
@@ -1816,7 +1816,7 @@ impl CallController {
                             }
                             termination = CallTermination::Transfer;
                             let _ = control_out_tx
-                                .send(OutgoingEvent::Stop { reason: StopReason::Transfer })
+                                .send(OutgoingEvent::Stop { reason: StopReason::Transfer, at: std::time::Instant::now() })
                                 .await;
                             break;
                         }
@@ -1954,7 +1954,7 @@ impl CallController {
                                             // bridge-end arm sees `parked` and
                                             // stays alive.
                                             let _ = control_out_tx
-                                                .send(OutgoingEvent::Stop { reason: StopReason::Park })
+                                                .send(OutgoingEvent::Stop { reason: StopReason::Park, at: std::time::Instant::now() })
                                                 .await;
                                             parked = true;
                                             park_count += 1;
@@ -2394,6 +2394,7 @@ impl CallController {
                         let _ = control_out_tx
                             .send(OutgoingEvent::Stop {
                                 reason: StopReason::Error,
+                                at: std::time::Instant::now(),
                             })
                             .await;
                     }
@@ -2467,17 +2468,22 @@ impl CallController {
                     match maybe_evt {
                         Some(evt) => {
                             let out = match evt {
-                                RecEvent::Started => {
+                                // `at` is stamped by the writer at the
+                                // moment itself (file open / finalize /
+                                // failure) — for `Started` it anchors
+                                // the WAV on the call timeline
+                                // (DESIGN_CALL_TIMELINE.md §2).
+                                RecEvent::Started { at } => {
                                     debug!(call_id = %call_id, recording_id = %recording_id, "recording started");
-                                    OutgoingEvent::RecordingStarted { recording_id: recording_id.clone() }
+                                    OutgoingEvent::RecordingStarted { recording_id: recording_id.clone(), at }
                                 }
-                                RecEvent::Stopped { data_bytes, frames } => {
+                                RecEvent::Stopped { data_bytes, frames, at } => {
                                     debug!(call_id = %call_id, data_bytes, frames, "recording stopped");
-                                    OutgoingEvent::RecordingStopped { recording_id: recording_id.clone() }
+                                    OutgoingEvent::RecordingStopped { recording_id: recording_id.clone(), at }
                                 }
-                                RecEvent::Failed { reason } => {
+                                RecEvent::Failed { reason, at } => {
                                     warn!(call_id = %call_id, %reason, "recording failed");
-                                    OutgoingEvent::RecordingFailed { recording_id: recording_id.clone(), reason }
+                                    OutgoingEvent::RecordingFailed { recording_id: recording_id.clone(), reason, at }
                                 }
                             };
                             let _ = control_out_tx.send(out).await;

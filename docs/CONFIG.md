@@ -333,6 +333,7 @@ mode = "session_progress"
 | `on_ws_failure`            | `"hangup" \| "play_prompt"` | `"hangup"` | What a call does when its WS becomes **unusable** (0.34.0): unexpected drop, connect failure at answer, keepalive timeout, `protocol_error`, `server_too_slow`, or an exhausted reconnect window. `hangup` = immediate teardown (the v1 behaviour). `play_prompt` = play `ws_failure_prompt_file` to the caller first (*"we're experiencing difficulties…"*), then the normal BYE teardown — CDR cause unchanged, `duration_ms` grows by the prompt. Never fires when the server *intended* the ending (`hangup`/clean `stop`), on caller actions, on `rtp_timeout`, or during drain. Previously a per-route-only key accepting `"hangup"` alone; now also the global default. Per-route override via `[route.bridge].on_ws_failure`. |
 | `ws_failure_prompt_file`   | path      | unset    | WAV played by `on_ws_failure = "play_prompt"` — **bridge rate** (8/16 kHz mono, like `[media].moh_file` and the consent announcement; no resampler). Required + existence-checked at load when any effective policy is `play_prompt`; files longer than the 30 s playback cap warn at load. Per-call unusability (e.g. rate mismatch on a 16 kHz call with an 8 kHz file) **fails open** to a plain hangup — the prompt is a courtesy, not compliance. Per-route override via `[route.bridge].ws_failure_prompt_file`. |
 | `idle_keepalive`           | `"off" \| "silence" \| "comfort_noise"` | `"off"` | Outbound RTP keepalive for the silent-server window ([#610](https://github.com/thevoiceguy/siphon-ai/issues/610)). With the default `"off"` a call whose WS server streams nothing emits **no** outbound RTP at all — the playout pace tick is deliberately un-polled while nothing is queued — and some media paths respond to a peer gone silent by **stopping their own RTP toward us**: FreeSWITCH tears down its inbound flow when it stops receiving peer RTP (measured: `rx_packets_received` advancing exactly one packet per 5 s, RTCP-only), so the caller's inbound audio starves and the leg wedges. `"silence"` emits one zero (digital-silence) frame per 20 ms tick; `"comfort_noise"` emits one low-level comfort-noise frame per tick (the same forge generator MOH falls back to) — an audible "the line is alive" cue. Engagement is debounced — the idle state must hold continuously for 250 ms (any server frame restarting the clock) so an ordinary mid-utterance stall (GC pause, TTS chunk boundary) doesn't insert a fill frame into the bot's sentence. Keepalive frames flow only while nothing else owns the caller's ear: forge has nothing in playout, the outbound queue is empty and no MOH/park/hold/announcement, conference room, peer-hold (tx gate), or WS drop is in effect; mute and a pending barge-in arbitration deliberately do **not** suppress it — they gate bot→caller audio only, while caller→server keeps flowing and still needs our outbound RTP. Unknown values fail at load. Per-route override via `[route.bridge].idle_keepalive`. |
+| `playout_events`           | bool      | `false`  | Emit `playout_started` / `playout_stopped` bot-turn events on the WS (0.53.0, PROTOCOL.md §3.15): when the caller actually *heard* the bot, on the same `offset_ms` axis as the speech events — the bot lane of a call timeline. A turn starts at the first server frame handed to the media engine and ends `completed` (audio finished and 250 ms passed with nothing new), `barge_in`, `cleared`, `muted`, `held` or `parked`. Off by default: most servers know when they sent audio, and the events are traffic on every call. Per-route override via `[route.bridge].playout_events`. |
 
 ```toml
 [bridge]
@@ -344,6 +345,18 @@ name = "quiet_trunk"               # per-route override wins over the global
 request_uri_user = "6000"
 [route.bridge]
 idle_keepalive = "silence"
+```
+
+```toml
+[bridge]
+playout_events = true              # bot-turn events for a call timeline (default false)
+
+[[route]]
+name = "ivr_menu"                  # per-route override, either direction
+[route.match]
+request_uri_user = "5000"
+[route.bridge]
+playout_events = false
 ```
 
 > **Detection cadence.** Silence / dead-air events are polled every

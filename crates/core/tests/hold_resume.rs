@@ -132,6 +132,7 @@ async fn push_bridge_event_emits_hold_and_resume_on_ws() {
 
     handle.push_bridge_event(OutgoingEvent::Hold {
         direction: "sendonly".into(),
+        at: std::time::Instant::now(),
     });
     let hold = tokio::time::timeout(Duration::from_secs(2), events_rx.recv())
         .await
@@ -139,13 +140,22 @@ async fn push_bridge_event_emits_hold_and_resume_on_ws() {
         .expect("channel open");
     assert_eq!(hold["type"], "hold");
     assert_eq!(hold["direction"], "sendonly");
+    // DESIGN_CALL_TIMELINE.md §1: the peer-hold event is placed on the
+    // call timeline.
+    assert!(hold["offset_ms"].is_u64(), "hold carries offset_ms: {hold}");
 
-    handle.push_bridge_event(OutgoingEvent::Resume);
+    handle.push_bridge_event(OutgoingEvent::Resume {
+        at: std::time::Instant::now(),
+    });
     let resume = tokio::time::timeout(Duration::from_secs(2), events_rx.recv())
         .await
         .expect("resume event arrives")
         .expect("channel open");
     assert_eq!(resume["type"], "resume");
+    assert!(
+        resume["offset_ms"].as_u64() >= hold["offset_ms"].as_u64(),
+        "offsets are monotonic: {hold} then {resume}"
+    );
 
     // 4. Drive cleanup so the controller exits.
     //

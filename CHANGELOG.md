@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   panicked, with regression tests, and siphon-rs's fuzz crate — described as running, but
   never built — now builds and runs nightly with four new targets. **All deployments should
   update.**
+- **rustls 0.23.40 → 0.23.45** ([RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285)):
+  TLS 1.3 handshake messages were accepted across encryption-level boundaries. rustls sits
+  under every TLS surface here — SIP over TLS, the WS bridge, the admin listener and the
+  webhook/CDR HTTP clients — so this closes the daily `cargo audit` failure that had been
+  open on `main` since the advisory landed. Lockfile-only; the fixed rustls requires
+  aws-lc-rs 1.18.1 / aws-lc-sys 0.45.0, which came along with it.
 
 ### Changed
 

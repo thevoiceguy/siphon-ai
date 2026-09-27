@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.54.0] - 2026-09-27
+
 ### Added
 
 - **Call timeline events** (PROTOCOL.md §3.15, `docs/design/DESIGN_CALL_TIMELINE.md`).

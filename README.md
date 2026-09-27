@@ -214,6 +214,10 @@ correlated in one call view), see
 
 ## Production install
 
+**New here?** [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) walks
+from a fresh Debian 13 server to a Twilio number answered by a talking
+bot, using the release packages.
+
 **From a release (recommended):** every tag ships static musl binary
 tarballs (amd64 + arm64), Debian packages, and a multi-arch container on
 GHCR — all cosign-signed with checksums and a CycloneDX SBOM. See

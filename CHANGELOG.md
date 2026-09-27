@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **The Debian 13 getting-started guide moved to `docs/GETTING_STARTED.md`** (from the
+  repository root) and is linked from the README's install section.
+
 ## [0.54.0] - 2026-09-27
 
 ### Added

@@ -2570,10 +2570,13 @@ BI_PYTHON="$REPO_ROOT/examples/echo-ws-server-python/.venv/bin/python"
 [[ -x "$BI_PYTHON" ]] || BI_PYTHON=python3
 "$BI_PYTHON" "$REPO_ROOT/examples/echo-ws-server-python/server.py" \
     --bind "127.0.0.1:$BI_WS_PORT" \
+    --greeting-ms 2000 \
     >"$BI_WS_LOG" 2>&1 &
 BI_WS_PID=$!
 
-RUST_LOG=warn,siphon_ai=info "$DAEMON_BIN" --config "$BI_CONFIG" \
+# media-glue at debug: a failure then shows the tap's own arbitration
+# decision ("barge-in pause armed" or why not), not just the metric.
+RUST_LOG=warn,siphon_ai=info,siphon_ai_media_glue=debug "$DAEMON_BIN" --config "$BI_CONFIG" \
     >"$BI_DAEMON_LOG" 2>&1 &
 BI_DAEMON_PID=$!
 bi_cleanup() {

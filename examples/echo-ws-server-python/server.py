@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 import os
 import signal
 import sys
@@ -74,6 +75,7 @@ class Options:
     # unexpected WS drop) to exercise 0.7.3 reconnect; the redial's
     # `start` carries reconnected:true and gets hung up instead.
     drop_after_ms: int | None
+    greeting_ms: int = 0
     _dropped_once: bool = False
 
 
@@ -97,6 +99,22 @@ async def handle(call: Call, opts: Options) -> None:
         LOG.info(
             "start call_id=%s trace_context=%s", start.call_id, start.trace_context
         )
+    if opts.greeting_ms > 0:
+        # Test-harness greeting: play `greeting_ms` of a low tone the
+        # moment the call starts, before any caller audio, so the bot is
+        # provably in playout when the caller's speech trips the VAD.
+        # The barge_in_pause SIPp phase depends on it (#612): echoing the
+        # caller's own tone raced the VAD onset on slow CI runners.
+        rate = start.audio.sample_rate
+        n = rate * opts.greeting_ms // 1000
+        tone = b"".join(
+            int(800 * math.sin(2 * math.pi * 440 * i / rate)).to_bytes(
+                2, "little", signed=True
+            )
+            for i in range(n)
+        )
+        call.send_audio(tone)  # paced at real time by the SDK
+        LOG.info("greeting call_id=%s ms=%d", start.call_id, opts.greeting_ms)
     if start.retrieved:
         LOG.info("start call_id=%s is a retrieved (parked) call", start.call_id)
 
@@ -383,6 +401,17 @@ def parse_args(argv: list[str] | None = None) -> Options:
         ),
     )
     p.add_argument(
+        "--greeting-ms",
+        type=int,
+        default=0,
+        help=(
+            "test-harness only: on `start`, play this many ms of a low tone "
+            "(paced) before echoing, so the bot is already in playout when "
+            "the caller starts talking. The barge_in_pause SIPp phase uses "
+            "it to arm pause arbitration deterministically (#612)."
+        ),
+    )
+    p.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -408,6 +437,7 @@ def parse_args(argv: list[str] | None = None) -> Options:
         auto_park_slot=args.auto_park or None,
         auto_hold=args.auto_hold,
         drop_after_ms=args.drop_after_ms,
+        greeting_ms=args.greeting_ms,
     )
 
 

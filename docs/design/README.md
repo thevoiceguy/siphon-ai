@@ -11,6 +11,7 @@ stays at the top level.
 
 One per feature theme — the locked decisions and the implementation sketch:
 
+- [DESIGN_PIPECAT.md](DESIGN_PIPECAT.md) — Pipecat connector (`sdks/pipecat`): real-time-paced transport, Pipecat-arbitrated barge-in, drained hangup; no daemon or protocol change
 - [DESIGN_CALL_TIMELINE.md](DESIGN_CALL_TIMELINE.md) — call timeline events: `offset_ms` everywhere, WAV anchor, `bot_playing`, opt-in bot-turn events (v0.54.0)
 - [DESIGN_OBSERVABILITY.md](DESIGN_OBSERVABILITY.md) — observability completeness: dashboards/alerts as code + OTLP traces (v0.21.0+, decisions locked)
 - [DESIGN_SECURITY_HARDENING.md](DESIGN_SECURITY_HARDENING.md) — security & abuse hardening: admin TLS + secret sources, inbound digest auth + admission, signed audit stream (v0.18–0.20)

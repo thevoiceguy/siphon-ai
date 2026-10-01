@@ -101,6 +101,28 @@ jobs:
           npm install --no-audit --no-fund
           npm test
 
+  pipecat-tests:
+    name: Pipecat transport tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Its own job: pipecat-ai's dependency tree (onnxruntime for Silero,
+      # provider SDKs for the example) is far heavier than the SDK suites'.
+      # The transport tests run a real uvicorn server against a scripted
+      # daemon (pacing, drained hangup, pause-mode verdicts); every command
+      # it can emit is validated against schemas/siphon-ai.v1.json.
+      - name: Install
+        run: |
+          pip install --quiet ./sdks/python "./sdks/pipecat[test]" \
+              "pipecat-ai[deepgram,openai,silero]>=1.12,<2" httpx
+      - name: siphon-ai-pipecat tests
+        run: python3 -m pytest sdks/pipecat/tests -q
+      - name: pipecat-bot-py smoke test
+        run: cd examples/pipecat-bot-py && python3 -m pytest test_smoke.py -q
+
   lint-and-test:
     name: fmt + clippy + cargo test
     runs-on: ubuntu-latest
@@ -211,11 +233,32 @@ jobs:
           ./target/debug/siphon-ai-testkit run ws://127.0.0.1:8862/ \
               --report /tmp/conformance-node.json
 
+      # ── Pipecat transport (examples/pipecat-bot-py --echo) ──
+      - name: Prep + start pipecat-bot-py --echo
+        run: |
+          python3 -m venv examples/pipecat-bot-py/.venv
+          examples/pipecat-bot-py/.venv/bin/pip install --no-input --quiet \
+              ./sdks/python ./sdks/pipecat "uvicorn>=0.30"
+          examples/pipecat-bot-py/.venv/bin/python \
+              examples/pipecat-bot-py/server.py --echo \
+              --bind 127.0.0.1:8863 > /tmp/pipecat-echo.log 2>&1 &
+          for _ in $(seq 1 20); do
+            ss -ltn 'sport = :8863' | grep -q LISTEN && exit 0
+            sleep 1
+          done
+          echo "pipecat echo bot failed to bind"; cat /tmp/pipecat-echo.log; exit 1
+
+      - name: Testkit vs Pipecat transport echo bot
+        run: |
+          ./target/debug/siphon-ai-testkit run ws://127.0.0.1:8863/ \
+              --report /tmp/conformance-pipecat.json
+
       - name: Dump server logs on failure
         if: failure()
         run: |
           echo "── echo-py.log ──";   cat /tmp/echo-py.log   || true
           echo "── echo-node.log ──"; cat /tmp/echo-node.log || true
+          echo "── pipecat-echo.log ──"; cat /tmp/pipecat-echo.log || true
 
       - name: Upload conformance reports
         if: always()

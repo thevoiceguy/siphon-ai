@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "siphon-ai-pipecat"
+version = "0.1.0"
+description = "Pipecat transport for SiphonAI: answer SIP calls with a Pipecat pipeline over the SiphonAI WebSocket bridge protocol v1."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT OR Apache-2.0" }
+keywords = ["siphon-ai", "pipecat", "sip", "voice", "telephony"]
+dependencies = [
+    # FastAPI/Starlette WebSocket support — the stack Pipecat telephony
+    # deployments already run. Upper-bounded: the transport subclasses
+    # BaseInputTransport/BaseOutputTransport, whose hooks may move in 2.x.
+    "pipecat-ai[websocket]>=1.12,<2",
+    # Typed protocol events (sdks/python) — reused, not re-derived, so the
+    # SDK's schema-drift tests guard this package too.
+    "siphon-ai-server>=0.28",
+]
+
+[project.urls]
+Homepage = "https://github.com/thevoiceguy/siphon-ai"
+Documentation = "https://github.com/thevoiceguy/siphon-ai/blob/main/sdks/pipecat/README.md"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "jsonschema>=4", "websockets>=13", "uvicorn>=0.30"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/siphon_ai_pipecat"]

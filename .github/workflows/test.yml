@@ -238,7 +238,7 @@ jobs:
         run: |
           python3 -m venv examples/pipecat-bot-py/.venv
           examples/pipecat-bot-py/.venv/bin/pip install --no-input --quiet \
-              ./sdks/python ./sdks/pipecat
+              ./sdks/python ./sdks/pipecat "uvicorn>=0.30"
           examples/pipecat-bot-py/.venv/bin/python \
               examples/pipecat-bot-py/server.py --echo \
               --bind 127.0.0.1:8863 > /tmp/pipecat-echo.log 2>&1 &

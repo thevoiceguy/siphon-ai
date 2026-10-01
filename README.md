@@ -175,7 +175,10 @@ it entirely with your own WS server in any language.
 Writing that server in Python or TypeScript? The **server SDKs** in
 [`sdks/`](sdks/) handle the wire protocol for you — typed events, paced
 20 ms audio framing, and connection lifecycle — so you write handlers,
-not wire code. The protocol itself is also machine-readable:
+not wire code. Building on [Pipecat](https://www.pipecat.ai/)? The
+**Pipecat transport** in [`sdks/pipecat/`](sdks/pipecat/) plugs SiphonAI
+calls straight into a Pipecat pipeline
+([example bot](examples/pipecat-bot-py/)). The protocol itself is also machine-readable:
 [`schemas/siphon-ai.v1.json`](schemas/siphon-ai.v1.json).
 
 ## Quickstart (Docker)
@@ -298,7 +301,7 @@ journal — grep `turn_summary` for SLO numbers. See
 | `crates/telemetry/`   | tracing + metrics + HEP wiring + admin API (auth + RBAC) |
 | `crates/protocol-testkit/` | `siphon-ai-testkit` — WS protocol conformance harness |
 | `bins/siphon-ai/`     | The daemon binary |
-| `sdks/`               | Server SDKs (Python + TypeScript) for the WS protocol |
+| `sdks/`               | Server SDKs (Python + TypeScript) and a Pipecat transport for the WS protocol |
 | `examples/`           | Reference WS servers and the local Homer stack |
 | `scripts/`            | Idempotent Debian 13 install scripts (daemon + bot) |
 | `test-harness/`       | SIPp scenarios, load tooling, HEP collector stub |

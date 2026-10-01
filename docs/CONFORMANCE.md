@@ -20,7 +20,8 @@ everything your server does:
 
 Exit code is `0` iff every scenario passed, so **"conformant with
 protocol v1" is a claim your CI can gate on**. SiphonAI's own CI runs the
-full set against both bundled SDK echo servers on every PR.
+full set against both bundled SDK echo servers, and against the Pipecat
+transport's echo bot (`examples/pipecat-bot-py --echo`), on every PR.
 
 ## Quick start
 
@@ -155,5 +156,6 @@ The server SDKs ([`sdks/`](../sdks/)) and this testkit approach the same
 contract from opposite ends: the SDKs make it hard to *write* a
 non-conformant server, the testkit proves any server — SDK-based or
 hand-rolled in any language — actually *is* conformant. SiphonAI's CI
-runs the testkit against both SDK echo servers on every PR, which is also
+runs the testkit against both SDK echo servers and the Pipecat transport's
+echo bot on every PR, which is also
 what keeps the testkit itself honest.

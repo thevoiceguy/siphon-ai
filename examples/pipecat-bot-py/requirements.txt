@@ -1,0 +1,7 @@
+# The SiphonAI protocol SDK + its Pipecat transport (this repo), then
+# Pipecat with the providers this example uses: Deepgram STT, OpenAI
+# LLM + TTS, Silero VAD. `--echo` mode needs only the first three lines.
+../../sdks/python
+../../sdks/pipecat
+pipecat-ai[websocket]>=1.12,<2
+pipecat-ai[deepgram,openai,silero]>=1.12,<2

@@ -37,6 +37,10 @@ The SDKs in [`sdks/`](../sdks/) implement this protocol — typed events,
 paced 20 ms audio framing, close semantics — so you write handlers, not
 wire code. Their test suites validate against the schema and every
 example in this document, so they track the spec release-for-release.
+Building on [Pipecat](https://www.pipecat.ai/)? [`sdks/pipecat`](../sdks/pipecat/)
+is a Pipecat transport for this protocol: real-time-paced 20 ms output
+(§5.5), `clear`/pause-mode verdicts from Pipecat's interruptions, and a
+`hangup` when the pipeline ends (§5.7).
 
 **Conformance testkit (0.29.0).** `siphon-ai-testkit` plays the daemon's
 side of this protocol against your server — scripted calls, every message

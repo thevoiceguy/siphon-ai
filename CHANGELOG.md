@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Pipecat transport — `siphon-ai-pipecat`** (`sdks/pipecat/`, design in
+  `docs/design/DESIGN_PIPECAT.md`). Answer SiphonAI calls with a
+  [Pipecat](https://www.pipecat.ai/) pipeline: `SiphonTransport.accept(websocket)` in a
+  FastAPI endpoint, then `transport.input()` / `transport.output()` in the pipeline.
+  Pipecat's stock WebSocket transport sends audio at 2× real time, which SiphonAI's
+  200 ms playout window (PROTOCOL.md §5.5) cannot absorb. Measured against the daemon,
+  a 3 s reply lost 65 frames (1.3 s) at 2× and none with this transport, which paces
+  exact 20 ms frames at real time. The transport also sends `clear` on Pipecat
+  interruptions, answers pause-mode arbitrations (Pipecat interrupts → confirm, no
+  interruption by the deadline → `barge_in_reject`), satisfies the start deadline
+  for listen-first bots, hangs up when the pipeline ends after the caller has
+  *heard* the last audio (a `mark` round-trip), maps DTMF both ways to Pipecat's
+  native frames, and surfaces every other event as a typed `SiphonEventFrame`.
+  Requires `pipecat-ai` 1.12–1.x. **No daemon or protocol change.**
+- **`examples/pipecat-bot-py`** — Deepgram STT → OpenAI LLM → OpenAI TTS bot on the
+  transport, with `end_call` / `transfer_call` tools, and an `--echo` mode (no
+  provider keys) that CI now runs the full conformance testkit against.
+
 ### Documentation
 
 - **The Debian 13 getting-started guide moved to `docs/GETTING_STARTED.md`** (from the

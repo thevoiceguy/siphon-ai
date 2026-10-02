@@ -124,7 +124,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # Sightglass TUI (bins/sightglass ONLY — the daemon never links these;
 # DESIGN_SIGHTGLASS.md §9). crossterm comes via ratatui's re-export so
 # the two can't version-skew.
-ratatui = "0.29"
+ratatui = "0.30"
 
 # Utilities
 parking_lot = "0.12"

@@ -224,7 +224,13 @@ jobs:
       - name: SBOM (CycloneDX, from Cargo.lock)
         run: |
           version="${TAG#v}"
+          # --source-name/--source-version: without them the SBOM's own
+          # metadata.component (what the document describes) is the
+          # scanned path ".", version null, and consumers can't tell
+          # which product or release it belongs to.
           syft scan dir:. \
+            --source-name siphon-ai \
+            --source-version "${version}" \
             -o cyclonedx-json="dist/siphon-ai-${version}-sbom.cdx.json"
 
       # SHA256SUMS covers the tarballs, the .deb packages, *and* the

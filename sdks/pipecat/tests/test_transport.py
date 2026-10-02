@@ -8,6 +8,7 @@ each test can drive one behaviour:
     2  → OutputDTMFUrgentFrame("9")        3 → 100 ms tone, then an
                                                ordered `transfer` command
     4  → `transfer`, then EndFrame (bot hands off and ends its pipeline)
+    5  → 1 s of "TTS" from a fixed-24 kHz service (see NativeRateTTS)
 """
 
 from __future__ import annotations
@@ -29,6 +30,11 @@ from pipecat.frames.frames import (
     InterruptionFrame,
     OutputAudioRawFrame,
     OutputDTMFUrgentFrame,
+    StartFrame,
+    TTSAudioRawFrame,
+    TTSSpeakFrame,
+    TTSStartedFrame,
+    TTSStoppedFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineWorker
@@ -45,6 +51,31 @@ from siphon_ai_server import Dtmf
 TOKEN = "s3cret"
 CALL_ID = "siphon-t1"
 FRAME = 320  # 20 ms @ 8 kHz
+
+
+class NativeRateTTS(FrameProcessor):
+    """Behaves like Pipecat's OpenAI TTS: always synthesizes 24 kHz audio but
+    labels frames with the pipeline's output rate from the StartFrame. With
+    an 8 kHz pipeline output rate that plays 24 kHz audio 3x slow — the bug
+    the live provider test caught."""
+
+    NATIVE_RATE = 24000
+
+    def __init__(self):
+        super().__init__()
+        self._label_rate = self.NATIVE_RATE
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, StartFrame):
+            self._label_rate = frame.audio_out_sample_rate
+        if isinstance(frame, TTSSpeakFrame):
+            await self.push_frame(TTSStartedFrame())
+            one_second = b"\x10\x00" * self.NATIVE_RATE
+            await self.push_frame(TTSAudioRawFrame(one_second, self._label_rate, 1))
+            await self.push_frame(TTSStoppedFrame())
+            return
+        await self.push_frame(frame, direction)
 
 
 class Echo(FrameProcessor):
@@ -71,7 +102,7 @@ def build_app(seen: dict) -> FastAPI:
             seen["handshake_error"] = str(e)
             return
         worker = PipelineWorker(
-            Pipeline([transport.input(), Echo(), transport.output()]),
+            Pipeline([transport.input(), Echo(), NativeRateTTS(), transport.output()]),
             params=transport.pipeline_params(),
         )
 
@@ -106,6 +137,8 @@ def build_app(seen: dict) -> FastAPI:
                 await worker.queue_frames(
                     [siphon_command("transfer", target="sip:agent@pbx"), EndFrame()]
                 )
+            elif ev.digit == "5":
+                await worker.queue_frame(TTSSpeakFrame("hello"))
 
         runner = WorkerRunner(handle_sigint=False)
         await runner.add_workers(worker)
@@ -155,6 +188,7 @@ class Daemon:
         self.audio: list[tuple[float, int]] = []  # (arrival, size)
         self.commands: list[dict] = []
         self.order: list[str] = []  # "audio" / command type, in arrival order
+        self.cmd_at: dict[str, float] = {}  # first arrival time per command type
         self.closed = asyncio.Event()
         self._task = asyncio.create_task(self._recv())
 
@@ -166,6 +200,7 @@ class Daemon:
                     self.order.append("audio")
                 else:
                     cmd = json.loads(msg)
+                    self.cmd_at.setdefault(cmd["type"], time.monotonic())
                     self.commands.append(cmd)
                     self.order.append(cmd["type"])
                     if cmd["type"] == "mark":  # play-out done at once
@@ -325,6 +360,21 @@ def test_failed_transfer_then_end_still_hangs_up():
     scenario(body)
 
 
+def test_fixed_rate_tts_plays_at_its_true_length():
+    async def body(d, seen):
+        await d.wait_for(lambda: d.audio)  # prime frame
+        before = len(d.audio)
+        await d.ws.send(dtmf("5", 1))
+        await asyncio.sleep(1.8)  # 1 s of speech, paced, plus slack
+        frames = len(d.audio) - before
+        # 1 s = 50 frames (+1 for padding the tail). Pinning the pipeline's
+        # output rate to the call's 8 kHz made this ~150: 3x slow.
+        assert 48 <= frames <= 52, frames
+        await d.ws.send(ev("stop", 2, reason="caller_hangup"))
+
+    scenario(body)
+
+
 def test_pause_mode_rejects_when_pipecat_does_not_interrupt():
     async def body(d, seen):
         t0 = time.monotonic()
@@ -334,6 +384,63 @@ def test_pause_mode_rejects_when_pipecat_does_not_interrupt():
         await d.wait_for(lambda: "barge_in_reject" in d.types())
         assert 0.25 <= time.monotonic() - t0 <= 0.45  # deadline less the 100 ms margin
         await d.ws.send(ev("stop", 2, reason="caller_hangup"))
+
+    scenario(body, start=start_msg(barge_in_mode="pause"))
+
+
+def test_pause_mode_holds_bot_audio_until_the_verdict():
+    async def body(d, seen):
+        await d.wait_for(lambda: d.audio)  # prime frame
+        base = len(d.audio)
+        await d.ws.send(dtmf("5", 1))  # 1 s of speech = 50 frames
+        await d.wait_for(lambda: len(d.audio) >= base + 10)  # 200 ms in
+        await d.ws.send(
+            ev("speech_started", 2, ts_ms=1, decision_pending=True, decision_deadline_ms=600)
+        )
+        await asyncio.sleep(0.1)  # let frames already in flight land
+        held_from = d.order.count("audio")
+        await d.wait_for(lambda: "barge_in_reject" in d.types())
+        # Nothing streamed into the daemon's pause (audio arriving before
+        # the reject): on a reject it would sit behind the retained tail
+        # and then be evicted (§5.5). The lead burst at release follows it.
+        during_pause = d.order[: d.order.index("barge_in_reject")].count("audio") - held_from
+        assert during_pause <= 1, during_pause
+        # Released on the verdict, and none of the bot's speech is lost.
+        await d.wait_for(lambda: len(d.audio) >= base + 50, timeout=3)
+        await asyncio.sleep(0.3)
+        assert 50 <= len(d.audio) - base <= 52, len(d.audio) - base
+        await d.ws.send(ev("stop", 3, reason="caller_hangup"))
+
+    scenario(body, start=start_msg(barge_in_mode="pause"))
+
+
+def test_pause_mode_release_keeps_schedule_instead_of_bursting():
+    async def body(d, seen):
+        await d.wait_for(lambda: d.audio)  # prime frame
+        await d.ws.send(dtmf("5", 1))
+        await d.wait_for(lambda: len(d.audio) >= 12)
+        await d.ws.send(
+            ev(
+                "speech_started",
+                2,
+                ts_ms=1,
+                decision_pending=True,
+                decision_deadline_ms=400,
+                offset_ms=5000,
+            )
+        )
+        await d.wait_for(lambda: "barge_in_reject" in d.types())
+        t_reject = d.cmd_at["barge_in_reject"]
+        await d.ws.send(ev("barge_in_resolved", 3, outcome="rejected", offset_ms=5300))
+        await asyncio.sleep(0.15)
+        burst = sum(1 for t, _ in d.audio if t_reject <= t <= t_reject + 0.1)
+        # Frames sent ahead before the pause are still queued in the
+        # daemon (a reject re-queues them). Re-anchoring sent a fresh lead
+        # burst on top (~9 frames in 100 ms) and grew that backlog with
+        # every pause until §5.5 evicted audio. The schedule now shifts by
+        # the pause instead: real time again, with no burst.
+        assert burst <= 5, burst
+        await d.ws.send(ev("stop", 4, reason="caller_hangup"))
 
     scenario(body, start=start_msg(barge_in_mode="pause"))
 

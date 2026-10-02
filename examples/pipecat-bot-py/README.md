@@ -68,6 +68,7 @@ Then place a call into SiphonAI.
 | `BOT_SYSTEM_PROMPT` | phone-assistant prompt | System instruction. The caller's number is appended. |
 | `BOT_GREETING` | "Hi! Thanks for calling…" | Spoken when the call connects. Set it empty to start by listening. |
 | `BOT_TRANSFER_TARGET` | *(unset)* | SIP URI for the `transfer_call` tool. The tool is not offered when this is unset. |
+| `BOT_INTERRUPT_MIN_WORDS` | *(unset)* | Words the caller must say while the bot is talking before it is interrupted (Pipecat's `MinWordsUserTurnStartStrategy`). Unset means Pipecat's default: any detected voice interrupts. Set it to `2` for SiphonAI's pause mode, so coughs and "mm-hmm" resume the bot. |
 | `SIPHON_AUTH_TOKEN` / `--auth-token` | *(unset)* | Require `Authorization: Bearer`, matching SiphonAI's `[bridge].auth_bearer`. |
 | `--echo` | off | Echo mode; no providers needed. |
 | `LOG_LEVEL` / `--log-level` | `INFO` | Log level. |

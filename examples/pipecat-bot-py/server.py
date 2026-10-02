@@ -29,6 +29,7 @@ from loguru import logger
 from pipecat.frames.frames import (
     EndWorkerFrame,
     Frame,
+    FunctionCallResultProperties,
     InputAudioRawFrame,
     OutputAudioRawFrame,
     TTSSpeakFrame,
@@ -79,6 +80,10 @@ def build_bot(transport: SiphonTransport) -> tuple[Pipeline, list[Frame]]:
     from pipecat.services.llm_service import FunctionCallParams
     from pipecat.services.openai.llm import OpenAILLMService
     from pipecat.services.openai.tts import OpenAITTSService
+    from pipecat.turns.user_start.min_words_user_turn_start_strategy import (
+        MinWordsUserTurnStartStrategy,
+    )
+    from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
     transfer_target = os.environ.get("BOT_TRANSFER_TARGET")
     start = transport.start
@@ -100,12 +105,18 @@ def build_bot(transport: SiphonTransport) -> tuple[Pipeline, list[Frame]]:
     async def end_call(params: FunctionCallParams):
         # EndWorkerFrame → EndFrame: the transport lets the goodbye finish
         # playing to the caller (mark round-trip), then sends `hangup`.
-        await params.result_callback({"status": "ending"})
+        # run_llm=False: the goodbye below is the last word. Letting the
+        # LLM run on the result made it say a second "Goodbye!".
+        await params.result_callback(
+            {"status": "ending"}, properties=FunctionCallResultProperties(run_llm=False)
+        )
         await params.llm.push_frame(TTSSpeakFrame("Thanks for calling. Goodbye!"))
         await params.llm.push_frame(EndWorkerFrame(), FrameDirection.UPSTREAM)
 
     async def transfer_call(params: FunctionCallParams):
-        await params.result_callback({"status": "transferring"})
+        await params.result_callback(
+            {"status": "transferring"}, properties=FunctionCallResultProperties(run_llm=False)
+        )
         await params.llm.push_frame(TTSSpeakFrame("Transferring you now."))
         # A DataFrame: sent after the audio queued ahead of it.
         await params.llm.push_frame(siphon_command("transfer", target=transfer_target))
@@ -130,10 +141,22 @@ def build_bot(transport: SiphonTransport) -> tuple[Pipeline, list[Frame]]:
         )
         llm.register_function("transfer_call", transfer_call)
 
+    # Pipecat's default interrupts the bot on any voice Silero accepts,
+    # coughs and "mm-hmm" included. With BOT_INTERRUPT_MIN_WORDS=N, the
+    # caller must say N words while the bot is talking before it is cut
+    # off. Needed for SiphonAI pause mode to resume on backchannels; give
+    # the route a [bridge.barge_in] decision_ms that covers STT latency.
+    turn_strategies = None
+    if min_words := int(os.environ.get("BOT_INTERRUPT_MIN_WORDS", "0")):
+        turn_strategies = UserTurnStrategies(
+            start=[MinWordsUserTurnStartStrategy(min_words=min_words)]
+        )
     context = LLMContext(tools=ToolsSchema(standard_tools=tools))
     aggregators = LLMContextAggregatorPair(
         context,
-        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(), user_turn_strategies=turn_strategies
+        ),
     )
     pipeline = Pipeline(
         [

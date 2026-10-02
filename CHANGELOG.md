@@ -18,11 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a 3 s reply lost 65 frames (1.3 s) at 2× and none with this transport, which paces
   exact 20 ms frames at real time. The transport also sends `clear` on Pipecat
   interruptions, answers pause-mode arbitrations (Pipecat interrupts → confirm, no
-  interruption by the deadline → `barge_in_reject`), satisfies the start deadline
+  interruption by the deadline → `barge_in_reject`; while one is pending the bot's
+  audio is held, then resumed on a schedule shifted by the daemon's exact pause so no
+  backlog builds up (#620 tracks the daemon side for other real-time servers). Pause
+  mode needs a word-based Pipecat interruption rule and a longer `decision_ms`, see
+  the README), satisfies the start deadline
   for listen-first bots, hangs up when the pipeline ends after the caller has
   *heard* the last audio (a `mark` round-trip), maps DTMF both ways to Pipecat's
   native frames, and surfaces every other event as a typed `SiphonEventFrame`.
   Requires `pipecat-ai` 1.12–1.x. **No daemon or protocol change.**
+  `transport.pipeline_params()` pins only the pipeline's input rate; TTS keeps its
+  native output rate and the transport resamples to the call's.
 - **`examples/pipecat-bot-py`** — Deepgram STT → OpenAI LLM → OpenAI TTS bot on the
   transport, with `end_call` / `transfer_call` tools, and an `--echo` mode (no
   provider keys) that CI now runs the full conformance testkit against.

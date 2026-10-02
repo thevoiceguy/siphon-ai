@@ -180,6 +180,17 @@ enum OutboundItem {
 struct OutboundQueue {
     items: VecDeque<OutboundItem>,
     audio_len: usize,
+    /// Extra frames the §5.5 window tolerates while a backlog the tap
+    /// itself created drains (#620). A pause-arbitration resolution
+    /// re-pushes the retained tail and post-pause audio straight into
+    /// forge, so forge holds far more than [`FORGE_LEAD_FRAMES`]; a
+    /// server still streaming at real time then accumulates here at
+    /// one frame per frame played, and a fixed 10-frame window
+    /// evicted about (pause length − 200 ms) of bot audio per reject.
+    /// Granted at resolution, only ever shrinks with the real backlog
+    /// (never grows from server traffic, so an over-rate server stays
+    /// bounded), and reset by every flush.
+    allowance: usize,
     /// One warn per call for §5.5 evictions (metric counts them all;
     /// CLAUDE.md §4.7-style logging discipline).
     dropped_warned: bool,
@@ -191,6 +202,7 @@ impl OutboundQueue {
             // +2: transient mark/DTMF riders between audio evictions.
             items: VecDeque::with_capacity(OUTBOUND_BUFFER_FRAMES + 2),
             audio_len: 0,
+            allowance: 0,
             dropped_warned: false,
         }
     }
@@ -206,7 +218,7 @@ impl OutboundQueue {
         self.items.push_back(OutboundItem::Audio(bytes));
         self.audio_len += 1;
         let mut dropped = 0u64;
-        while self.audio_len > OUTBOUND_BUFFER_FRAMES {
+        while self.audio_len > OUTBOUND_BUFFER_FRAMES + self.allowance {
             let oldest_audio = self
                 .items
                 .iter()
@@ -246,6 +258,24 @@ impl OutboundQueue {
             .push_back(OutboundItem::Dtmf { digit, duration_ms });
     }
 
+    /// Tolerate the backlog a pause-arbitration resolution just put in
+    /// forge: `repushed` frames, of which [`FORGE_LEAD_FRAMES`] is the
+    /// normal in-flight cushion (#620).
+    fn grant_allowance(&mut self, repushed: u64) {
+        let repushed = usize::try_from(repushed).unwrap_or(usize::MAX);
+        self.allowance = repushed.saturating_sub(FORGE_LEAD_FRAMES);
+    }
+
+    /// Shrink the allowance to what is still owed: the tap's total
+    /// backlog (`unplayed` in forge plus what is held here) beyond the
+    /// forge lead. A server streaming at real time keeps the backlog
+    /// level, so the allowance holds; once the server pauses or the
+    /// turn ends it drains away and the window is back to 10 frames.
+    fn shrink_allowance(&mut self, unplayed: usize) {
+        let owed = (unplayed + self.audio_len).saturating_sub(FORGE_LEAD_FRAMES);
+        self.allowance = self.allowance.min(owed);
+    }
+
     /// Drop everything (a `Clear` / flush path). Returns
     /// `(audio_frames, marks)` dropped, for the log line.
     fn clear(&mut self) -> (usize, usize) {
@@ -257,6 +287,7 @@ impl OutboundQueue {
         let audio = self.audio_len;
         self.items.clear();
         self.audio_len = 0;
+        self.allowance = 0;
         (audio, marks)
     }
 
@@ -274,6 +305,7 @@ impl OutboundQueue {
             }
         }
         self.audio_len = 0;
+        self.allowance = 0;
         riders
     }
 }
@@ -1358,6 +1390,7 @@ impl MediaTap {
                 None => break,
             }
         }
+        outbound.shrink_allowance(clock.unplayed(Instant::now()));
         Ok(())
     }
 
@@ -2399,6 +2432,7 @@ impl MediaTap {
                                     .repush_chunks(p.fresh, true, &mut shadow, shadow_cap)
                                     .await?;
                                 clock.restore(n);
+                                outbound.grant_allowance(n);
                                 emit_resolved(&events_tx, &self.call_id, BargeInOutcome::Confirmed);
                                 debug!(
                                     call_id = %self.call_id,
@@ -2427,6 +2461,7 @@ impl MediaTap {
                                     .repush_chunks(p.fresh, true, &mut shadow, shadow_cap)
                                     .await?;
                                 clock.restore(resumed + fresh);
+                                outbound.grant_allowance(resumed + fresh);
                                 emit_resolved(&events_tx, &self.call_id, BargeInOutcome::Rejected);
                                 debug!(
                                     call_id = %self.call_id,
@@ -3253,6 +3288,7 @@ impl MediaTap {
                                     .repush_chunks(p.fresh, true, &mut shadow, shadow_cap)
                                     .await?;
                                 clock.restore(fresh);
+                                outbound.grant_allowance(fresh);
                                 emit_resolved(&events_tx, &self.call_id, BargeInOutcome::Timeout);
                                 debug!(
                                     call_id = %self.call_id,
@@ -3269,6 +3305,7 @@ impl MediaTap {
                                     .repush_chunks(p.fresh, true, &mut shadow, shadow_cap)
                                     .await?;
                                 clock.restore(resumed + fresh);
+                                outbound.grant_allowance(resumed + fresh);
                                 emit_resolved(&events_tx, &self.call_id, BargeInOutcome::Timeout);
                                 debug!(
                                     call_id = %self.call_id,
@@ -3621,6 +3658,68 @@ mod tests {
 
     /// §4.1 (#365): `clear` reports what it dropped and empties both
     /// audio and mark entries.
+    /// #620: a pause-arbitration resolution re-pushes its backlog into
+    /// forge; the window must absorb what a real-time server keeps
+    /// sending while that backlog plays, then shrink back to 10.
+    #[test]
+    fn outbound_queue_allowance_absorbs_backlog_then_shrinks() {
+        let call_id = CallId::new("q");
+        let mut q = OutboundQueue::new();
+        // A reject re-pushed 60 frames (1.2 s) into forge.
+        q.grant_allowance(60);
+        assert_eq!(q.allowance, 60 - FORGE_LEAD_FRAMES);
+        // While forge plays that down to its lead, a real-time server
+        // adds one frame per frame played: 55 frames, none evicted.
+        for i in 0..55u8 {
+            assert_eq!(q.push_audio(frame(i), &call_id), 0, "frame {i} evicted");
+            q.shrink_allowance(60 - usize::from(i) - 1);
+        }
+        assert_eq!(q.audio_len, 55);
+        // The server goes quiet: the backlog drains, and the allowance
+        // shrinks with it (never below what is still held).
+        while q.audio_len > 0 {
+            q.items.pop_front();
+            q.audio_len -= 1;
+            q.shrink_allowance(FORGE_LEAD_FRAMES);
+        }
+        assert_eq!(q.allowance, 0, "allowance gone once the backlog is");
+        // Normal §5.5 bound again: the 11th held frame evicts.
+        for i in 0..OUTBOUND_BUFFER_FRAMES {
+            assert_eq!(q.push_audio(frame(i as u8), &call_id), 0);
+        }
+        assert_eq!(q.push_audio(frame(0xAA), &call_id), 1);
+    }
+
+    /// The allowance never grows from server traffic: an over-rate
+    /// server is still bounded, just by window + the granted backlog.
+    #[test]
+    fn outbound_queue_allowance_still_bounds_over_rate_server() {
+        let call_id = CallId::new("q");
+        let mut q = OutboundQueue::new();
+        q.grant_allowance(20); // allowance 15
+        let mut evicted = 0;
+        for i in 0..100u8 {
+            evicted += q.push_audio(frame(i), &call_id);
+            // A huge backlog never raises the allowance.
+            q.shrink_allowance(1_000);
+        }
+        assert_eq!(q.audio_len, OUTBOUND_BUFFER_FRAMES + 15);
+        assert_eq!(evicted, 100 - (OUTBOUND_BUFFER_FRAMES as u64 + 15));
+    }
+
+    /// Every flush path drops the allowance with the audio it covered.
+    #[test]
+    fn outbound_queue_flushes_reset_allowance() {
+        let mut q = OutboundQueue::new();
+        q.grant_allowance(40);
+        q.clear();
+        assert_eq!(q.allowance, 0);
+        q.grant_allowance(40);
+        let mut resume = Vec::new();
+        q.fold_audio_into(&mut resume);
+        assert_eq!(q.allowance, 0);
+    }
+
     #[test]
     fn outbound_queue_clear_drops_audio_and_marks() {
         let call_id = CallId::new("q");

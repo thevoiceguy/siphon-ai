@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.55.1] - 2026-10-02
+
 ### Changed
 
 - **`examples/pipecat-bot-py` now speaks with Deepgram Aura TTS by default**

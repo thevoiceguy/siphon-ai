@@ -210,7 +210,7 @@ as `auto_clear`.
   plays after the resumed tail, on confirm it plays immediately (the
   server barged over itself — its choice).
 - **The resolution's backlog is exempt from the §5.5 window (#620,
-  fixed after 0.55.0).** The tail and the post-pause audio are re-pushed
+  fixed in 0.55.1).** The tail and the post-pause audio are re-pushed
   straight into forge, so forge then holds far more than its 5-frame
   lead. A server still streaming at real time accumulates in the
   outbound queue at one frame per frame played, and the fixed 10-frame

@@ -209,6 +209,21 @@ as `auto_clear`.
   the resume buffer in the normal controller→tap channel; on reject it
   plays after the resumed tail, on confirm it plays immediately (the
   server barged over itself — its choice).
+- **The resolution's backlog is exempt from the §5.5 window (#620,
+  fixed after 0.55.0).** The tail and the post-pause audio are re-pushed
+  straight into forge, so forge then holds far more than its 5-frame
+  lead. A server still streaming at real time accumulates in the
+  outbound queue at one frame per frame played, and the fixed 10-frame
+  window used to evict about (pause − 200 ms) of bot audio per
+  resolution. A real PSTN call lost 158 frames over 5 rejects. The queue
+  now carries an *allowance*, granted at every resolution (reject,
+  confirm, and both timeouts) as `repushed − FORGE_LEAD_FRAMES`. It only
+  shrinks, to `unplayed + held − FORGE_LEAD_FRAMES`, as that backlog
+  really drains, and every flush resets it. A real-time server keeps the
+  backlog level, so the allowance holds for the rest of the turn; an
+  over-rate server is still bounded, because traffic never raises the
+  allowance. Regression: `realtime_stream_through_pause_reject_loses_nothing`
+  (19 of 150 frames lost without the fix).
 
 ### 5.4 Bounds
 

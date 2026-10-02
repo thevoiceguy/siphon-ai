@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Pause-mode barge-in no longer drops bot audio after a resolution**
+  ([#620](https://github.com/thevoiceguy/siphon-ai/issues/620)). Resolving a
+  pause arbitration (reject, confirm, or either timeout) re-pushes the retained tail and
+  the post-pause audio straight into the media engine. A WS server still streaming at
+  real time, which is what a correctly paced server does (including `sdks/python`'s
+  `AudioSender` and `sdks/typescript`), then accumulated behind that backlog, and the
+  200 ms window (PROTOCOL.md §5.5) evicted about the pause length minus 200 ms of bot
+  speech per resolution: 158 frames over 5 rejects on a live PSTN call. The window now
+  tolerates the backlog the daemon itself created, shrinking as it drains and resetting
+  on every flush, so PROTOCOL.md §4.11's "playout resumes where it stopped, then any
+  audio streamed during the pause plays behind it" holds. Over-rate servers are still
+  bounded. No configuration or protocol change.
+
 ## [0.55.0] - 2026-10-01
 
 ### Added

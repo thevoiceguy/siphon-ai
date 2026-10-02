@@ -1766,6 +1766,105 @@ async fn fresh_audio_during_pause_queues_behind_tail() {
     let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
 }
 
+/// #620: a server streaming at real time *through* a pause must not
+/// lose audio after a reject. The resolution re-pushes tail + fresh
+/// straight into forge, and the §5.5 window used to evict the frames
+/// the server kept sending while that backlog played out.
+#[tokio::test]
+async fn realtime_stream_through_pause_reject_loses_nothing() {
+    use chrono::Utc;
+    use forge_core::{EventBus as ForgeEventBus, ForgeEvent};
+    use siphon_ai_bridge::OutgoingEvent;
+    use siphon_ai_media_glue::{TapCommand, TimeoutVerdict};
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let manager = Arc::new(MediaBridgeManager::with_capacities(64, 64));
+    let bus = Arc::new(ForgeEventBus::new());
+    let call = CallId::new("pause-realtime");
+    let tap = MediaTap::attach_with_barge_in(
+        &manager,
+        &bus,
+        call.clone(),
+        8000,
+        pause_action(Duration::from_secs(5), TimeoutVerdict::Confirm),
+    )
+    .expect("attach");
+
+    let (caller_tx, _caller_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (playout_tx, playout_rx) = mpsc::channel::<Vec<u8>>(10);
+    let (events_tx, mut events_rx) = mpsc::channel::<OutgoingEvent>(64);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<TapCommand>(8);
+    let pump = tokio::spawn(tap.run(caller_tx, playout_rx, events_tx, cmd_rx));
+    // Keep the event channel drained so the tap never blocks on it.
+    let events = tokio::spawn(async move { while events_rx.recv().await.is_some() {} });
+
+    // Collect the id (first sample) of every frame forge is handed.
+    let done = Arc::new(AtomicBool::new(false));
+    let collector = {
+        let (manager, call, done) = (manager.clone(), call.clone(), done.clone());
+        tokio::spawn(async move {
+            let mut seen = BTreeSet::new();
+            while !done.load(Ordering::Relaxed) {
+                match manager.try_recv_outbound_request(&call).await {
+                    Some(OutboundMediaRequest::Audio(f)) => {
+                        seen.insert(f.samples[0]);
+                    }
+                    Some(_) => {}
+                    None => tokio::time::sleep(Duration::from_millis(2)).await,
+                }
+            }
+            seen
+        })
+    };
+
+    // A real-time server: one frame per 20 ms, ids 1..=TOTAL. The caller
+    // speaks after PAUSE_AT; the server keeps streaming through a 600 ms
+    // pause (exactly what a paced SDK sender does), then the verdict is
+    // reject and it carries on.
+    const TOTAL: i16 = 150;
+    const PAUSE_AT: i16 = 30;
+    const REJECT_AT: i16 = PAUSE_AT + 30;
+    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    for id in 1..=TOTAL {
+        tick.tick().await;
+        playout_tx
+            .send(pack_pcm16_le(&vec![id; 160]))
+            .await
+            .expect("send frame");
+        if id == PAUSE_AT {
+            bus.publish(ForgeEvent::SpeechStarted {
+                call_id: call.clone(),
+                timestamp: Utc::now(),
+            })
+            .expect("publish");
+        }
+        if id == REJECT_AT {
+            cmd_tx
+                .send(TapCommand::BargeInReject)
+                .await
+                .expect("send reject");
+        }
+    }
+    // Let the post-reject backlog play out.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    done.store(true, Ordering::Relaxed);
+    let seen = collector.await.expect("collector");
+
+    let missing: Vec<i16> = (1..=TOTAL).filter(|id| !seen.contains(id)).collect();
+    assert!(
+        missing.is_empty(),
+        "{} of {TOTAL} frames never reached forge: {missing:?}",
+        missing.len(),
+    );
+
+    drop(cmd_tx);
+    drop(_caller_rx);
+    drop(playout_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+    events.abort();
+}
+
 /// A preempting command (Mute here, standing in for hold/park/announce
 /// /room — same code path) resolves the pending arbitration as
 /// confirm: the tail is gone, the barge-in is counted, and a late

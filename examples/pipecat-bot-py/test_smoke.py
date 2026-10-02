@@ -26,9 +26,21 @@ def test_echo_app_serves_health_and_both_ws_paths():
     assert {"/", "/ws"} <= paths
 
 
-def test_bot_pipeline_builds(monkeypatch):
+@pytest.mark.parametrize(
+    "provider, tts_class",
+    [
+        (None, "DeepgramTTSService"),  # the default
+        ("openai", "OpenAITTSService"),
+        ("deepgram", "DeepgramTTSService"),
+    ],
+)
+def test_bot_pipeline_builds(monkeypatch, provider, tts_class):
     pytest.importorskip("pipecat.services.deepgram.stt")
     pytest.importorskip("pipecat.audio.vad.silero")
+    if provider is None:
+        monkeypatch.delenv("BOT_TTS_PROVIDER", raising=False)
+    else:
+        monkeypatch.setenv("BOT_TTS_PROVIDER", provider)
     monkeypatch.setenv("DEEPGRAM_API_KEY", "test")
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     monkeypatch.setenv("BOT_TRANSFER_TARGET", "sip:agent@pbx.example.com")
@@ -68,6 +80,26 @@ def test_bot_pipeline_builds(monkeypatch):
     pipeline, greeting = asyncio.run(build())
     assert len(greeting) == 1
     assert len(pipeline.processors) >= 7
+    (tts,) = [p for p in pipeline.processors if type(p).__name__ == tts_class]
+    if tts_class == "DeepgramTTSService":
+        # Synthesizes at the wire rate, so frames are labelled correctly.
+        assert tts._init_sample_rate == 8000
+    else:
+        assert tts._settings.model == "tts-1"
+
+
+def test_unknown_tts_provider_is_refused(monkeypatch):
+    monkeypatch.setenv("BOT_TTS_PROVIDER", "nope")
+
+    class _Start:
+        class audio:
+            sample_rate = 8000
+
+    class _T:
+        start = _Start
+
+    with pytest.raises(ValueError, match="BOT_TTS_PROVIDER"):
+        server.build_tts(_T())
 
 
 if __name__ == "__main__":

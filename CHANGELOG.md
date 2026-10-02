@@ -38,6 +38,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The Debian 13 getting-started guide moved to `docs/GETTING_STARTED.md`** (from the
   repository root) and is linked from the README's install section.
 
+### Security
+
+- **sightglass: `ratatui` 0.29 → 0.30, clearing `lru` advisory
+  [GHSA-rhfx-m35p-ff5j](https://github.com/advisories/GHSA-rhfx-m35p-ff5j)**
+  (RUSTSEC-2026-0002 / RUSTSEC-2026-0253, low severity): `lru` 0.12's `IterMut` violated
+  Stacked Borrows. The only path to it was `ratatui` 0.29 (no patched 0.29.x exists);
+  0.30's `ratatui-core` uses `lru` 0.18. **The daemon is unaffected.** It never links
+  ratatui, and the only change to what it builds is `bitflags` 2.11 → 2.13 (ratatui
+  0.30 requires ^2.12). Sightglass needed no code changes, and its screens render
+  identically: all six tabs at 120×40 and 80×24 were diffed character for character
+  against 0.29. `cargo audit` also loses the unmaintained-`paste` warning.
+
 ## [0.54.0] - 2026-09-27
 
 ### Added

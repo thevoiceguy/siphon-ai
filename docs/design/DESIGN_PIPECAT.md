@@ -107,8 +107,14 @@ async def ws(websocket: WebSocket):
   `audio_out_10ms_chunks = 2` makes each chunk exactly one 20 ms protocol
   frame. On `TTSStoppedFrame` Pipecat zero-pads the trailing partial chunk,
   so an utterance never leaves a fragment to prepend to the next one.
-  `transport.pipeline_params()` returns `PipelineParams` with matching
-  rates so nothing upstream resamples twice.
+  `transport.pipeline_params()` sets only the pipeline's **input** rate to
+  the call's. The output rate stays at Pipecat's default **[corrected
+  2026-10-01]**. The first version pinned it to the call's rate as well, on
+  the theory that TTS would synthesize there. The live provider test (§6)
+  showed that a fixed-rate service such as OpenAI TTS (24 kHz only) instead
+  *labels* its 24 kHz audio with the pipeline rate, so a 2.8 s greeting
+  played as 8.4 s. Correctly labelled audio at any rate is resampled by the
+  transport, which is pinned to the call's rate.
 - **Framing guard.** The serializer still resamples if a frame arrives at
   another rate, and the output transport re-frames into exact 20 ms frames
   regardless. A wrong-size frame is impossible by construction, never just
@@ -131,7 +137,7 @@ behaviour depends on `start.barge_in_mode`:
 | Mode | Behaviour | Status |
 |---|---|---|
 | `notify_only` | `InterruptionFrame` → `clear`, and the local re-framer drops its partial frame. Only Pipecat's turn strategy can cut the bot. | **Recommended.** One brain decides. |
-| `pause` | The daemon ducks playout within one frame on caller speech (`decision_pending`) and the connector arbitrates: if Pipecat raises an `InterruptionFrame` before the deadline, `clear` is sent (≡ `barge_in_confirm`, §4.1); if not, `barge_in_reject` is sent `pause_decision_margin_ms` (default 100 ms) before `decision_deadline_ms`, and the bot resumes where it stopped. | **Supported.** Gives the fastest perceived reaction. Pipecat keeps streaming during the pause, and the daemon queues that audio behind the retained tail (bounded by `resume_max_secs`), so a reject loses nothing. |
+| `pause` | The daemon ducks playout within one frame on caller speech (`decision_pending`) and the connector arbitrates: if Pipecat raises an `InterruptionFrame` before the deadline, `clear` is sent (≡ `barge_in_confirm`, §4.1); if not, `barge_in_reject` is sent `pause_decision_margin_ms` (default 100 ms) before `decision_deadline_ms`, and the bot resumes where it stopped. | **Supported, with configuration [revised 2026-10-02 after the PSTN test, §6]:** (a) the connector **holds its outbound audio while the arbitration is pending** (the paced writer blocks, back-pressuring Pipecat), and on release **shifts its pacing schedule by the daemon's exact pause** (`barge_in_resolved.offset_ms − speech_started.offset_ms`, plus 40 ms bias) instead of re-anchoring. Frames sent ahead before the pause are still unplayed (the reject re-queues them); a fresh lead on top grew the retained tail with every pause (5 → 12 → 15 frames) until the window evicted audio. Under-shifting compounds; over-shifting self-corrects, which is why the bias is positive. The first version streamed into the pause on the theory that the daemon would queue it behind the tail, but a reject then re-queues that backlog and the daemon's 200 ms window evicts the real-time audio that follows: 158 frames lost over 5 rejects on a live call (#620). (b) Pipecat's default turn-start strategy interrupts on any voice Silero accepts, coughs included, so it never produces a reject; use `MinWordsUserTurnStartStrategy` (the example's `BOT_INTERRUPT_MIN_WORDS=2`). (c) That waits for STT words, so raise the route's `decision_ms` (1200 ms tested; Pipecat's VAD alone took 160–433 ms, past the 400 ms reject point of the 500 ms default). |
 | `auto_clear` | `clear` is still sent on `InterruptionFrame`, but the daemon has already flushed on its own VAD, including for speech Pipecat's strategy would have ignored. Pipecat then believes the bot is still talking. | Works, with a startup warning. |
 | absent (pre-0.32 daemon) | Treated as `auto_clear`. | Warning. |
 
@@ -213,3 +219,44 @@ same aggregator would race. The events still reach the app as
    The daemon logged its "streaming faster than realtime" warning only in
    the 2× run. This confirms the §2 premise on the real system rather than
    by reading the code.
+5. **Live providers, LAN** (2026-10-01; Deepgram STT, OpenAI LLM + TTS,
+   SIPp caller). Found that pinning the pipeline's *output* rate to the
+   call's rate made OpenAI TTS, which is fixed at 24 kHz, play 3× slow
+   (§4.1, corrected). After the fix, the greeting turn lasted 2.96–3.06 s
+   for 2.85 s of speech.
+6. **PSTN through Twilio Elastic SIP Trunking** (2026-10-01; a mobile phone
+   calling a Twilio DID, routed to a Linode staging box running the
+   released v0.54.0 `.deb`, `notify_only`, G.711 μ-law at 8 kHz):
+
+   | Check | Result |
+   |---|---|
+   | Outbound audio dropped by the daemon | **0** frames over 2 calls |
+   | Network | 0 % loss, 2 ms jitter, 66 ms RTT, MOS 4.41 |
+   | Interruptions | 4 of 4 real interruptions cut the bot, **220–310 ms** after the daemon heard the caller; the connector's `clear` reached the daemon within ms of Pipecat's decision |
+   | False interruptions | **0**. The daemon's energy VAD fired 9 times during bot speech (`barge_in_count 9`); the other 5 were breath or noise 20–45 dB below speech, uncorrelated with the bot's audio (not echo), and Silero correctly ignored them. Under `auto_clear` those 5 would each have cut the bot, which is the case for §4.2's recommendation in numbers |
+   | `end_call` hangup | Goodbye played in full, then the `mark` echo, then `hangup`, with BYE about 80 ms after the last audio. CDR `server_hangup` |
+   | Turn latency (Pipecat end of user turn → bot audio) | 1.3–3.0 s, median ≈ 2.4 s. Almost entirely provider time (LLM 0.5–1.4 s, OpenAI TTS first byte 0.8–1.8 s); no measurable connector overhead |
+
+   **Pause mode** (`decision_ms = 1200`, `BOT_INTERRUPT_MIN_WORDS=2`): over
+   PSTN, coughs, "mm-hmm" and 17 dog barks were all rejected (the bot
+   resumed), and multi-word interruptions confirmed in 449 ms. Each rejected
+   noise still paused the bot for about 1.1 s, because the daemon's energy
+   VAD arms on any loud sound; pair pause mode with `[media].vad = "neural"`.
+   The first connector version lost audio after rejects (158 and then 73
+   frames on two calls). A scripted repro on the staging box (SIPp playing
+   300 ms/700 ms bark bursts over a 25 s bot turn, daemon debug logging)
+   traced it in three steps:
+
+   | Connector behaviour | Dropped (12 s run) | Retained tail per pause |
+   |---|---|---|
+   | Streams into the pause | 73 (live call) | grows to the 15-frame cap |
+   | Holds, re-anchors at release | 33 | 5 → 12 → 15 |
+   | Holds, shifts by local estimate | 8–9 | 5 → 8 → 11 → 14 → 15 |
+   | Holds, shifts by daemon's exact pause + 40 ms | **0** (also 0 on two 30 s / 15-pause runs) | 5 5 5 5 … |
+
+   Real-time servers that stream into a pause still lose audio on the
+   daemon side: #620.
+
+   The example's `end_call`/`transfer_call` tools now return results with
+   `run_llm=False`. Without it, Pipecat re-ran the LLM on the tool result
+   and the caller heard a second "Goodbye!".

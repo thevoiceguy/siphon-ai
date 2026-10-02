@@ -95,7 +95,7 @@ mode = "notify_only"     # or "pause", see below
 | `barge_in_mode` | What happens |
 |---|---|
 | `notify_only` (**recommended**) | Only Pipecat's turn strategy can cut the bot. When Pipecat emits an `InterruptionFrame`, the transport sends `clear`. |
-| `pause` | SiphonAI ducks the bot within one frame when the caller speaks, then the transport arbitrates. If Pipecat interrupts before the deadline, the transport sends `clear`, which confirms the barge-in. If not, it sends `barge_in_reject` and the bot resumes mid-word. This gives the fastest perceived reaction. |
+| `pause` | SiphonAI ducks the bot within one frame when the caller speaks, and the transport holds the bot's audio while it arbitrates. If Pipecat interrupts before the deadline, the transport sends `clear`, which confirms the barge-in. If not, it sends `barge_in_reject` and the bot resumes mid-word. **It needs two settings to be useful:** a word-based interruption rule in Pipecat (`MinWordsUserTurnStartStrategy`; Pipecat's default interrupts on any voice, coughs included, so the bot would never resume), and a longer route deadline, `[route.bridge.barge_in] decision_ms = 1200`, so the transcribed words arrive in time. See `examples/pipecat-bot-py` (`BOT_INTERRUPT_MIN_WORDS`). SiphonAI's default energy VAD pauses the bot on any loud sound: a barking dog paused it 17 times in one test call (all correctly resumed, about 1.1 s each). `[route.media] vad = "neural"` is recommended to cut those pauses. It is untested against that noise so far. |
 | `auto_clear` (daemon default) | Works, but SiphonAI flushes the bot on its own voice activity detection (VAD). That includes a cough Pipecat would have ignored, after which Pipecat still believes the bot is talking. The transport logs a warning. |
 
 ## What the transport handles
@@ -107,9 +107,11 @@ mode = "notify_only"     # or "pause", see below
   effect, Pipecat's "bot speaking" state now tracks what the caller
   actually hears.
 - **Sample rates.** The transport's input and output rates are pinned to the
-  call's negotiated rate (8 or 16 kHz). Pipecat resamples TTS output, and
-  `transport.pipeline_params()` makes TTS services synthesize at that rate
-  where they can.
+  call's negotiated rate (8 or 16 kHz), and the transport resamples TTS
+  audio to it. `transport.pipeline_params()` sets only the pipeline's
+  *input* rate. Don't set `audio_out_sample_rate` to the call's rate:
+  TTS services with a fixed native rate (OpenAI: 24 kHz) label their audio
+  with that setting, and it would play 3× slow.
 - **Start deadline.** One 20 ms silence frame goes out as soon as the pipeline
   runs, so a listen-first bot or a slow cold start doesn't trip SiphonAI's
   `server_too_slow` 5-second deadline (`prime_start_deadline`).

@@ -54,6 +54,12 @@ except ModuleNotFoundError as e:  # pragma: no cover - import guard
 __all__ = ["SiphonHandshakeError", "SiphonParams", "SiphonTransport"]
 
 FRAME_SECS = 0.020
+# Extra delay added to the post-pause schedule shift. Under-shifting
+# leaves backlog in the daemon that nothing drains: it compounds per pause
+# (+1-2 frames each in the staging repro) until the 200 ms window evicts.
+# Over-shifting only lets the backlog shrink until the pacer re-anchors on
+# its own, and the daemon still holds its retained tail, so no audible gap.
+PAUSE_SHIFT_SLACK = 2 * FRAME_SECS
 # Upper bound on waiting for a pending transfer/park to resolve before the
 # end-of-pipeline hangup (a REFER round-trip through a PBX is seconds).
 HANDOFF_WAIT_SECS = 10.0
@@ -257,7 +263,9 @@ class SiphonOutputTransport(BaseOutputTransport):
         await super().start(frame)
         await self.set_transport_ready(frame)
         if self._prime:
-            await self._send_paced(bytes(self._frame_bytes))
+            # A liveness frame, not bot speech: never held by a pause, or
+            # start() would block the frames queued behind it.
+            await self._send_paced(bytes(self._frame_bytes), gated=False)
 
     async def stop(self, frame: EndFrame) -> None:
         await super().stop(frame)  # media senders drain queued audio first
@@ -316,8 +324,24 @@ class SiphonOutputTransport(BaseOutputTransport):
             self._pending.clear()
             await self._send_paced(chunk)
 
-    async def _send_paced(self, chunk: bytes) -> bool:
-        now = asyncio.get_running_loop().time()
+    async def _send_paced(self, chunk: bytes, *, gated: bool = True) -> bool:
+        gate = self._transport._playout_gate
+        loop = asyncio.get_running_loop()
+        if gated and not gate.is_set():
+            # Pause-mode arbitration pending: hold the bot's audio here
+            # (back-pressuring Pipecat) instead of streaming into the
+            # daemon's pause. On release, shift the schedule by the
+            # daemon's pause rather than re-anchoring to now: what was
+            # already sent ahead is still unplayed (a reject re-queues
+            # it), so a fresh lead on top would grow the daemon's backlog
+            # with every pause until its 200 ms window evicts audio
+            # (staging repro: retained tail 5 -> 12 -> 15 frames, 33
+            # dropped). The transport corrects the shift to the daemon's
+            # exact pause length when `barge_in_resolved` arrives.
+            await gate.wait()
+            if self._next_at is not None:
+                self._next_at += self._transport._take_pause_shift()
+        now = loop.time()
         # Idle (or fell behind): re-anchor rather than burst to catch up.
         if self._next_at is None or self._next_at < now:
             self._next_at = now
@@ -371,6 +395,20 @@ class SiphonTransport(BaseTransport):
         self.serializer = SiphonFrameSerializer(start, auto_hang_up=params.auto_hang_up)
         self._socket = _SiphonSocket(websocket)
         self._end_mark = asyncio.Event()
+        # Closed while a pause-mode arbitration is pending: outbound audio
+        # waits instead of streaming into the paused daemon. Audio streamed
+        # during a pause would be re-queued behind the retained tail on a
+        # reject, then evicted by the daemon's 200 ms window (§5.5) while a
+        # real-time sender kept going: the caller lost about the pause
+        # length of bot speech per reject (PSTN test, 2026-10-02).
+        self._playout_gate = asyncio.Event()
+        self._playout_gate.set()
+        # The current pause on two clocks: when its arm arrived here
+        # (loop time), and where the daemon armed and resolved it on its
+        # own timeline (`offset_ms`), for the exact length.
+        self._pause_armed_local: float | None = None
+        self._pause_armed_offset: int | None = None
+        self._pause_shift_applied: float | None = None
         # Signalled whenever a pending transfer/park may have resolved.
         self._handoff_changed = asyncio.Event()
         self._verdict_task: asyncio.Task | None = None
@@ -457,11 +495,17 @@ class SiphonTransport(BaseTransport):
         return self._output
 
     def pipeline_params(self, **kwargs: Any) -> PipelineParams:
-        """``PipelineParams`` with audio rates matching the call, so TTS
-        synthesizes at the wire rate where it can and nothing resamples
-        twice. Extra keyword arguments pass through."""
-        rate = self.start.audio.sample_rate
-        return PipelineParams(audio_in_sample_rate=rate, audio_out_sample_rate=rate, **kwargs)
+        """``PipelineParams`` whose input rate is the call's, so STT gets the
+        caller's audio as it arrives. Extra keyword arguments pass through.
+
+        The output rate is deliberately left at Pipecat's default: TTS
+        services with a fixed native rate (OpenAI: 24 kHz only) label their
+        frames with the pipeline rate, so pinning it to 8 kHz would play
+        24 kHz audio 3x slow. The output transport is pinned to the call's
+        rate and resamples whatever arrives, correctly labelled.
+        """
+        kwargs.setdefault("audio_in_sample_rate", self.start.audio.sample_rate)
+        return PipelineParams(**kwargs)
 
     # ─── commands (PROTOCOL.md §4) ────────────────────────────────
 
@@ -501,9 +545,14 @@ class SiphonTransport(BaseTransport):
         if isinstance(event, Mark) and event.name == END_MARK:
             self._end_mark.set()
         elif isinstance(event, SpeechStarted) and event.decision_pending:
+            self._pause_armed_local = asyncio.get_running_loop().time()
+            self._pause_armed_offset = event.offset_ms
+            self._pause_shift_applied = None
             self._arm_verdict(event.decision_deadline_ms or 0)
         elif isinstance(event, BargeInResolved):
             self._cancel_verdict()
+            if event.outcome == "rejected":
+                self._correct_pause_shift(event.offset_ms)
         elif isinstance(event, Error):
             if event.code in ("transfer_failed", "park_failed"):
                 self.serializer.handoff_failed()
@@ -524,6 +573,7 @@ class SiphonTransport(BaseTransport):
         If none comes before the deadline (less a margin), reject — the
         daemon resumes the bot where it paused."""
         self._cancel_verdict()
+        self._playout_gate.clear()
         delay = max(0, deadline_ms - self._params.pause_decision_margin_ms) / 1000
         self._verdict_task = asyncio.create_task(self._reject_after(delay))
 
@@ -532,11 +582,37 @@ class SiphonTransport(BaseTransport):
         self._verdict_task = None
         logger.debug(f"siphon call {self.call_id}: no Pipecat interruption; barge_in_reject")
         await self.send_command("barge_in_reject")
+        self._playout_gate.set()
+
+    def _take_pause_shift(self) -> float:
+        """Seconds to move the pacing schedule after a hold: the pause as
+        seen from here (arm received → now). Recorded so the daemon's
+        exact figure can correct it later."""
+        if self._pause_armed_local is None:
+            return 0.0
+        shift = asyncio.get_running_loop().time() - self._pause_armed_local + PAUSE_SHIFT_SLACK
+        self._pause_shift_applied = shift
+        return shift
+
+    def _correct_pause_shift(self, resolved_offset_ms: int | None) -> None:
+        """Re-time the schedule to the daemon's own pause length
+        (`barge_in_resolved.offset_ms - speech_started.offset_ms`), which
+        also covers the event latency the local estimate can't see."""
+        applied = self._pause_shift_applied
+        if applied is None or resolved_offset_ms is None or self._pause_armed_offset is None:
+            return
+        exact = (resolved_offset_ms - self._pause_armed_offset) / 1000 + PAUSE_SHIFT_SLACK
+        if self._output._next_at is not None:
+            self._output._next_at += exact - applied
+        self._pause_shift_applied = exact
 
     def _cancel_verdict(self) -> None:
+        """Every way an arbitration ends (verdict, `barge_in_resolved`,
+        `stop`, teardown) also releases held outbound audio."""
         if self._verdict_task is not None:
             self._verdict_task.cancel()
             self._verdict_task = None
+        self._playout_gate.set()
 
     async def _interrupted(self) -> None:
         # `clear` doubles as `barge_in_confirm` while an arbitration is

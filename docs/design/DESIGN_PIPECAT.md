@@ -255,7 +255,7 @@ same aggregator would race. The events still reach the app as
    | Holds, shifts by daemon's exact pause + 40 ms | **0** (also 0 on two 30 s / 15-pause runs) | 5 5 5 5 … |
 
    Real-time servers that stream into a pause lost audio on the daemon
-   side too: #620, fixed in the daemon after 0.55.0. The connector keeps
+   side too: #620, fixed in daemon 0.55.1. The connector keeps
    its hold anyway, because it also keeps Pipecat's "bot is speaking"
    state aligned with what the caller actually hears during a pause.
 

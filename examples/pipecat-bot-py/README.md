@@ -1,10 +1,10 @@
-# Pipecat voice bot (Deepgram STT → OpenAI LLM → OpenAI TTS)
+# Pipecat voice bot (Deepgram STT → OpenAI LLM → Deepgram TTS)
 
 A SiphonAI WebSocket server built on [Pipecat](https://www.pipecat.ai/) and
 the [`siphon-ai-pipecat`](../../sdks/pipecat/) transport:
 
 ```
-SIP trunk / PBX ──► SiphonAI ──WS──► server.py ──► Pipecat: Silero VAD · Deepgram STT · OpenAI LLM · OpenAI TTS
+SIP trunk / PBX ──► SiphonAI ──WS──► server.py ──► Pipecat: Silero VAD · Deepgram STT · OpenAI LLM · Deepgram TTS
 ```
 
 Each call gets its own WebSocket and its own Pipecat pipeline. SiphonAI
@@ -62,9 +62,11 @@ Then place a call into SiphonAI.
 | Variable / flag | Default | Purpose |
 |---|---|---|
 | `DEEPGRAM_API_KEY` | *(required)* | Deepgram streaming STT. |
-| `OPENAI_API_KEY` | *(required)* | OpenAI LLM and TTS. |
+| `OPENAI_API_KEY` | *(required)* | OpenAI LLM, plus TTS when `BOT_TTS_PROVIDER=openai`. |
 | `BOT_LLM_MODEL` | `gpt-4.1-mini` | Chat model. |
-| `BOT_TTS_VOICE` | `alloy` | OpenAI TTS voice. |
+| `BOT_TTS_PROVIDER` | `deepgram` | `deepgram` (Aura, reusing `DEEPGRAM_API_KEY`; synthesizes directly at the call's rate) or `openai`. |
+| `BOT_TTS_MODEL` | `tts-1` | OpenAI TTS model (`openai` provider only). `gpt-4o-mini-tts` is faster on most requests but occasionally stalls for 10 s or more (see *Choosing a TTS*). |
+| `BOT_TTS_VOICE` | `aura-2-helena-en` / `alloy` | Voice for the chosen provider. |
 | `BOT_SYSTEM_PROMPT` | phone-assistant prompt | System instruction. The caller's number is appended. |
 | `BOT_GREETING` | "Hi! Thanks for calling…" | Spoken when the call connects. Set it empty to start by listening. |
 | `BOT_TRANSFER_TARGET` | *(unset)* | SIP URI for the `transfer_call` tool. The tool is not offered when this is unset. |
@@ -76,6 +78,24 @@ Then place a call into SiphonAI.
 To swap providers, change the three service constructors in `build_bot()`.
 Any Pipecat STT, LLM or TTS service works, because the transport never
 sees them.
+
+## Choosing a TTS
+
+Time to first audio for a short phrase, 12 requests each from the same host
+(2026-10-02):
+
+| TTS | Median | Worst | Over 3 s |
+|---|---|---|---|
+| Deepgram `aura-2-helena-en` (default) | 0.52 s | 0.59 s | 0 / 12 |
+| OpenAI `tts-1` | 1.64 s | 2.3 s | 0 / 12 |
+| OpenAI `gpt-4o-mini-tts` | 0.94 s | **12.7 s** | 1 / 12 |
+
+On a phone call a long silence is worse than a slightly slower reply. A PSTN
+test call with `gpt-4o-mini-tts` waited 23 s for its goodbye. Over the same PSTN
+path, the next call with Deepgram had a median of 1.01 s from the caller's last
+word to bot audio (0.62–1.54 s), against 1.95 s with OpenAI. That's why
+Deepgram is the default, and why `BOT_TTS_PROVIDER=openai` falls back to `tts-1`. Response time also depends on the LLM: about
+0.5–1.4 s for `gpt-4.1-mini` in the same tests.
 
 ## Test
 

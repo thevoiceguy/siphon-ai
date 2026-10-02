@@ -2,7 +2,7 @@
 """Pipecat voice bot behind SiphonAI.
 
     SIP trunk / PBX ──► SiphonAI ──WS──► this server
-                                         (Pipecat: Deepgram STT → OpenAI LLM → OpenAI TTS)
+                                         (Pipecat: Deepgram STT → OpenAI LLM → Deepgram TTS)
 
 One WebSocket = one call = one Pipecat pipeline, built on
 ``siphon_ai_pipecat.SiphonTransport`` (``sdks/pipecat``). SiphonAI contains no
@@ -65,6 +65,40 @@ class Echo(FrameProcessor):
             await self.push_frame(frame, direction)
 
 
+def build_tts(transport: SiphonTransport):
+    """The TTS service named by BOT_TTS_PROVIDER.
+
+    Measured time to first audio for a short phrase (12 requests each,
+    2026-10-02): Deepgram aura-2 median 0.52 s, worst 0.59 s; OpenAI tts-1
+    median 1.64 s, worst 2.3 s; OpenAI gpt-4o-mini-tts median 0.94 s but
+    worst 12.7 s (one request in ten or so stalls for 10 s or more; a PSTN
+    test call sat 23 s on a goodbye). On a phone call a frozen silence is
+    worse than a slightly slower reply. Deepgram is the default: fastest,
+    consistent, and it reuses the STT key. The OpenAI fallback uses tts-1.
+    """
+    provider = os.environ.get("BOT_TTS_PROVIDER", "deepgram").lower()
+    voice = os.environ.get("BOT_TTS_VOICE")
+    if provider == "deepgram":
+        from pipecat.services.deepgram.tts import DeepgramTTSService
+
+        # Synthesize at the call's rate: no resampling, frames labelled right.
+        return DeepgramTTSService(
+            api_key=os.environ["DEEPGRAM_API_KEY"],
+            sample_rate=transport.start.audio.sample_rate,
+            settings=DeepgramTTSService.Settings(voice=voice or "aura-2-helena-en"),
+        )
+    if provider == "openai":
+        from pipecat.services.openai.tts import OpenAITTSService
+
+        return OpenAITTSService(
+            api_key=os.environ["OPENAI_API_KEY"],
+            settings=OpenAITTSService.Settings(
+                model=os.environ.get("BOT_TTS_MODEL", "tts-1"), voice=voice or "alloy"
+            ),
+        )
+    raise ValueError(f"BOT_TTS_PROVIDER must be openai or deepgram, not {provider!r}")
+
+
 def build_bot(transport: SiphonTransport) -> tuple[Pipeline, list[Frame]]:
     """STT → LLM → TTS pipeline plus the frames that greet the caller."""
     # Imported here so --echo runs without the provider extras installed.
@@ -79,7 +113,6 @@ def build_bot(transport: SiphonTransport) -> tuple[Pipeline, list[Frame]]:
     from pipecat.services.deepgram.stt import DeepgramSTTService
     from pipecat.services.llm_service import FunctionCallParams
     from pipecat.services.openai.llm import OpenAILLMService
-    from pipecat.services.openai.tts import OpenAITTSService
     from pipecat.turns.user_start.min_words_user_turn_start_strategy import (
         MinWordsUserTurnStartStrategy,
     )
@@ -97,10 +130,7 @@ def build_bot(transport: SiphonTransport) -> tuple[Pipeline, list[Frame]]:
             + f" The caller is calling from {start.from_ or 'an unknown number'}.",
         ),
     )
-    tts = OpenAITTSService(
-        api_key=os.environ["OPENAI_API_KEY"],
-        settings=OpenAITTSService.Settings(voice=os.environ.get("BOT_TTS_VOICE", "alloy")),
-    )
+    tts = build_tts(transport)
 
     async def end_call(params: FunctionCallParams):
         # EndWorkerFrame → EndFrame: the transport lets the goodbye finish

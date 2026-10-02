@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`examples/pipecat-bot-py` now speaks with Deepgram Aura TTS by default**
+  (`BOT_TTS_PROVIDER=deepgram`), reusing the `DEEPGRAM_API_KEY` its speech-to-text
+  already needs, and synthesizing directly at the call's 8/16 kHz. Measured on 12
+  requests each: time to first audio was a median of 0.52 s (worst 0.59 s), against
+  0.94 s with a 12.7 s worst case for OpenAI `gpt-4o-mini-tts`. On PSTN calls the
+  median gap between the caller's last word and bot audio went from 1.95 s to
+  1.01 s, and a goodbye that had waited 23 s started in 0.13 s.
+  `BOT_TTS_PROVIDER=openai` remains available, now with a `BOT_TTS_MODEL` setting
+  that defaults to `tts-1` (median 1.64 s, worst 2.3 s) rather than the
+  occasionally stalling `gpt-4o-mini-tts`.
+
 ### Fixed
 
 - **Pause-mode barge-in no longer drops bot audio after a resolution**

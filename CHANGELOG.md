@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The release SBOM now identifies itself.** `siphon-ai-<version>-sbom.cdx.json`'s
+  `metadata.component` (the product the document describes) was the scanned path `"."`
+  with no version, in every release through 0.55.1, so SBOM tooling couldn't tell which
+  product or release it covered. The release workflow now passes `--source-name
+  siphon-ai --source-version <version>` to syft. The component list is unchanged.
+
 ## [0.55.1] - 2026-10-02
 
 ### Changed

@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **siphon-rs v2026.09.22 → v2026.10.22.2 and forge-media v2026.09.22 →
+  v2026.10.23**, in lockstep (forge embeds that siphon-rs). No configuration, protocol
+  or CDR change. What reaches the daemon:
+  - **One final per INVITE transaction** (sip-transaction 0.7.3). A 200 racing the 487
+    for a CANCEL is no longer sent after the 487, and a 2xx arriving after a 3xx–6xx on
+    an outbound INVITE is dropped rather than delivered as a second final. Only a
+    provisional with `Require: 100rel` and an RSeq draws a PRACK, and a retransmitted
+    reliable 180/183 no longer draws a fresh PRACK answered with 481.
+  - **SIP connection pool** (sip-transport 0.7.1): a TCP/TLS/WS connection the peer
+    closes immediately no longer stays pooled with later sends going into a dead socket;
+    a failed send removes only its own connection; a send parked on a peer that stopped
+    reading no longer holds the pool's lock.
+  - **Outbound TLS to an IP destination** (sip-uac 0.9.3) verifies the certificate
+    against `[sip].tls_server_name` or the Request-URI host rather than the IP.
+  - **Inbound**: sip-uas answers 422 to a Session-Expires below Min-SE (it used to
+    accept it); the registrar grants an over-long Expires the ceiling rather than 400.
+  - **Media** (forge-engine 0.7.0, forge-rtp 0.7.1): RTP is classified to a leg by exact
+    address first, so a leg no longer goes deaf when the other leg's peer shares its IP
+    (two peers behind one NAT, or loopback); recordings of overlapping speech are mixed
+    per side instead of by arrival order, so two parties talking over each other are no
+    longer recorded taking turns; a packet refused by the RTP latch logs one WARN per
+    source (at most 32) instead of one per packet — 50/s per leg from anyone spraying
+    the media ports — while `forge_rtp_latch_rejected_total` still counts each one.
+  - **WebRTC legs** (forge-webrtc 0.8.0): ICE renomination — a session that nominated a
+    TURN relay moves to a direct pair when one succeeds.
+
+### Security
+
+- **Lockfile bumps for open RUSTSEC advisories**: quinn-proto 0.11.19
+  (RUSTSEC-2026-0338 … -0342, remote panics), rustls 0.23.46 (RUSTSEC-2026-0346 …
+  -0349), rustls-webpki 0.103.16 (RUSTSEC-2026-0382), webpki-roots 1.0.11
+  (RUSTSEC-2026-0381), ctutils 0.4.5 (RUSTSEC-2026-0385), and hickory-resolver
+  0.26.3 (DNSSEC and parser advisories fixed in 0.26.2, regressions in 0.26.3)
+  ([#628](https://github.com/thevoiceguy/siphon-ai/pull/628)).
+
 ### Fixed
 
 - **The release SBOM now identifies itself.** `siphon-ai-<version>-sbom.cdx.json`'s

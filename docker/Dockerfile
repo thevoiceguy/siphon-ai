@@ -57,6 +57,9 @@ COPY . .
 # on any Linux kernel ≥ 3.2 without dynamic library deps. `strip`
 # drops debug info, halving the binary size.
 ENV RUSTFLAGS="-C target-feature=+crt-static"
+# Alpine ships CMake 4, which refuses vendored libopus's
+# `cmake_minimum_required` (< 3.5); this lets audiopus_sys configure it.
+ENV CMAKE_POLICY_VERSION_MINIMUM=3.5
 RUN cargo build \
         --release \
         --locked \

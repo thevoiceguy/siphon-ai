@@ -41,6 +41,10 @@ env:
   # arch-independent (no host `strip` needed for the aarch64 artifact).
   CARGO_PROFILE_RELEASE_STRIP: symbols
   CARGO_TERM_COLOR: always
+  # ubuntu-latest is Ubuntu 26.04 since 2026-10, whose CMake 4 refuses
+  # vendored libopus's `cmake_minimum_required` (< 3.5), so audiopus_sys's
+  # build script fails. This lets CMake configure it anyway.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 jobs:
   # The tag must agree with the workspace version and have a dated

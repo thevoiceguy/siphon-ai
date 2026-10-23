@@ -31,6 +31,12 @@ concurrency:
   group: browser-interop-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # ubuntu-latest is Ubuntu 26.04 since 2026-10, whose CMake 4 refuses
+  # vendored libopus's `cmake_minimum_required` (< 3.5), so audiopus_sys's
+  # build script fails. This lets CMake configure it anyway.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
 jobs:
   interop:
     name: browsers × the WebRTC leg

@@ -1067,15 +1067,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "encoding_rs"
-version = "0.8.35"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
-dependencies = [
- "cfg-if",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1309,7 +1300,7 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 [[package]]
 name = "forge-codecs"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "audiopus",
  "ezk-g722",
@@ -1321,7 +1312,7 @@ dependencies = [
 [[package]]
 name = "forge-core"
 version = "0.2.2"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "chrono",
  "serde",
@@ -1336,7 +1327,7 @@ dependencies = [
 [[package]]
 name = "forge-dtmf"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "chrono",
  "forge-core",
@@ -1347,8 +1338,8 @@ dependencies = [
 
 [[package]]
 name = "forge-engine"
-version = "0.6.1"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+version = "0.7.0"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1360,7 +1351,9 @@ dependencies = [
  "forge-dtmf",
  "forge-hep",
  "forge-injection",
+ "forge-mixer",
  "forge-recorder",
+ "forge-resampler",
  "forge-rtp",
  "forge-transcoder",
  "forge-vad",
@@ -1378,7 +1371,7 @@ dependencies = [
 [[package]]
 name = "forge-hep"
 version = "0.0.1"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "bytes",
  "hep-rs",
@@ -1391,7 +1384,7 @@ dependencies = [
 [[package]]
 name = "forge-ice"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "bytes",
  "forge-core",
@@ -1412,8 +1405,8 @@ dependencies = [
 
 [[package]]
 name = "forge-injection"
-version = "0.1.1"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+version = "0.2.0"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "forge-core",
  "rubato",
@@ -1425,8 +1418,8 @@ dependencies = [
 
 [[package]]
 name = "forge-mixer"
-version = "0.4.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+version = "0.5.0"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "bytes",
  "dashmap 6.2.1",
@@ -1440,7 +1433,7 @@ dependencies = [
 [[package]]
 name = "forge-recorder"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "bytes",
  "forge-core",
@@ -1453,8 +1446,8 @@ dependencies = [
 
 [[package]]
 name = "forge-resampler"
-version = "0.1.1"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+version = "0.2.0"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "thiserror 2.0.18",
  "tracing",
@@ -1462,8 +1455,8 @@ dependencies = [
 
 [[package]]
 name = "forge-rtp"
-version = "0.7.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+version = "0.7.1"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "aes 0.9.1",
  "aes-gcm 0.11.0",
@@ -1488,7 +1481,7 @@ dependencies = [
 [[package]]
 name = "forge-sdp"
 version = "0.2.2"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1504,7 +1497,7 @@ dependencies = [
 [[package]]
 name = "forge-transcoder"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "bytes",
  "forge-codecs",
@@ -1517,7 +1510,7 @@ dependencies = [
 [[package]]
 name = "forge-vad"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "forge-core",
  "thiserror 2.0.18",
@@ -1526,8 +1519,8 @@ dependencies = [
 
 [[package]]
 name = "forge-webrtc"
-version = "0.7.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.09.22#84360943f834501a89814ebea213d40b3dd68a95"
+version = "0.8.0"
+source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.10.23#b975d214260c86ee74ea441c982861000886e8fd"
 dependencies = [
  "bytes",
  "dashmap 6.2.1",
@@ -3886,6 +3879,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
+
+[[package]]
 name = "regex-syntax"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4407,7 +4406,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 [[package]]
 name = "sip-auth"
 version = "0.4.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4430,7 +4429,7 @@ dependencies = [
 [[package]]
 name = "sip-core"
 version = "0.7.8"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "bytes",
  "httpdate",
@@ -4442,8 +4441,8 @@ dependencies = [
 
 [[package]]
 name = "sip-dialog"
-version = "0.3.4"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+version = "0.4.0"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4461,7 +4460,7 @@ dependencies = [
 [[package]]
 name = "sip-dns"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4475,7 +4474,7 @@ dependencies = [
 [[package]]
 name = "sip-hep"
 version = "0.0.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "bytes",
  "hep-rs",
@@ -4486,7 +4485,7 @@ dependencies = [
 [[package]]
 name = "sip-identity"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "base64 0.22.1",
  "ring",
@@ -4499,7 +4498,7 @@ dependencies = [
 [[package]]
 name = "sip-observe"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "once_cell",
  "tracing",
@@ -4508,7 +4507,7 @@ dependencies = [
 [[package]]
 name = "sip-parse"
 version = "0.4.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "bytes",
  "httpdate",
@@ -4522,7 +4521,7 @@ dependencies = [
 [[package]]
 name = "sip-ratelimit"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "dashmap 5.5.3",
  "parking_lot",
@@ -4532,8 +4531,8 @@ dependencies = [
 
 [[package]]
 name = "sip-registrar"
-version = "0.3.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+version = "0.3.2"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4554,7 +4553,7 @@ dependencies = [
 [[package]]
 name = "sip-sdp"
 version = "0.3.2"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "nom 7.1.3",
  "smol_str",
@@ -4562,8 +4561,8 @@ dependencies = [
 
 [[package]]
 name = "sip-transaction"
-version = "0.7.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+version = "0.7.3"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4581,8 +4580,8 @@ dependencies = [
 
 [[package]]
 name = "sip-transport"
-version = "0.6.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+version = "0.7.1"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4606,8 +4605,8 @@ dependencies = [
 
 [[package]]
 name = "sip-uac"
-version = "0.7.5"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+version = "0.9.3"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4631,8 +4630,8 @@ dependencies = [
 
 [[package]]
 name = "sip-uas"
-version = "0.5.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+version = "0.5.1"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4658,7 +4657,7 @@ checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "siphon-ai"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4710,7 +4709,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-admin-api-types"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4718,7 +4717,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-audit"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4734,7 +4733,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-bridge"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4756,7 +4755,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-cdr"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4773,7 +4772,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-config"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "regex",
  "serde",
@@ -4793,7 +4792,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-core"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4842,7 +4841,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-http"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "base64 0.22.1",
  "hmac 0.12.1",
@@ -4865,7 +4864,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-media-glue"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4891,7 +4890,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-protocol-testkit"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4909,7 +4908,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-quality"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4927,7 +4926,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-recording"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "audiopus",
@@ -4941,7 +4940,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-routes"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "regex",
  "serde",
@@ -4953,7 +4952,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-security"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "schemars",
  "serde",
@@ -4963,7 +4962,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-sightglass"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4978,7 +4977,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-sip-glue"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5007,7 +5006,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-stir-shaken"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "base64 0.22.1",
  "rcgen",
@@ -5025,7 +5024,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-telemetry"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "anyhow",
  "forge-engine",
@@ -5057,7 +5056,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-webhooks"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5072,7 +5071,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-webrtc-glue"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "bytes",
  "forge-codecs",
@@ -5207,9 +5206,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "symphonia"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5773a4c030a19d9bfaa090f49746ff35c75dfddfa700df7a5939d5e076a57039"
+checksum = "a7edef6a96b696d4e0cab5ee9ebb7ca155ed95f30a6b45bbb8b97d2727f02424"
 dependencies = [
  "lazy_static",
  "symphonia-bundle-flac",
@@ -5230,44 +5229,44 @@ dependencies = [
 
 [[package]]
 name = "symphonia-bundle-flac"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c91565e180aea25d9b80a910c546802526ffd0072d0b8974e3ebe59b686c9976"
+checksum = "6405d5c34ff6f8f7ca08a4101efe66d21e180f7322ef9359900a0e55698a7892"
 dependencies = [
  "log",
+ "symphonia-common",
  "symphonia-core",
  "symphonia-metadata",
- "symphonia-utils-xiph",
 ]
 
 [[package]]
 name = "symphonia-bundle-mp3"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4872dd6bb56bf5eac799e3e957aa1981086c3e613b27e0ac23b176054f7c57ed"
+checksum = "98ea5ffc8716bff677dfb3b01b420c7b758de901a72b8c330bf2040ab74b4add"
 dependencies = [
  "lazy_static",
  "log",
  "symphonia-core",
- "symphonia-metadata",
 ]
 
 [[package]]
 name = "symphonia-codec-aac"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c263845aa86881416849c1729a54c7f55164f8b96111dba59de46849e73a790"
+checksum = "f5bf8e39552d34a3c4c98333370e62f48c92456d2e814f273b5c3ad7c4a5f45c"
 dependencies = [
  "lazy_static",
  "log",
+ "symphonia-common",
  "symphonia-core",
 ]
 
 [[package]]
 name = "symphonia-codec-adpcm"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2dddc50e2bbea4cfe027441eece77c46b9f319748605ab8f3443350129ddd07f"
+checksum = "445932ecb0c59362fde9c082dd63a75380650c5077fdb8b80b8cac850442a74c"
 dependencies = [
  "log",
  "symphonia-core",
@@ -5275,19 +5274,20 @@ dependencies = [
 
 [[package]]
 name = "symphonia-codec-alac"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8413fa754942ac16a73634c9dfd1500ed5c61430956b33728567f667fdd393ab"
+checksum = "920a78f96f3cf62932d0c497959c0cc2100ef36b03c7ca1417b260f432a482d8"
 dependencies = [
  "log",
+ "symphonia-common",
  "symphonia-core",
 ]
 
 [[package]]
 name = "symphonia-codec-pcm"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e89d716c01541ad3ebe7c91ce4c8d38a7cf266a3f7b2f090b108fb0cb031d95"
+checksum = "e04ba75686acbe43542fdd374571195f0530c0b7785ca25cc6840e9c6c4b6eea"
 dependencies = [
  "log",
  "symphonia-core",
@@ -5295,82 +5295,93 @@ dependencies = [
 
 [[package]]
 name = "symphonia-codec-vorbis"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f025837c309cd69ffef572750b4a2257b59552c5399a5e49707cc5b1b85d1c73"
+checksum = "73d90b4fcf796137cc683c538282804ff9629f8ad9dbfd881fcbba331ac4e986"
+dependencies = [
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-common"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acc3fcc18ec9b8cdd48614e259c4cf0d27b71d41e5d9b120b42c5adab12d7c4"
 dependencies = [
  "log",
  "symphonia-core",
- "symphonia-utils-xiph",
+ "symphonia-metadata",
 ]
 
 [[package]]
 name = "symphonia-core"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea00cc4f79b7f6bb7ff87eddc065a1066f3a43fe1875979056672c9ef948c2af"
+checksum = "01c412864d599d4750d0c3d684d7e093ec05e5309681ef5252cc1096a437f6e0"
 dependencies = [
- "arrayvec",
- "bitflags 1.3.2",
+ "bitflags 2.13.2",
  "bytemuck",
  "lazy_static",
  "log",
+ "num-complex",
+ "rustfft",
+ "smallvec",
 ]
 
 [[package]]
 name = "symphonia-format-caf"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8faf379316b6b6e6bbc274d00e7a592e0d63ff1a7e182ce8ba25e24edd3d096"
+checksum = "ab64327ee1920531c5bf86cf7e9cd1a599d57013ddc30691da62683cefc65191"
 dependencies = [
  "log",
+ "symphonia-common",
  "symphonia-core",
- "symphonia-metadata",
 ]
 
 [[package]]
 name = "symphonia-format-isomp4"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "243739585d11f81daf8dac8d9f3d18cc7898f6c09a259675fc364b382c30e0a5"
+checksum = "0e681a70e1870d34e02abf1dbc51e4267c3f1827801474e8870be8c689fc4dc3"
 dependencies = [
- "encoding_rs",
  "log",
+ "symphonia-common",
  "symphonia-core",
  "symphonia-metadata",
- "symphonia-utils-xiph",
 ]
 
 [[package]]
 name = "symphonia-format-mkv"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "122d786d2c43a49beb6f397551b4a050d8229eaa54c7ddf9ee4b98899b8742d0"
+checksum = "d015c5c0558864665894b3f4cbd95e10abb01b9c868e751c72670f326a56360e"
 dependencies = [
  "lazy_static",
  "log",
+ "symphonia-common",
  "symphonia-core",
- "symphonia-metadata",
- "symphonia-utils-xiph",
 ]
 
 [[package]]
 name = "symphonia-format-ogg"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b4955c67c1ed3aa8ae8428d04ca8397fbef6a19b2b051e73b5da8b1435639cb"
+checksum = "0b5495e7f7e3c7035328d82b6d6e377eef289bb0c4105bdeb557fc93a833f994"
 dependencies = [
  "log",
+ "symphonia-common",
  "symphonia-core",
  "symphonia-metadata",
- "symphonia-utils-xiph",
 ]
 
 [[package]]
 name = "symphonia-format-riff"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2d7c3df0e7d94efb68401d81906eae73c02b40d5ec1a141962c592d0f11a96f"
+checksum = "1ff70929083a8c1a5f6cd7c904b6071c7914ad04739b510c2f7239dfc9b7dabe"
 dependencies = [
  "extended",
  "log",
@@ -5380,24 +5391,15 @@ dependencies = [
 
 [[package]]
 name = "symphonia-metadata"
-version = "0.5.5"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36306ff42b9ffe6e5afc99d49e121e0bd62fe79b9db7b9681d48e29fa19e6b16"
+checksum = "83713a97705d77bdef7cdbc0768fd6e5a54e4cd7e48d60a806ae85639e2c87c6"
 dependencies = [
- "encoding_rs",
  "lazy_static",
  "log",
+ "regex-lite",
+ "smallvec",
  "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-utils-xiph"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee27c85ab799a338446b68eec77abf42e1a6f1bb490656e121c6e27bfbab9f16"
-dependencies = [
- "symphonia-core",
- "symphonia-metadata",
 ]
 
 [[package]]

@@ -4657,7 +4657,7 @@ checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "siphon-ai"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4709,7 +4709,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-admin-api-types"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4717,7 +4717,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-audit"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4733,7 +4733,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-bridge"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4755,7 +4755,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-cdr"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4772,7 +4772,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-config"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "regex",
  "serde",
@@ -4792,7 +4792,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-core"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4841,7 +4841,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-http"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "base64 0.22.1",
  "hmac 0.12.1",
@@ -4864,7 +4864,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-media-glue"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4890,7 +4890,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-protocol-testkit"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4908,7 +4908,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-quality"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4926,7 +4926,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-recording"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "audiopus",
@@ -4940,7 +4940,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-routes"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "regex",
  "serde",
@@ -4952,7 +4952,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-security"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "schemars",
  "serde",
@@ -4962,7 +4962,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-sightglass"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4977,7 +4977,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-sip-glue"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5006,7 +5006,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-stir-shaken"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "base64 0.22.1",
  "rcgen",
@@ -5024,7 +5024,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-telemetry"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "anyhow",
  "forge-engine",
@@ -5056,7 +5056,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-webhooks"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5071,7 +5071,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-ai-webrtc-glue"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "bytes",
  "forge-codecs",

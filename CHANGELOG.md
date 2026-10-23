@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.56.0] - 2026-10-23
+
 ### Changed
 
 - **siphon-rs v2026.09.22 → v2026.10.22.2 and forge-media v2026.09.22 →
@@ -46,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Building with CMake 4** (Ubuntu 26.04, current Alpine, which GitHub's `ubuntu-latest`
+  now is): the vendored libopus that `audiopus_sys` builds declares a
+  `cmake_minimum_required` CMake 4 refuses, so the build script fails. CI, the release
+  workflow and `docker/Dockerfile` now set `CMAKE_POLICY_VERSION_MINIMUM=3.5`; set the
+  same when building from source on such a host
+  ([#628](https://github.com/thevoiceguy/siphon-ai/pull/628)).
 - **The release SBOM now identifies itself.** `siphon-ai-<version>-sbom.cdx.json`'s
   `metadata.component` (the product the document describes) was the scanned path `"."`
   with no version, in every release through 0.55.1, so SBOM tooling couldn't tell which

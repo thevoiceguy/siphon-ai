@@ -274,7 +274,7 @@ The range `40000–40100` can overlap Linux’s ephemeral port range. Reserve it
 )
 ```
 
-If another sysctl file or configuration-management system also sets this key, consolidate the reservations there so a later reload or reboot does not overwrite them. The RTP pool provides 50 port pairs; that is a port-pool ceiling, not a benchmark for the bot’s capacity. [Deployment reference](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/docs/DEPLOY.md)
+If another sysctl file or configuration-management system also sets this key, consolidate the reservations there so a later reload or reboot does not overwrite them. The RTP pool provides 50 port pairs, which is 25 concurrent calls from 0.57.0 (two pairs per call; widen the range, the reservation and the firewall rule together for more); that is a port-pool ceiling, not a benchmark for the bot’s capacity. [Deployment reference](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/docs/DEPLOY.md)
 
 ### Firewall
 

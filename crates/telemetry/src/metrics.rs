@@ -357,8 +357,8 @@ pub const OUTBOUND_DELAYED_OFFER_TOTAL: &str = "siphon_ai_outbound_delayed_offer
 /// match the call site in `siphon-ai-media-glue::setup`.
 pub const RTP_RESERVE_BLOCKS_TOTAL: &str = "siphon_ai_rtp_reserve_blocks_total";
 
-/// The configured outbound reservation in port pairs (= concurrent
-/// calls), published once at startup so the shed threshold is readable
+/// The configured outbound reservation in concurrent calls (two port
+/// pairs each), published once at startup so the shed threshold is readable
 /// next to the counter above rather than living only in the TOML.
 /// `0` = no reservation. Literal must match the call site in
 /// `siphon-ai` (`runtime`).
@@ -1315,7 +1315,7 @@ pub fn register_descriptions() {
     describe_gauge!(
         RTP_RESERVED_OUTBOUND_CALLS,
         Unit::Count,
-        "Configured RTP port pairs held back from inbound for origination ([media].reserved_outbound_calls)."
+        "Configured concurrent calls (two RTP port pairs each) held back from inbound for origination ([media].reserved_outbound_calls)."
     );
     describe_counter!(
         REGISTRAR_REGISTERS_TOTAL,
@@ -1334,7 +1334,7 @@ pub fn register_descriptions() {
     describe_gauge!(
         RTP_PORT_PAIRS_CAPACITY,
         Unit::Count,
-        "Total RTP port pairs in the pool ([media].rtp_port_range / 2)."
+        "Total RTP port pairs in the pool ([media].rtp_port_range / 2). A SIP call holds two."
     );
     describe_counter!(
         WEBRTC_LEGS_TOTAL,

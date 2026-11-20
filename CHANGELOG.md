@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.57.0] - 2026-11-20
+
+### Upgrade notes
+
+- **A SIP call now holds two RTP port pairs, so an existing `[media].rtp_port_range`
+  carries half as many calls.** forge-engine 0.8 binds an RTP/RTCP pair for each of a
+  media session's two legs, and the daemon uses one of them. `[40000, 40500]` was 250
+  concurrent calls and is now 125. To keep your capacity, double the range, and widen
+  the firewall rule and `net.ipv4.ip_local_reserved_ports` with it. A pool that runs
+  out answers `503` + `Retry-After` and counts
+  `siphon_ai_invites_total{result="rejected_capacity"}`, as before. A browser (WebRTC)
+  call still holds one pair. forge-media
+  [#225](https://github.com/thevoiceguy/forge-media/issues/225) asks for a single-leg
+  session that would take this back to one pair.
+- **`[media].reserved_outbound_calls` is still counted in calls** and now holds back two
+  pairs for each. It must be below the pool's capacity in calls, which halved, so a
+  value that loaded on 0.56.0 can fail the load on 0.57.0: run `siphon-ai check` before
+  upgrading.
+- `siphon_ai_rtp_port_pairs_allocated` reads up to twice `siphon_ai_calls_active`. An
+  alert that compares the two needs the factor; "above zero with no calls" still means
+  a leak.
+- **Debian package:** the `[admin]` block below is in the packaged default config,
+  which is a conffile. dpkg keeps a config you have edited, so on an upgrade add the
+  block by hand (`docs/DEPLOY.md` → *Debian / Ubuntu package*).
+
+### Added
+
+- **The `.deb` ships `sightglass`, set up to work as installed.** The package installs
+  `/usr/bin/sightglass` next to the daemon. Its default config enables the admin API on
+  `127.0.0.1:9092` with one `admin`-role token, generated at install into
+  `/etc/siphon-ai/admin.token` (`root:siphon-ai`, `0640`; kept across upgrades, removed
+  on purge), and `/etc/sightglass/config.toml` points the console at it. After
+  `systemctl start siphon-ai`, `sudo sightglass` shows the node. Earlier packages
+  carried the daemon only and left `/admin/*` unserved.
+- **sightglass reads `/etc/sightglass/config.toml`** when the user has no
+  `~/.config/sightglass/config.toml`. `--config` and `--target` are unchanged. A token
+  file it may not read now says so and names the fix.
+
+### Changed
+
+- **siphon-rs v2026.10.22.2 → v2026.11.10 and forge-media v2026.10.23 →
+  v2026.11.20.2**, in lockstep (forge embeds that siphon-rs). No protocol or CDR change.
+  What reaches the daemon:
+  - **Two port pairs per SIP call** (forge-engine 0.8.1), as in the upgrade notes.
+    `siphon-ai check` and `print-config` report the pool's capacity in calls on the new
+    basis.
+  - **Every response carries a stamped Via** (sip-transaction 0.9.1): `received=` and
+    a filled `rport=` on responses built outside the integrated UAS, which a caller
+    behind NAT needs.
+  - **Outbound early dialogs are released** (sip-uac 0.9.5). Each tagged provisional
+    left a dialog in the store for the life of the process when the callee answered
+    under another To tag, the call was cancelled while ringing, or it failed.
+  - **New outbound TCP connections go through the daemon's own dispatcher**
+    (sip-transaction 0.8.0) and its client pool, where the transaction layer used to
+    open them from a pool of its own.
+  - Reliable provisionals (RFC 3262) in the server INVITE transaction and transport-cc,
+    simulcast and webinar work in forge are present upstream and not used here.
+- **The packaged default `rtp_port_range` is `[40000, 40200]`** (was `[40000, 40100]`),
+  so a fresh install still carries 50 calls. `configs/soak.toml` moves to
+  `[40000, 44000]` for the same reason.
+
 ## [0.56.0] - 2026-10-23
 
 ### Changed

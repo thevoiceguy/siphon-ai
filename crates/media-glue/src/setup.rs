@@ -96,8 +96,17 @@ pub struct MediaSetup {
     reserved_outbound_calls: usize,
 }
 
-/// RTP port *pairs* — equivalently, concurrent calls — a pool spanning
-/// `range` can hand out. `None` = forge's default range.
+/// RTP port pairs one forge media session holds: one per leg, since
+/// forge-engine 0.8.0 (forge-media #189). We only ever put a peer on
+/// leg A — the other side of a call is the WebSocket tap — but forge
+/// allocates both or neither, so a classic SIP call costs two pairs of
+/// `[media].rtp_port_range`. A WebRTC leg is not a session and holds one
+/// ([`crate::PortReservation`]).
+pub const PORT_PAIRS_PER_SESSION: usize = 2;
+
+/// Concurrent classic (SIP) calls a pool spanning `range` can carry:
+/// its port pairs divided by [`PORT_PAIRS_PER_SESSION`]. `None` =
+/// forge's default range.
 ///
 /// Lives here rather than in `config` so the number a
 /// `[media].reserved_outbound_calls` value is validated against is
@@ -106,7 +115,7 @@ pub struct MediaSetup {
 /// forge changes its default.
 #[must_use]
 pub fn rtp_pool_capacity_calls(range: Option<(u16, u16)>) -> usize {
-    match range {
+    let pairs = match range {
         // A malformed range is `[media].rtp_port_range`'s own error to
         // report (`CompileError::BadRtpPortRange`); don't mask it with a
         // reserve error, so fall back to forge's default capacity here.
@@ -114,7 +123,8 @@ pub fn rtp_pool_capacity_calls(range: Option<(u16, u16)>) -> usize {
             .map(|c| c.capacity())
             .unwrap_or_else(|_| forge_rtp::PortPoolConfig::default().capacity()),
         None => forge_rtp::PortPoolConfig::default().capacity(),
-    }
+    };
+    pairs / PORT_PAIRS_PER_SESSION
 }
 
 /// Per-call inputs to [`MediaSetup::accept_inbound`].
@@ -459,19 +469,28 @@ impl MediaSetup {
         }
     }
 
-    /// Hold `calls` port pairs back from the inbound allocator for
-    /// origination (`[media].reserved_outbound_calls`, siphon-ai #556).
-    /// `0` disables the reservation.
+    /// Hold room for `calls` originated calls back from the inbound
+    /// allocator (`[media].reserved_outbound_calls`, siphon-ai #556) —
+    /// [`PORT_PAIRS_PER_SESSION`] port pairs each. `0` disables the
+    /// reservation.
     #[must_use]
     pub fn with_reserved_outbound_calls(mut self, calls: usize) -> Self {
         self.reserved_outbound_calls = calls;
         self
     }
 
-    /// The configured outbound reservation, in port pairs / calls.
+    /// The configured outbound reservation, in calls.
     #[must_use]
     pub fn reserved_outbound_calls(&self) -> usize {
         self.reserved_outbound_calls
+    }
+
+    /// The reservation as the pool floor forge enforces: the port pairs
+    /// an inbound allocation must leave free so that
+    /// `reserved_outbound_calls` originations still fit.
+    fn reserved_floor_pairs(&self) -> usize {
+        self.reserved_outbound_calls
+            .saturating_mul(PORT_PAIRS_PER_SESSION)
     }
 
     /// Reserve an RTP port pair for a media leg that is not a forge
@@ -479,7 +498,7 @@ impl MediaSetup {
     ///
     /// Draws under the same `[media].reserved_outbound_calls` floor an
     /// inbound SIP call uses, because that is what it is: an inbound
-    /// call occupying one slot. Anything else would let browser traffic
+    /// call (one that costs a single pair). Anything else would let browser traffic
     /// starve origination while the reserved band appeared untouched.
     ///
     /// The returned [`PortReservation`] releases on drop, so the pair
@@ -489,7 +508,7 @@ impl MediaSetup {
     pub async fn reserve_port_pair(&self) -> Result<crate::PortReservation, SetupError> {
         crate::PortReservation::take(
             Arc::clone(&self.session_manager),
-            self.reserved_outbound_calls,
+            self.reserved_floor_pairs(),
         )
         .await
         .map_err(|e| self.classify_inbound_alloc_error(e))
@@ -518,7 +537,8 @@ impl MediaSetup {
             if Self::is_reserve_refusal(detail) {
                 metrics::counter!(RTP_RESERVE_BLOCKS_TOTAL).increment(1);
                 warn!(
-                    reserved_pairs = self.reserved_outbound_calls,
+                    reserved_calls = self.reserved_outbound_calls,
+                    reserved_pairs = self.reserved_floor_pairs(),
                     detail = %detail,
                     "refusing inbound call: RTP port pool is down to the outbound reservation"
                 );
@@ -691,7 +711,7 @@ impl MediaSetup {
                 Some(call.offer_sdp.to_string()),
                 call.from_tag.clone(),
                 call.to_tag.clone(),
-                self.session_config_for(call.vad, self.reserved_outbound_calls),
+                self.session_config_for(call.vad, self.reserved_floor_pairs()),
             )
             .await
         {
@@ -1196,9 +1216,10 @@ a=sendrecv\r\n"
             .await
             .expect("offer generated");
 
-        // A port pair was allocated, and the offer advertises it.
+        // One session's pairs were allocated, and the offer advertises
+        // leg A's.
         let (allocated, _) = session_mgr.port_pool_stats().await;
-        assert_eq!(allocated, 1, "one session allocated");
+        assert_eq!(allocated, PORT_PAIRS_PER_SESSION, "one session allocated");
         let rtp_port = offer.session.ports().rtp_port;
         assert!(
             offer.offer_sdp.contains(&format!("m=audio {rtp_port} ")),
@@ -1229,7 +1250,7 @@ a=sendrecv\r\n"
         assert_eq!(accepted.tap.sample_rate(), 8000);
         // The session survived — still allocated, not rolled back.
         let (allocated, _) = session_mgr.port_pool_stats().await;
-        assert_eq!(allocated, 1);
+        assert_eq!(allocated, PORT_PAIRS_PER_SESSION);
         // Regression — the delayed-offer / outbound "no audio" bug: apply_answer
         // must ACTIVATE the session (start forge's RTP forwarding), not merely
         // bind the codec + attach the tap. A session left in `Initializing`
@@ -1424,7 +1445,10 @@ a=sendrecv\r\n"
             .expect("SRTP answer applied");
         assert_eq!(accepted.answer.negotiated_codec, Codec::Pcmu);
         let (allocated, _) = session_mgr.port_pool_stats().await;
-        assert_eq!(allocated, 1, "session retained after SRTP install");
+        assert_eq!(
+            allocated, PORT_PAIRS_PER_SESSION,
+            "session retained after SRTP install"
+        );
     }
 
     #[tokio::test]

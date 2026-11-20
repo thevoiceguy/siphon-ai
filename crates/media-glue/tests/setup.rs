@@ -372,9 +372,10 @@ async fn energy_vad_call_keeps_engine_default_detector() {
 // `the_floor_is_exact_under_concurrent_inbound_setup` is the test that
 // would have failed against the pre-check.
 
-/// A `MediaSetup` over a fresh pool holding `reserved` pairs back from
-/// inbound. Ranges must span >= 100 ports (forge's minimum), so the
-/// pool is 50 pairs and the reservations below are sized against that.
+/// A `MediaSetup` over a fresh pool holding room for `reserved` calls
+/// back from inbound. Ranges must span >= 100 ports (forge's minimum),
+/// so the pool is 50 pairs — 25 calls at two pairs a session (forge-
+/// engine 0.8) — and the reservations below are sized against that.
 fn reserved_setup(
     min_port: u16,
     max_port: u16,
@@ -413,10 +414,11 @@ fn outbound_req(call_id: &str) -> OutboundOfferRequest {
 
 #[tokio::test]
 async fn reserve_refuses_inbound_while_ports_remain_and_leaves_them_to_outbound() {
-    // 50-pair pool, 49 held for origination: exactly one inbound call
-    // fits, and everything after it must be refused *while 49 pairs are
-    // still free* — that is the whole point of the knob.
-    let (setup, session_mgr) = reserved_setup(42000, 42100, 49);
+    // 25-call pool (50 pairs), 24 calls held for origination: exactly
+    // one inbound call fits, and everything after it must be refused
+    // *while 48 pairs are still free* — that is the whole point of the
+    // knob.
+    let (setup, session_mgr) = reserved_setup(42000, 42100, 24);
 
     setup
         .accept_inbound(pcmu_call("c-res-1", LINPHONE_PCMU_OFFER))
@@ -424,8 +426,8 @@ async fn reserve_refuses_inbound_while_ports_remain_and_leaves_them_to_outbound(
         .expect("first inbound fits under the reservation");
 
     let (allocated, available) = session_mgr.port_pool_stats().await;
-    assert_eq!(allocated, 1);
-    assert_eq!(available, 49, "the reserved band, and nothing more");
+    assert_eq!(allocated, 2, "one session, a pair per leg");
+    assert_eq!(available, 48, "the reserved band, and nothing more");
 
     let refused = setup
         .accept_inbound(pcmu_call("c-res-2", LINPHONE_PCMU_OFFER))
@@ -439,8 +441,8 @@ async fn reserve_refuses_inbound_while_ports_remain_and_leaves_them_to_outbound(
     // Refusing must not have cost a port, or the reservation would
     // erode itself under a sustained surge.
     let (allocated, available) = session_mgr.port_pool_stats().await;
-    assert_eq!(allocated, 1, "a refused INVITE allocates nothing");
-    assert_eq!(available, 49);
+    assert_eq!(allocated, 2, "a refused INVITE allocates nothing");
+    assert_eq!(available, 48);
 
     // And the reserved band is genuinely usable by origination — the
     // outbound allocator is not gated.
@@ -449,7 +451,7 @@ async fn reserve_refuses_inbound_while_ports_remain_and_leaves_them_to_outbound(
         .await
         .expect("origination draws from the reserved band");
     let (allocated, _) = session_mgr.port_pool_stats().await;
-    assert_eq!(allocated, 2);
+    assert_eq!(allocated, 4);
 
     session_mgr
         .stop_session(&CallId::new("c-res-1"))
@@ -464,28 +466,28 @@ async fn reserve_refuses_inbound_while_ports_remain_and_leaves_them_to_outbound(
 #[tokio::test]
 async fn reserve_of_zero_leaves_the_pool_unreserved() {
     // The default. Pre-0.50 behaviour must be byte-for-byte unchanged:
-    // inbound may take the last pair in the pool.
+    // inbound may take the last pairs in the pool.
     let (setup, session_mgr) = reserved_setup(42200, 42300, 0);
 
-    for i in 0..50 {
+    for i in 0..25 {
         setup
             .accept_inbound(pcmu_call(&format!("c-unres-{i}"), LINPHONE_PCMU_OFFER))
             .await
-            .unwrap_or_else(|e| panic!("inbound {i} of 50 must fit an unreserved pool: {e}"));
+            .unwrap_or_else(|e| panic!("inbound {i} of 25 must fit an unreserved pool: {e}"));
     }
 
     let (allocated, available) = session_mgr.port_pool_stats().await;
     assert_eq!((allocated, available), (50, 0));
 
-    // 51st is a genuinely exhausted pool — same error type, different
+    // 26th is a genuinely exhausted pool — same error type, different
     // cause, which is exactly why the split lives in a metric and not
     // on the wire.
     let exhausted = setup
-        .accept_inbound(pcmu_call("c-unres-51", LINPHONE_PCMU_OFFER))
+        .accept_inbound(pcmu_call("c-unres-26", LINPHONE_PCMU_OFFER))
         .await;
     assert!(matches!(exhausted, Err(SetupError::ResourceLimit(_))));
 
-    for i in 0..50 {
+    for i in 0..25 {
         session_mgr
             .stop_session(&CallId::new(format!("c-unres-{i}")))
             .await
@@ -498,7 +500,7 @@ async fn reserve_is_checked_after_the_offer_parse() {
     // Ordering matters for the caller's answer: a malformed offer is
     // the peer's bug (488) and must not be reported as our capacity
     // (503) just because the pool happens to be at the floor.
-    let (setup, _session_mgr) = reserved_setup(42400, 42500, 50);
+    let (setup, _session_mgr) = reserved_setup(42400, 42500, 25);
 
     let mut call = pcmu_call("c-res-parse", LINPHONE_PCMU_OFFER);
     call.offer_sdp = "not actually sdp";
@@ -516,8 +518,9 @@ async fn reserve_is_checked_after_the_offer_parse() {
 /// they were clear, dipping up to `K-1` pairs under. Now the check
 /// happens inside the allocation's own critical section.
 ///
-/// 100-pair pool, floor 60: exactly 40 inbound calls may land no matter
-/// how they interleave, leaving exactly 60 for origination.
+/// 100-pair pool, 30 calls reserved (a floor of 60 pairs): exactly 20
+/// inbound calls may land no matter how they interleave, leaving
+/// exactly 60 pairs for origination.
 #[tokio::test]
 async fn the_floor_is_exact_under_concurrent_inbound_setup() {
     let session_mgr = small_session_manager(42600, 42800);
@@ -528,7 +531,7 @@ async fn the_floor_is_exact_under_concurrent_inbound_setup() {
             Arc::new(forge_core::EventBus::new()),
             "192.168.1.10",
         )
-        .with_reserved_outbound_calls(60),
+        .with_reserved_outbound_calls(30),
     );
 
     let mut tasks = Vec::new();
@@ -549,8 +552,8 @@ async fn the_floor_is_exact_under_concurrent_inbound_setup() {
     }
 
     assert_eq!(
-        admitted, 40,
-        "capacity 100 minus a floor of 60 — exactly, not approximately"
+        admitted, 20,
+        "100 pairs minus a floor of 60, at two a call — exactly, not approximately"
     );
     let (allocated, available) = session_mgr.port_pool_stats().await;
     assert_eq!((allocated, available), (40, 60));
@@ -563,12 +566,12 @@ async fn the_floor_is_exact_under_concurrent_inbound_setup() {
 #[tokio::test]
 async fn reserve_refusal_is_recognised_from_the_real_forge_error() {
     let session_mgr = small_session_manager(42800, 43000); // 100 pairs
-    let setup = reserved_setup_on(&session_mgr, 99);
+    let setup = reserved_setup_on(&session_mgr, 49); // 98 of them
 
     setup
         .accept_inbound(pcmu_call("c-msg-1", LINPHONE_PCMU_OFFER))
         .await
-        .expect("one call fits under a floor of 99");
+        .expect("one call fits under a floor of 98 pairs");
 
     let err = setup
         .accept_inbound(pcmu_call("c-msg-2", LINPHONE_PCMU_OFFER))
@@ -585,7 +588,7 @@ async fn reserve_refusal_is_recognised_from_the_real_forge_error() {
 
     // And an exhausted pool must NOT look like a floor refusal.
     let plain = reserved_setup_on(&session_mgr, 0);
-    for i in 0..99 {
+    for i in 0..49 {
         plain
             .accept_inbound(pcmu_call(&format!("c-msg-fill-{i}"), LINPHONE_PCMU_OFFER))
             .await
@@ -640,15 +643,17 @@ async fn reserved_pair_shows_in_the_pool_while_held() {
     );
 }
 
-/// The whole point of holding a *pair*: a browser call and a SIP call
-/// cost the same, so the reserved band means one thing regardless of
-/// which kind of leg is consuming the pool.
+/// A browser leg draws from the same pool under the same floor, so the
+/// reserved band means one thing regardless of which kind of leg is
+/// consuming the pool. It holds one pair where a SIP session holds two.
 #[tokio::test]
 async fn browser_legs_respect_the_outbound_reservation() {
-    // 50 pairs, 49 reserved for origination — one inbound slot.
-    let (setup, mgr) = reserved_setup(43200, 43300, 49);
+    // 50 pairs, 24 calls (48 pairs) reserved for origination — two
+    // pairs left for inbound, one per browser leg.
+    let (setup, mgr) = reserved_setup(43200, 43300, 24);
 
-    let first = setup.reserve_port_pair().await.expect("one slot is free");
+    let first = setup.reserve_port_pair().await.expect("a pair is free");
+    let also = setup.reserve_port_pair().await.expect("and a second");
     let second = setup.reserve_port_pair().await;
     assert!(
         second.is_err(),
@@ -660,6 +665,7 @@ async fn browser_legs_respect_the_outbound_reservation() {
     assert!(matches!(second, Err(SetupError::ResourceLimit(_))));
 
     drop(first);
+    drop(also);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_eq!(mgr.port_pool_stats().await.0, 0);
 }

@@ -1,0 +1,21 @@
+# Sightglass fleet config (installed by the siphon-ai .deb package).
+#
+# `sightglass` reads this when the invoking user has no
+# ~/.config/sightglass/config.toml of their own. It points at the
+# daemon on this host through the loopback admin listener the packaged
+# /etc/siphon-ai/config.toml enables.
+#
+# The token file is readable by root and the siphon-ai group, so run
+# `sudo sightglass`, or add your user to the group:
+#
+#     sudo usermod -aG siphon-ai "$USER"    # then log in again
+#
+# Add more [[node]] blocks to watch other nodes from here. Full guide:
+# https://github.com/thevoiceguy/siphon-ai/blob/main/docs/SIGHTGLASS.md
+#
+# This is a dpkg conffile: your edits survive package upgrades.
+
+[[node]]
+name = "local"
+url = "http://127.0.0.1:9092"
+token_file = "/etc/siphon-ai/admin.token"

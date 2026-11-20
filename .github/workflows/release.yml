@@ -164,9 +164,9 @@ jobs:
       # Package: the daemon + the sightglass operator console (0.49.0)
       # + both licenses + README into a versioned tarball. Both
       # binaries are fully static, so the tarball is the whole
-      # delivery for that arch. (The .deb below stays daemon-only on
-      # purpose: sightglass is a client tool that usually runs on a
-      # workstation, not the service host — tarball users get both.)
+      # delivery for that arch. The .deb below carries both too (0.57.0),
+      # with a loopback admin listener and a generated token so
+      # `sightglass` works on the node as installed.
       - name: Package
         run: |
           version="${TAG#v}"
@@ -178,8 +178,9 @@ jobs:
           tar -C staging -czf "${dist}.tar.gz" "${dist}"
           ls -l "${dist}.tar.gz"
 
-      # .deb from the *same* prebuilt static binary. --no-build reuses
-      # it; --no-strip keeps the already-stripped binary (and avoids
+      # .deb from the *same* prebuilt static binaries (daemon +
+      # sightglass, both built above). --no-build reuses
+      # them; --no-strip keeps the already-stripped binary (and avoids
       # needing an aarch64-aware `strip` on the x86 runner). cargo-deb
       # maps the Rust target to the Debian arch (amd64/arm64).
       - name: Install cargo-deb

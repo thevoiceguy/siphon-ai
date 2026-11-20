@@ -31,7 +31,8 @@ use ui::Theme;
     about = "Terminal operator console for siphon-ai nodes"
 )]
 pub struct Cli {
-    /// Fleet config file (default: ~/.config/sightglass/config.toml).
+    /// Fleet config file (default: ~/.config/sightglass/config.toml,
+    /// then /etc/sightglass/config.toml).
     #[arg(long, conflicts_with = "target")]
     config: Option<std::path::PathBuf>,
 

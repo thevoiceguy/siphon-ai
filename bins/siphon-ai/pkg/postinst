@@ -35,6 +35,19 @@ case "$1" in
             chmod 0640 /etc/siphon-ai/config.toml
         fi
 
+        # Admin API token for the packaged [admin] block and the bundled
+        # sightglass console. Generated once and never rotated here: an
+        # upgrade must not invalidate a token an operator has copied.
+        if [ ! -s /etc/siphon-ai/admin.token ]; then
+            (
+                umask 077
+                head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' \
+                    > /etc/siphon-ai/admin.token
+            )
+        fi
+        chown root:"$SVC_GROUP" /etc/siphon-ai/admin.token
+        chmod 0640 /etc/siphon-ai/admin.token
+
         # Empty env file for ${VAR} expansion (operator fills it in).
         if [ ! -e /etc/siphon-ai/env ]; then
             touch /etc/siphon-ai/env

@@ -5,6 +5,12 @@
 # CDRs/recordings aren't lost; remove them by hand for a clean slate.
 set -e
 
+# The generated admin token is not a conffile, so dpkg does not know to
+# remove it; a purge takes it with the config it belonged to.
+if [ "$1" = "purge" ]; then
+    rm -f /etc/siphon-ai/admin.token
+fi
+
 #DEBHELPER#
 
 exit 0

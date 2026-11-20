@@ -14,6 +14,31 @@ reach that listener. Design rationale and build plan:
 
 ---
 
+## On a node installed from the `.deb`
+
+Nothing to set up (0.57.0 and later). The package ships `sightglass`
+next to the daemon, enables the admin listener on loopback with a
+generated `admin`-role token, and installs a fleet config that points
+at it:
+
+```bash
+sudo systemctl start siphon-ai
+sudo sightglass
+```
+
+The token lives in `/etc/siphon-ai/admin.token`, readable by root and
+the `siphon-ai` group. To run the console without `sudo`, add yourself
+to that group (`sudo usermod -aG siphon-ai "$USER"`, then log in
+again). `/etc/sightglass/config.toml` is the fleet config used when you
+have no `~/.config/sightglass/config.toml` of your own; add `[[node]]`
+blocks there to watch other nodes from this host. An upgrade from an
+older package keeps your edited daemon config, so the `[admin]` block
+has to be added by hand once: see `DEPLOY.md` → *Debian / Ubuntu
+package*.
+
+The rest of this page is for everything else: a workstation, a tarball
+install, a fleet.
+
 ## Prerequisites
 
 1. **The `[admin]` listener must be enabled** on every node you want
@@ -44,7 +69,8 @@ Ad-hoc, one node:
 sightglass --target https://prod-1.example.com:9092 --token-file ~/.config/sightglass/prod-1.token
 ```
 
-A fleet, via `~/.config/sightglass/config.toml`:
+A fleet, via `~/.config/sightglass/config.toml` (or, when that file
+does not exist, the system-wide `/etc/sightglass/config.toml`):
 
 ```toml
 poll_interval_ms = 1000   # per node
@@ -220,6 +246,9 @@ enabled and a real 403 both toasts and greys the keys from then on.
   configured on that node? Is the URL the *admin* listener (not the
   `[observability]` one)? Wrong or missing token shows the same way
   (the error text names the status).
+- **`no permission to read /etc/siphon-ai/admin.token`** — the
+  packaged token is readable by root and the `siphon-ai` group only.
+  Run `sudo sightglass`, or add your user to that group.
 - **Everything is greyed** — your token's role is `readonly`, or the
   binary was started with `--read-only` (the header shows a
   `read-only` badge).

@@ -13,7 +13,7 @@ ships prebuilt, **statically-linked musl** artifacts for `x86_64` and
 | Artifact | What it is |
 |---|---|
 | `siphon-ai-<ver>-<target>.tar.gz` | Standalone static binary (+ licenses, README). |
-| `siphon-ai_<ver>-1_<arch>.deb` | Debian/Ubuntu package (`amd64` / `arm64`). |
+| `siphon-ai_<ver>-1_<arch>.deb` | Debian/Ubuntu package (`amd64` / `arm64`): the daemon and the `sightglass` console. |
 | `ghcr.io/thevoiceguy/siphon-ai:<ver>` | Multi-arch container (`linux/amd64` + `linux/arm64`). |
 | `siphon-ai-<ver>-sbom.cdx.json` | CycloneDX SBOM. |
 | `SHA256SUMS`, `SHA256SUMS.cosign.bundle` | Checksums + a keyless [cosign](https://docs.sigstore.dev/) signature over them. |
@@ -49,13 +49,47 @@ siphon-ai --version
 sudo apt install ./siphon-ai_<ver>-1_amd64.deb   # resolves ca-certificates + adduser
 ```
 
-The package installs the binary to `/usr/bin/siphon-ai`, a default config to
-`/etc/siphon-ai/config.toml` (a dpkg *conffile* — your edits survive
-upgrades), and a hardened systemd unit. It creates the `siphon-ai` service
+The package installs the daemon to `/usr/bin/siphon-ai`, the
+[`sightglass`](SIGHTGLASS.md) operator console to `/usr/bin/sightglass`, a
+default config to `/etc/siphon-ai/config.toml` (a dpkg *conffile* — your edits
+survive upgrades), and a hardened systemd unit. It creates the `siphon-ai` service
 user and `/var/{lib,log}/siphon-ai`, and **enables but does not start** the
 service — the default config points at a placeholder `[bridge].ws_url`. Edit
 the config, then `sudo systemctl start siphon-ai`. (`systemctl reload`
 hot-applies route/gateway/webhook changes via `SIGHUP`.)
+
+**Sightglass works as installed** (0.57.0). The default config enables the
+admin API on loopback (`[admin] listen = "127.0.0.1:9092"`) with one
+`admin`-role token, generated at install time into
+`/etc/siphon-ai/admin.token` (`root:siphon-ai`, mode `0640`; generated once and
+kept across upgrades, removed on purge). `/etc/sightglass/config.toml` points
+the console at it, so once the service is running:
+
+```sh
+sudo sightglass                         # or, to run it as yourself:
+sudo usermod -aG siphon-ai "$USER"      # then log in again
+```
+
+Whoever can read that file holds the `admin` role on this node, which is why
+it is not world-readable. To turn the admin API off, delete the `[admin]`
+block from the config and restart.
+
+**Upgrading from a package older than 0.57.0:** `/etc/siphon-ai/config.toml` is
+a conffile you have edited, so dpkg keeps your version (or asks) and the
+`[admin]` block does not appear by itself. The token file is generated either
+way. To get the same result, add this and restart; skip it if you already have
+an `[admin]` block, and point `/etc/sightglass/config.toml` at that listener
+and a token of yours instead:
+
+```toml
+[admin]
+listen = "127.0.0.1:9092"
+
+[[admin.token]]
+name  = "local-sightglass"
+token = "${file:/etc/siphon-ai/admin.token}"
+role  = "admin"
+```
 
 ### Container
 
@@ -112,7 +146,7 @@ operator's network, and the daemon container.
 | `[sip].listen`    | UDP    | TOML           | inbound   | SIP signaling (default 5060 / 5070 in samples). Bidirectional within UDP. |
 | `[sip].listen`    | TCP    | TOML           | inbound   | Same port number when `transports` includes `"tcp"`. |
 | `[sip.tls].listen`| TCP    | TOML           | inbound   | TLS signaling. Defaults to the SIP IP + 5061. |
-| `[media].rtp_port_range` | UDP | TOML       | both      | RTP/RTCP. Forge allocates one even-numbered RTP port + the next odd RTCP port per call. Forward the whole range. **Also reserve it from the kernel — see below.** |
+| `[media].rtp_port_range` | UDP | TOML       | both      | RTP/RTCP. Forge allocates two port pairs per SIP call (0.57.0; an even-numbered RTP port + the next odd RTCP port for each media leg), of which the caller's media uses one; a browser call takes one pair. Forward the whole range. **Also reserve it from the kernel — see below.** |
 | `[observability].http_listen` | TCP | TOML  | inbound (cluster-local) | `/metrics`, `/health`, `/ready`. Unauthenticated — keep it cluster-local. Since 0.10.0 `/admin/*` is **not** served here (returns `404`); it moved to the dedicated `[admin]` listener below. |
 | `[admin].listen`  | TCP    | TOML           | inbound (cluster-local) | `/admin/*` control plane (0.10.0). Bearer-token auth + RBAC (`readonly` ⊂ `operator` ⊂ `admin`); omit `[admin]` and `/admin/*` isn't served at all. Set `[admin.tls]` (0.18.0) to serve HTTPS so the token is encrypted on a routable bind. Still keep it off the public internet. |
 | Outbound, dynamic | TCP    | `[bridge].ws_url` (per route) | outbound | WebSocket from daemon to operator's WS server. |
@@ -168,10 +202,12 @@ works equally well but leaves less room to grow.
 
 ### Sizing the pool on a node that also originates
 
-**One pool serves both directions.** An originated leg holds a port pair
+**One pool serves both directions.** An originated call holds ports
 exactly like an accepted one, so `rtp_port_range` must be sized for the
-**sum** of inbound and outbound concurrency plus headroom — two ports per
-concurrent call, whichever way it is going.
+**sum** of inbound and outbound concurrency plus headroom — **four ports
+(two pairs) per concurrent SIP call**, whichever way it is going, and two
+ports (one pair) per browser call. Before 0.57.0 a SIP call held one pair;
+a range sized then carries half as many calls now.
 
 By default the two directions are **unreserved and first-come-first-served**,
 which is not how an operator would prioritise them. Measured on 0.49.9 with
@@ -1425,9 +1461,9 @@ applied (and test-enforced) in our `prometheus_builder()` (issue #437).
 |-----------------------------------------|-----------|---------------------------------------|------------------|
 | `siphon_ai_invites_total`               | counter   | `result=accepted\|rejected\|rejected_attestation\|rejected_capacity\|rejected_trunk\|rejected_webrtc\|no_match` | INVITEs by acceptance outcome. `rejected_attestation` is a STIR/SHAKEN policy reject (`min_attestation` gate or `require_identity`) — separately alertable from ordinary routing/media `rejected`. **`rejected_trunk`** (#564) is the `[[trunk]]` allowlist gate's `403 Forbidden` — an INVITE from a source matching no configured trunk, i.e. exactly the scanner traffic the gate exists to shed. **Alert on it**: a sustained rate is either an attack on your SIP port or a misconfigured peer that should be in a trunk's `peer_addrs`. Per-peer detail is in the audit stream (`invite_rejected`, reason `no_trunk`) and the SIP ring — the metric deliberately carries no peer label (unbounded cardinality). **`rejected_webrtc`** is a browser call this daemon could not serve: an INVITE arrived over WS/WSS with a WebRTC-shaped offer while `[webrtc]` was disabled, or enabled on a build that cannot yet terminate the media leg. **Alert on it** — it means someone pointed a browser at this node and got nothing, which is a deployment gap rather than a bad call; the rejection's log line says which of the two it was. Digest-auth 401s are *not* in this counter — the same INVITE normally retries with credentials and is counted then; brute-force alerting for that gate is `siphon_ai_sip_auth_total{result="failed"}`. **`rejected_capacity`** (#554) is the RTP port pool being full: the call was refused `503 Service Unavailable` + `Retry-After` because `[media].rtp_port_range` had nothing left, not because anything was wrong with it. **Alert on it** — on a node that also originates, the pool is shared and an outbound surge can exhaust it, with this counter the only inbound-side signal. It also covers a `[media].reserved_outbound_calls` refusal, where free ports remain but are held for origination; `siphon_ai_rtp_reserve_blocks_total` (below) separates the two. It is a sizing problem, not a fault; see `test-harness/load/RESULTS-0.49.9-mixed-and-soak.md`. |
 | `siphon_ai_rtp_reserve_blocks_total`    | counter   | none                                  | Inbound INVITEs refused because the RTP port pool had reached `[media].reserved_outbound_calls` — ports were still free, but held for origination (#556). The refusal is indistinguishable from a genuinely exhausted pool on the wire and in `siphon_ai_invites_total` (both `503` + `Retry-After`, both `rejected_capacity`); this is the operator-side split. Non-zero means the reservation is actively shedding inbound load — the knob working, not a fault — but a sustained rate means `rtp_port_range` is too small for the traffic you are carrying. **Published as a zero baseline**, so "never shed" reads as `0` rather than as a missing series. |
-| `siphon_ai_rtp_reserved_outbound_calls` | gauge     | none                                  | The configured value of `[media].reserved_outbound_calls`, in port pairs (= concurrent calls), published once at startup. `0` = unreserved pool. Sits next to the counter above so a dashboard can show the shed rate against the threshold that produced it without reading the TOML. |
-| `siphon_ai_rtp_port_pairs_allocated`    | gauge     | none                                  | RTP port pairs currently allocated, **sampled from the pool itself** every 2 s (not incremented at call sites — a site-updated gauge under-counts under exactly the leak it exists to catch). Tracks `siphon_ai_calls_active`; **a value that stays above it — especially above zero with no calls — is a leaked media session**, the hung-dialog/port-leak class the teardown-soak harness phase guards (DEV_PLAN_WebRTC.md Phase 0). **Alert on divergence.** |
-| `siphon_ai_rtp_port_pairs_capacity`     | gauge     | none                                  | Total RTP port pairs in the pool (`[media].rtp_port_range` / 2), republished by the same sampler. Static per process; with the gauge above it gives dashboards pool headroom without reading the TOML — the live complement of `rejected_capacity` above, which only fires once headroom is already gone. |
+| `siphon_ai_rtp_reserved_outbound_calls` | gauge     | none                                  | The configured value of `[media].reserved_outbound_calls`, in concurrent calls (each is two port pairs since 0.57.0), published once at startup. `0` = unreserved pool. Sits next to the counter above so a dashboard can show the shed rate against the threshold that produced it without reading the TOML. |
+| `siphon_ai_rtp_port_pairs_allocated`    | gauge     | none                                  | RTP port pairs currently allocated, **sampled from the pool itself** every 2 s (not incremented at call sites — a site-updated gauge under-counts under exactly the leak it exists to catch). A SIP call holds **two** pairs (0.57.0; one before) and a browser call one, so expect up to `2 × siphon_ai_calls_active`; **a value that stays above that — especially above zero with no calls — is a leaked media session**, the hung-dialog/port-leak class the teardown-soak harness phase guards (DEV_PLAN_WebRTC.md Phase 0). **Alert on divergence.** |
+| `siphon_ai_rtp_port_pairs_capacity`     | gauge     | none                                  | Total RTP port pairs in the pool (`[media].rtp_port_range` / 2), republished by the same sampler. Concurrent SIP calls the pool can carry is **half** this (two pairs per call since 0.57.0). Static per process; with the gauge above it gives dashboards pool headroom without reading the TOML — the live complement of `rejected_capacity` above, which only fires once headroom is already gone. |
 | `siphon_ai_registrar_registers_total`   | counter   | `result=ok\|challenged\|forbidden\|interval_too_brief\|rejected\|error` | REGISTER requests served by `[registrar]`. `challenged` is the normal digest first leg, not an attack signal. **Alert on `forbidden`**: an authenticated user's credentials trying to register an AOR they're not authorized for — someone claiming someone else's identity. |
 | `siphon_ai_registrar_bindings`          | gauge     | none                                  | AORs currently registered with the daemon's registrar (`[registrar]`), republished on register/unregister and every sweeper pass. Falls when a stream-registered client's connection dies and the ~32 s grace elapses. Distinct from `siphon_ai_register_state`, which is this daemon registering as a *client* elsewhere. |
 | `siphon_ai_calls_total`                 | counter   | `cause=caller_hangup\|server_hangup\|local_shutdown\|drain_forced\|bridge_ended\|ws_disconnect\|tap_ended\|transfer` | Ended calls by termination cause. `caller_hangup` (0.40.0) = the far end sent BYE, split out of `local_shutdown`, which now means admin force-hangup / CANCEL / session expiry only. `drain_forced` (0.17.0) = force-ended at the graceful-shutdown drain deadline. `transfer` (0.41.x) = the call was handed off via REFER. `ws_disconnect` (0.45.0) = the WS dropped unexpectedly mid-call (or reconnect never recovered), split out of `bridge_ended` — alert on this one; it's the WS server crashing or the network failing, not a call ending. Counts inbound **and** outbound legs (#373 — outbound legs were previously invisible here, so `ws_disconnect` alerting missed outbound WS crashes). |

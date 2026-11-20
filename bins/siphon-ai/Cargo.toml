@@ -139,11 +139,17 @@ calls (as a trunk endpoint or a registered phone), streams the call \
 audio over a WebSocket to a developer-supplied server, and plays \
 returned audio back into the call. It contains no AI code — running \
 the AI (STT/LLM/TTS) is the WebSocket server's job."""
-conf-files = ["/etc/siphon-ai/config.toml"]
+conf-files = ["/etc/siphon-ai/config.toml", "/etc/sightglass/config.toml"]
 maintainer-scripts = "pkg/"
 assets = [
     ["target/release/siphon-ai", "usr/bin/", "755"],
+    # The operator console, built from the sibling `siphon-ai-sightglass`
+    # crate into the same target dir. `cargo deb` builds only this
+    # package, so build both first (the release workflow does) and run
+    # it with `--no-build`.
+    ["target/release/sightglass", "usr/bin/", "755"],
     ["pkg/config.toml", "etc/siphon-ai/config.toml", "640"],
+    ["pkg/sightglass.toml", "etc/sightglass/config.toml", "644"],
     ["../../README.md", "usr/share/doc/siphon-ai/README.md", "644"],
     ["../../LICENSE-APACHE", "usr/share/doc/siphon-ai/LICENSE-APACHE", "644"],
     ["../../LICENSE-MIT", "usr/share/doc/siphon-ai/LICENSE-MIT", "644"],

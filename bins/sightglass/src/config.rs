@@ -14,7 +14,8 @@ use serde::Deserialize;
 
 use crate::Cli;
 
-/// On-disk shape of `~/.config/sightglass/config.toml`.
+/// On-disk shape of the fleet config (`~/.config/sightglass/config.toml`
+/// or `/etc/sightglass/config.toml`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
@@ -82,7 +83,10 @@ pub fn load(cli: &Cli) -> Result<Fleet> {
 
     let path = match &cli.config {
         Some(p) => p.clone(),
-        None => default_config_path()?,
+        None => default_config_path(
+            std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+            Path::new(SYSTEM_CONFIG_PATH),
+        )?,
     };
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("reading fleet config {}", path.display()))?;
@@ -152,7 +156,21 @@ fn resolve_path(base_dir: &Path, p: &Path) -> PathBuf {
 
 fn read_token(path: &Path) -> Result<String> {
     let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading token file {}", path.display()))?;
+        .with_context(|| format!("reading token file {}", path.display()));
+    // The packaged token is root:siphon-ai 0640, so this is the first
+    // thing an unprivileged user on a freshly installed node hits.
+    let raw = match raw {
+        Err(e)
+            if e.downcast_ref::<std::io::Error>().map(std::io::Error::kind)
+                == Some(std::io::ErrorKind::PermissionDenied) =>
+        {
+            return Err(e.context(format!(
+                "no permission to read {} — run sightglass with sudo, or add your user to the file's group",
+                path.display()
+            )));
+        }
+        other => other?,
+    };
     let token = raw.trim().to_string();
     if token.is_empty() {
         bail!("token file {} is empty", path.display());
@@ -183,9 +201,26 @@ fn display_name_for(url: &str) -> String {
         .to_string()
 }
 
-fn default_config_path() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("HOME is not set; pass --config or --target")?;
-    Ok(PathBuf::from(home).join(".config/sightglass/config.toml"))
+/// The system-wide fleet config. The `.deb` installs one here pointing
+/// at the local daemon, so a bare `sightglass` works on a freshly
+/// installed node.
+const SYSTEM_CONFIG_PATH: &str = "/etc/sightglass/config.toml";
+
+/// Pick the fleet config when neither `--config` nor `--target` is
+/// given: the user's own file wins when it exists, otherwise the
+/// system-wide one. With neither present the user path is returned so
+/// the read error names the file a user would create.
+fn default_config_path(home: Option<&Path>, system: &Path) -> Result<PathBuf> {
+    let user = home.map(|h| h.join(".config/sightglass/config.toml"));
+    match user {
+        Some(user) if user.exists() => Ok(user),
+        _ if system.exists() => Ok(system.to_path_buf()),
+        Some(user) => Ok(user),
+        None => bail!(
+            "HOME is not set and {} does not exist; pass --config or --target",
+            system.display()
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -255,5 +290,30 @@ mod tests {
             display_name_for("http://127.0.0.1:9090/admin"),
             "127.0.0.1:9090"
         );
+    }
+
+    #[test]
+    fn default_config_prefers_user_then_system() {
+        let dir = std::env::temp_dir().join(format!("sightglass-cfg-{}", std::process::id()));
+        let home = dir.join("home");
+        let system = dir.join("etc/config.toml");
+        std::fs::create_dir_all(home.join(".config/sightglass")).unwrap();
+        std::fs::create_dir_all(system.parent().unwrap()).unwrap();
+        let user = home.join(".config/sightglass/config.toml");
+
+        // Neither exists: the user path, so the error names it.
+        assert_eq!(default_config_path(Some(&home), &system).unwrap(), user);
+        assert!(default_config_path(None, &system).is_err());
+
+        // Only the system file: used with or without a HOME.
+        std::fs::write(&system, "").unwrap();
+        assert_eq!(default_config_path(Some(&home), &system).unwrap(), system);
+        assert_eq!(default_config_path(None, &system).unwrap(), system);
+
+        // Both: the user's own file wins.
+        std::fs::write(&user, "").unwrap();
+        assert_eq!(default_config_path(Some(&home), &system).unwrap(), user);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

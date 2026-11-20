@@ -1,7 +1,7 @@
 # SiphonAI default configuration (installed by the .deb package).
 #
 # This is a minimal, VALID-but-inert template: the daemon starts and
-# serves /health + /metrics on loopback, but until you set a real
+# serves /health + /metrics and the admin API on loopback, but until you set a real
 # [bridge].ws_url (your WebSocket AI server) and a [[trunk]] allowlist,
 # it won't bridge any calls. Edit this file, then:
 #
@@ -27,7 +27,10 @@ user_agent = "SiphonAI"
 [media]
 codecs = ["pcmu", "pcma"]
 dtmf = "rfc2833"
-rtp_port_range = [40000, 40100]
+# 200 ports = 50 concurrent SIP calls: each call holds two RTP/RTCP port
+# pairs (four ports). Open this range in your firewall, and widen both
+# together for more calls.
+rtp_port_range = [40000, 40200]
 inactivity_timeout_secs = 60
 
 [bridge]
@@ -42,6 +45,21 @@ enabled = true
 # has its own authenticated listener ([admin]); do not expose this on a
 # public interface without a fronting proxy.
 http_listen = "127.0.0.1:9091"
+
+# Admin API on loopback, so the bundled `sightglass` console works with
+# no setup: run `sudo sightglass` on this host (it reads
+# /etc/sightglass/config.toml, which points here). The token is
+# generated at install time into /etc/siphon-ai/admin.token, readable by
+# root and the siphon-ai group only. Remove this block to turn the admin
+# API off entirely. Before binding it anywhere but loopback, add
+# [admin.tls]; see docs/CONFIG.md, `[admin]`.
+[admin]
+listen = "127.0.0.1:9092"
+
+[[admin.token]]
+name  = "local-sightglass"
+token = "${file:/etc/siphon-ai/admin.token}"
+role  = "admin"
 
 # A default route is REQUIRED. Add [[trunk]] allowlists and more
 # specific [[route]] entries above this one (first match wins).

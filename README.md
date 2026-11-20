@@ -50,7 +50,7 @@ handling, jitter, barge-in, DTMF, hold, transfer. See
 
 ## Status
 
-**Current release: v0.56.0.** Production-deployed against real carriers
+**Current release: v0.57.0.** Production-deployed against real carriers
 (Twilio Elastic SIP Trunking, FreeSWITCH, CUCM). The WS protocol is still
 `version: "1"` — every release has been additive, so a WS server built
 against 0.1.0 keeps working unchanged. Daemon upgrades are near-drop-in
@@ -144,9 +144,10 @@ directory.
 | Behaviour past the cap | admission shed is **503**, exact, admitted calls unaffected (0.48.13); an exhausted RTP pool answers **503 + `Retry-After`** (0.49.10) |
 
 **State the limit with the number.** Concurrency is capped by
-`[media].rtp_port_range` before it is capped by CPU — every call holds two
-UDP ports, so a 4,000-port range is 2,000 calls and no amount of CPU
-changes that. The runs above used `[41000, 45000]`. On a node that both
+`[media].rtp_port_range` before it is capped by CPU — since 0.57.0 every
+SIP call holds four UDP ports (an RTP/RTCP pair per media leg), so a
+4,000-port range is 1,000 calls and no amount of CPU changes that. The runs
+above predate that and used `[41000, 45000]` at two ports a call. On a node that both
 answers and originates, both directions draw from that one pool with no
 reservation between them ([#556](https://github.com/thevoiceguy/siphon-ai/issues/556)),
 so size it for the sum.
@@ -232,6 +233,9 @@ verify-and-install steps.
 # https://github.com/thevoiceguy/siphon-ai/releases/latest — then:
 sudo apt install ./siphon-ai_<version>_<arch>.deb
 ```
+
+The package also installs the [`sightglass`](docs/SIGHTGLASS.md) terminal
+console, already pointed at the local daemon: `sudo sightglass`.
 
 **From source (Debian 13):**
 two scripts walk through `docs/INSTALL_DEBIAN13.md` and

@@ -19,14 +19,15 @@ them make the daemon look worse than it is; one makes it look better.
 
 ### 1.1 RTP port range is the real ceiling, not CPU
 
-Every active call holds **two** UDP ports (RTP + RTCP). The range is a hard
+Every active call holds **four** UDP ports (an RTP + RTCP pair for each of
+the media session's two legs, since 0.57.0; two before). The range is a hard
 cap that has nothing to do with load:
 
 | `rtp_port_range` | Ports | **Max concurrent calls** |
 |---|---|---|
-| `[40000, 40100]` — shipped `configs/local-dev.toml` | 100 | **50** |
-| `[40000, 40500]` — typical production | 500 | **250** |
-| `[40000, 42000]` — shipped `configs/soak.toml`, sized for the 500-call test | 2000 | **1000** |
+| `[40000, 40100]` — shipped `configs/local-dev.toml` | 100 | **25** |
+| `[40000, 40500]` — typical production | 500 | **125** |
+| `[40000, 44000]` — shipped `configs/soak.toml`, sized for the 500-call test | 4000 | **1000** |
 
 **The `concurrent_burst_500.xml` scenario cannot pass with the config the
 README points at** — it exhausts ports at 50 calls and reports failures that

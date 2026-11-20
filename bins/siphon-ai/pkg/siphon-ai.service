@@ -18,7 +18,7 @@ Restart=always
 RestartSec=5
 
 # Hardening — the daemon binds unprivileged ports (SIP 5060, RTP
-# 40000-40100) and needs no root at runtime.
+# 40000-40200) and needs no root at runtime.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

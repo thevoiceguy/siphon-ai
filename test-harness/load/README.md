@@ -17,12 +17,12 @@ listens on **5070** (every SIPp command below targets 5060), its port
 range caps at 50 concurrent calls, and its default 60 s watchdog reaps
 the burst's signalling-only calls at the one-minute mark.
 
-> **Size `rtp_port_range` first.** Every active call holds two UDP ports
-> (RTP + RTCP), so the range is a hard concurrency cap independent of load.
+> **Size `rtp_port_range` first.** Every active call holds four UDP ports
+> (an RTP + RTCP pair per media leg, since 0.57.0), so the range is a hard concurrency cap independent of load.
 > The shipped `configs/local-dev.toml` uses `[40000, 40100]` — 100 ports,
-> so **50 concurrent calls** — and `concurrent_burst_500.xml` will exhaust
-> it at call 51 and report failures that look like the daemon falling over.
-> For the 500-call burst you need at least `[40000, 42000]` — which is
+> so **25 concurrent calls** — and `concurrent_burst_500.xml` will exhaust
+> it at call 26 and report failures that look like the daemon falling over.
+> For the 500-call burst you need at least `[40000, 44000]` — which is
 > what `configs/soak.toml` ships. See
 > `LOAD_TEST_PLAN.md` §1 for this and the three other settings
 > (admission control, the inactivity watchdog, and the WS server's own

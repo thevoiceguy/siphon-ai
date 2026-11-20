@@ -755,11 +755,12 @@ fi
 # and past sip-dialog's MAX_CONFIRMED_DIALOGS (10,000) `insert` fails
 # silently and in-dialog requests stop matching for every call.
 #
-# This is the one assertion in the suite that has to wait out a real
-# timer: removal is deliberately deferred by DialogReaper::DEFAULT_GRACE
-# (32 s = Timer H/J) so a retransmitted BYE still matches, and that
-# window is not configurable. Polls rather than sleeps flat, so it costs
-# only what it must, and only when the preceding call actually answered.
+# Since sip-uac 0.9.4 (siphon-rs v2026.11.06) the UAC takes the dialog
+# out itself when it sends the BYE, so a leg the daemon hangs up is
+# gone at once. A leg the reaper retires instead is removed after
+# DialogReaper::DEFAULT_GRACE (32 s = Timer H/J), which is not
+# configurable. This check accepts either, and polls rather than sleeps
+# flat, only when the preceding call actually answered.
 total=$((total + 1))
 echo "─── outbound_dialog_reclaimed ────────────────────────"
 ob_reclaim_ok=0
@@ -768,32 +769,39 @@ ob_gauge() {
         | awk '/^siphon_ai_dialogs_active /{print $2}'
 }
 if (( ob_ok )); then
-    # Two-step on purpose. The gauge is republished by the reaper's
-    # sweep (every 5 s), and the UAC inserts the dialog when it sends
-    # the BYE — so for a few seconds after teardown it still reads the
-    # pre-BYE `0`. Asserting `== 0` straight away passes on that stale
-    # sample even against a daemon that never reclaims anything, which
-    # is exactly how a first cut of this check went green on the bug.
-    # So: wait for the store to publish the dialog, *then* wait for it
-    # to go away.
+    # The gauge is republished by the reaper's sweep (every 5 s), so a
+    # sample read straight after teardown may predate the call and say
+    # `0` even against a daemon that never reclaims anything — which is
+    # how a first cut of this check went green on the bug. So watch for
+    # 12 s, more than two sweeps, all of them after the call ended:
+    #   - a non-zero sample means the dialog is waiting on the reaper,
+    #     and it must then go away within the grace;
+    #   - twelve seconds of `0` means it was already gone by the first
+    #     sweep after teardown (the UAC removed it at the BYE).
+    # An absent series is neither, and fails.
     ob_tracked=0
+    ob_published=1
     for _ in $(seq 1 12); do
-        [[ "$(ob_gauge)" != "0" ]] && { ob_tracked=1; break; }
+        ob_now=$(ob_gauge)
+        [[ -z "$ob_now" ]] && { ob_published=0; break; }
+        [[ "$ob_now" != "0" ]] && { ob_tracked=1; break; }
         sleep 1
     done
-    if (( ob_tracked )); then
+    if (( ! ob_published )); then
+        echo "  (siphon_ai_dialogs_active is not published — check the gauge/metrics wiring)"
+    elif (( ob_tracked )); then
         for _ in $(seq 1 50); do
             [[ "$(ob_gauge)" == "0" ]] && { ob_reclaim_ok=1; break; }
             sleep 1
         done
     else
-        echo "  (dialog never published as tracked — check the gauge//metrics wiring)"
+        ob_reclaim_ok=1
     fi
 fi
 if (( ob_reclaim_ok )); then
     echo "  OK"
 else
-    echo "  FAIL (dialog not reclaimed past the 32s grace: gauge=$(ob_gauge); daemon: $OB_DAEMON_LOG)"
+    echo "  FAIL (dialog not reclaimed: gauge=$(ob_gauge); daemon: $OB_DAEMON_LOG)"
     failures=$((failures + 1))
 fi
 

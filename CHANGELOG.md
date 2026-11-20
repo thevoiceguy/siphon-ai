@@ -59,11 +59,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Outbound early dialogs are released** (sip-uac 0.9.5). Each tagged provisional
     left a dialog in the store for the life of the process when the callee answered
     under another To tag, the call was cancelled while ringing, or it failed.
+    A call the daemon hangs up now leaves the store when its BYE is sent (0.9.4), where it
+    used to wait out the reaper's 32 s grace; `siphon_ai_dialogs_active` drops sooner.
   - **New outbound TCP connections go through the daemon's own dispatcher**
     (sip-transaction 0.8.0) and its client pool, where the transaction layer used to
     open them from a pool of its own.
   - Reliable provisionals (RFC 3262) in the server INVITE transaction and transport-cc,
     simulcast and webinar work in forge are present upstream and not used here.
+- **quinn-udp 0.5.14 → 0.5.16** for RUSTSEC-2026-0538 (a receive loop that can spin
+  after a truncated datagram). The daily audit had been failing on it.
 - **The packaged default `rtp_port_range` is `[40000, 40200]`** (was `[40000, 40100]`),
   so a fresh install still carries 50 calls. `configs/soak.toml` moves to
   `[40000, 44000]` for the same reason.

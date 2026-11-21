@@ -11,7 +11,7 @@
 #     sudo usermod -aG siphon-ai "$USER"    # then log in again
 #
 # Add more [[node]] blocks to watch other nodes from here. Full guide:
-# https://github.com/thevoiceguy/siphon-ai/blob/main/docs/SIGHTGLASS.md
+# https://github.com/feryx-io/siphon-ai/blob/main/docs/SIGHTGLASS.md
 #
 # This is a dpkg conffile: your edits survive package upgrades.
 

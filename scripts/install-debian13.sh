@@ -24,7 +24,7 @@
 #     RTP_PORT_MIN=40000
 #     RTP_PORT_MAX=40500
 #     OBS_LISTEN=127.0.0.1:9091
-#     REPO_URL=https://github.com/thevoiceguy/siphon-ai.git
+#     REPO_URL=https://github.com/feryx-io/siphon-ai.git
 #     REPO_BRANCH=main
 #     SKIP_BUILD=0     Set to 1 to reuse an existing target/release build.
 #     SKIP_RUSTUP=0    Set to 1 if rustup is already installed/usable.
@@ -106,7 +106,7 @@ SIP_PORT="${SIP_PORT:-5060}"
 RTP_PORT_MIN="${RTP_PORT_MIN:-40000}"
 RTP_PORT_MAX="${RTP_PORT_MAX:-40500}"
 OBS_LISTEN="${OBS_LISTEN:-127.0.0.1:9091}"
-REPO_URL="${REPO_URL:-https://github.com/thevoiceguy/siphon-ai.git}"
+REPO_URL="${REPO_URL:-https://github.com/feryx-io/siphon-ai.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_RUSTUP="${SKIP_RUSTUP:-0}"

@@ -116,7 +116,7 @@ A new `.github/workflows/release.yml`, triggered on `push: tags: ['v*']`
 4. **Sign + SBOM** — sign the checksums + artifacts and generate an SBOM
    (decision 5: cosign keyless + syft is the recommended default).
 5. **Container** — `docker buildx` multi-arch (`linux/amd64,linux/arm64`)
-   build of `docker/Dockerfile`, pushed to `ghcr.io/thevoiceguy/siphon-ai`
+   build of `docker/Dockerfile`, pushed to `ghcr.io/feryx-io/siphon-ai`
    tagged `:vX.Y.Z` + `:latest`, image signed with the same cosign identity.
    This is also where the Dockerfile's `rust:1.85-alpine` pin gets corrected
    to track `rust-toolchain.toml` (a build-arg or a CI check).

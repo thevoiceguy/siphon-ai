@@ -1806,7 +1806,7 @@
       "type": "object"
     }
   },
-  "$id": "https://raw.githubusercontent.com/thevoiceguy/siphon-ai/main/schemas/siphon-ai.v1.json",
+  "$id": "https://raw.githubusercontent.com/feryx-io/siphon-ai/main/schemas/siphon-ai.v1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "anyOf": [
     {

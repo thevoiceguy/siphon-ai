@@ -21,8 +21,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/thevoiceguy/siphon-ai"
-Documentation = "https://github.com/thevoiceguy/siphon-ai/blob/main/sdks/pipecat/README.md"
+Homepage = "https://github.com/feryx-io/siphon-ai"
+Documentation = "https://github.com/feryx-io/siphon-ai/blob/main/sdks/pipecat/README.md"
 
 [project.optional-dependencies]
 test = ["pytest>=8", "jsonschema>=4", "websockets>=13", "uvicorn>=0.30"]

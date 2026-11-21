@@ -132,13 +132,13 @@ left 0.5.0; pinning their homes:
 - **AMD** — a later audio-analysis release; the `forge-amd` primitive is
   ready to pick up when outbound makes it pay off.
 - **SRTP re-key on a timer** (was §3.2) — the **SDES** upstream primitive now
-  exists: forge-media [#72](https://github.com/thevoiceguy/forge-media/pull/72)
+  exists: forge-media [#72](https://github.com/feryx-io/forge-media/pull/72)
   (merged) added `SrtpContext::rekey()` + `rekey_srtp_keys()`, which rotate the
   master keys mid-stream while preserving ROC/replay. So the siphon-ai side is
   **unblocked for SDES**: expose `[media.srtp].rekey_after_seconds` + originate
   a UAS re-INVITE carrying fresh `a=crypto:` and call `rekey_srtp_keys` on the
   200-OK. (The DTLS-SRTP renegotiation path remains parked upstream —
-  [forge-media#73](https://github.com/thevoiceguy/forge-media/issues/73).)
+  [forge-media#73](https://github.com/feryx-io/forge-media/issues/73).)
   Target a later release.
 
 Confirm the outbound-vs-conferencing ordering in §9 decision 8.

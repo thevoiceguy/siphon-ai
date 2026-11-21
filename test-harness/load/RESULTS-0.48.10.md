@@ -13,7 +13,7 @@ nothing here is a claim about a network, crypto, or a real carrier.
 > attribution is unconfirmed. (3) §7.2's neural-VAD memory
 > comparison was wrong — "~2× the memory per call" was a 25-concurrent artifact,
 > and the real figure is ~8.8× per call at 200. **Corrected in place below**
-> ([#472](https://github.com/thevoiceguy/siphon-ai/issues/472)). Everything else
+> ([#472](https://github.com/feryx-io/siphon-ai/issues/472)). Everything else
 > here still stands.
 
 ## Environment
@@ -201,7 +201,7 @@ the packet count by roughly an order of magnitude.
 
 No drop-rate line accompanies this row because **there is no metric to read**:
 `siphon_ai_hep_*` is documented in five places and exported nowhere
-([#460](https://github.com/thevoiceguy/siphon-ai/issues/460)). The plan's §8
+([#460](https://github.com/feryx-io/siphon-ai/issues/460)). The plan's §8
 trap that HEP-on runs "need their own drop-rate line" is currently impossible
 to satisfy.
 
@@ -219,12 +219,12 @@ taken at 25 concurrent where nothing contends:
 
 - **CPU: +1.47 %/core per call** attributable to the model — ~470 µs per 32 ms
   window, against the ~60–80 µs `docs/CONFIG.md` quotes
-  ([#461](https://github.com/thevoiceguy/siphon-ai/issues/461)).
+  ([#461](https://github.com/feryx-io/siphon-ai/issues/461)).
 - **Memory: ~1.6 MB/call.** The cost is *per call*, not a one-time model load,
   and the model loads on the **first call**, not at startup — an idle
   neural-VAD daemon sits at 14.6 MB and tells you nothing about its footprint.
 
-  > **Correction ([#472](https://github.com/thevoiceguy/siphon-ai/issues/472)).**
+  > **Correction ([#472](https://github.com/feryx-io/siphon-ai/issues/472)).**
   > This bullet originally compared the figure above against "energy's ~0.79
   > MB/call" and the headline read that as ~2×. Both per-call numbers were taken
   > at 25 concurrent, where energy's cost is mostly *fixed* overhead divided by a

@@ -1,6 +1,6 @@
 # siphon-ai-server (TypeScript)
 
-Server SDK for the [SiphonAI](https://github.com/thevoiceguy/siphon-ai)
+Server SDK for the [SiphonAI](https://github.com/feryx-io/siphon-ai)
 WebSocket bridge protocol v1: typed events (discriminated unions), paced
 20 ms audio framing, and connection lifecycle — write handlers, not wire
 code.

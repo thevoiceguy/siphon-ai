@@ -27,8 +27,8 @@ PBX/Trunk ──SIP/RTP──► SiphonAI ──WebSocket──► Developer's W
 
 Two upstream Rust libraries do most of the heavy lifting:
 
-- **siphon-rs** (https://github.com/thevoiceguy/siphon-rs) — RFC 3261 SIP stack. UAS, UAC, transactions, dialogs, REGISTER, REFER, auth.
-- **forge-media** (https://github.com/thevoiceguy/forge-media) — RTP/RTCP, codecs (G.711/Opus), SDP (`forge-sdp`), jitter buffer, DTMF, audio injection, VAD.
+- **siphon-rs** (https://github.com/feryx-io/siphon-rs) — RFC 3261 SIP stack. UAS, UAC, transactions, dialogs, REGISTER, REFER, auth.
+- **forge-media** (https://github.com/feryx-io/forge-media) — RTP/RTCP, codecs (G.711/Opus), SDP (`forge-sdp`), jitter buffer, DTMF, audio injection, VAD.
 - **hep-rs** (new, owned by us) — HEP3 codec, transport, `HepSink` trait. Used by all three of siphon-rs (SIP messages), forge-media (RTCP/QoS), and siphon-ai (logs/CDRs/events) to ship observability data to Homer.
 
 **All three are owned by the same author as SiphonAI.** If you find a missing capability in any, the right answer is often a small PR upstream, not a workaround here. Ask the user before doing this.

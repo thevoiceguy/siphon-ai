@@ -78,7 +78,7 @@ rustup update stable
 
 ```bash
 sudo install -d -o "$USER" -g "$USER" /opt/siphon-ai-src
-git clone https://github.com/thevoiceguy/siphon-ai.git /opt/siphon-ai-src
+git clone https://github.com/feryx-io/siphon-ai.git /opt/siphon-ai-src
 cd /opt/siphon-ai-src
 ```
 

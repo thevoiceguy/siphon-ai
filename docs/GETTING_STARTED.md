@@ -2,7 +2,7 @@
 
 By the end of this guide, you’ll have a Debian 13 server answering a Twilio phone number, streaming caller audio to Deepgram for transcription, sending the transcript to Groq for a response, and using Deepgram to turn that response into speech. You’ll also have health checks, call records, and SIP traces to help explain what happened on each call.
 
-This edition targets **SiphonAI v0.52.0**, released September 11, 2026. The package, bot checkout, and repository links are pinned to that release. The commands and configuration have been reviewed against the release source, and the TOML syntax has been parsed. The shell examples have not been executed, and this revision still needs a fresh Debian deployment and live Twilio call before being described as end-to-end tested. For upgrades, consult the [CHANGELOG](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/CHANGELOG.md) and the documentation for the version you install.
+This edition targets **SiphonAI v0.52.0**, released September 11, 2026. The package, bot checkout, and repository links are pinned to that release. The commands and configuration have been reviewed against the release source, and the TOML syntax has been parsed. The shell examples have not been executed, and this revision still needs a fresh Debian deployment and live Twilio call before being described as end-to-end tested. For upgrades, consult the [CHANGELOG](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/CHANGELOG.md) and the documentation for the version you install.
 
 The call path is: caller → Twilio → SiphonAI → Deepgram STT → Groq → Deepgram TTS → SiphonAI → caller. SiphonAI handles SIP and media; the reference bot handles the AI services.
 
@@ -22,7 +22,7 @@ Budget about an hour if the VM, accounts, and number are ready; firewall setup a
 
 ## 1. Install SiphonAI on Debian 13
 
-This guide uses the release `.deb`. The repository also provides a [source installer](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/scripts/install-debian13.sh), but you don’t need a Rust toolchain for this path.
+This guide uses the release `.deb`. The repository also provides a [source installer](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/scripts/install-debian13.sh), but you don’t need a Rust toolchain for this path.
 
 Install the command-line tools used throughout the guide:
 
@@ -33,7 +33,7 @@ sudo apt install -y ca-certificates curl git openssl jq tcpdump iproute2 procps 
 
 ### Grab the package
 
-The v0.52.0 release includes static musl tarballs, Debian packages for amd64 and arm64, a CycloneDX SBOM, and signed checksums. A container image is also published on GHCR. See the [release assets](https://github.com/thevoiceguy/siphon-ai/releases/tag/v0.52.0).
+The v0.52.0 release includes static musl tarballs, Debian packages for amd64 and arm64, a CycloneDX SBOM, and signed checksums. A container image is also published on GHCR. See the [release assets](https://github.com/feryx-io/siphon-ai/releases/tag/v0.52.0).
 
 Download the package for your VM’s architecture into a new working directory:
 
@@ -44,7 +44,7 @@ case "$ARCH" in
   amd64|arm64) ;;
   *) printf "Unsupported package architecture: %s\n" "$ARCH"; exit 1 ;;
 esac
-BASE="https://github.com/thevoiceguy/siphon-ai/releases/download/v${VER}"
+BASE="https://github.com/feryx-io/siphon-ai/releases/download/v${VER}"
 DOWNLOAD_DIR=$(mktemp -d /tmp/siphon-ai-release.XXXXXX)
 cd "$DOWNLOAD_DIR"
 curl -fLO "$BASE/siphon-ai_${VER}-1_${ARCH}.deb"
@@ -58,7 +58,7 @@ Use `cosign` to verify the signature and provenance of `SHA256SUMS` before check
 cosign verify-blob --bundle SHA256SUMS.cosign.bundle \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity \
-  "https://github.com/thevoiceguy/siphon-ai/.github/workflows/release.yml@refs/tags/v${VER}" \
+  "https://github.com/feryx-io/siphon-ai/.github/workflows/release.yml@refs/tags/v${VER}" \
   SHA256SUMS
 ```
 
@@ -91,7 +91,7 @@ If an earlier run printed `Download is performed unsandboxed as root ... couldn'
 - Creates the `siphon-ai` service user with no login shell, plus `/var/lib/siphon-ai` and `/var/log/siphon-ai`.
 - Installs a hardened systemd unit (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`) and **enables it but does not start it**.
 
-That last point is deliberate. The shipped template binds SIP on all interfaces, has a catch-all route, and points at a loopback WebSocket endpoint. It does not include a trunk allowlist. Configure the public address, admission rules, and bot before starting the service; an absent allowlist does not disable inbound calls. See the [packaged configuration](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/bins/siphon-ai/pkg/config.toml).
+That last point is deliberate. The shipped template binds SIP on all interfaces, has a catch-all route, and points at a loopback WebSocket endpoint. It does not include a trunk allowlist. Configure the public address, admission rules, and bot before starting the service; an absent allowlist does not disable inbound calls. See the [packaged configuration](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/bins/siphon-ai/pkg/config.toml).
 
 Sanity check:
 
@@ -223,7 +223,7 @@ A couple of things about the allowlist that I'd rather you read here than discov
 
 **Why all eight regions?** Twilio's own docs say to allow all of them. Your number lives in one edge location, but if that gateway is down Twilio fails over to another region, and a `/30` you didn't list means a 403 from you and a fast-busy for the caller. Eight `/30`s is 32 addresses. Just list them all. And re-check Twilio's [IP addresses page](https://www.twilio.com/docs/sip-trunking/ip-addresses) when they add a region.
 
-**Use `peer_addrs`.** That is the v0.52.0 configuration key. Older comments may still refer to `sources`; follow the [versioned configuration reference](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/docs/CONFIG.md). The route’s `register_source = "twilio"` matches the configured trunk name for this deployment.
+**Use `peer_addrs`.** That is the v0.52.0 configuration key. Older comments may still refer to `sources`; follow the [versioned configuration reference](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/docs/CONFIG.md). The route’s `register_source = "twilio"` matches the configured trunk name for this deployment.
 
 **Keep both the trunk allowlist and the firewall rules.** With no trunk gate, a public SIP listener can admit arbitrary internet INVITEs to matching routes. Source-IP admission identifies traffic from Twilio’s shared infrastructure; it does not identify your individual Twilio account. The exact-number route limits which destination this guide serves.
 
@@ -274,7 +274,7 @@ The range `40000–40100` can overlap Linux’s ephemeral port range. Reserve it
 )
 ```
 
-If another sysctl file or configuration-management system also sets this key, consolidate the reservations there so a later reload or reboot does not overwrite them. The RTP pool provides 50 port pairs, which is 25 concurrent calls from 0.57.0 (two pairs per call; widen the range, the reservation and the firewall rule together for more); that is a port-pool ceiling, not a benchmark for the bot’s capacity. [Deployment reference](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/docs/DEPLOY.md)
+If another sysctl file or configuration-management system also sets this key, consolidate the reservations there so a later reload or reboot does not overwrite them. The RTP pool provides 50 port pairs, which is 25 concurrent calls from 0.57.0 (two pairs per call; widen the range, the reservation and the firewall rule together for more); that is a port-pool ceiling, not a benchmark for the bot’s capacity. [Deployment reference](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/docs/DEPLOY.md)
 
 ### Firewall
 
@@ -332,14 +332,14 @@ Skip it. You don't need a termination SIP URI, credential list, or IP ACL for in
 
 ## 4. The Deepgram/LLM bot on the same host
 
-SiphonAI delivers PCM16 audio over its WebSocket bridge protocol and expects correctly framed PCM16 audio back. The other end must speak that protocol, including the `start` handshake and control messages. The repository’s reference bot closes the loop with Deepgram STT → streaming LLM → Deepgram TTS. It is a demo with limitations around queueing and pacing under load; assess those before increasing traffic. The daemon supports configurable WebSocket reconnect, but recovering a connection does not automatically preserve the bot’s conversation state. [Bot source](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/examples/deepgram-llm-bot-node/server.js), [Bridge protocol](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/docs/PROTOCOL.md)
+SiphonAI delivers PCM16 audio over its WebSocket bridge protocol and expects correctly framed PCM16 audio back. The other end must speak that protocol, including the `start` handshake and control messages. The repository’s reference bot closes the loop with Deepgram STT → streaming LLM → Deepgram TTS. It is a demo with limitations around queueing and pacing under load; assess those before increasing traffic. The daemon supports configurable WebSocket reconnect, but recovering a connection does not automatically preserve the bot’s conversation state. [Bot source](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/examples/deepgram-llm-bot-node/server.js), [Bridge protocol](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/docs/PROTOCOL.md)
 
 The bot lives in the repo, not the `.deb`, so you need a checkout. You don't need to build anything.
 
 ```bash
 sudo install -d -o "$USER" -g "$USER" /opt/siphon-ai-src
 git clone --depth 1 --branch v0.52.0 \
-  https://github.com/thevoiceguy/siphon-ai.git /opt/siphon-ai-src
+  https://github.com/feryx-io/siphon-ai.git /opt/siphon-ai-src
 git -C /opt/siphon-ai-src describe --tags --exact-match
 # v0.52.0
 ```
@@ -356,7 +356,7 @@ id siphon >/dev/null 2>&1 || \
 
 ### The scripted path
 
-The [bot installer](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/scripts/install-bot-debian13.sh) installs Node 22 from NodeSource if a qualifying runtime is absent, installs the npm dependencies, writes the bot environment file and systemd unit, and starts `siphon-bot`. It accepts an existing Node version of 20 or later; Debian 13’s Node 20 package meets the bot’s declared minimum. If you use Debian’s runtime, install both `nodejs` and `npm`.
+The [bot installer](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/scripts/install-bot-debian13.sh) installs Node 22 from NodeSource if a qualifying runtime is absent, installs the npm dependencies, writes the bot environment file and systemd unit, and starts `siphon-bot`. It accepts an existing Node version of 20 or later; Debian 13’s Node 20 package meets the bot’s declared minimum. If you use Debian’s runtime, install both `nodejs` and `npm`.
 
 These settings select the `.deb` configuration path, loopback binding, and Groq. The installer prompts for the Deepgram and Groq keys, so you don’t need to place real keys in a shell command:
 
@@ -389,7 +389,7 @@ sudo journalctl -u siphon-ai -n 30 --no-pager
 
 If startup fails, inspect the journal: configuration errors, permissions, and port conflicts are common causes. A service being active is only a process-level check; validate readiness and a live call next.
 
-`EnvironmentFile` changes need a service restart: `sudo systemctl restart siphon-ai` for daemon variables, or `sudo systemctl restart siphon-bot` for bot variables. SIGHUP reloads supported daemon settings such as routes, gateways, webhooks, and CDR sinks; it does not re-read systemd’s environment file. Re-run `check` after edits and consult the [reload reference](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/docs/CONFIG.md) for settings that require a restart.
+`EnvironmentFile` changes need a service restart: `sudo systemctl restart siphon-ai` for daemon variables, or `sudo systemctl restart siphon-bot` for bot variables. SIGHUP reloads supported daemon settings such as routes, gateways, webhooks, and CDR sinks; it does not re-read systemd’s environment file. Re-run `check` after edits and consult the [reload reference](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/docs/CONFIG.md) for settings that require a restart.
 
 ---
 
@@ -438,11 +438,11 @@ sudo journalctl -u siphon-ai -n 5 --no-pager
 # ... WARN ... INVITE rejected: no trunk matched (403 Forbidden) peer=127.0.0.1:...
 ```
 
-Trunk-gate rejections occur before bridged-call admission, so do not expect `siphon_ai_invites_total` to count them as accepted INVITEs. The journal warning is the direct signal. If you separately enable [audit logging](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/docs/AUDIT.md), the rejection emits `invite_rejected` with reason `no_trunk`; audit logging is not enabled by this tutorial.
+Trunk-gate rejections occur before bridged-call admission, so do not expect `siphon_ai_invites_total` to count them as accepted INVITEs. The journal warning is the direct signal. If you separately enable [audit logging](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/docs/AUDIT.md), the rejection emits `invite_rejected` with reason `no_trunk`; audit logging is not enabled by this tutorial.
 
 The SIP capture ring may observe rejected signaling, but the bridge-call ladder endpoint shown later resolves active or recent bridge call IDs. Do not assume that an INVITE rejected before a bridge call exists can be retrieved through that endpoint. Use the journal or a packet capture for this gate test.
 
-For a full local bridged test, you need both a temporary loopback trunk and a route matching that trunk and test destination. Adding only the loopback trunk will still fail the exact Twilio route in this guide. Use the [load harness](https://github.com/thevoiceguy/siphon-ai/tree/v0.52.0/test-harness/load) for a separate test configuration, and remove temporary access afterward.
+For a full local bridged test, you need both a temporary loopback trunk and a route matching that trunk and test destination. Adding only the loopback trunk will still fail the exact Twilio route in this guide. Use the [load harness](https://github.com/feryx-io/siphon-ai/tree/v0.52.0/test-harness/load) for a separate test configuration, and remove temporary access afterward.
 
 ### Is Twilio actually reaching you?
 
@@ -516,7 +516,7 @@ Bot side, look for STT opening, greeting audio, transcripts, and reply metrics. 
 
 Every metric record contains `metric <event> +Nms k=v ...`, so you can search the journal for `turn_summary` and compare calls. In this bot, `user_to_audio_ms` starts when a reply begins processing after Deepgram’s `UtteranceEnd` event and ends when the first audio frame is sent by the bot. It excludes the preceding speech-end detection delay, and queued replies also exclude their earlier queue wait.
 
-The configured `utterance_end_ms` is 1000. Perceived caller silence includes that detection stage, processing, network transport, and playout. A logged `user_to_audio_ms=610` therefore does not establish a 610 ms end-to-end conversational response time. Measure the full caller experience separately. [Metric implementation](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/examples/deepgram-llm-bot-node/server.js)
+The configured `utterance_end_ms` is 1000. Perceived caller silence includes that detection stage, processing, network transport, and playout. A logged `user_to_audio_ms=610` therefore does not establish a 610 ms end-to-end conversational response time. Measure the full caller experience separately. [Metric implementation](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/examples/deepgram-llm-bot-node/server.js)
 
 ### After the call
 
@@ -549,7 +549,7 @@ sudo bash -c 'set -a; . /etc/siphon-ai/env; set +a; \
 
 Each entry carries the full raw message in `payload`; the `split` pulls the first line so the ladder reads at a glance. One display quirk to expect: with the usual wildcard bind, your own end shows as `0.0.0.0:5060` in `src`/`dst` — siphon-rs stamps the local side with the socket's address, and the ring knowingly treats an unspecified IP as "this node" so direction still attributes correctly. The peer side is always the real address.
 
-That needs the `operator` token because the payloads contain raw SIP, including any `Authorization` headers. The defaults retain ladders for 50 completed calls, with a separate recent-CDR ring used to resolve their bridge IDs. This history is in memory and disappears on restart; a known call’s trace can also be evicted or truncated. Check `count` and `truncated` in the full response when investigating missing messages. For persistent, searchable history, see [HEP](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/docs/HEP.md) and the [Homer example](https://github.com/thevoiceguy/siphon-ai/tree/v0.52.0/examples/homer-stack).
+That needs the `operator` token because the payloads contain raw SIP, including any `Authorization` headers. The defaults retain ladders for 50 completed calls, with a separate recent-CDR ring used to resolve their bridge IDs. This history is in memory and disappears on restart; a known call’s trace can also be evicted or truncated. Check `count` and `truncated` in the full response when investigating missing messages. For persistent, searchable history, see [HEP](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/docs/HEP.md) and the [Homer example](https://github.com/feryx-io/siphon-ai/tree/v0.52.0/examples/homer-stack).
 
 ### Two things that will bite you on a first test call
 
@@ -561,15 +561,15 @@ That needs the `operator` token because the payloads contain raw SIP, including 
 
 ## What you have now
 
-One box, two services, a phone number that answers. The daemon handles SIP and media; the bot handles transcription, responses, and synthesized speech. To replace the reference bot with another pipeline, provide a WebSocket adapter that implements [SiphonAI’s bridge protocol](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/docs/PROTOCOL.md). A generic WebSocket audio endpoint is not automatically compatible.
+One box, two services, a phone number that answers. The daemon handles SIP and media; the bot handles transcription, responses, and synthesized speech. To replace the reference bot with another pipeline, provide a WebSocket adapter that implements [SiphonAI’s bridge protocol](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/docs/PROTOCOL.md). A generic WebSocket audio endpoint is not automatically compatible.
 
-Before expanding this into a production service, follow the [deployment guide](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/docs/DEPLOY.md) for TLS signaling, SRTP media, admission limits, and operational setup. Enabling Twilio Secure Trunking requires configuring both sides; changing only the Origination URI does not encrypt the media. Keep the bot’s queueing, pacing, provider limits, and conversation recovery in scope too.
+Before expanding this into a production service, follow the [deployment guide](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/docs/DEPLOY.md) for TLS signaling, SRTP media, admission limits, and operational setup. Enabling Twilio Secure Trunking requires configuring both sides; changing only the Origination URI does not encrypt the media. Keep the bot’s queueing, pacing, provider limits, and conversation recovery in scope too.
 
 For observability beyond one node:
 
-- [HEP and Homer](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/docs/HEP.md) add correlated signaling, media quality, and call records. With a HEP collector configured, **v0.52.0 adds node-health events** keyed by `node:<node.id>` and a status heartbeat every 60 seconds by default. `[hep].node_status_interval_secs = 0` disables only that heartbeat; positive values must be at least 5 seconds. HEP is optional and is not enabled in this tutorial.
-- [Dashboards and alerts](https://github.com/thevoiceguy/siphon-ai/tree/v0.52.0/examples/observability) help track capacity, call quality, and exporter failures. A successful UDP send cannot prove that a collector received a packet.
-- [Operations documentation](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/docs/OPERATIONS.md) covers JSON logging and OTLP. If you adopt the [fail2ban integration](https://github.com/thevoiceguy/siphon-ai/tree/v0.52.0/contrib/fail2ban), keep its log-format assumptions in mind: the shipped filter expects text logs, and switching the daemon to JSON requires a compatible filter.
+- [HEP and Homer](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/docs/HEP.md) add correlated signaling, media quality, and call records. With a HEP collector configured, **v0.52.0 adds node-health events** keyed by `node:<node.id>` and a status heartbeat every 60 seconds by default. `[hep].node_status_interval_secs = 0` disables only that heartbeat; positive values must be at least 5 seconds. HEP is optional and is not enabled in this tutorial.
+- [Dashboards and alerts](https://github.com/feryx-io/siphon-ai/tree/v0.52.0/examples/observability) help track capacity, call quality, and exporter failures. A successful UDP send cannot prove that a collector received a packet.
+- [Operations documentation](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/docs/OPERATIONS.md) covers JSON logging and OTLP. If you adopt the [fail2ban integration](https://github.com/feryx-io/siphon-ai/tree/v0.52.0/contrib/fail2ban), keep its log-format assumptions in mind: the shipped filter expects text logs, and switching the daemon to JSON requires a compatible filter.
 
 When upgrading, change the package version and bot checkout together, review the intervening release notes, run the configuration checks, and repeat the live call test. Use documentation for the installed release when a moving repository page differs.
 
@@ -618,7 +618,7 @@ BOT_BIND=127.0.0.1:8080
 # BOT_GREETING="Thanks for calling Acme. How can I help?"
 ```
 
-This selects Groq for the LLM while STT and TTS stay on Deepgram. For other endpoint configurations, see the [bot setup reference](https://github.com/thevoiceguy/siphon-ai/blob/v0.52.0/docs/BOT_LOCALHOST_SETUP.md). Measure latency with your own call path and provider account.
+This selects Groq for the LLM while STT and TTS stay on Deepgram. For other endpoint configurations, see the [bot setup reference](https://github.com/feryx-io/siphon-ai/blob/v0.52.0/docs/BOT_LOCALHOST_SETUP.md). Measure latency with your own call path and provider account.
 
 **Foreground smoke test first.** Before systemd, run it by hand so you can see what it prints. This wrapper sources the environment file as Bash; keep any multiword prompt or greeting values quoted as shown above. (If you ran the scripted installer above, the service is already up and holding the port — `sudo systemctl stop siphon-bot` first or you'll get `EADDRINUSE`, and restart it after.)
 

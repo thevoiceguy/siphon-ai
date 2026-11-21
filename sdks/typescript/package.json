@@ -5,7 +5,7 @@
   "license": "(MIT OR Apache-2.0)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/thevoiceguy/siphon-ai.git",
+    "url": "https://github.com/feryx-io/siphon-ai.git",
     "directory": "sdks/typescript"
   },
   "keywords": ["siphon-ai", "sip", "voice", "websocket", "telephony"],

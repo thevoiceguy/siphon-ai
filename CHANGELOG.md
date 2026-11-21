@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `GET /admin/v1/status` reported `hep_enabled: true` on a node with no
+  `[hep]` collector whenever the SIP ladder was on (the default), and
+  sightglass's System tab showed HEP as enabled to match. It now
+  reports whether HEP actually ships to a collector. Wrong since the
+  SIP ladder landed (#526).
+- The same ring-only node also attached a HEP CDR sink that went
+  nowhere and logged `CDR HEP sink active`. That sink is no longer
+  built without a collector, so `[cdr].enabled = true` with no file or
+  webhook sink warns again instead of being masked.
+- `siphon_ai_calls_active`, `siphon_ai_outbound_calls_active`,
+  `siphon_ai_parked_calls_active` and `siphon_ai_draining` were missing
+  from `/metrics` until first touched, so an idle node after a restart
+  was indistinguishable from one not being scraped. All four are now
+  published at `0` from startup.
+
 ## [0.57.0] - 2026-11-20
 
 ### Upgrade notes

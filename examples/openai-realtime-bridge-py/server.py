@@ -46,7 +46,7 @@ def parse_args(argv: list[str] | None = None) -> Options:
         "--instructions",
         default=os.environ.get(
             "OPENAI_REALTIME_INSTRUCTIONS",
-            "You are a helpful voice assistant on a phone call. Always reply in English unless the caller explicitly asks you to switch languages, translate something, or continue in another language. If the caller speaks another language without asking you to switch, you man switch to the matching language. Keep replies short and conversational.",
+            "You are a helpful voice assistant on a phone call. Always reply in English unless the caller explicitly asks you to switch languages, translate something, or continue in another language. If the caller speaks another language without asking you to switch, you may switch to the matching language. Keep replies short and conversational.",
         ),
     )
     p.add_argument(

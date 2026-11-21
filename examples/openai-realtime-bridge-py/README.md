@@ -40,16 +40,20 @@ finishes their opening sentence.
 | Flag                | Default                        | What                                       |
 |---------------------|--------------------------------|--------------------------------------------|
 | `--bind`            | `0.0.0.0:8765`                 | Listen address                             |
-| `--model`           | `gpt-realtime-2025-10-01`      | OpenAI Realtime model ID                   |
-| `--voice`           | `alloy`                        | TTS voice (`alloy`/`echo`/`fable`/`onyx`/`nova`/`shimmer`/`verse`) |
+| `--model`           | `gpt-realtime`                 | OpenAI Realtime model ID                   |
+| `--voice`           | `ash`                          | OpenAI Realtime voice name                 |
 | `--instructions`    | (short helpful-assistant text) | System prompt                              |
+| `--greeting`        | (one-sentence English greeting) | Prompt for the model's opening line       |
 | `--vad-threshold`   | `0.5`                          | OpenAI server-VAD speech threshold (0–1)   |
-| `--log-level`       | `INFO`                         | Standard Python logging level              |
+| `--log-level`       | `INFO`                         | `DEBUG`/`INFO`/`WARNING`/`ERROR`           |
 
 Environment variables:
 
 - `OPENAI_API_KEY` *(required)* — your API key
-- `OPENAI_REALTIME_MODEL` — alternate way to set `--model`
+- `OPENAI_REALTIME_MODEL`, `OPENAI_REALTIME_VOICE`,
+  `OPENAI_REALTIME_INSTRUCTIONS`, `OPENAI_REALTIME_GREETING`,
+  `OPENAI_REALTIME_VAD_THRESHOLD`, `LOG_LEVEL` — set the default for
+  the matching flag (an explicit flag wins)
 
 ## Architecture
 

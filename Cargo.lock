@@ -1300,7 +1300,7 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 [[package]]
 name = "forge-codecs"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "audiopus",
  "ezk-g722",
@@ -1312,7 +1312,7 @@ dependencies = [
 [[package]]
 name = "forge-core"
 version = "0.2.2"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "chrono",
  "serde",
@@ -1327,7 +1327,7 @@ dependencies = [
 [[package]]
 name = "forge-dtmf"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "chrono",
  "forge-core",
@@ -1339,7 +1339,7 @@ dependencies = [
 [[package]]
 name = "forge-engine"
 version = "0.8.1"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1371,7 +1371,7 @@ dependencies = [
 [[package]]
 name = "forge-hep"
 version = "0.0.1"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "bytes",
  "hep-rs",
@@ -1384,7 +1384,7 @@ dependencies = [
 [[package]]
 name = "forge-ice"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "bytes",
  "forge-core",
@@ -1406,7 +1406,7 @@ dependencies = [
 [[package]]
 name = "forge-injection"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "forge-core",
  "symphonia",
@@ -1418,7 +1418,7 @@ dependencies = [
 [[package]]
 name = "forge-mixer"
 version = "0.6.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "bytes",
  "dashmap 6.2.1",
@@ -1432,7 +1432,7 @@ dependencies = [
 [[package]]
 name = "forge-recorder"
 version = "0.2.1"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "bytes",
  "forge-core",
@@ -1446,7 +1446,7 @@ dependencies = [
 [[package]]
 name = "forge-resampler"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "thiserror 2.0.18",
  "tracing",
@@ -1455,7 +1455,7 @@ dependencies = [
 [[package]]
 name = "forge-rtp"
 version = "0.8.1"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "aes 0.9.1",
  "aes-gcm 0.11.0",
@@ -1480,7 +1480,7 @@ dependencies = [
 [[package]]
 name = "forge-sdp"
 version = "0.2.3"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1496,7 +1496,7 @@ dependencies = [
 [[package]]
 name = "forge-transcoder"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "bytes",
  "forge-codecs",
@@ -1509,7 +1509,7 @@ dependencies = [
 [[package]]
 name = "forge-vad"
 version = "0.2.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "forge-core",
  "thiserror 2.0.18",
@@ -1519,7 +1519,7 @@ dependencies = [
 [[package]]
 name = "forge-webrtc"
 version = "0.11.0"
-source = "git+https://github.com/thevoiceguy/forge-media?tag=v2026.11.20.2#cf3e207733d37e8f560653cf9a132e6cfadf93a8"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
 dependencies = [
  "bytes",
  "dashmap 6.2.1",
@@ -1821,7 +1821,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "hep-rs"
 version = "0.0.1"
-source = "git+https://github.com/thevoiceguy/hep-rs?branch=main#f50337898b2b74ebd32ce85598926d0deb79e5fe"
+source = "git+https://github.com/feryx-io/hep-rs?branch=main#4281b753bbd2efe20ed2b18f3361be4a282486a2"
 dependencies = [
  "bytes",
  "thiserror 2.0.18",
@@ -4430,7 +4430,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 [[package]]
 name = "sip-auth"
 version = "0.4.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4453,7 +4453,7 @@ dependencies = [
 [[package]]
 name = "sip-core"
 version = "0.7.8"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "bytes",
  "httpdate",
@@ -4466,7 +4466,7 @@ dependencies = [
 [[package]]
 name = "sip-dialog"
 version = "0.4.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4484,7 +4484,7 @@ dependencies = [
 [[package]]
 name = "sip-dns"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4498,7 +4498,7 @@ dependencies = [
 [[package]]
 name = "sip-hep"
 version = "0.0.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "bytes",
  "hep-rs",
@@ -4509,7 +4509,7 @@ dependencies = [
 [[package]]
 name = "sip-identity"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "base64 0.22.1",
  "ring",
@@ -4522,7 +4522,7 @@ dependencies = [
 [[package]]
 name = "sip-observe"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "once_cell",
  "tracing",
@@ -4531,7 +4531,7 @@ dependencies = [
 [[package]]
 name = "sip-parse"
 version = "0.4.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "bytes",
  "httpdate",
@@ -4545,7 +4545,7 @@ dependencies = [
 [[package]]
 name = "sip-ratelimit"
 version = "0.3.0"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "dashmap 5.5.3",
  "parking_lot 0.12.5",
@@ -4556,7 +4556,7 @@ dependencies = [
 [[package]]
 name = "sip-registrar"
 version = "0.3.2"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4577,7 +4577,7 @@ dependencies = [
 [[package]]
 name = "sip-sdp"
 version = "0.3.2"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "nom 7.1.3",
  "smol_str",
@@ -4586,7 +4586,7 @@ dependencies = [
 [[package]]
 name = "sip-transaction"
 version = "0.9.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4605,7 +4605,7 @@ dependencies = [
 [[package]]
 name = "sip-transport"
 version = "0.7.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4630,7 +4630,7 @@ dependencies = [
 [[package]]
 name = "sip-uac"
 version = "0.9.6"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4655,7 +4655,7 @@ dependencies = [
 [[package]]
 name = "sip-uas"
 version = "0.5.2"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "anyhow",
  "async-trait",

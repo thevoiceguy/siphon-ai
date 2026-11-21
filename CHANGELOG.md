@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The old `thevoiceguy/siphon-ai` URLs redirect, so existing clones and
   links keep working; `git remote set-url origin
   git@github.com:feryx-io/siphon-ai.git` is still worth doing.
+- **Upstream pins: siphon-rs v2026.11.10 → v2026.11.21, forge-media
+  v2026.11.20.2 → v2026.11.21**, both taken from `github.com/feryx-io`,
+  as is `hep-rs`. Neither tag changes a crate this daemon uses; they
+  exist so every manifest names the new URLs and the build keeps one
+  copy of the shared crates.
 - **Container images publish to `ghcr.io/feryx-io/siphon-ai`** from the
   next release. Images for 0.57.1 and earlier stay at
   `ghcr.io/thevoiceguy/siphon-ai`; a deployment that pulls by the old

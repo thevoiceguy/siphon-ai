@@ -44,7 +44,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use metrics::{counter, describe_counter, describe_gauge, describe_histogram, Unit};
+use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, Unit};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use thiserror::Error;
 
@@ -1392,7 +1392,25 @@ pub fn publish_zero_baselines() {
     // to shed an inbound call" and "this daemon does not have the knob"
     // otherwise render identically as a missing series.
     counter!(RTP_RESERVE_BLOCKS_TOTAL).absolute(0);
+    // Gauges register lazily too: `calls_active` was absent until the
+    // first call after a restart, so "idle" and "not scraping" looked
+    // the same and `calls_active == 0` guards matched nothing.
+    // `increment(0.0)` rather than `set(0.0)` so this can never clobber
+    // a value if it is ever called late.
+    for name in ZERO_BASELINE_GAUGES {
+        gauge!(*name).increment(0.0);
+    }
 }
+
+/// Unlabeled gauges whose idle value is zero and which are otherwise
+/// only touched by the first call / park / drain. Gauges published by
+/// a sampler or at startup already exist and are not listed.
+pub const ZERO_BASELINE_GAUGES: &[&str] = &[
+    CALLS_ACTIVE,
+    OUTBOUND_CALLS_ACTIVE,
+    PARKED_CALLS_ACTIVE,
+    DRAINING,
+];
 
 /// Buckets for `ws_connect_seconds`. The first bucket (25ms) catches
 /// the typical healthy local-network handshake; the last (30s)
@@ -1596,7 +1614,7 @@ pub const ALL_HISTOGRAMS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use metrics::{counter, gauge, histogram};
+    use metrics::histogram;
 
     /// Install a per-test recorder, run the closure, return the
     /// rendered `/metrics` text. `metrics::with_local_recorder`
@@ -1666,6 +1684,23 @@ mod tests {
                 "expected a zero baseline for {name} in:\n{out}"
             );
         }
+        for name in ZERO_BASELINE_GAUGES {
+            assert!(
+                out.contains(&format!("\n{name} 0")),
+                "expected a zero baseline for gauge {name} in:\n{out}"
+            );
+        }
+    }
+
+    /// The gauge baseline adds zero rather than setting it, so it
+    /// cannot wipe a live value.
+    #[test]
+    fn gauge_baseline_does_not_clobber_a_live_value() {
+        let out = with_recorder(|| {
+            gauge!(CALLS_ACTIVE).increment(3.0);
+            publish_zero_baselines();
+        });
+        assert!(out.contains(&format!("{CALLS_ACTIVE} 3")), "{out}");
     }
 
     /// The baseline must not clobber a real count — `absolute(0)` runs

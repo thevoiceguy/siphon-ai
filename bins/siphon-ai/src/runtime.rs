@@ -1319,7 +1319,11 @@ impl Runtime {
             let registry = registry_for_drain.clone();
             let drain = drain.clone();
             let registration_mgr = registration_mgr.clone();
-            let hep_enabled = hep_telemetry.is_some();
+            // Not `is_some()`: the plumbing also exists ring-only, for
+            // the SIP ladder, with no collector behind it.
+            let hep_enabled = hep_telemetry
+                .as_deref()
+                .is_some_and(HepTelemetry::ships_to_collector);
             let started = std::time::Instant::now();
             Arc::new(move || {
                 let regs = registration_mgr.snapshot();
@@ -2657,8 +2661,10 @@ pub(crate) async fn build_cdr_sink(
 
     // HEP CDR shipping is independent of `[cdr].enabled` — operators
     // can ship CDRs to Homer without also writing them to disk or a
-    // webhook. Wires up when HEP is installed.
-    if let Some(hep) = hep {
+    // webhook. Wires up when HEP ships to a collector; a ring-only
+    // build (SIP ladder, no collector) has nowhere to send a CDR, and
+    // counting it as a sink would also silence the warning below.
+    if let Some(hep) = hep.filter(|h| h.ships_to_collector()) {
         let mut sink = HepCdrSink::new(hep.sink(), hep.capture_id());
         if let Some(pw) = hep.capture_password() {
             sink = sink.with_password(pw);

@@ -78,6 +78,9 @@ pub struct HepTelemetry {
     capture_id: u32,
     capture_password: Option<String>,
     node_id: String,
+    /// A UDP collector leg exists. False on a ring-only build, where
+    /// the sink only feeds the in-process SIP ladder.
+    ships_to_collector: bool,
 }
 
 /// Owner of the spawned UDP worker. The runtime stashes this on
@@ -322,6 +325,7 @@ impl HepTelemetry {
             capture_id,
             capture_password,
             node_id,
+            ships_to_collector: collector.is_some(),
         };
         Ok((telemetry, worker_handle))
     }
@@ -431,6 +435,15 @@ impl HepTelemetry {
     /// without re-reading config.
     pub fn node_id(&self) -> &str {
         &self.node_id
+    }
+
+    /// Whether anything leaves the process. `false` on a ring-only
+    /// build (`[hep]` off, SIP ladder on): the plumbing exists so the
+    /// ladder can capture, but there is no collector. Callers that
+    /// mean "HEP is configured" must ask this, not whether a
+    /// `HepTelemetry` exists.
+    pub fn ships_to_collector(&self) -> bool {
+        self.ships_to_collector
     }
 
     /// Borrow the shared `HepSink` so downstream consumers (e.g., a
@@ -795,6 +808,25 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn build_with_a_collector_reports_that_it_ships() {
+        let homer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake collector");
+        let (telemetry, worker) = HepTelemetry::build(HepTelemetryBuild {
+            collector: Some(homer.local_addr().expect("local addr")),
+            capture_id: 7,
+            capture_password: None,
+            queue_capacity: 8,
+            node_id: "shipping".into(),
+            extra_sinks: Vec::new(),
+        })
+        .await
+        .expect("collector build succeeds");
+        assert!(telemetry.ships_to_collector());
+        assert!(worker.is_some());
+    }
+
     // DESIGN_SIP_LADDER.md §3.1. The whole reason `collector` is an
     // Option: with `[hep]` off but the ladder on, the packet stream
     // must still exist — teeing off the UDP sink instead would leave
@@ -817,6 +849,10 @@ mod tests {
         assert!(
             worker.is_none(),
             "no collector ⇒ no UDP worker to drain and no socket opened"
+        );
+        assert!(
+            !telemetry.ships_to_collector(),
+            "ring-only must not read as HEP enabled (status, CDR sink)"
         );
 
         telemetry.emit_log("hello", Some("call-1"), None);
@@ -853,6 +889,7 @@ mod tests {
             capture_id: 2002,
             capture_password: Some("homer-secret".into()),
             node_id: "node-a".into(),
+            ships_to_collector: true,
         }
     }
 

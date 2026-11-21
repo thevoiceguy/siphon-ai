@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.57.1] - 2026-11-21
+
 ### Fixed
 
 - `GET /admin/v1/status` reported `hep_enabled: true` on a node with no

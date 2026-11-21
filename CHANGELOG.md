@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.57.2] - 2026-11-21
+
 ### Changed
 
 - **The repository moved to the `feryx-io` organization**:
@@ -20,8 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as is `hep-rs`. Neither tag changes a crate this daemon uses; they
   exist so every manifest names the new URLs and the build keeps one
   copy of the shared crates.
-- **Container images publish to `ghcr.io/feryx-io/siphon-ai`** from the
-  next release. Images for 0.57.1 and earlier stay at
+- **Container images publish to `ghcr.io/feryx-io/siphon-ai`** from this
+  release. Images for 0.57.1 and earlier stay at
   `ghcr.io/thevoiceguy/siphon-ai`; a deployment that pulls by the old
   path will not see new versions until it is repointed.
 

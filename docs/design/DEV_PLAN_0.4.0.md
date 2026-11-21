@@ -1,6 +1,6 @@
 # SiphonAI 0.4.0 Development Plan
 
-> **STATUS: SHIPPED — released as [`v0.4.0`](https://github.com/thevoiceguy/siphon-ai/releases/tag/v0.4.0) on 2026-06-07** (tag `v0.4.0`, commit `c20e99f`).
+> **STATUS: SHIPPED — released as [`v0.4.0`](https://github.com/feryx-io/siphon-ai/releases/tag/v0.4.0) on 2026-06-07** (tag `v0.4.0`, commit `c20e99f`).
 > The full STIR/SHAKEN must-have scope (§4) landed across PRs #113–#121, plus
 > the release cut (#122). Off by default; protocol stays at `version: "1"`.
 > Per-section completion is marked inline below (§7 sprint table, §9 decisions,

@@ -1,6 +1,6 @@
 # siphon-ai-server (Python)
 
-Server SDK for the [SiphonAI](https://github.com/thevoiceguy/siphon-ai)
+Server SDK for the [SiphonAI](https://github.com/feryx-io/siphon-ai)
 WebSocket bridge protocol v1: typed events, paced 20 ms audio framing, and
 connection lifecycle — write handlers, not wire code.
 
@@ -14,7 +14,7 @@ Not yet on PyPI — install from the repo (vendorable):
 ```bash
 pip install ./sdks/python
 # or from a checkout URL:
-pip install "siphon-ai-server @ git+https://github.com/thevoiceguy/siphon-ai#subdirectory=sdks/python"
+pip install "siphon-ai-server @ git+https://github.com/feryx-io/siphon-ai#subdirectory=sdks/python"
 ```
 
 Requires Python ≥ 3.10. Sole runtime dependency: `websockets`.

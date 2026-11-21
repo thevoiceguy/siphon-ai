@@ -772,7 +772,7 @@ currently has **no effect on the wire**.
 > design (a `BridgeIn::Answer` message, noted as targeted for 0.2.1/0.3.0
 > in `docs/CONFIG.md` under `[sip.call_progress]`) that has not shipped.
 > Pre-answer rejection is tracked in
-> [#376](https://github.com/thevoiceguy/siphon-ai/issues/376); the cause
+> [#376](https://github.com/feryx-io/siphon-ai/issues/376); the cause
 > values stay in the schema so that adding it later is additive.
 
 After a successful hangup, SiphonAI sends `stop` with

@@ -35,7 +35,7 @@ subtle.workspace                      = true
 # us the live `ServerConfig`; we only build a `TlsAcceptor` per accept.
 tokio-rustls.workspace                = true
 
-# HEP3 / Homer shipping. Owned by us (github.com/thevoiceguy/hep-rs +
+# HEP3 / Homer shipping. Owned by us (github.com/feryx-io/hep-rs +
 # the sip-hep / forge-hep adapter crates). Telemetry assembles the
 # UdpHepSink at startup, installs the per-protocol emitters, and
 # exposes a small SIPHON-AI-owned API for log / CDR HEP chunks.

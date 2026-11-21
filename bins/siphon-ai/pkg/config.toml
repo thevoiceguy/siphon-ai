@@ -9,7 +9,7 @@
 #     sudo systemctl reload siphon-ai     # apply route/gateway/webhook changes (SIGHUP)
 #
 # Full reference: /usr/share/doc/siphon-ai/ and
-# https://github.com/thevoiceguy/siphon-ai/blob/main/docs/CONFIG.md
+# https://github.com/feryx-io/siphon-ai/blob/main/docs/CONFIG.md
 #
 # This is a dpkg conffile: your edits survive package upgrades.
 

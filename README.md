@@ -149,7 +149,7 @@ SIP call holds four UDP ports (an RTP/RTCP pair per media leg), so a
 4,000-port range is 1,000 calls and no amount of CPU changes that. The runs
 above predate that and used `[41000, 45000]` at two ports a call. On a node that both
 answers and originates, both directions draw from that one pool with no
-reservation between them ([#556](https://github.com/thevoiceguy/siphon-ai/issues/556)),
+reservation between them ([#556](https://github.com/feryx-io/siphon-ai/issues/556)),
 so size it for the sum.
 
 See [`docs/DEV_PLAN.md`](docs/DEV_PLAN.md) for design rationale. Still
@@ -230,7 +230,7 @@ verify-and-install steps.
 
 ```sh
 # Debian/Ubuntu: grab the .deb for your arch from
-# https://github.com/thevoiceguy/siphon-ai/releases/latest — then:
+# https://github.com/feryx-io/siphon-ai/releases/latest — then:
 sudo apt install ./siphon-ai_<version>_<arch>.deb
 ```
 
@@ -243,7 +243,7 @@ two scripts walk through `docs/INSTALL_DEBIAN13.md` and
 re-running is safe.
 
 ```sh
-git clone https://github.com/thevoiceguy/siphon-ai.git /opt/siphon-ai-src
+git clone https://github.com/feryx-io/siphon-ai.git /opt/siphon-ai-src
 cd /opt/siphon-ai-src
 
 # Daemon: packages, rustup, build, systemd unit, working TOML config.
@@ -370,9 +370,9 @@ secure default). See [`docs/DEPLOY.md`](docs/DEPLOY.md) → *Admin auth & RBAC*.
 SiphonAI is glue. The heavy lifting lives in three companion repos owned by
 the same author:
 
-- [`siphon-rs`](https://github.com/thevoiceguy/siphon-rs) — RFC 3261 SIP stack
-- [`forge-media`](https://github.com/thevoiceguy/forge-media) — RTP/codecs/SDP/jitter/VAD
-- [`hep-rs`](https://github.com/thevoiceguy/hep-rs) — HEP3 codec, transport, `HepSink` trait
+- [`siphon-rs`](https://github.com/feryx-io/siphon-rs) — RFC 3261 SIP stack
+- [`forge-media`](https://github.com/feryx-io/forge-media) — RTP/codecs/SDP/jitter/VAD
+- [`hep-rs`](https://github.com/feryx-io/hep-rs) — HEP3 codec, transport, `HepSink` trait
 
 ## License
 

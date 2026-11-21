@@ -23,7 +23,7 @@ fn main() {
 
     let schema = serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$id": "https://raw.githubusercontent.com/thevoiceguy/siphon-ai/main/schemas/siphon-ai.v1.json",
+        "$id": "https://raw.githubusercontent.com/feryx-io/siphon-ai/main/schemas/siphon-ai.v1.json",
         "title": "SiphonAI WebSocket protocol v1",
         "description": "Every JSON text frame on a SiphonAI bridge WebSocket \
     is exactly one of these messages, discriminated by `type`. `BridgeOut` = \

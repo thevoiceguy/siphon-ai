@@ -1,6 +1,6 @@
 [Unit]
 Description=SiphonAI — SIP-to-WebSocket media bridge
-Documentation=https://github.com/thevoiceguy/siphon-ai
+Documentation=https://github.com/feryx-io/siphon-ai
 After=network-online.target
 Wants=network-online.target
 

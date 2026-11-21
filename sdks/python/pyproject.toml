@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/thevoiceguy/siphon-ai"
-Documentation = "https://github.com/thevoiceguy/siphon-ai/blob/main/docs/PROTOCOL.md"
+Homepage = "https://github.com/feryx-io/siphon-ai"
+Documentation = "https://github.com/feryx-io/siphon-ai/blob/main/docs/PROTOCOL.md"
 
 [project.optional-dependencies]
 test = ["jsonschema>=4"]

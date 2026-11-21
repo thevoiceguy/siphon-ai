@@ -275,7 +275,7 @@ Clean shed at a known cap, identical to 0.48.10.
 - **Playout SLO** — unverified on this run, for the third time, and now fixed
   for the next one. `outbound_audio_frames_dropped_total` existed in the code
   but was not exported until it first incremented, so "zero dropped" and "not
-  instrumented" were indistinguishable ([#474](https://github.com/thevoiceguy/siphon-ai/issues/474)).
+  instrumented" were indistinguishable ([#474](https://github.com/feryx-io/siphon-ai/issues/474)).
   The counter is published at zero from startup as of the commit after
   0.48.13, so the next tier-1 run can assert this SLO rather than skip it.
 - **Convergence.** Hour 2 of the two-hour run still added 6 MB. Growth is

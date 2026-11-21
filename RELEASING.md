@@ -53,12 +53,12 @@ So the three move together, in one commit, at release time — never drift.
    - **publish** — CycloneDX SBOM (syft), `SHA256SUMS` over everything, a
      cosign keyless signature over the checksums, and a GitHub release marked
      **Latest**, with notes extracted from `CHANGELOG.md`;
-   - **container** — multi-arch image to `ghcr.io/thevoiceguy/siphon-ai:vX.Y.Z`
+   - **container** — multi-arch image to `ghcr.io/feryx-io/siphon-ai:vX.Y.Z`
      and `:latest`, cosign-signed.
 
 4. **Verify the published release** (see `docs/DEPLOY.md` → *Install from a
    release*): `sha256sum -c SHA256SUMS`, `cosign verify-blob …`, and
-   `cosign verify ghcr.io/thevoiceguy/siphon-ai:vX.Y.Z …`.
+   `cosign verify ghcr.io/feryx-io/siphon-ai:vX.Y.Z …`.
 
 ## Pre-releases (`-rc.N`)
 

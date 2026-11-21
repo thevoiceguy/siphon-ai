@@ -171,10 +171,10 @@ off, but it carries a forge-media dependency.
 - **Conferencing / whisper / barge + call park** — the other big theme;
   still post-outbound. A dedicated release.
 - **SRTP re-key** — the SDES upstream primitive landed
-  ([forge-media#72](https://github.com/thevoiceguy/forge-media/pull/72)); the
+  ([forge-media#72](https://github.com/feryx-io/forge-media/pull/72)); the
   siphon-ai SDES re-key trigger is unblocked for a later release. DTLS-SRTP
   renegotiation is parked
-  ([forge-media#73](https://github.com/thevoiceguy/forge-media/issues/73)).
+  ([forge-media#73](https://github.com/feryx-io/forge-media/issues/73)).
 - **Campaigns / scheduling** — bulk/scheduled outbound (dialer lists, pacing)
   is a layer *above* single-call origination; out of 0.6.0. The originate API
   is the primitive a campaign tool would call.

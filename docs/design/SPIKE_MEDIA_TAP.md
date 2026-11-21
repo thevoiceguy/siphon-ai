@@ -141,7 +141,7 @@ transitively pulled in OpenAI, Anthropic, ElevenLabs, and Deepgram
 WebSocket clients — code we never call but which violated CLAUDE.md §4.1's
 "zero dependencies on AI vendors" in spirit.
 
-Upstream PR [thevoiceguy/forge-media#39][pr39] added an `ai` Cargo feature
+Upstream PR [feryx-io/forge-media#39][pr39] added an `ai` Cargo feature
 (default-on) that gates the `forge-ai-stream` dep, the `ai_integration` and
 `persistence` modules, the `MediaSession::ai_manager` field and accessors,
 and the AI-aware code paths in `ForwardingEngine`. Existing consumers see
@@ -155,7 +155,7 @@ That's the configuration SiphonAI's workspace `Cargo.toml` now uses.
 After the PR landed, the lockfile shrank from 434 to 393 packages — the
 AI vendor SDK chains are no longer in the dep tree.
 
-[pr39]: https://github.com/thevoiceguy/forge-media/pull/39
+[pr39]: https://github.com/feryx-io/forge-media/pull/39
 
 ## Verification
 

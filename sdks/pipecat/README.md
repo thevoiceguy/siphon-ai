@@ -1,7 +1,7 @@
 # siphon-ai-pipecat
 
 A [Pipecat](https://www.pipecat.ai/) transport for
-[SiphonAI](https://github.com/thevoiceguy/siphon-ai). Answer SIP calls,
+[SiphonAI](https://github.com/feryx-io/siphon-ai). Answer SIP calls,
 from a carrier trunk or a PBX extension, with a Pipecat pipeline.
 
 ```

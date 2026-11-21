@@ -142,7 +142,7 @@ enough for a developer to act on.
 ## Gating your server's CI
 
 ```yaml
-- run: cargo install --git https://github.com/thevoiceguy/siphon-ai siphon-ai-protocol-testkit
+- run: cargo install --git https://github.com/feryx-io/siphon-ai siphon-ai-protocol-testkit
 # …start your server on :8080…
 - run: siphon-ai-testkit run ws://127.0.0.1:8080/ --report conformance.json
 ```

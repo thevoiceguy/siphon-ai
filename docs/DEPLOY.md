@@ -6,7 +6,7 @@ observability bar (the §11.8 ten questions) see `docs/OPERATIONS.md`.
 
 ## Install from a release
 
-Every [GitHub release](https://github.com/thevoiceguy/siphon-ai/releases)
+Every [GitHub release](https://github.com/feryx-io/siphon-ai/releases)
 ships prebuilt, **statically-linked musl** artifacts for `x86_64` and
 `aarch64` — no need to build from source. Each release carries:
 
@@ -14,7 +14,7 @@ ships prebuilt, **statically-linked musl** artifacts for `x86_64` and
 |---|---|
 | `siphon-ai-<ver>-<target>.tar.gz` | Standalone static binary (+ licenses, README). |
 | `siphon-ai_<ver>-1_<arch>.deb` | Debian/Ubuntu package (`amd64` / `arm64`): the daemon and the `sightglass` console. |
-| `ghcr.io/thevoiceguy/siphon-ai:<ver>` | Multi-arch container (`linux/amd64` + `linux/arm64`). |
+| `ghcr.io/feryx-io/siphon-ai:<ver>` | Multi-arch container (`linux/amd64` + `linux/arm64`). |
 | `siphon-ai-<ver>-sbom.cdx.json` | CycloneDX SBOM. |
 | `SHA256SUMS`, `SHA256SUMS.cosign.bundle` | Checksums + a keyless [cosign](https://docs.sigstore.dev/) signature over them. |
 
@@ -93,15 +93,19 @@ role  = "admin"
 
 ### Container
 
+Releases up to and including 0.57.1 were published before the repository
+moved to the `feryx-io` organization; their images stay at
+`ghcr.io/thevoiceguy/siphon-ai:<ver>`. Later releases publish to the path below.
+
 ```sh
-docker pull ghcr.io/thevoiceguy/siphon-ai:<ver>
+docker pull ghcr.io/feryx-io/siphon-ai:<ver>
 # Verify the image signature (same keyless identity as the blob above):
-cosign verify ghcr.io/thevoiceguy/siphon-ai:<ver> \
+cosign verify ghcr.io/feryx-io/siphon-ai:<ver> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp 'release\.yml@refs/tags/'
 
 docker run --rm -v "$PWD/config.toml:/app/config.toml" \
-  ghcr.io/thevoiceguy/siphon-ai:<ver>
+  ghcr.io/feryx-io/siphon-ai:<ver>
 ```
 
 To build the container yourself instead, see **Container image** below.
@@ -237,7 +241,7 @@ Two things follow:
   exhausted pool and a reservation refusal;
   `siphon_ai_rtp_reserve_blocks_total` isolates the latter.
 
-[#556]: https://github.com/thevoiceguy/siphon-ai/issues/556
+[#556]: https://github.com/feryx-io/siphon-ai/issues/556
 
 ## TLS deployment (SIP/TLS + WSS)
 
@@ -1501,7 +1505,7 @@ applied (and test-enforced) in our `prometheus_builder()` (issue #437).
 | `siphon_ai_barge_in_decision_seconds`   | histogram | —                                     | Arbitration latency: armed on `speech_started` → resolved. Explicit buckets 50ms–5s; the ceiling of the distribution is the configured `decision_ms` (timeout resolutions land there). |
 | `siphon_ai_silence_events_total`        | counter   | —                                     | Times `silence_detected` fired on the WS bridge. Configurable via `[bridge].silence_threshold_ms`. |
 | `siphon_ai_dead_air_events_total`       | counter   | —                                     | Times `dead_air_detected` fired on the WS bridge. Configurable via `[bridge].dead_air_threshold_ms`. |
-| `siphon_ai_idle_keepalive_frames_total` | counter   | —                                     | Caller-leg 20 ms keepalive frames emitted while the WS server is silent (`[bridge].idle_keepalive`, [#610](https://github.com/thevoiceguy/siphon-ai/issues/610)). `"silence"` counts digital-silence frames, `"comfort_noise"` counts low-level comfort-noise frames; every emitted frame counts, zeros included — the counter answers "is the keepalive flowing", while "is it audible" is the config, not the metric. Stays at 0 with the default `"off"`, and pauses whenever anything else owns the caller's ear (playout in progress, MOH/park/hold/announcement, conference room, peer hold, WS drop); it keeps counting through mute and barge-in arbitration, where caller→server audio must keep flowing. |
+| `siphon_ai_idle_keepalive_frames_total` | counter   | —                                     | Caller-leg 20 ms keepalive frames emitted while the WS server is silent (`[bridge].idle_keepalive`, [#610](https://github.com/feryx-io/siphon-ai/issues/610)). `"silence"` counts digital-silence frames, `"comfort_noise"` counts low-level comfort-noise frames; every emitted frame counts, zeros included — the counter answers "is the keepalive flowing", while "is it audible" is the config, not the metric. Stays at 0 with the default `"off"`, and pauses whenever anything else owns the caller's ear (playout in progress, MOH/park/hold/announcement, conference room, peer hold, WS drop); it keeps counting through mute and barge-in arbitration, where caller→server audio must keep flowing. |
 | `siphon_ai_playout_turns_total`         | counter   | `reason=completed\|barge_in\|cleared\|muted\|held\|parked` | Bot playout turns closed, by why they ended (`[bridge].playout_events`, PROTOCOL.md §3.15). Counted only on calls with the feature on; a turn still open at call end is not counted. The `barge_in` share against `completed` is how often callers talk over the bot. |
 | `siphon_ai_rtp_jitter_ms`               | histogram | —                                     | RTP jitter snapshot recorded on every `rtp_stats` emission (when forge has reported a value). Explicit buckets 1 ms – 500 ms. |
 | `siphon_ai_rtp_packet_loss_ratio`       | histogram | —                                     | Packet-loss ratio (0.0-1.0) recorded on every `rtp_stats` emission. Explicit buckets 0.001 – 1.0 (a fraction, not a percentage). |

@@ -1299,8 +1299,8 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "forge-codecs"
-version = "0.2.0"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+version = "0.3.0"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "audiopus",
  "ezk-g722",
@@ -1312,7 +1312,7 @@ dependencies = [
 [[package]]
 name = "forge-core"
 version = "0.2.2"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "chrono",
  "serde",
@@ -1327,7 +1327,7 @@ dependencies = [
 [[package]]
 name = "forge-dtmf"
 version = "0.2.1"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "chrono",
  "forge-core",
@@ -1339,7 +1339,7 @@ dependencies = [
 [[package]]
 name = "forge-engine"
 version = "0.8.1"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1370,8 +1370,8 @@ dependencies = [
 
 [[package]]
 name = "forge-hep"
-version = "0.0.1"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+version = "0.1.0"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "bytes",
  "hep-rs",
@@ -1384,7 +1384,7 @@ dependencies = [
 [[package]]
 name = "forge-ice"
 version = "0.3.0"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "bytes",
  "forge-core",
@@ -1406,7 +1406,7 @@ dependencies = [
 [[package]]
 name = "forge-injection"
 version = "0.2.0"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "forge-core",
  "symphonia",
@@ -1418,7 +1418,7 @@ dependencies = [
 [[package]]
 name = "forge-mixer"
 version = "0.6.0"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "bytes",
  "dashmap 6.2.1",
@@ -1432,7 +1432,7 @@ dependencies = [
 [[package]]
 name = "forge-recorder"
 version = "0.2.1"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "bytes",
  "forge-core",
@@ -1446,7 +1446,7 @@ dependencies = [
 [[package]]
 name = "forge-resampler"
 version = "0.2.0"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "thiserror 2.0.18",
  "tracing",
@@ -1455,7 +1455,7 @@ dependencies = [
 [[package]]
 name = "forge-rtp"
 version = "0.8.1"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "aes 0.9.1",
  "aes-gcm 0.11.0",
@@ -1479,8 +1479,8 @@ dependencies = [
 
 [[package]]
 name = "forge-sdp"
-version = "0.2.3"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+version = "0.3.0"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1488,7 +1488,7 @@ dependencies = [
  "forge-ice",
  "forge-rtp",
  "rand 0.10.1",
- "sip-sdp",
+ "siphon-sdp",
  "smol_str",
  "thiserror 2.0.18",
 ]
@@ -1496,7 +1496,7 @@ dependencies = [
 [[package]]
 name = "forge-transcoder"
 version = "0.2.0"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "bytes",
  "forge-codecs",
@@ -1509,7 +1509,7 @@ dependencies = [
 [[package]]
 name = "forge-vad"
 version = "0.2.0"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "forge-core",
  "thiserror 2.0.18",
@@ -1519,7 +1519,7 @@ dependencies = [
 [[package]]
 name = "forge-webrtc"
 version = "0.11.0"
-source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.21#b8f4a2dcdf76fc7e6ab9bc2cc79034f4f0513115"
+source = "git+https://github.com/feryx-io/forge-media?tag=v2026.11.22#2a1eed789b9a8d5a1e947e5aff9b9ac7b9a3a881"
 dependencies = [
  "bytes",
  "dashmap 6.2.1",
@@ -1538,9 +1538,9 @@ dependencies = [
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -1820,8 +1820,9 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hep-rs"
-version = "0.0.1"
-source = "git+https://github.com/feryx-io/hep-rs?branch=main#4281b753bbd2efe20ed2b18f3361be4a282486a2"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c233590341627f762577d155c00de4affb395aa09561600410938f95195a12d2"
 dependencies = [
  "bytes",
  "thiserror 2.0.18",
@@ -4428,252 +4429,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
-name = "sip-auth"
-version = "0.4.0"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "dashmap 5.5.3",
- "hex",
- "md5 0.7.0",
- "rand 0.10.1",
- "sha2 0.10.9",
- "sip-core",
- "sip-parse",
- "sip-ratelimit",
- "smol_str",
- "subtle",
- "tokio",
- "tracing",
- "zeroize",
-]
-
-[[package]]
-name = "sip-core"
-version = "0.7.8"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "bytes",
- "httpdate",
- "percent-encoding",
- "serde",
- "smol_str",
- "subtle",
-]
-
-[[package]]
-name = "sip-dialog"
-version = "0.4.0"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "dashmap 5.5.3",
- "parking_lot 0.12.5",
- "rand 0.10.1",
- "sip-core",
- "sip-parse",
- "smol_str",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "sip-dns"
-version = "0.3.0"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "anyhow",
- "async-trait",
- "hickory-resolver",
- "rand 0.10.1",
- "sip-core",
- "smol_str",
- "tokio",
-]
-
-[[package]]
-name = "sip-hep"
-version = "0.0.1"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "bytes",
- "hep-rs",
- "once_cell",
- "tracing",
-]
-
-[[package]]
-name = "sip-identity"
-version = "0.3.0"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "base64 0.22.1",
- "ring",
- "rustls-pki-types",
- "rustls-webpki",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "sip-observe"
-version = "0.3.0"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "once_cell",
- "tracing",
-]
-
-[[package]]
-name = "sip-parse"
-version = "0.4.0"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "bytes",
- "httpdate",
- "nom 7.1.3",
- "serde",
- "sip-core",
- "smol_str",
- "tracing",
-]
-
-[[package]]
-name = "sip-ratelimit"
-version = "0.3.0"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "dashmap 5.5.3",
- "parking_lot 0.12.5",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "sip-registrar"
-version = "0.3.2"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "dashmap 5.5.3",
- "rand 0.10.1",
- "sip-auth",
- "sip-core",
- "sip-parse",
- "sip-ratelimit",
- "smol_str",
- "tokio",
- "tracing",
- "unicode-normalization",
-]
-
-[[package]]
-name = "sip-sdp"
-version = "0.3.2"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "nom 7.1.3",
- "smol_str",
-]
-
-[[package]]
-name = "sip-transaction"
-version = "0.9.1"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "dashmap 5.5.3",
- "parking_lot 0.12.5",
- "rand 0.10.1",
- "sip-core",
- "sip-parse",
- "sip-transport",
- "smol_str",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "sip-transport"
-version = "0.7.1"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "anyhow",
- "arc-swap",
- "bytes",
- "dashmap 5.5.3",
- "futures-util",
- "memchr",
- "rustls",
- "rustls-pki-types",
- "sha2 0.10.9",
- "sip-hep",
- "sip-observe",
- "sip-ratelimit",
- "socket2 0.5.10",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite 0.21.0",
- "tracing",
- "x509-parser",
-]
-
-[[package]]
-name = "sip-uac"
-version = "0.9.6"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "hex",
- "rand 0.10.1",
- "sha1 0.10.6",
- "sip-auth",
- "sip-core",
- "sip-dialog",
- "sip-dns",
- "sip-parse",
- "sip-sdp",
- "sip-transaction",
- "sip-transport",
- "smol_str",
- "tokio",
- "tracing",
- "urlencoding",
-]
-
-[[package]]
-name = "sip-uas"
-version = "0.5.2"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "rand 0.10.1",
- "sip-auth",
- "sip-core",
- "sip-dialog",
- "sip-parse",
- "sip-sdp",
- "sip-transaction",
- "sip-transport",
- "smol_str",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "siphasher"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4699,14 +4454,6 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "serde_json",
- "sip-core",
- "sip-dialog",
- "sip-dns",
- "sip-parse",
- "sip-transaction",
- "sip-transport",
- "sip-uac",
- "sip-uas",
  "siphon-ai-audit",
  "siphon-ai-bridge",
  "siphon-ai-cdr",
@@ -4722,6 +4469,14 @@ dependencies = [
  "siphon-ai-telemetry",
  "siphon-ai-webhooks",
  "siphon-ai-webrtc-glue",
+ "siphon-core",
+ "siphon-dialog",
+ "siphon-dns",
+ "siphon-parse",
+ "siphon-transaction",
+ "siphon-transport",
+ "siphon-uac",
+ "siphon-uas",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -4835,13 +4590,6 @@ dependencies = [
  "parking_lot 0.12.5",
  "serde",
  "serde_json",
- "sip-core",
- "sip-dialog",
- "sip-parse",
- "sip-sdp",
- "sip-transaction",
- "sip-uac",
- "sip-uas",
  "siphon-ai-audit",
  "siphon-ai-bridge",
  "siphon-ai-cdr",
@@ -4856,6 +4604,13 @@ dependencies = [
  "siphon-ai-telemetry",
  "siphon-ai-webhooks",
  "siphon-ai-webrtc-glue",
+ "siphon-core",
+ "siphon-dialog",
+ "siphon-parse",
+ "siphon-sdp",
+ "siphon-transaction",
+ "siphon-uac",
+ "siphon-uas",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.24.0",
@@ -5011,18 +4766,18 @@ dependencies = [
  "metrics",
  "parking_lot 0.12.5",
  "sha2 0.10.9",
- "sip-auth",
- "sip-core",
- "sip-dialog",
- "sip-parse",
- "sip-registrar",
- "sip-transaction",
- "sip-transport",
- "sip-uac",
- "sip-uas",
  "siphon-ai-audit",
  "siphon-ai-routes",
  "siphon-ai-telemetry",
+ "siphon-auth",
+ "siphon-core",
+ "siphon-dialog",
+ "siphon-parse",
+ "siphon-registrar",
+ "siphon-transaction",
+ "siphon-transport",
+ "siphon-uac",
+ "siphon-uas",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -5038,8 +4793,8 @@ dependencies = [
  "ring",
  "rustls-pemfile",
  "rustls-pki-types",
- "sip-identity",
  "siphon-ai-security",
+ "siphon-identity",
  "thiserror 1.0.69",
  "time",
  "tokio",
@@ -5065,10 +4820,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "sip-hep",
- "sip-observe",
  "siphon-ai-admin-api-types",
  "siphon-ai-audit",
+ "siphon-hep",
+ "siphon-observe",
  "subtle",
  "thiserror 1.0.69",
  "tokio",
@@ -5106,6 +4861,267 @@ dependencies = [
  "forge-webrtc",
  "siphon-ai-bridge",
  "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "siphon-auth"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4dbc30425fb14e56b7bef5a55b72769f5a86799065851a7124d2f75700d8fb0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "dashmap 5.5.3",
+ "hex",
+ "md5 0.7.0",
+ "rand 0.10.1",
+ "sha2 0.10.9",
+ "siphon-core",
+ "siphon-parse",
+ "siphon-ratelimit",
+ "smol_str",
+ "subtle",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "siphon-core"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdd2bbfc8c65945dc25836664aff9159bc509da54667a6afc01c8b1befde5a9a"
+dependencies = [
+ "bytes",
+ "httpdate",
+ "percent-encoding",
+ "serde",
+ "smol_str",
+ "subtle",
+]
+
+[[package]]
+name = "siphon-dialog"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98427d093503c8b90b1945b073d019bf697d301f12350008e0d26f36093848dc"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "dashmap 5.5.3",
+ "parking_lot 0.12.5",
+ "rand 0.10.1",
+ "siphon-core",
+ "siphon-parse",
+ "smol_str",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "siphon-dns"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20c52af4b4477a1c46f41e8d44710fbc4ba3d146b35e0d7129850ee4408cbb90"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hickory-resolver",
+ "rand 0.10.1",
+ "siphon-core",
+ "smol_str",
+ "tokio",
+]
+
+[[package]]
+name = "siphon-hep"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71fbbc700d92450dea5545a13e751d35b373dd03bdbedbc324c96d85830bb224"
+dependencies = [
+ "bytes",
+ "hep-rs",
+ "once_cell",
+ "tracing",
+]
+
+[[package]]
+name = "siphon-identity"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc48d92d6084ac92d32355f85a2797c008081d799080fe98535eb7de5e4f0682"
+dependencies = [
+ "base64 0.22.1",
+ "ring",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "siphon-observe"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b02ede0b52324595301f032da4a66c48e695df790f1762bd4ce53c3291b82fc"
+dependencies = [
+ "once_cell",
+ "tracing",
+]
+
+[[package]]
+name = "siphon-parse"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "083ef9233053c4df8e3fcd864dd6937932ffff87a43e7305cf5abb9bcb3cfc8c"
+dependencies = [
+ "bytes",
+ "httpdate",
+ "nom 7.1.3",
+ "serde",
+ "siphon-core",
+ "smol_str",
+ "tracing",
+]
+
+[[package]]
+name = "siphon-ratelimit"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b966fc55eeb9342e48cb37d097564596c1b97e0cc04cf4d56cc0d682eeb28f3"
+dependencies = [
+ "dashmap 5.5.3",
+ "parking_lot 0.12.5",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "siphon-registrar"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56e5d507e09cba30b29674073c4185b63cf87391208d5795334083e28d0fea98"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "dashmap 5.5.3",
+ "rand 0.10.1",
+ "siphon-auth",
+ "siphon-core",
+ "siphon-parse",
+ "siphon-ratelimit",
+ "smol_str",
+ "tokio",
+ "tracing",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "siphon-sdp"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e2fef51d3b9fdffafa1919d2013021260b4be95045902c6298212e35f7fa063"
+dependencies = [
+ "nom 7.1.3",
+ "smol_str",
+]
+
+[[package]]
+name = "siphon-transaction"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29e70308049e40f98e97c1f8bbbbd62ba7393e0894997a8d1404a9d3c47d7bef"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "dashmap 5.5.3",
+ "parking_lot 0.12.5",
+ "rand 0.10.1",
+ "siphon-core",
+ "siphon-parse",
+ "siphon-transport",
+ "smol_str",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "siphon-transport"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71c5d2b93bdab07631606a8bc466b3b0eb673604754865cd9fe9ac6b9b9c9fc7"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "bytes",
+ "dashmap 5.5.3",
+ "futures-util",
+ "memchr",
+ "rustls",
+ "rustls-pki-types",
+ "sha2 0.10.9",
+ "siphon-hep",
+ "siphon-observe",
+ "siphon-ratelimit",
+ "socket2 0.5.10",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite 0.21.0",
+ "tracing",
+ "x509-parser",
+]
+
+[[package]]
+name = "siphon-uac"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00c901e062fe6259191b25cde29eac65984b1a4149093ad29d56bc6bca413d20"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "hex",
+ "rand 0.10.1",
+ "sha1 0.10.6",
+ "siphon-auth",
+ "siphon-core",
+ "siphon-dialog",
+ "siphon-dns",
+ "siphon-parse",
+ "siphon-sdp",
+ "siphon-transaction",
+ "siphon-transport",
+ "smol_str",
+ "tokio",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
+name = "siphon-uas"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef25c69a8e59cbb0dce2cd892df04bb77b823d84b9468134560209bb441d87de"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "rand 0.10.1",
+ "siphon-auth",
+ "siphon-core",
+ "siphon-dialog",
+ "siphon-parse",
+ "siphon-sdp",
+ "siphon-transaction",
+ "siphon-transport",
+ "smol_str",
  "tokio",
  "tracing",
 ]
@@ -6383,9 +6399,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

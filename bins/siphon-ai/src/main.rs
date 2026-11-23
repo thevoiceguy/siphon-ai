@@ -638,11 +638,11 @@ fn print_check_summary(path: &Path, config: &Config) {
 /// already covers every first-party `siphon_ai_*` crate — those were
 /// never muted. What the old allowlist did drop was everything whose
 /// target matched no listed prefix: `hep_rs`, and the siphon-rs crates
-/// that aren't `sip_uas` / `sip_transaction` / `sip_transport`
-/// (`sip_uac`, `sip_dialog`, `sip_auth`, …), plus every third-party
+/// that aren't `siphon_uas` / `siphon_transaction` / `siphon_transport`
+/// (`siphon_uac`, `siphon_dialog`, `siphon_auth`, …), plus every third-party
 /// dependency. Two of those matter in practice, confirmed against
 /// production on 0.48.11: `hep_rs`'s "collector unreachable" warning
-/// (#460) and `sip_uac`'s registration-auth warnings both went from
+/// (#460) and `siphon_uac`'s registration-auth warnings both went from
 /// **zero** log lines in three days to firing normally once the floor
 /// was in place.
 ///
@@ -650,7 +650,7 @@ fn print_check_summary(path: &Path, config: &Config) {
 /// can never be silently muted; it can only be turned *up* from warn
 /// by naming it below.
 ///
-/// Upstream `sip_*` / `forge*` / `hep_rs` no longer need explicit
+/// Upstream `siphon_*` / `forge*` / `hep_rs` no longer need explicit
 /// entries — the floor already puts them exactly where their old
 /// `=warn` directives did, without the drift risk of a list.
 const DEFAULT_LOG_FILTER: &str = "warn,\
@@ -1211,7 +1211,7 @@ mod tests {
         assert!(out.contains("call started"), "got {out:?}");
 
         let out = survives(DEFAULT_LOG_FILTER, || {
-            tracing::info!(target: "sip_transport", "chatty");
+            tracing::info!(target: "siphon_transport", "chatty");
         });
         assert!(
             !out.contains("chatty"),

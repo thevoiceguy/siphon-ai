@@ -122,7 +122,7 @@ pub const RECORDING_UPLOADS_TOTAL: &str = "siphon_ai_recording_uploads_total";
 ///
 /// The source IP is deliberately **not** a label — it is unbounded
 /// cardinality (trivially so on UDP, where the source is spoofable).
-/// The throttled `sip_transport` WARN names the peer when you need to
+/// The throttled `siphon_transport` WARN names the peer when you need to
 /// know which one.
 pub const SIP_RATE_LIMITED_TOTAL: &str = "siphon_ai_sip_rate_limited_total";
 

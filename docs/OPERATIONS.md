@@ -328,7 +328,7 @@ this audit.
 ## When to bump log level
 
 Default filter: every `siphon_ai_*` crate at `info`, upstream
-busy spans (`sip_uas`, `sip_transaction`, `sip_transport`,
+busy spans (`siphon_uas`, `siphon_transaction`, `siphon_transport`,
 `forge=warn`) silenced. Bump to `debug` for:
 
 | Layer                | What you'll see                                                |
@@ -336,8 +336,8 @@ busy spans (`sip_uas`, `sip_transaction`, `sip_transport`,
 | `siphon_ai_bridge`   | Every received WS message (control + audio counts)             |
 | `siphon_ai_core`     | Call-controller state transitions + tap commands              |
 | `siphon_ai_sip_glue` | Dialog dispatch, route-match details                          |
-| `sip_uas`            | Inbound transaction lifecycle (Trying/Ringing/200/487)        |
-| `sip_transaction`    | Per-transaction state machine (use only during SIP debugging) |
+| `siphon_uas`         | Inbound transaction lifecycle (Trying/Ringing/200/487)        |
+| `siphon_transaction` | Per-transaction state machine (use only during SIP debugging) |
 | `forge`              | Frame-by-frame RTP / VAD events (very chatty)                 |
 
 All of the above are reachable without restart via

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **siphon-rs and hep-rs are taken from crates.io** instead of git
+  (siphon-rs v2026.11.22.1, hep-rs 0.1.1), and forge-media moves
+  v2026.11.21 → v2026.11.22, the release that does the same, so the build
+  still holds one copy of each shared crate. siphon-rs renamed its crates `sip-*` → `siphon-*` when it
+  published them; the manifest aliases them back, so no source changes. What
+  reaches the daemon: siphon-transport 0.7.1 → 0.7.2 (no span guard held
+  across an await, the cause of a "tried to clone a span that already
+  closed" abort).
+- **The SIP stack's log targets are renamed with its crates**: `sip_uas` →
+  `siphon_uas`, `sip_transaction` → `siphon_transaction`, `sip_transport` →
+  `siphon_transport`, `sip_auth` → `siphon_auth`, and so on. The default
+  filter needs no change (they sit on the `warn` floor either way), but a
+  `--log` / `RUST_LOG` directive or a log-pipeline rule that names an old
+  target stops matching and must be updated. The `sip_auth` audit event type
+  is unrelated and keeps its name.
+
+### Security
+
+- `url` 2.5.9 for RUSTSEC-2026-0592 (stack overflow in `Url::origin()` on
+  nested `blob:` URLs). Lockfile only.
+
 ## [0.57.2] - 2026-11-21
 
 ### Changed

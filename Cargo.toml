@@ -133,22 +133,32 @@ uuid        = { version = "1", features = ["v4", "serde"] }
 chrono      = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
 # ─── Upstream voice stack (separate repos, owned by us) ──────────────────────
-# These are git deps for now; once published to crates.io we'll switch to
-# versioned releases. Pinned to specific commit revs for reproducibility —
-# `branch = "main"` would mean a tagged release could build different code
-# later if upstream moves. To bump, run `git ls-remote` for the upstream's
-# main branch and replace the rev hashes here (see CLAUDE.md §7.5).
-# siphon-rs pins moved from revs to **release tags** on 2026-08-20. Its
-# RELEASING.md asks consumers to pin tags, and answers the objection that
-# kept us on revs — "Tags are immutable. Never move or delete a pushed
-# tag; if a tagged release is bad, cut a new one." A tag also names what
-# the release notes and CHANGELOG name, which a twelve-hex-digit rev does
-# not, and `Cargo.lock` still records the exact commit either way.
-# Pin every `sip-*` entry to the SAME tag: different refs of one repo are
-# different sources to Cargo, which duplicates shared crates and produces
-# impossible type mismatches.
+# siphon-rs and hep-rs are taken from **crates.io** (since 2026-11-22);
+# forge-media is still a git dependency, pinned to a release tag.
+#
+# siphon-rs renamed its crates `sip-*` -> `siphon-*` when it published them
+# (`sip-core` was taken). `package = "siphon-…"` keeps the dependency names,
+# and so every `sip_core::…` path in this workspace, as they were.
+#
+# One source for everything: forge-media takes `siphon-sdp` and `hep-rs` from
+# crates.io too, so Cargo resolves a single copy of each. Do NOT put a git
+# pin of siphon-rs or hep-rs beside these lines — a git source and the
+# registry are different sources to Cargo, which duplicates the shared crates
+# and produces impossible type mismatches (the same failure the old "pin
+# every `sip-*` entry to the SAME tag" rule guarded against). A fix needed
+# from upstream has to be published there first.
+#
+# `Cargo.lock` records the exact versions; to move one, raise the requirement
+# here or run `cargo update -p siphon-<crate>`.
 
 # siphon-rs — RFC 3261 SIP stack.
+# Moved 2026-11-22 from the git tag **v2026.11.21** to the crates.io
+# versions below (siphon-rs v2026.11.22.1). The code is that tag's, apart
+# from: siphon-transport 0.7.1 -> 0.7.2 (no span guard held across an
+# await — the "tried to clone a span that already closed" abort), and
+# siphon-hep 0.0.1 -> 0.1.0 (version only). The crates' log targets changed
+# with their names: `sip_transport` is now `siphon_transport`, and so on.
+#
 # Bumped 2026-11-21 **v2026.11.10** → **v2026.11.21**, with the forge-media
 # bump below. No crate changed: that tag exists so the manifests name the
 # repositories' new home, `github.com/feryx-io`. Cargo treats the old
@@ -383,32 +393,32 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 #  `6fd432270bb8` = #67 dialog_manager share, siphon-ai #324;
 #  `fcaff011f9c6` = #65 invite_with_from, siphon-ai #316;
 #  `3a4fc312ade3` = #64 TLS-SNI-is-hostname, siphon-ai #312.)
-sip-core        = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.11.21" }
-sip-parse       = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.11.21" }
-sip-transport   = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.11.21", features = ["tls", "ws"] }
-sip-transaction = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.11.21" }
-sip-dialog      = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.11.21" }
-sip-uas         = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.11.21" }
-sip-uac         = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.11.21" }
-sip-auth        = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.11.21" }
-sip-registrar   = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.11.21" }
-sip-dns         = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.11.21" }
+sip-core        = { package = "siphon-core", version = "0.7.8" }
+sip-parse       = { package = "siphon-parse", version = "0.4.0" }
+sip-transport   = { package = "siphon-transport", version = "0.7.2", features = ["tls", "ws"] }
+sip-transaction = { package = "siphon-transaction", version = "0.9.1" }
+sip-dialog      = { package = "siphon-dialog", version = "0.4.0" }
+sip-uas         = { package = "siphon-uas", version = "0.5.2" }
+sip-uac         = { package = "siphon-uac", version = "0.9.6" }
+sip-auth        = { package = "siphon-auth", version = "0.4.0" }
+sip-registrar   = { package = "siphon-registrar", version = "0.3.2" }
+sip-dns         = { package = "siphon-dns", version = "0.3.0" }
 # sip-sdp — the SAME sip-sdp sip-uac's SdpAnswerGenerator trait speaks
-# (distinct from forge-media's pinned sip-sdp). Used by the outbound
-# delayed-offer answer generator to hand the UAC a SessionDescription it
-# accepts. Must stay on the same siphon-rs rev as the rest below.
-sip-sdp         = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.11.21" }
-sip-hep         = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.11.21" }
+# and, now that forge-media takes it from crates.io as well, the same one
+# forge-sdp uses. Used by the outbound delayed-offer answer generator to
+# hand the UAC a SessionDescription it accepts.
+sip-sdp         = { package = "siphon-sdp", version = "0.3.2" }
+sip-hep         = { package = "siphon-hep", version = "0.1.0" }
 # sip-observe — the transport-layer observability seam. We implement its
 # `TransportMetrics` trait in siphon-ai-telemetry and install it with
 # `set_transport_metrics`, which is the only way to see ingress
 # rate-limit drops: the hook is defaulted to a no-op upstream, so an
 # embedder that installs nothing (as we did until 0.48.11) silently gets
 # the `NoopTransportMetrics` fallback (siphon-ai #459).
-sip-observe     = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.11.21" }
+sip-observe     = { package = "siphon-observe", version = "0.3.0" }
 # sip-identity — STIR/SHAKEN Identity-header parsing + PASSporT verification
 # (ES256 + X.509 chain validation). Consumed by the stir-shaken verifier crate.
-sip-identity    = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.11.21" }
+sip-identity    = { package = "siphon-identity", version = "0.3.0" }
 
 # forge-media — RTP / codecs / SDP / DTMF / engine.
 #
@@ -419,7 +429,13 @@ sip-identity    = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.
 # upstream gate at https://github.com/feryx-io/forge-media/pull/39.
 #
 # forge-media is pinned to a **release tag** (RELEASING.md, adopted
-# 2026-08-24). Bumped 2026-11-21 **v2026.11.20.2 → v2026.11.21** for the
+# 2026-08-24). Bumped 2026-11-23 **v2026.11.21 → v2026.11.22**, with the
+# siphon-rs move to crates.io above: forge-sdp 0.3.0 and forge-hep 0.1.0
+# take `siphon-sdp` and `hep-rs` from crates.io, so the build keeps one copy
+# of each. No forge source changed. It also passes v2026.11.21.1, whose
+# forge-codecs 0.3.0 adds an `aac` feature (off by default, not enabled
+# here) and whose new forge-rtmp crate we do not use.
+# Bumped 2026-11-21 **v2026.11.20.2 → v2026.11.21** for the
 # `feryx-io` URLs (embeds siphon-rs v2026.11.21); no forge source change,
 # and its forge-api tower-http 0.7 break does not reach us (unused crate).
 # Bumped 2026-11-20 **v2026.10.23 → v2026.11.20.2** (embeds
@@ -656,38 +672,32 @@ sip-identity    = { git = "https://github.com/feryx-io/siphon-rs", tag = "v2026.
 # comment for the current rev.) Prior forge pins: forge 1c996ae5fb4f = #86
 # neural VAD; forge 3c59b5f6e464 = #82-#85 dependency migrations; forge
 # 5fa76fb38675 = #81.
-forge-core    = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.21" }
-forge-rtp     = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.21" }
-forge-engine  = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.21", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
-forge-codecs  = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.21" }
-forge-sdp     = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.21" }
-forge-dtmf    = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.21" }
-forge-vad     = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.21" }
-forge-hep     = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.21" }
+forge-core    = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.22" }
+forge-rtp     = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.22" }
+forge-engine  = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.22", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
+forge-codecs  = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.22" }
+forge-sdp     = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.22" }
+forge-dtmf    = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.22" }
+forge-vad     = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.22" }
+forge-hep     = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.22" }
 # WebRTC leg (DEV_PLAN_WebRTC.md Phase 2). Only reachable through
 # siphon-ai-webrtc-glue, which the daemon pulls in behind its
 # `webrtc` feature — a default build links neither.
-forge-webrtc  = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.21" }
-forge-ice     = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.21" }
+forge-webrtc  = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.22" }
+forge-ice     = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.22" }
 # Conference rooms (0.7.0): forge-mixer is the per-room AudioMixer;
 # forge-injection provides ToneGenerator (join/leave tones now, MOH
 # for park later). Deliberately NOT forge-conference — its DTMF
 # IVR/PIN/host-control layer is unused per DEV_PLAN_0.7.0.md §9.4.
-forge-mixer     = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.21" }
-forge-injection = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.21" }
+forge-mixer     = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.22" }
+forge-injection = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.11.22" }
 
 # hep-rs — HEP3 codec, transport, HepSink trait. Owned by the same
 # author as siphon-rs and forge-media; lives in its own repo.
 #
-# Kept on `branch = "main"` (NOT rev-pinned) on purpose: both
-# siphon-rs and forge-media depend on hep-rs as `branch = "main"`,
-# so pinning a `rev` here would create two distinct source URLs in
-# the dep graph (`?rev=X` vs `?branch=main`) — cargo treats those
-# as different crates, causing the classic "two different versions
-# of crate `hep_rs` are being used" build error.
-# Reproducibility for hep-rs is still enforced via the checked-in
-# Cargo.lock entry (`source = git+…hep-rs?branch=main#<commit>`).
-hep-rs = { git = "https://github.com/feryx-io/hep-rs", branch = "main" }
+# From crates.io, like siphon-hep's and forge-hep's own requirement on it,
+# so the graph holds one `hep_rs` (see the note above the siphon-rs lines).
+hep-rs = "0.1"
 
 [profile.release]
 lto           = "thin"

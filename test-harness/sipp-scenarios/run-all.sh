@@ -2312,7 +2312,7 @@ name = "default"
 any = true
 EOF
 
-RUST_LOG=warn,siphon_ai=info,sip_uas=warn "$DAEMON_BIN" --config "$RIA_CONFIG" \
+RUST_LOG=warn,siphon_ai=info,siphon_uas=warn "$DAEMON_BIN" --config "$RIA_CONFIG" \
     >"$RIA_DAEMON_LOG" 2>&1 &
 RIA_DAEMON_PID=$!
 ria_cleanup() {

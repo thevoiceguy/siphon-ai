@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target stops matching and must be updated. The `sip_auth` audit event type
   is unrelated and keeps its name.
 
+### Security
+
+- `url` 2.5.9 for RUSTSEC-2026-0592 (stack overflow in `Url::origin()` on
+  nested `blob:` URLs). Lockfile only.
+
 ## [0.57.2] - 2026-11-21
 
 ### Changed
